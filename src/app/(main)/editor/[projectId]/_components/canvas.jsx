@@ -76,17 +76,6 @@ const CanvasEditor = ({ project }) => {
             // Apply zoom to scale the entire canvas content
             canvas.setZoom(viewportScale)
 
-            const scaleFactor = window.devicePixelRatio || 1
-
-            if (scaleFactor > 1) {
-                // Increase the canvas resolution for High-Resolution displayes
-                canvas.getElement().width = project.width * scaleFactor
-                canvas.getElement().height = project.height * scaleFactor
-
-                // Scale the drawing context to match
-                canvas.getContext().scale(scaleFactor, scaleFactor)
-            }
-
             if (project.currentImageUrl || project.originalImageUrl) {
                 try {
                     // Use current image if available (may have transformations) or fallback to the original one
@@ -114,8 +103,8 @@ const CanvasEditor = ({ project }) => {
                     }
 
                     fabricImage.set({
-                        left: project.width / 2,    // Center horizontally
-                        right: project.height / 2,  // Center vertically
+                        left: project.width / 2,     // Center horizontally
+                        top: project.height / 2,     // Center vertically
                         originX: "center",          // Transform origin at center
                         originY: "center",          // Transform origin at center 
                         scaleX,                     // Horizontal scale factor
@@ -171,7 +160,16 @@ const CanvasEditor = ({ project }) => {
             setCanvasEditor(null)
         }
 
-    }, [project, setCanvasEditor])
+        // Keep project.canvasState out of these deps so autosaves do not remount the Fabric canvas.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        project?._id,
+        project?.width,
+        project?.height,
+        project?.currentImageUrl,
+        project?.originalImageUrl,
+        setCanvasEditor,
+    ])
 
     const saveCanvasState = async () => {
         if (!canvasEditor || !project) return
@@ -214,6 +212,8 @@ const CanvasEditor = ({ project }) => {
             canvasEditor.off("object:added", handleCanvasChange)
             canvasEditor.off("object:removed", handleCanvasChange)
         }
+        // Keep the original save flow; canvasEditor is the listener owner.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [canvasEditor])
 
     useEffect(() => {
@@ -246,7 +246,9 @@ const CanvasEditor = ({ project }) => {
         return () => {
             window.removeEventListener("resize", handleResize)
         }
-    }, [project])
+        // Keep project.canvasState out of these deps so autosaves do not trigger a resize cycle.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [project?.width, project?.height])
 
     return (
         <div ref={containerRef} className='relative flex items-center justify-center bg-secondary w-full h-full overflow-hidden'>

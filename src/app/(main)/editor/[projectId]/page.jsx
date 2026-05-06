@@ -1,7 +1,7 @@
 "use client"
 
 import { useParams } from 'next/navigation'
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useConvexAuth } from 'convex/react'
 import { CanvasContext } from '../../../../../context/context'
 import { Loader2, Monitor } from 'lucide-react'
@@ -9,6 +9,8 @@ import { useConvexQuery } from '../../../../../hooks/useConvexQuery'
 import { api } from '../../../../../convex/_generated/api'
 import { RingLoader } from 'react-spinners'
 import CanvasEditor from './_components/canvas'
+import EditorTopbar from './_components/editor-topbar'
+import EditorSidebar from './_components/editor-sidebar'
 
 const Editor = () => {
 
@@ -20,6 +22,7 @@ const Editor = () => {
     const [processingMessage, setProcessingMessage] = useState(null)
 
     const [activeTool, setActiveTool] = useState("resize")
+    const [cachedProject, setCachedProject] = useState(null)
 
     const {
         data: project,
@@ -29,7 +32,21 @@ const Editor = () => {
         api.projects.getProject,
         isAuthenticated ? { projectId } : "skip",
     )
-    const isLoading = isAuthLoading || isProjectLoading
+
+    useEffect(() => {
+        const cacheTimeout = setTimeout(() => {
+            if (project) {
+                setCachedProject(project)
+            } else if (!isAuthLoading && !isAuthenticated) {
+                setCachedProject(null)
+            }
+        }, 0)
+
+        return () => clearTimeout(cacheTimeout)
+    }, [project, isAuthLoading, isAuthenticated])
+
+    const activeProject = project || (cachedProject?._id === projectId ? cachedProject : null)
+    const isLoading = (isAuthLoading || isProjectLoading) && !activeProject
 
     if (isLoading) {
         return (
@@ -44,7 +61,7 @@ const Editor = () => {
         )
     }
 
-    if (error || !project) {
+    if (error || !activeProject) {
         return (
             <div className='min-h-screen bg-slate-900 flex items-center justify-center'>
                 <div className='text-center'>
@@ -102,11 +119,16 @@ const Editor = () => {
                     }
 
                     {/* Top Bar Component */}
+                    <EditorTopbar project={activeProject} />
+
                     <div className='flex flex-1 overflow-hidden'>
                         {/* Sidebar Component */}
+
+                        <EditorSidebar project={activeProject} />
+
                         <div className='flex-1 bg-slate-800'>
                             {/* Canvas Component */}
-                            <CanvasEditor project={project} />
+                            <CanvasEditor project={activeProject} />
                         </div>
                     </div>
                 </div>
