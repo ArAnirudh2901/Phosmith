@@ -10,7 +10,7 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason }) => {
 
     const getToolName = (toolId) => {
         const toolNames = {
-            background: "AI Background Tools",
+            ai_background: "AI Background Tools",
             ai_extender: "AI Image Extender",
             ai_edit: "AI Editor",
             projects: "Unlimited Projects",

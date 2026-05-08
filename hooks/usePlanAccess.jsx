@@ -15,7 +15,7 @@ const usePlanAccess = () => {
         text: true,
 
         // Pro only tools
-        background: isPro,
+        ai_background: isPro,
         ai_extender: isPro,
         ai_edit: isPro
     }

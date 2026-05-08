@@ -1,12 +1,19 @@
 "use client"
 
-import { Expand, Eye, Maximize2, Palette, Sliders, Text, Crop, ArrowLeft, Lock, RotateCcw, RotateCw } from 'lucide-react'
+import { Expand, Eye, Maximize2, Palette, Sliders, Text, Crop, ArrowLeft, Lock, RotateCcw, ChevronDown, Download, RotateCw, Save } from 'lucide-react'
 import { useRouter } from 'next/navigation'
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useCanvas } from '../../../../../../context/context'
 import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import { Button } from '@/components/ui/button'
 import UpgradeModel from '@/components/upgradeModel'
+
+const EXPORT_PRESETS = [
+    { id: 'png', label: 'PNG (High Quality)', description: 'PNG • 100% quality', format: 'png', quality: 1 },
+    { id: 'jpeg90', label: 'JPEG (90% Quality)', description: 'JPEG • 90% quality', format: 'jpeg', quality: 0.9 },
+    { id: 'jpeg80', label: 'JPEG (80% Quality)', description: 'JPEG • 80% quality', format: 'jpeg', quality: 0.8 },
+    { id: 'webp90', label: 'WebP (90% Quality)', description: 'WEBP • 90% quality', format: 'webp', quality: 0.9 },
+]
 
 const TOOLS = [
     {
@@ -59,12 +66,30 @@ const TOOLS = [
 const EditorTopbar = ({ project }) => {
 
     const router = useRouter()
+    const exportMenuRef = useRef(null)
 
     const [showUpgradeModel, setShowUpgradeModel] = useState(false)
     const [restrictedTool, setRestrictedTool] = useState(null)
+    const [showExportMenu, setShowExportMenu] = useState(false)
 
-    const { activeTool, onToolChange } = useCanvas()
+    const { canvasEditor, activeTool, onToolChange } = useCanvas()
     const { hasAccess, canExport, isFree } = usePlanAccess()
+
+    const exportResolutionLabel = useMemo(() => {
+        if (!project?.width || !project?.height) return 'Export Resolution'
+        return `Export Resolution: ${project.width} × ${project.height}px`
+    }, [project?.width, project?.height])
+
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (exportMenuRef.current && !exportMenuRef.current.contains(event.target)) {
+                setShowExportMenu(false)
+            }
+        }
+
+        window.addEventListener('mousedown', handleClickOutside)
+        return () => window.removeEventListener('mousedown', handleClickOutside)
+    }, [])
 
     const handleBackToDashboard = () => {
         router.push("/dashboard")
@@ -79,6 +104,25 @@ const EditorTopbar = ({ project }) => {
         }
 
         onToolChange(toolId)
+    }
+
+    const handleExport = async ({ format, quality }) => {
+        if (!canvasEditor || !project) return
+
+        const multiplier = 1
+        const backgroundColor = format === 'png' ? null : (canvasEditor.backgroundColor || '#ffffff')
+        const dataUrl = canvasEditor.toDataURL({
+            format,
+            quality,
+            multiplier,
+            backgroundColor,
+        })
+
+        const link = document.createElement('a')
+        link.href = dataUrl
+        link.download = `${project.title || 'export'}.${format === 'jpeg' ? 'jpg' : format}`
+        link.click()
+        setShowExportMenu(false)
     }
 
     return (
@@ -99,8 +143,30 @@ const EditorTopbar = ({ project }) => {
                         {project.title}
                     </h1>
 
-                    <div>
-                        Right Actions
+                    <div className='flex items-center gap-2'>
+                        <Button
+                            variant='ghost'
+                            size='sm'
+                            className='text-white hover:bg-white/10'
+                            onClick={() => canvasEditor?.__resetCanvasView?.()}
+                            disabled={!canvasEditor}
+                            title='Reset canvas view'
+                        >
+                            <RotateCw className='h-4 w-4 mr-2' />
+                            Reset
+                        </Button>
+
+                        <Button
+                            variant='ghost'
+                            size='sm'
+                            className='text-white hover:bg-white/10'
+                            onClick={() => canvasEditor?.__saveCanvasState?.()}
+                            disabled={!canvasEditor}
+                            title='Save canvas state'
+                        >
+                            <Save className='h-4 w-4 mr-2' />
+                            Save
+                        </Button>
                     </div>
                 </div>
 
@@ -133,14 +199,52 @@ const EditorTopbar = ({ project }) => {
                         })}
                     </div>
 
-                    <div className='flex items-center gap-1'>
-                        <Button variant='ghost' size='sm' className="text-white">
+                    <div className='relative flex items-center gap-1' ref={exportMenuRef}>
+                        <Button variant='ghost' size='sm' className="text-white" title='Reset View'>
                             <RotateCcw className='h-4 w-4' />
                         </Button>
 
-                        <Button variant='ghost' size='sm' className="text-white">
+                        <Button variant='ghost' size='sm' className="text-white" title='Restore View'>
                             <RotateCw className='h-4 w-4' />
                         </Button>
+
+                        <Button
+                            variant='ghost'
+                            size='sm'
+                            className='text-white hover:bg-white/10'
+                            onClick={() => setShowExportMenu((current) => !current)}
+                        >
+                            <Download className='h-4 w-4 mr-2' />
+                            Export
+                            <ChevronDown className='h-4 w-4 ml-1' />
+                        </Button>
+
+                        {showExportMenu && (
+                            <div className='absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-xl border border-white/10 bg-slate-900/95 shadow-2xl backdrop-blur-xl'>
+                                <div className='border-b border-white/10 px-4 py-3'>
+                                    <div className='text-sm font-medium text-white'>{exportResolutionLabel}</div>
+                                </div>
+
+                                <div className='p-2'>
+                                    {EXPORT_PRESETS.map((preset) => (
+                                        <button
+                                            key={preset.id}
+                                            type='button'
+                                            onClick={() => handleExport(preset)}
+                                            className='flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-white/5'
+                                        >
+                                            <div className='flex h-9 w-9 items-center justify-center rounded-md border border-white/10 bg-white/5 text-white'>
+                                                <Download className='h-4 w-4' />
+                                            </div>
+                                            <div>
+                                                <div className='text-sm font-semibold text-white'>{preset.label}</div>
+                                                <div className='text-xs text-white/55'>{preset.description}</div>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                 </div>

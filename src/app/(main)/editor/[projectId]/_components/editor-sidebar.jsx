@@ -4,6 +4,10 @@ import { useCanvas } from '../../../../../../context/context'
 import CropContent from './tools/crop'
 import ResizeControls from './tools/resize'
 import AdjustControls from './tools/adjust'
+import BackgroundControls from './tools/ai-background'
+import AIExtender from './tools/ai-extender'
+import AIEdits from './tools/ai-edit'
+import TextControls from './tools/text'
 
 const TOOL_CONFIGS = {
     resize: {
@@ -61,7 +65,7 @@ const EditorSidebar = ({ project }) => {
     const Icon = toolConfig.icon
 
     return (
-        <div className='min-w-96 border-r flex flex-col'>
+        <div className='w-[380px] max-w-[380px] shrink-0 border-r flex h-full min-h-0 flex-col overflow-hidden'>
             <div className='p-4 border-b'>
                 <div className='flex items-center gap-3'>
                     <Icon className='h-5 w-5 text-white' />
@@ -74,7 +78,7 @@ const EditorSidebar = ({ project }) => {
                 </p>
             </div>
 
-            <div className='flex-1 p-4'>
+            <div className='flex-1 min-h-0 overflow-y-auto p-4 pr-3'>
                 {renderToolConfig(activeTool, project)}
             </div>
         </div>
@@ -91,6 +95,18 @@ const renderToolConfig = (activeTool, project) => {
 
         case "adjust":
             return <AdjustControls />
+
+        case "ai_background":
+            return <BackgroundControls project={project} />
+
+        case "ai_extender":
+            return <AIExtender project={project} />
+
+        case "ai_edit":
+            return <AIEdits project={project} />
+
+        case "text":
+            return <TextControls />
 
         default:
             return <div className='text-white'>Select a tool to get started</div>
