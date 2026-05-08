@@ -5,7 +5,14 @@ import { useCanvas } from '../../../../../../context/context'
 import { useConvexMutation } from '../../../../../../hooks/useConvexQuery'
 import { api } from '../../../../../../convex/_generated/api'
 import { Loader2 } from 'lucide-react'
-import { Canvas, FabricImage } from 'fabric'
+import { Canvas, FabricImage, Point } from 'fabric'
+import { normalizeCanvasState, serializeCanvasState } from '../../../../../lib/canvas-state'
+
+const MIN_ZOOM = 0.05
+const MAX_ZOOM = 64
+const INITIAL_VIEWPORT_MARGIN = 0.9
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 
 const CanvasEditor = ({ project }) => {
 
@@ -13,26 +20,126 @@ const CanvasEditor = ({ project }) => {
     const canvasRef = useRef()
     const containerRef = useRef()
     const canvasInstanceRef = useRef(null)
+    const isPanningRef = useRef(false)
+    const ctrlPressedRef = useRef(false)
+    const lastPointerRef = useRef(null)
+    const historyRef = useRef([])
+    const historyIndexRef = useRef(-1)
+    const isRestoringRef = useRef(false)
 
     const { canvasEditor, setCanvasEditor, activeTool, onToolChange } = useCanvas()
 
     const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
 
-    const calculateViewportScale = () => {
-        if (!containerRef.current || !project)
-            return 1
+    const getContainerSize = () => {
+        if (!containerRef.current) {
+            return { width: 0, height: 0 }
+        }
 
-        const container = containerRef.current
-        const containerWidth = container.clientWidth - 40  // 40px padding
-        const containerHeight = container.clientHeight - 40
+        return {
+            width: containerRef.current.clientWidth,
+            height: containerRef.current.clientHeight,
+        }
+    }
 
-        const scaleX = containerWidth / project.width
-        const scaleY = containerHeight / project.height
+    const getViewportState = (canvas) => {
+        const viewportTransform = canvas.viewportTransform || [1, 0, 0, 1, 0, 0]
+        const zoom = viewportTransform[0] || 1
 
-        // Use the smaller scale to ensure the canvas fits completely
-        // Cap at 1 to prevent the upscaling beyond the original size
+        return {
+            zoom,
+            center: {
+                x: (canvas.getWidth() / 2 - viewportTransform[4]) / zoom,
+                y: (canvas.getHeight() / 2 - viewportTransform[5]) / zoom,
+            },
+        }
+    }
 
-        return Math.min(scaleX, scaleY, 1)
+    const setViewportState = (canvas, viewportState, fallbackCenter) => {
+        const zoom = clamp(viewportState?.zoom || 1, MIN_ZOOM, MAX_ZOOM)
+        const center = viewportState?.center || fallbackCenter
+
+        if (!center) return
+
+        canvas.setViewportTransform([
+            zoom,
+            0,
+            0,
+            zoom,
+            canvas.getWidth() / 2 - center.x * zoom,
+            canvas.getHeight() / 2 - center.y * zoom,
+        ])
+    }
+
+    const createInitialViewport = (canvas) => {
+        const { width, height } = getContainerSize()
+        const widthRatio = width > 0 ? width / project.width : 1
+        const heightRatio = height > 0 ? height / project.height : 1
+        const fitZoom = Math.min(widthRatio, heightRatio) * INITIAL_VIEWPORT_MARGIN
+
+        setViewportState(canvas, {
+            zoom: clamp(fitZoom || 1, MIN_ZOOM, MAX_ZOOM),
+            center: {
+                x: project.width / 2,
+                y: project.height / 2,
+            },
+        })
+    }
+
+    const pushHistoryState = (canvas) => {
+        if (!canvas || isRestoringRef.current) return
+
+        const nextState = serializeCanvasState(canvas)
+        const nextSignature = JSON.stringify(nextState)
+        const currentState = historyRef.current[historyIndexRef.current]
+        const currentSignature = currentState ? JSON.stringify(currentState) : null
+
+        if (nextSignature === currentSignature) {
+            return
+        }
+
+        historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1)
+        historyRef.current.push(nextState)
+        historyIndexRef.current = historyRef.current.length - 1
+    }
+
+    const restoreCanvasState = async (canvas, state) => {
+        if (!canvas || !state) return
+
+        isRestoringRef.current = true
+
+        try {
+            const nextState = normalizeCanvasState(state)
+            await canvas.loadFromJSON(nextState.canvas || nextState)
+
+            if (nextState.viewport) {
+                setViewportState(canvas, nextState.viewport, {
+                    x: project.width / 2,
+                    y: project.height / 2,
+                })
+            }
+
+            canvas.calcOffset()
+            canvas.requestRenderAll()
+        } finally {
+            isRestoringRef.current = false
+        }
+    }
+
+    const undoCanvasState = async () => {
+        const canvas = canvasInstanceRef.current
+        if (!canvas || historyIndexRef.current <= 0) return
+
+        historyIndexRef.current -= 1
+        await restoreCanvasState(canvas, historyRef.current[historyIndexRef.current])
+    }
+
+    const redoCanvasState = async () => {
+        const canvas = canvasInstanceRef.current
+        if (!canvas || historyIndexRef.current >= historyRef.current.length - 1) return
+
+        historyIndexRef.current += 1
+        await restoreCanvasState(canvas, historyRef.current[historyIndexRef.current])
     }
 
     useEffect(() => {
@@ -45,13 +152,13 @@ const CanvasEditor = ({ project }) => {
         const initializeCanvas = async () => {
             setIsLoading(true)
 
-            const viewportScale = calculateViewportScale()
+            const { width, height } = getContainerSize()
 
             const canvas = new Canvas(canvasRef.current, {
-                width: project.width,           // Logical canvas width (design dimensions)
-                height: project.height,         // Logical canvas height (design dimensions)
+                width: width || project.width,
+                height: height || project.height,
 
-                backgroundColor: "#ffffff",   // Default white background
+                backgroundColor: "transparent",
 
                 preserveObjectStacking: true,   // Maintain object layer order
                 controlsAboveOverlay: true,     // Show selection controls above overlay when an object is selected
@@ -67,14 +174,17 @@ const CanvasEditor = ({ project }) => {
             })
             canvasInstanceRef.current = canvas
 
-            canvas.setDimensions({
-                width: project.width * viewportScale,       // Scaled display width
-                height: project.height * viewportScale,     // Scaled display height
-            },
-                { backstoreOnly: false })
+            canvas.setDimensions(
+                {
+                    width: width || project.width,
+                    height: height || project.height,
+                },
+                { backstoreOnly: false }
+            )
 
-            // Apply zoom to scale the entire canvas content
-            canvas.setZoom(viewportScale)
+            createInitialViewport(canvas)
+
+            const canvasState = normalizeCanvasState(project.canvasState)
 
             if (project.currentImageUrl || project.originalImageUrl) {
                 try {
@@ -123,10 +233,18 @@ const CanvasEditor = ({ project }) => {
                 }
             }
 
-            if (project.canvasState) {
+            if (canvasState) {
                 try {
                     // Load JSON state - this will restore all objects and their properties
-                    await canvas.loadFromJSON(project.canvasState)
+                    await canvas.loadFromJSON(canvasState.canvas || canvasState)
+
+                    if (canvasState.viewport) {
+                        setViewportState(canvas, canvasState.viewport, {
+                            x: project.width / 2,
+                            y: project.height / 2,
+                        })
+                    }
+
                     canvas.requestRenderAll()
                 }
                 catch (error) {
@@ -144,6 +262,112 @@ const CanvasEditor = ({ project }) => {
             canvas.requestRenderAll()   // Trigger initial render
             setCanvasEditor(canvas)     // Store canvas instance in context
 
+            const handleKeyDown = (event) => {
+                if (event.key !== 'Control' || event.repeat) return
+
+                ctrlPressedRef.current = true
+                canvas.skipTargetFind = true
+                canvas.defaultCursor = 'grab'
+                canvas.upperCanvasEl.style.cursor = 'grab'
+                event.preventDefault()
+            }
+
+            const handleKeyUp = (event) => {
+                if (event.key !== 'Control') return
+
+                ctrlPressedRef.current = false
+                isPanningRef.current = false
+                lastPointerRef.current = null
+                canvas.skipTargetFind = false
+                canvas.defaultCursor = 'default'
+                canvas.upperCanvasEl.style.cursor = 'default'
+            }
+
+            const handleMouseDown = (opt) => {
+                const event = opt.e
+
+                if (event.ctrlKey || ctrlPressedRef.current) {
+                    isPanningRef.current = true
+                    lastPointerRef.current = {
+                        x: event.clientX,
+                        y: event.clientY,
+                    }
+
+                    canvas.discardActiveObject()
+                    canvas.requestRenderAll()
+                    event.preventDefault()
+                    event.stopPropagation()
+                }
+            }
+
+            const handleMouseMove = (opt) => {
+                if (!isPanningRef.current || !lastPointerRef.current) return
+
+                const event = opt.e
+                const deltaX = event.clientX - lastPointerRef.current.x
+                const deltaY = event.clientY - lastPointerRef.current.y
+
+                canvas.relativePan(new Point(deltaX, deltaY))
+                lastPointerRef.current = {
+                    x: event.clientX,
+                    y: event.clientY,
+                }
+                canvas.requestRenderAll()
+            }
+
+            const handleMouseUp = () => {
+                isPanningRef.current = false
+                lastPointerRef.current = null
+                canvas.upperCanvasEl.style.cursor = ctrlPressedRef.current ? 'grab' : 'default'
+            }
+
+            const handleMouseWheel = (opt) => {
+                const event = opt.e
+
+                if (!(event.ctrlKey || ctrlPressedRef.current)) {
+                    return
+                }
+
+                event.preventDefault()
+
+                const zoom = clamp(
+                    canvas.getZoom() * Math.pow(0.999, event.deltaY),
+                    MIN_ZOOM,
+                    MAX_ZOOM
+                )
+
+                const pointer = canvas.getViewportPoint(event)
+                canvas.zoomToPoint(new Point(pointer.x, pointer.y), zoom)
+                canvas.requestRenderAll()
+            }
+
+            window.addEventListener('keydown', handleKeyDown)
+            window.addEventListener('keyup', handleKeyUp)
+            canvas.on('mouse:down', handleMouseDown)
+            canvas.on('mouse:move', handleMouseMove)
+            canvas.on('mouse:up', handleMouseUp)
+            canvas.on('mouse:wheel', handleMouseWheel)
+
+            canvas.__cleanupInfiniteWorkspace = () => {
+                window.removeEventListener('keydown', handleKeyDown)
+                window.removeEventListener('keyup', handleKeyUp)
+                canvas.off('mouse:down', handleMouseDown)
+                canvas.off('mouse:move', handleMouseMove)
+                canvas.off('mouse:up', handleMouseUp)
+                canvas.off('mouse:wheel', handleMouseWheel)
+            }
+
+            canvas.__undoCanvasState = undoCanvasState
+            canvas.__redoCanvasState = redoCanvasState
+            canvas.__saveCanvasState = saveCanvasState
+            canvas.__resetCanvasView = () => {
+                createInitialViewport(canvas)
+                canvas.calcOffset()
+                canvas.requestRenderAll()
+            }
+
+            pushHistoryState(canvas)
+
             setIsLoading(false)
         }
 
@@ -153,6 +377,7 @@ const CanvasEditor = ({ project }) => {
             mounted = false
 
             if (canvasInstanceRef.current) {
+                canvasInstanceRef.current.__cleanupInfiniteWorkspace?.()
                 canvasInstanceRef.current.dispose()
                 canvasInstanceRef.current = null
             }
@@ -175,8 +400,7 @@ const CanvasEditor = ({ project }) => {
         if (!canvasEditor || !project) return
 
         try {
-            // Export canvas to JSON format (include all objects and properties)
-            const canvasJSON = canvasEditor.toJSON()
+            const canvasJSON = serializeCanvasState(canvasEditor)
 
             // Save to Convex Database
             await updateProject({
@@ -195,6 +419,7 @@ const CanvasEditor = ({ project }) => {
 
         // Debounced save function - waits 2 seconds after last change 
         const handleCanvasChange = () => {
+            pushHistoryState(canvasEditor)
             clearTimeout(saveTimeout)
             saveTimeout = setTimeout(() => {
                 saveCanvasState()
@@ -205,12 +430,14 @@ const CanvasEditor = ({ project }) => {
         canvasEditor.on("object:modified", handleCanvasChange)      // Object transformed/moved
         canvasEditor.on("object:added", handleCanvasChange)         // New object added
         canvasEditor.on("object:removed", handleCanvasChange)       // Object deleted
+        canvasEditor.on("text:changed", handleCanvasChange)         // Text edited in-place
 
         return () => {
             clearTimeout(saveTimeout)
             canvasEditor.off("object:modified", handleCanvasChange)
             canvasEditor.off("object:added", handleCanvasChange)
             canvasEditor.off("object:removed", handleCanvasChange)
+            canvasEditor.off("text:changed", handleCanvasChange)
         }
         // Keep the original save flow; canvasEditor is the listener owner.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -222,21 +449,19 @@ const CanvasEditor = ({ project }) => {
 
             if (!canvas || !project || !containerRef.current) return
 
-            // Recalculate optimal scale for new window size 
-            const newScale = calculateViewportScale()
+            const viewportState = getViewportState(canvas)
 
-            // Update canvas display dimensions
             canvas.setDimensions(
                 {
-                    width: project.width * newScale,
-                    height: project.height * newScale,
+                    width: containerRef.current.clientWidth,
+                    height: containerRef.current.clientHeight,
                 },
                 {
                     backstoreOnly: false
                 }
-            );
+            )
 
-            canvas.setZoom(newScale)
+            setViewportState(canvas, viewportState)
             canvas.calcOffset()       // Update mouse event coordinates
             canvas.requestRenderAll() // Re-render with new dimensions
         }
@@ -251,7 +476,7 @@ const CanvasEditor = ({ project }) => {
     }, [project?.width, project?.height])
 
     return (
-        <div ref={containerRef} className='relative flex items-center justify-center bg-secondary w-full h-full overflow-hidden'>
+        <div ref={containerRef} className='relative w-full h-full overflow-hidden bg-secondary'>
             <div
                 className='absolute inset-0 opacity-10 pointer-events-none'
                 style={{
@@ -276,8 +501,8 @@ const CanvasEditor = ({ project }) => {
                 </div>
             }
 
-            <div className='px-5'>
-                <canvas id='canvas' className='border' ref={canvasRef} />
+            <div className='absolute inset-0 p-5'>
+                <canvas id='canvas' className='border border-slate-600/50 rounded-md shadow-2xl' ref={canvasRef} />
             </div>
         </div>
     )

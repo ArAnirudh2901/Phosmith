@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Expand, Lock, Monitor, Unlock } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
+import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 
 const ASPECT_RATIOS = [
     {
@@ -176,7 +177,7 @@ const ResizeControls = ({ project }) => {
                 projectId: project._id,
                 width: newWidth,
                 height: newHeight,
-                canvasState: canvasEditor.toJSON(),              // Save current canvas state
+                canvasState: serializeCanvasState(canvasEditor), // Save current canvas state and viewport
             })
         } catch (error) {
             console.error("Error resizing canvas: ", error)

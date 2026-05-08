@@ -1,10 +1,11 @@
 "use client"
 
 import { Button } from '@/components/ui/button'
-import { Crop, Maximize, RectangleHorizontal, RectangleVertical, Smartphone, Square } from 'lucide-react'
+import { CheckCheck, Crop, Maximize, RectangleHorizontal, RectangleVertical, Smartphone, Square, X } from 'lucide-react'
 import React, { useEffect, useState } from 'react'
 import { useCanvas } from '../../../../../../../context/context'
-import { Rect } from 'fabric'
+import { FabricImage, Rect } from 'fabric'
+import { toast } from 'sonner'
 
 const ASPECT_RATIOS = [
     {
@@ -64,7 +65,7 @@ const CropContent = () => {
     }
 
     const exitCropMode = () => {
-        if (!canvasEditor)
+        if (!canvasEditor || !isCropMode)
             return
 
         removeAllCropRectangles()
@@ -77,13 +78,16 @@ const CropContent = () => {
             })
         }
 
+        canvasEditor.setActiveObject(selectedImage)
         setCropRect(null)
         setSelectedImage(null)
         setSelectedRatio(null)
         setOriginalProps(null)
         setIsCropMode(false)
         canvasEditor.discardActiveObject()
-        canvasEditor.requestRenderAll()
+
+        if (canvasEditor)
+            canvasEditor.requestRenderAll()
     }
 
     const removeAllCropRectangles = () => {
@@ -177,6 +181,103 @@ const CropContent = () => {
         canvasEditor.requestRenderAll()
     }
 
+    const applyAspectRatio = (ratioValue) => {
+        if (!canvasEditor || !cropRect || !selectedImage)
+            return
+
+        setSelectedRatio(ratioValue)
+
+        const imageBounds = selectedImage.getBoundingRect()
+        const insetX = imageBounds.width * 0.1
+        const insetY = imageBounds.height * 0.1
+        const maxWidth = Math.max(imageBounds.width - insetX * 2, 1)
+        const maxHeight = Math.max(imageBounds.height - insetY * 2, 1)
+
+        let nextWidth = maxWidth
+        let nextHeight = maxHeight
+
+        if (ratioValue) {
+            const maxWidthFromHeight = maxHeight * ratioValue
+
+            if (maxWidthFromHeight <= maxWidth) {
+                nextWidth = maxWidthFromHeight
+                nextHeight = maxHeight
+            } else {
+                nextWidth = maxWidth
+                nextHeight = maxWidth / ratioValue
+            }
+        }
+
+        cropRect.set({
+            left: imageBounds.left + (imageBounds.width - nextWidth) / 2,
+            top: imageBounds.top + (imageBounds.height - nextHeight) / 2,
+            width: nextWidth,
+            height: nextHeight,
+            scaleX: 1,
+            scaleY: 1,
+        })
+
+        cropRect.setCoords()
+        canvasEditor.setActiveObject(cropRect)
+        canvasEditor.requestRenderAll()
+    }
+
+    const applyCrop = () => {
+
+        if (!canvasEditor || !selectedImage || !cropRect)
+            return
+
+        try {
+            const cropBounds = cropRect.getBoundingRect()
+            const imageBounds = selectedImage.getBoundingRect()
+
+            const cropX = Math.max(0, cropBounds.left - imageBounds.left)
+            const cropY = Math.max(0, cropBounds.top - imageBounds.top)
+            const cropWidth = Math.min(cropBounds.width, imageBounds.width - cropX)
+            const cropHeight = Math.min(cropBounds.height, imageBounds.height - cropY)
+
+            const imageScaleX = selectedImage.scaleX || 1
+            const imageScaleY = selectedImage.scaleY || 1
+
+            const actualCropX = cropX / imageScaleX
+            const actualCropY = cropY / imageScaleY
+
+            const actualCropWidth = cropWidth / imageScaleX
+            const actualCropHeight = cropHeight / imageScaleY
+
+            const croppedImage = new FabricImage(selectedImage._element, {
+                left: cropBounds.left + cropBounds.width / 2,
+                top: cropBounds.top + cropBounds.height / 2,
+
+                originX: "center",
+                originY: "center",
+                selectable: true,
+                evented: true,
+
+                // Applying CROP using the CROP properties of Fabric.js
+                cropX: actualCropX,
+                cropY: actualCropY,
+                width: actualCropWidth,
+                height: actualCropHeight,
+                scaleX: imageScaleX,
+                scaleY: imageScaleY,
+            })
+
+            canvasEditor.remove(selectedImage)
+            canvasEditor.add(croppedImage)
+
+            canvasEditor.setActiveObject(croppedImage)
+            canvasEditor.requestRenderAll()
+
+            exitCropMode()
+        } catch (error) {
+
+            console.error("Error exiting Crop Mode: ", error)
+            toast.error("Failed to to apply Crop, please try again")
+            exitCropMode()
+        }
+    }
+
     useEffect(() => {
         return () => {
             if (isCropMode) {
@@ -233,8 +334,79 @@ const CropContent = () => {
                     <Crop className='h-4 w-4 mr-2' />
                     Start Cropping
                 </Button>
-            )
-            }
+            )}
+
+            {isCropMode && (
+                <div>
+                    <h3 className='text-sm font-medium text-white mb-3'>
+                        Crop Aspect Ratios
+                    </h3>
+                    <div className='grid grid-cols-3 gap-2'>
+                        {ASPECT_RATIOS.map((ratio) => {
+                            const IconComponent = ratio.icon
+                            const isSelected = selectedRatio === ratio.value
+
+                            return (
+                                <button
+                                    key={ratio.label}
+                                    type="button"
+                                    onClick={() => applyAspectRatio(ratio.value)}
+                                    className={`rounded-lg border p-3 text-center transition-colors ${isSelected
+                                        ? "border-cyan-400 bg-cyan-400/10"
+                                        : "border-white/20 hover:border-white/40 hover:bg-white/5"
+                                        }`}
+                                >
+                                    <IconComponent className="mx-auto mb-2 h-6 w-6 text-white" />
+                                    <div className="text-xs font-medium text-white">
+                                        {ratio.label}
+                                    </div>
+                                    {ratio.ratio && (
+                                        <div className="mt-1 text-[11px] text-white/60">
+                                            {ratio.ratio}
+                                        </div>
+                                    )}
+                                </button>
+                            )
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {isCropMode && (
+                <div>
+                    <Button
+                        onClick={applyCrop}
+                        className='w-full'
+                        variant="primary"
+                    >
+                        <CheckCheck className='h-4 w-4 mr-2' />
+                        Apply Crop
+                    </Button>
+
+                    <Button
+                        onClick={() => exitCropMode()}
+                        variant='outline'
+                        className="w-full"
+                    >
+                        <X className='h-4 w-4 mr-2 ' />
+                        Cancel
+                    </Button>
+                </div>
+            )}
+
+            <div className='bg-slate-700/30 rounded-lg p-3'>
+                <p className='text-xxs text-white/70'>
+                    <strong>How to crop:</strong>
+                    <br />
+                    1. Click "Start Cropping"
+                    <br />
+                    2. Drag the blue rectanglet o select crop area
+                    <br />
+                    3. Choose aspect ratio (optional)
+                    <br />
+                    4. Click "Apply Crop" to finalize
+                </p>
+            </div>
         </div >
     )
 }
