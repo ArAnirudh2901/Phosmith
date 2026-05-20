@@ -54,7 +54,7 @@ const getHuggingFaceEndpoint = () => {
     return `${baseUrl}/${HF_MODEL}`
 }
 
-const generateImageWithHuggingFace = async (prompt) => {
+async function generateImageWithHuggingFace(prompt) {
     const apiToken = process.env.HUGGINGFACE_API_TOKEN
     
     if (!apiToken) {
@@ -163,7 +163,7 @@ const generateImageWithHuggingFace = async (prompt) => {
     }
 }
 
-const uploadBufferToImageKit = async (buffer, fileName = null) => {
+async function uploadBufferToImageKit(buffer, fileName = null) {
     const endpoint = getImageKitEndpoint()
     const publicKey = process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY
     const privateKey = process.env.IMAGEKIT_PRIVATE_KEY

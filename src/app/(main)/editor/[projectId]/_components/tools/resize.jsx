@@ -48,7 +48,7 @@ const ASPECT_RATIOS = [
     },
 ];
 
-const ResizeControls = ({ project }) => {
+const ResizeControls = ({ project, dominantColor, contrastingColor, lighterColor }) => {
 
     const { canvasEditor, processingMessage, setProcessingMessage } = useCanvas()
 
@@ -126,30 +126,6 @@ const ResizeControls = ({ project }) => {
         setSelectedPreset(aspectRatio.name)
     }
 
-    const calculateViewportScale = () => {
-
-        if (!canvasEditor || !newWidth || !newHeight)
-            return 1
-
-        const container =
-            canvasEditor.wrapperEl?.parentElement?.parentElement ||
-            canvasEditor.wrapperEl?.parentElement ||
-            canvasEditor.getElement()?.parentNode
-
-        if (!container)
-            return 1
-
-        const containerWidth = Math.max(container.clientWidth - 40, 1)  // 40px padding
-        const containerHeight = Math.max(container.clientHeight - 40, 1)
-
-        const scaleX = containerWidth / newWidth
-        const scaleY = containerHeight / newHeight
-
-        // Use the smaller scale to ensure the canvas fits completely
-        // Cap at 1 to prevent the upscaling beyond the original size
-        return Math.min(scaleX, scaleY, 1)
-    }
-
     const handleApplyResize = async () => {
 
         if (!canvasEditor || !project || (newWidth === project.width && newHeight === project.height))
@@ -158,20 +134,9 @@ const ResizeControls = ({ project }) => {
         setProcessingMessage("Resizing Canvas...")
 
         try {
-            const viewportScale = calculateViewportScale()
-
-            // Fabric 7 removed setWidth/setHeight, so setDimensions handles the canvas size.
-            canvasEditor.setDimensions(
-                {
-                    width: newWidth * viewportScale,             // Visual width
-                    height: newHeight * viewportScale,
-                },
-                { backstoreOnly: false }
-            )
-
-            canvasEditor.setZoom(viewportScale)                  // Set zoom level
-            canvasEditor.calcOffset()                            // Recalculate mouse coordinates
-            canvasEditor.requestRenderAll()                      // Trigger redraw
+            canvasEditor.__fitCanvasToProject?.({ width: newWidth, height: newHeight })
+            canvasEditor.calcOffset()
+            canvasEditor.requestRenderAll()
 
             await updateProject({
                 projectId: project._id,
@@ -200,147 +165,124 @@ const ResizeControls = ({ project }) => {
     const hasChanges = newWidth !== project.width || newHeight !== project.height
 
     return (
-        <div className='space-y-5'>
-            <div className='bg-slate-700/30 rounded-lg p-3'>
-                <h4 className='text-sm font-medium text-white mb-2'>
-                    Current Size
-                </h4>
-                <div className='text-xs text-white/70'>
-                    {project.width} x {project.height} px
+        <div className='space-y-4'>
+            <div className='panel-card'>
+                <label className='panel-label'>Current Size</label>
+                <div className='text-xs mt-1.5 font-mono' style={{ color: 'var(--text-secondary)' }}>
+                    {project.width} × {project.height} px
                 </div>
             </div>
 
-            <div className='space-y-4'>
-                <div className='flex items-center justify-between mb-2'>
-                    <h3 className='text-sm font-medium text-white'>
-                        Custom Size
-                    </h3>
-                    <Button
-                        variant='ghost'
-                        size='sm'
+            <div className='space-y-3'>
+                <div className='flex items-center justify-between'>
+                    <label className='panel-label'>Custom Size</label>
+                    <button
                         onClick={() => setLockAspectRatio(!lockAspectRatio)}
-                        className="text-white/70 hover:text-white p-1"
+                        className="flex items-center justify-center w-7 h-7 rounded-lg editor-interactive"
+                        style={{ color: lockAspectRatio ? dominantColor || 'var(--accent-primary)' : 'var(--text-muted)', background: 'transparent' }}
                     >
-                        {lockAspectRatio ? (
-                            <Lock className='h-4 w-4' />        // Locked - proportions maintained
-                        ) : (
-                            <Unlock className='h-4 w-4' />)    // Unlocked - free resize
-                        }
-                    </Button>
+                        {lockAspectRatio ? <Lock className='h-3.5 w-3.5' /> : <Unlock className='h-3.5 w-3.5' />}
+                    </button>
                 </div>
-                <div className='grid grid-cols-2 gap-3'>
+                <div className='grid grid-cols-2 gap-2'>
                     <div>
-                        <label className='text-xs text-white/70 mb-1 block'>
-                            Width
-                        </label>
-                        <Input
+                        <label className='text-[10px] mb-1 block' style={{ color: 'var(--text-muted)' }}>Width</label>
+                        <input
                             type="number"
                             value={newWidth}
                             onChange={(e) => handleWidthChange(e.target.value)}
                             min="100"
                             max="5000"
-                            className="bg-slate-700 border-white/20 text-white"
+                            className="panel-input"
                         />
                     </div>
                     <div>
-                        <label className='text-xs text-white/70 mb-1 block'>
-                            Height
-                        </label>
-                        <Input
+                        <label className='text-[10px] mb-1 block' style={{ color: 'var(--text-muted)' }}>Height</label>
+                        <input
                             type="number"
                             value={newHeight}
                             onChange={(e) => handleHeightChange(e.target.value)}
                             min="100"
                             max="5000"
-                            className="bg-slate-700 border-white/20 text-white"
+                            className="panel-input"
                         />
                     </div>
                 </div>
-                <div className='flex items-center justify-between text-xs'>
-                    <span className='text-white/70'>
-                        {lockAspectRatio ? "Aspect ratio locked" : "Free resize"}
-                    </span>
+                <div className='text-[10px]' style={{ color: 'var(--text-muted)' }}>
+                    {lockAspectRatio ? "🔒 Aspect ratio locked" : "🔓 Free resize"}
                 </div>
             </div>
 
-            <div className='space-y-3'>
-                <h3 className='text-sm font-medium text-white'>
-                    Aspect Ratios
-                </h3>
-                <div className='grid grid-cols-1 max-h-60 overflow-y-auto gap-2'>
+            <div className='space-y-2.5'>
+                <label className='panel-label'>Aspect Ratios</label>
+                <div className='grid grid-cols-1 max-h-56 overflow-y-auto gap-1.5 panel-scroll'>
                     {ASPECT_RATIOS.map((aspectRatio) => {
-                        const dimensions = calculateAspectRatioDimensions(
-                            aspectRatio.ratio
-                        )
+                        const dimensions = calculateAspectRatioDimensions(aspectRatio.ratio)
+                        const active = selectedPreset === aspectRatio.name
 
                         return (
-                            <Button
+                            <button
                                 key={aspectRatio.name}
-                                variant={
-                                    selectedPreset === aspectRatio.name ? "default" : "outline"
-                                }
-                                size="sm"
                                 onClick={() => applyAspectRatio(aspectRatio)}
-                                className={`justify-between h-auto py-2 text-left
-                                    ${selectedPreset === aspectRatio.name
-                                        ? "bg-cyan-500 hover:bg-cyan-600"       // Highlight selected preset
-                                        : "text-white/70 hover:text-white border-white/20"
-                                    }`}
+                                className='flex items-center justify-between rounded-lg px-3 py-2 text-left editor-interactive'
+                                style={{
+                                    border: `1px solid ${active ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                    background: active ? `${dominantColor}1a` : 'var(--bg-elevated)',
+                                }}
                             >
-                                <div className='text-left'>
-                                    <div className='font-medium'>
+                                <div>
+                                    <div className='text-xs font-medium' style={{ color: active ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
                                         {aspectRatio.name}
                                     </div>
-                                    <div className='text-xs opacity-70'>
-                                        {dimensions.width} x {dimensions.height} (
-                                        {aspectRatio.label})
+                                    <div className='text-[10px] mt-0.5' style={{ color: 'var(--text-muted)' }}>
+                                        {dimensions.width} × {dimensions.height} ({aspectRatio.label})
                                     </div>
                                 </div>
-                                <Monitor className='h-4 w-4' />
-                            </Button>
+                                <Monitor className='h-3.5 w-3.5' style={{ color: active ? dominantColor || 'var(--accent-primary)' : 'var(--text-muted)' }} />
+                            </button>
                         )
                     })}
                 </div>
             </div>
+
             {hasChanges && (
-                <div className='bg-slate-700/30 rounded-lg p-3'>
-                    <h4 className='text-sm font-medium text-white mb-2'>
-                        New Size Preview
-                    </h4>
-                    <div className='text-xs text-white/70'>
-                        <div>
-                            New Canvas: {newWidth} x {newHeight} px
-                        </div>
-                        <div className='text-cyan-400'>
-                            {/* Indicate whether canvas will grow or shrink */}
+                <div className='panel-card' style={{ borderColor: 'rgba(0, 229, 255, 0.2)' }}>
+                    <label className='panel-label'>New Size</label>
+                    <div className='text-xs mt-1.5' style={{ color: 'var(--text-secondary)' }}>
+                        <div className="font-mono">{newWidth} × {newHeight} px</div>
+                        <div className='mt-1' style={{ color: 'var(--accent-primary)' }}>
                             {newWidth > project.width || newHeight > project.height
-                                ? "Canvas will be expanded"                       // Growing - adds space
-                                : "Canvas will be cropped"
-                            }{" "}
+                                ? "↗ Canvas will expand"
+                                : "↙ Canvas will crop"
+                            }
                         </div>
-                        <div className='text-white/50 mt-1'>
-                            Objects will maintain their current size and positions
+                        <div className='mt-1' style={{ color: 'var(--text-muted)' }}>
+                            Objects maintain their size and position
                         </div>
                     </div>
                 </div>
             )}
 
-            <Button
+            <button
                 onClick={handleApplyResize}
-                disabled={!hasChanges || processingMessage}                         // Disabled if there are no changes or processing
-                className="w-full"
-                variant="primary"
+                disabled={!hasChanges || processingMessage}
+                className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
+                style={{ 
+                    background: dominantColor || 'var(--accent-primary)', 
+                    color: contrastingColor || '#fff', 
+                    border: 'none',
+                    boxShadow: hasChanges ? `0 0 30px ${dominantColor}40` : 'none' 
+                }}
             >
-                <Expand className='h-4 w-4 mr-2' />
+                <Expand className='h-3.5 w-3.5' />
                 Apply Resize
-            </Button>
+            </button>
 
-            {/* Info that we want to show to the user */}
-            <div className='bg-slate-700/30 rounded-lg p-3'>
-                <p className='text-xs text-white/70'>
-                    <strong>Resize Canvas:</strong> Changes canvas dimensions
+            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+                <p style={{ color: 'var(--text-muted)' }}>
+                    <strong style={{ color: 'var(--text-secondary)' }}>Resize:</strong> Changes canvas dimensions
                     <br />
-                    <strong>Aspect Ratios:</strong> Smart sizing based on your current canvas
+                    <strong style={{ color: 'var(--text-secondary)' }}>Ratios:</strong> Smart sizing based on your canvas
                     <br />
                     Objects maintain their size and position
                 </p>

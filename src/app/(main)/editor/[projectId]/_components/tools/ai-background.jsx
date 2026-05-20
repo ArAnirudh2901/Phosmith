@@ -164,12 +164,12 @@ const getToastErrorMessage = (error) => {
     return "Background operation failed. Retrying soon..."
 }
 
-const BackgroundControls = ({ project }) => {
+const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterColor }) => {
     const { canvasEditor, processingMessage, setProcessingMessage } = useCanvas()
     const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
 
     // States
-    const [backgroundColor, setBackgroundColor] = useState("#ffffff")
+    const [backgroundColor, setBackgroundColor] = useState(dominantColor || "#ffffff")
     const [searchQuery, setSearchQuery] = useState("")
     const [unsplashImages, setUnsplashImages] = useState([])
     const [searchPage, setSearchPage] = useState(0)
@@ -300,6 +300,28 @@ const BackgroundControls = ({ project }) => {
                 selectable: imageToReplace.selectable,
                 evented: imageToReplace.evented,
             })
+
+            // Compute the bounding box of the visible (non-transparent) pixels
+            processedImage.setCoords()
+            const boundingRect = processedImage.getBoundingRect(true, true)
+            const croppedWidth = boundingRect.width
+            const croppedHeight = boundingRect.height
+
+            // If the processed image tightly fits the foreground, recenter it visually
+            if (croppedWidth > 0 && croppedHeight > 0) {
+                const canvasWidth = project.width
+                const canvasHeight = project.height
+
+                // Calculate the offset of the bounding box relative to the image center
+                const offsetX = (processedImage.width * processedImage.scaleX) / 2 - (boundingRect.left - processedImage.left + croppedWidth / 2)
+                const offsetY = (processedImage.height * processedImage.scaleY) / 2 - (boundingRect.top - processedImage.top + croppedHeight / 2)
+
+                // Center the cropped bounding box on the canvas
+                processedImage.set({
+                    left: canvasWidth / 2 + offsetX,
+                    top: canvasHeight / 2 + offsetY,
+                })
+            }
 
             canvasEditor.remove(imageToReplace)
             canvasEditor.add(processedImage)
@@ -529,60 +551,59 @@ const BackgroundControls = ({ project }) => {
     return (
         <div className="relative flex h-full min-h-0 flex-col gap-5 overflow-hidden">
             <div>
-                <div>
-                    <h3 className="text-sm font-medium text-white mb-2">
-                        AI Background Removal
-                    </h3>
-                    <p className="text-xs text-white/70 mb-4">
+                <div className="mb-3">
+                    <label className="panel-label">AI Background Removal</label>
+                    <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
                         Automatically remove backgrounds using AI
                     </p>
                 </div>
-                <Button
-                    className="w-full"
-                    variant="primary"
+                <button
                     onClick={handleBackgroundRemoval}
                     disabled={Boolean(processingMessage) || !mainImage}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
+                    style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
                 >
-                    <Trash2 className="h-4 w-4 mr-2" />
+                    <Trash2 className="h-3.5 w-3.5" />
                     Remove Image Background
-                </Button>
+                </button>
                 {!mainImage && (
-                    <p className="mt-3 text-xs text-amber-400">
-                        Add an image to canvas first
+                    <p className="mt-2 text-[11px]" style={{ color: 'var(--accent-warning)' }}>
+                        ⚠ Add an image to canvas first
                     </p>
                 )}
             </div>
 
             <Tabs defaultValue="color" className="min-h-0 w-full flex-1 overflow-hidden">
-                <TabsList className="grid w-full grid-cols-3 bg-slate-700/50">
+                <TabsList className="grid w-full grid-cols-3" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
                     <TabsTrigger
                         value="color"
-                        className="data-[state=active]:bg-cyan-500 data-[state=active]:text-white"
+                        className="text-xs data-[state=active]:text-white"
+                        style={{ '--tw-shadow': 'none' }}
                     >
-                        <Palette className="h-4 w-4 mr-2" />
+                        <Palette className="h-3.5 w-3.5 mr-1.5" />
                         Color
                     </TabsTrigger>
                     <TabsTrigger
                         value="image"
-                        className="data-[state=active]:bg-cyan-500 data-[state=active]:text-white"
+                        className="text-xs data-[state=active]:text-white"
                     >
-                        <ImageIcon className="h-4 w-4 mr-2" />
+                        <ImageIcon className="h-3.5 w-3.5 mr-1.5" />
                         Image
                     </TabsTrigger>
                     <TabsTrigger
                         value="generate"
-                        className="data-[state=active]:bg-cyan-500 data-[state=active]:text-white"
+                        className="text-xs data-[state=active]:text-white"
                     >
-                        <Sparkles className="h-4 w-4 mr-2" />
+                        <Sparkles className="h-3.5 w-3.5 mr-1.5" />
                         Generate
                     </TabsTrigger>
                 </TabsList>
 
-            <TabsContent value="color" className="mt-5 min-h-0 overflow-y-auto pr-1">
+            <TabsContent value="color" className="mt-4 min-h-0 overflow-y-auto pr-1 panel-scroll">
                 <div className="space-y-4">
                     <div>
-                        <h3 className="text-sm font-medium text-white mb-2">Solid Color</h3>
-                        <p className="text-xs text-white/70">Choose canvas background color</p>
+                        <label className="panel-label">Solid Color</label>
+                        <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>Choose canvas background color</p>
                     </div>
                     <Colorful
                         color={backgroundColor}
@@ -591,54 +612,59 @@ const BackgroundControls = ({ project }) => {
                         style={{ width: "100%" }}
                     />
                     <div className="flex items-center gap-3">
-                        <Input
+                        <input
                             value={backgroundColor}
                             onChange={(e) => setBackgroundColor(e.target.value)}
                             placeholder="#ffffff"
-                            className="min-w-0 flex-1 bg-slate-700 border-white/20 text-white"
+                            className="panel-input flex-1 min-w-0"
                         />
                         <div
-                            className="h-10 w-10 shrink-0 rounded border border-white/20"
-                            style={{ backgroundColor }}
+                            className="h-9 w-9 shrink-0 rounded-lg"
+                            style={{ backgroundColor, border: '1px solid var(--border-default)' }}
                         />
                     </div>
-                    <Button onClick={handleColorBackground} className="w-full" variant="primary">
-                        <Palette className="h-4 w-4 mr-2" />
+                    <button
+                        onClick={handleColorBackground}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-medium editor-interactive"
+                        style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none' }}
+                    >
+                        <Palette className="h-3.5 w-3.5" />
                         Apply Color
-                    </Button>
+                    </button>
                 </div>
             </TabsContent>
 
-            <TabsContent value="image" className="mt-5 flex min-h-0 flex-col gap-4 overflow-hidden">
+            <TabsContent value="image" className="mt-4 flex min-h-0 flex-col gap-3 overflow-hidden">
                 <div>
-                    <h3 className="text-sm font-medium text-white mb-2">Image Background</h3>
-                    <p className="text-xs text-white/70">Search Unsplash images</p>
+                    <label className="panel-label">Image Background</label>
+                    <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>Search Unsplash images</p>
                 </div>
 
                 <div className="flex gap-2">
-                    <Input
+                    <input
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         onKeyDown={handleSearchKeyPress}
                         placeholder="Search backgrounds"
-                        className="flex-1 bg-slate-700 border-white/20 text-white"
+                        className="panel-input flex-1"
                     />
-                    <Button
+                    <button
                         onClick={searchUnsplashImages}
                         disabled={isSearching || !searchQuery.trim()}
-                        variant="primary"
+                        className="flex items-center justify-center rounded-lg px-3 editor-interactive disabled:opacity-40"
+                        style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none' }}
                     >
                         {isSearching ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
-                            <Search className="h-4 w-4" />
+                            <Search className="h-3.5 w-3.5" />
                         )}
-                    </Button>
+                    </button>
                 </div>
 
                 {unsplashImages.length > 0 && (
                     <div
-                        className="grid min-h-0 flex-1 content-start grid-cols-2 gap-3 overflow-y-auto pr-2"
+                        className="grid min-h-0 flex-1 content-start grid-cols-2 gap-2 overflow-y-auto pr-1 panel-scroll"
                         onScroll={handleResultsScroll}
                     >
                         {unsplashImages.map((image) => (
@@ -647,7 +673,8 @@ const BackgroundControls = ({ project }) => {
                                 type="button"
                                 onClick={() => handleImageBackground(image.urls.regular, image.id)}
                                 disabled={Boolean(selectedImageId)}
-                                className="group relative h-32 overflow-hidden rounded-lg border border-white/10 bg-slate-900 shadow-[0_10px_24px_rgba(2,6,23,0.24)] transition-all duration-200 hover:border-cyan-300/80 focus-visible:border-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/30"
+                                className="group relative h-28 overflow-hidden rounded-lg editor-interactive"
+                                style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-app)' }}
                                 title={image.alt_description || "Unsplash image"}
                             >
                                 <Image
@@ -659,25 +686,27 @@ const BackgroundControls = ({ project }) => {
                                     className="object-cover"
                                 />
                                 <div className="absolute inset-0 bg-black/0 transition-all duration-200 group-hover:bg-black/35" />
-                                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 px-2 pb-2 pt-8 text-left">
-                                    <p className="truncate text-xs font-medium text-white drop-shadow">
+                                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 px-2 pb-1.5 pt-6 text-left">
+                                    <p className="truncate text-[10px] font-medium text-white drop-shadow">
                                         by {image.user?.name || "Unsplash"}
                                     </p>
                                 </div>
                                 <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                                    <span className="flex size-11 items-center justify-center rounded-full border border-white/50 bg-slate-950/45 text-white shadow-lg backdrop-blur-sm">
+                                    <span className="flex size-9 items-center justify-center rounded-full text-white backdrop-blur-sm"
+                                          style={{ background: 'rgba(11, 13, 18, 0.6)', border: '1px solid var(--border-default)' }}>
                                         {selectedImageId === image.id ? (
-                                            <Loader2 className="h-5 w-5 animate-spin" />
+                                            <Loader2 className="h-4 w-4 animate-spin" />
                                         ) : (
-                                            <Download className="h-5 w-5" />
+                                            <Download className="h-4 w-4" />
                                         )}
                                     </span>
                                 </div>
                             </button>
                         ))}
                         {isLoadingMoreImages && (
-                            <div className="col-span-2 flex items-center justify-center gap-2 py-3 text-xs text-white/60">
-                                <Loader2 className="h-4 w-4 animate-spin" />
+                            <div className="col-span-2 flex items-center justify-center gap-2 py-3 text-[11px]"
+                                 style={{ color: 'var(--text-muted)' }}>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                 Loading more...
                             </div>
                         )}
@@ -686,18 +715,18 @@ const BackgroundControls = ({ project }) => {
 
           {!isSearching && searchQuery && unsplashImages.length === 0 && (
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center py-4 text-center">
-              <ImageIcon className="h-9 w-9 text-white/30 mb-3" />
-              <p className="text-white/70 text-sm">No images for &quot;{searchQuery}&quot;</p>
-              <p className="text-white/50 text-xs">Try different search</p>
+              <ImageIcon className="h-8 w-8 mb-3" style={{ color: 'var(--text-muted)' }} />
+              <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>No images for &quot;{searchQuery}&quot;</p>
+              <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>Try different search</p>
             </div>
           )}
         </TabsContent>
 
-        <TabsContent value="generate" className="mt-5 min-h-0 overflow-y-auto pr-1">
+        <TabsContent value="generate" className="mt-4 min-h-0 overflow-y-auto pr-1 panel-scroll">
           <div className="space-y-4">
             <div>
-              <h3 className="text-sm font-medium text-white mb-2">AI Background Generator</h3>
-              <p className="text-xs text-white/70">Describe your perfect background</p>
+              <label className="panel-label">AI Background Generator</label>
+              <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>Describe your perfect background</p>
             </div>
 
             <textarea
@@ -705,37 +734,39 @@ const BackgroundControls = ({ project }) => {
               onChange={(e) => setGenerationPrompt(e.target.value)}
               placeholder="Soft ocean sunset, cinematic light, clean background"
               rows={5}
-              className="w-full resize-none border border-white/20 bg-slate-700 px-3 py-2 text-sm text-white outline-none placeholder:text-white/40 focus:border-cyan-300"
+              className="panel-input resize-none"
+              style={{ minHeight: '100px' }}
             />
 
-            <Button
+            <button
               type="button"
               onClick={generateAiBackground}
               disabled={isGeneratingBackground || Boolean(processingMessage) || !generationPrompt.trim()}
-              className="w-full"
-              variant="primary"
+              className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
+              style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
             >
               {isGeneratingBackground ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Sparkles className="h-4 w-4 mr-2" />
+                <Sparkles className="h-3.5 w-3.5" />
               )}
               {isGeneratingBackground ? "Generating..." : "Generate Background"}
-            </Button>
+            </button>
 
             {generatedBackgroundUrl && (
               <button
                 type="button"
                 onClick={() => applyImageBackground(generatedBackgroundUrl)}
-                className="group relative h-36 w-full overflow-hidden rounded-lg border border-white/10 bg-slate-900 transition-all duration-200 hover:border-cyan-300/80"
+                className="group relative h-32 w-full overflow-hidden rounded-lg editor-interactive"
                 style={{
                   backgroundImage: `url("${generatedBackgroundUrl}")`,
                   backgroundSize: "cover",
                   backgroundPosition: "center",
+                  border: '1px solid var(--border-subtle)',
                 }}
               >
                 <div className="absolute inset-0 bg-black/0 transition-all duration-200 group-hover:bg-black/30" />
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-3 pb-3 pt-10 text-xs font-medium text-white">
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2 pt-8 text-[11px] font-medium text-white">
                   Apply generated background
                 </div>
               </button>
@@ -744,11 +775,15 @@ const BackgroundControls = ({ project }) => {
         </TabsContent>
       </Tabs>
 
-      <div className="pt-4 border-t border-white/20">
-        <Button onClick={removeCanvasBackground} className="w-full" variant="outline">
-          <Trash2 className="h-4 w-4 mr-2" />
+      <div className="pt-3" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+        <button
+            onClick={removeCanvasBackground}
+            className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
+            style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
           Clear Canvas Background
-        </Button>
+        </button>
       </div>
     </div >
   )

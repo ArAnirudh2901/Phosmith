@@ -43,7 +43,7 @@ const ASPECT_RATIOS = [
     },
 ]
 
-const CropContent = () => {
+const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
 
     const { canvasEditor, activeTool } = useCanvas()
     const [selectedImage, setSelectedImage] = useState(null)        // The image being cropped
@@ -110,7 +110,7 @@ const CropContent = () => {
             width: bounds.width * 0.8,
             height: bounds.height * 0.8,
             fill: "transparent",                             // See through interior
-            stroke: "#00bcd4",                                // Cyan border colour
+            stroke: "#00E5FF",
             strokeWidth: 2,
             strokeDashArray: [5, 5],                         // Dashed line effect
             selectable: true,                                // User can select5 and resize
@@ -118,11 +118,11 @@ const CropContent = () => {
             name: "cropRect",                                 // Identifier for this example
 
             // Visual Styling for the Crop Handles
-            cornerColor: "#00bcd4",
+            cornerColor: "#00E5FF",
             cornerSize: 12,
             transparentCorners: false,
             cornerStyle: "circle",
-            borderColor: "#00bcd4",
+            borderColor: "#00E5FF",
             borderScaleFactor: 1,
 
             // Custom property to identify crop rectangles
@@ -303,7 +303,7 @@ const CropContent = () => {
     if (!canvasEditor) {
         return (
             <div className='p-4'>
-                <p className='text-white/70 text-sm'>
+                <p className='text-xs' style={{ color: 'var(--text-muted)' }}>
                     Canvas not ready
                 </p>
             </div>
@@ -313,35 +313,38 @@ const CropContent = () => {
     const activeImage = getActiveImage(canvasEditor)
 
     return (
-        <div className='space-y-6'>
+        <div className='space-y-4'>
             {isCropMode && (
-                <div className='bg-cyan-500/10 border border-cyan-500/20 rounded-lg p-3'>
-                    <p className='text-cyan-400 text-sm font-medium'>
+                <div className='panel-card' style={{ borderColor: `${dominantColor || 'rgba(0, 229, 255, 0.3)'}` }}>
+                    <p className='text-xs font-medium' style={{ color: dominantColor || 'var(--accent-primary)' }}>
                         ✂️ Crop Mode Active
                     </p>
-                    <p className='text-cyan/300/80 text-xs mt-1'>
-                        Adjust the blue rectangle to set crop area
+                    <p className='text-[11px] mt-1' style={{ color: 'var(--text-muted)' }}>
+                        Adjust the rectangle to set crop area
                     </p>
                 </div>
             )}
 
             {!isCropMode && activeImage && (
-                <Button
+                <button
                     onClick={() => initializeCropMode(activeImage)}
-                    className="w-full"
-                    variant="primary"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
+                    style={{
+                        background: dominantColor || 'var(--accent-primary)',
+                        color: contrastingColor || '#fff',
+                        border: 'none',
+                        boxShadow: `0 0 30px ${dominantColor}40`
+                    }}
                 >
-                    <Crop className='h-4 w-4 mr-2' />
-                    Start Cropping
-                </Button>
+                    <Crop className='h-3.5 w-3.5' />
+                    Start Crop
+                </button>
             )}
 
             {isCropMode && (
                 <div>
-                    <h3 className='text-sm font-medium text-white mb-3'>
-                        Crop Aspect Ratios
-                    </h3>
-                    <div className='grid grid-cols-3 gap-2'>
+                    <label className='panel-label mb-2.5 block'>Aspect Ratios</label>
+                    <div className='grid grid-cols-3 gap-1.5'>
                         {ASPECT_RATIOS.map((ratio) => {
                             const IconComponent = ratio.icon
                             const isSelected = selectedRatio === ratio.value
@@ -351,17 +354,18 @@ const CropContent = () => {
                                     key={ratio.label}
                                     type="button"
                                     onClick={() => applyAspectRatio(ratio.value)}
-                                    className={`rounded-lg border p-3 text-center transition-colors ${isSelected
-                                        ? "border-cyan-400 bg-cyan-400/10"
-                                        : "border-white/20 hover:border-white/40 hover:bg-white/5"
-                                        }`}
+                                    className='rounded-lg p-2.5 text-center editor-interactive'
+                                    style={{
+                                        border: `1px solid ${isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                        background: isSelected ? `${dominantColor}1a` : 'var(--bg-elevated)',
+                                    }}
                                 >
-                                    <IconComponent className="mx-auto mb-2 h-6 w-6 text-white" />
-                                    <div className="text-xs font-medium text-white">
+                                    <IconComponent className="mx-auto mb-1.5 h-5 w-5" style={{ color: isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--text-secondary)' }} />
+                                    <div className="text-[10px] font-medium" style={{ color: isSelected ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
                                         {ratio.label}
                                     </div>
                                     {ratio.ratio && (
-                                        <div className="mt-1 text-[11px] text-white/60">
+                                        <div className="mt-0.5 text-[9px]" style={{ color: 'var(--text-muted)' }}>
                                             {ratio.ratio}
                                         </div>
                                     )}
@@ -373,34 +377,39 @@ const CropContent = () => {
             )}
 
             {isCropMode && (
-                <div>
-                    <Button
+                <div className='space-y-2'>
+                    <button
                         onClick={applyCrop}
-                        className='w-full'
-                        variant="primary"
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
+                        style={{ 
+                            background: dominantColor || 'var(--accent-primary)', 
+                            color: contrastingColor || '#fff', 
+                            border: 'none',
+                            boxShadow: `0 0 30px ${dominantColor}40` 
+                        }}
                     >
-                        <CheckCheck className='h-4 w-4 mr-2' />
+                        <CheckCheck className='h-3.5 w-3.5' />
                         Apply Crop
-                    </Button>
+                    </button>
 
-                    <Button
+                    <button
                         onClick={() => exitCropMode()}
-                        variant='outline'
-                        className="w-full"
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}
                     >
-                        <X className='h-4 w-4 mr-2 ' />
+                        <X className='h-3.5 w-3.5' />
                         Cancel
-                    </Button>
+                    </button>
                 </div>
             )}
 
-            <div className='bg-slate-700/30 rounded-lg p-3'>
-                <p className='text-xxs text-white/70'>
-                    <strong>How to crop:</strong>
+            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+                <p style={{ color: 'var(--text-muted)' }}>
+                    <strong style={{ color: 'var(--text-secondary)' }}>How to crop:</strong>
                     <br />
                     1. Click "Start Cropping"
                     <br />
-                    2. Drag the blue rectanglet o select crop area
+                    2. Drag the rectangle to select crop area
                     <br />
                     3. Choose aspect ratio (optional)
                     <br />

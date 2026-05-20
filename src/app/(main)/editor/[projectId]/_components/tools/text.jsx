@@ -82,7 +82,7 @@ const isEditableElement = (target) => {
     return target?.isContentEditable || ["input", "textarea", "select"].includes(tagName)
 }
 
-const TextControls = () => {
+const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
 
     const { canvasEditor } = useCanvas()
     const [selectedText, setSelectedText] = useState(null)
@@ -307,84 +307,71 @@ const TextControls = () => {
     if (!canvasEditor) {
         return (
             <div className='p-4'>
-                <p className='text-white/70 text-sm'>
-                    Canvas not ready
-                </p>
+                <p className='text-xs' style={{ color: 'var(--text-muted)' }}>Canvas not ready</p>
             </div>
         )
     }
 
     return (
-        <div className='space-y-6 overflow-y-auto pr-1'>
-            <div className='space-y-4'>
-                <div>
-                    <h3 className='text-sm font-medium text-white mb-2'>
-                        Add Text
-                    </h3>
-                </div>
-                <Button
+        <div className='space-y-4 overflow-y-auto pr-1 panel-scroll'>
+            <div className='space-y-3'>
+                <label className='panel-label'>Add Text</label>
+                <button
                     onClick={addText}
-                    className="w-full"
-                    variant="primary"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
+                    style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
                 >
-                    <Type className='h-4 w-4 mr-2' />
+                    <Type className='h-3.5 w-3.5' />
                     Add Text
-                </Button>
+                </button>
             </div>
 
             {selectedText && (
-                <div className='space-y-5 border-t border-white/10 pt-6'>
-                    <h3 className='text-sm font-medium text-white mb-4'>
-                        Edit Selected Text
-                    </h3>
+                <div className='space-y-4 pt-4' style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                    <label className='panel-label'>Edit Selected Text</label>
 
-                    <div className='space-y-2'>
-                        <label className='text-xs text-white/70'>
-                            Content
-                        </label>
+                    <div className='space-y-1.5'>
+                        <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Content</label>
                         <textarea
                             value={textContent}
                             onChange={(e) => applyTextContent(e.target.value)}
                             rows={3}
-                            className="w-full resize-none rounded border border-white/20 bg-slate-700 px-3 py-2 text-sm text-white outline-none placeholder:text-white/40 focus:border-cyan-300"
+                            className="panel-input resize-none"
+                            style={{ minHeight: '60px' }}
                         />
                     </div>
 
-                    <div className='space-y-2'>
-                        <label className='text-xs text-white/70'>
-                            Font Family
-                        </label>
+                    <div className='space-y-1.5'>
+                        <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Font Family</label>
                         <select
                             value={fontFamily}
                             onChange={(e) => applyFontFamily(e.target.value)}
-                            className='w-full rounded border border-white/20 bg-slate-700 px-3 py-2 text-sm text-white outline-none focus:border-cyan-300'
+                            className='panel-input'
+                            style={{ appearance: 'auto' }}
                         >
                             {FONT_FAMILIES.map((font) => (
-                                <option key={font} value={font}>
-                                    {font}
-                                </option>
+                                <option key={font} value={font}>{font}</option>
                             ))}
                         </select>
                     </div>
 
-                    <div className='space-y-3'>
+                    <div className='space-y-2'>
                         <div className='flex items-center justify-between'>
-                            <label className='text-xs text-white/70'>
-                                Size
-                            </label>
-                            <span className='text-xs text-white/70'>
+                            <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Size</label>
+                            <span className='text-[10px] font-mono px-1.5 py-0.5 rounded'
+                                  style={{ color: 'var(--accent-primary)', background: 'rgba(0, 229, 255, 0.1)' }}>
                                 {fontSize}px
                             </span>
                         </div>
                         <div className='flex items-center gap-2'>
-                            <Button
+                            <button
                                 type="button"
-                                variant="outline"
-                                size="icon-sm"
                                 onClick={() => applyFontSize(fontSize - 1)}
+                                className="flex items-center justify-center w-7 h-7 rounded-lg editor-interactive"
+                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                             >
-                                <Minus className='h-4 w-4' />
-                            </Button>
+                                <Minus className='h-3 w-3' />
+                            </button>
                             <Slider
                                 value={[fontSize]}
                                 min={FONT_SIZES.min}
@@ -393,29 +380,27 @@ const TextControls = () => {
                                 onValueChange={(value) => applyFontSize(value[0])}
                                 className='flex-1'
                             />
-                            <Button
+                            <button
                                 type="button"
-                                variant="outline"
-                                size="icon-sm"
                                 onClick={() => applyFontSize(fontSize + 1)}
+                                className="flex items-center justify-center w-7 h-7 rounded-lg editor-interactive"
+                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                             >
-                                <Plus className='h-4 w-4' />
-                            </Button>
+                                <Plus className='h-3 w-3' />
+                            </button>
                         </div>
-                        <Input
+                        <input
                             type="number"
                             value={fontSize}
                             min={FONT_SIZES.min}
                             max={FONT_SIZES.max}
                             onChange={(e) => applyFontSize(e.target.value)}
-                            className="bg-slate-700 border-white/20 text-white"
+                            className="panel-input"
                         />
                     </div>
 
-                    <div className='space-y-3'>
-                        <label className='text-xs text-white/70'>
-                            Color
-                        </label>
+                    <div className='space-y-2'>
+                        <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Color</label>
                         <Colorful
                             color={HEX_COLOR_PATTERN.test(textColor) ? textColor : DEFAULT_TEXT_COLOR}
                             onChange={(color) => applyTextColor(color.hex)}
@@ -423,125 +408,118 @@ const TextControls = () => {
                             style={{ width: "100%" }}
                         />
                         <div className='flex items-center gap-3'>
-                            <Input
+                            <input
                                 value={textColor}
                                 onChange={(e) => applyTextColor(e.target.value)}
                                 placeholder={DEFAULT_TEXT_COLOR}
-                                className="min-w-0 flex-1 bg-slate-700 border-white/20 text-white"
+                                className="panel-input flex-1 min-w-0"
                             />
                             <div
-                                className='h-10 w-10 shrink-0 rounded border border-white/20'
+                                className='h-9 w-9 shrink-0 rounded-lg'
                                 style={{
-                                    backgroundColor: HEX_COLOR_PATTERN.test(textColor)
-                                        ? textColor
-                                        : DEFAULT_TEXT_COLOR,
+                                    backgroundColor: HEX_COLOR_PATTERN.test(textColor) ? textColor : DEFAULT_TEXT_COLOR,
+                                    border: '1px solid var(--border-default)',
                                 }}
                             />
                         </div>
-                        <div className='grid grid-cols-8 gap-2'>
+                        <div className='grid grid-cols-8 gap-1.5'>
                             {COLOR_SWATCHES.map((color) => (
                                 <button
                                     key={color}
                                     type="button"
                                     aria-label={`Use ${color}`}
                                     onClick={() => applyTextColor(color)}
-                                    className={`h-7 rounded border transition-colors ${textColor.toLowerCase() === color
-                                        ? "border-cyan-300 ring-2 ring-cyan-300/30"
-                                        : "border-white/20 hover:border-white/50"
-                                        }`}
-                                    style={{ backgroundColor: color }}
+                                    className='h-6 rounded-md editor-interactive'
+                                    style={{
+                                        backgroundColor: color,
+                                        border: `2px solid ${textColor.toLowerCase() === color ? 'var(--accent-primary)' : 'transparent'}`,
+                                        boxShadow: textColor.toLowerCase() === color ? '0 0 0 1px rgba(0,229,255,0.3)' : 'none',
+                                    }}
                                 />
                             ))}
                         </div>
                     </div>
 
-                    <div className='space-y-3'>
-                        <label className='text-xs text-white/70'>
-                            Style
-                        </label>
-                        <div className='grid grid-cols-3 gap-2'>
-                            <Button
-                                type="button"
-                                variant={isBold ? "default" : "outline"}
-                                onClick={toggleBold}
-                                className={isBold ? "bg-cyan-500 text-white hover:bg-cyan-600" : "text-white/70 hover:text-white border-white/20"}
-                            >
-                                <Bold className='h-4 w-4' />
-                            </Button>
-                            <Button
-                                type="button"
-                                variant={isItalic ? "default" : "outline"}
-                                onClick={toggleItalic}
-                                className={isItalic ? "bg-cyan-500 text-white hover:bg-cyan-600" : "text-white/70 hover:text-white border-white/20"}
-                            >
-                                <Italic className='h-4 w-4' />
-                            </Button>
-                            <Button
-                                type="button"
-                                variant={isUnderline ? "default" : "outline"}
-                                onClick={toggleUnderline}
-                                className={isUnderline ? "bg-cyan-500 text-white hover:bg-cyan-600" : "text-white/70 hover:text-white border-white/20"}
-                            >
-                                <Underline className='h-4 w-4' />
-                            </Button>
+                    <div className='space-y-2'>
+                        <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Style</label>
+                        <div className='grid grid-cols-3 gap-1.5'>
+                            {[
+                                { active: isBold, toggle: toggleBold, Icon: Bold },
+                                { active: isItalic, toggle: toggleItalic, Icon: Italic },
+                                { active: isUnderline, toggle: toggleUnderline, Icon: Underline },
+                            ].map(({ active, toggle, Icon }) => (
+                                <button
+                                    key={Icon.displayName || Icon.name}
+                                    type="button"
+                                    onClick={toggle}
+                                    className="flex items-center justify-center h-8 rounded-lg editor-interactive"
+                                    style={{
+                                        background: active ? 'rgba(0, 229, 255, 0.15)' : 'var(--bg-elevated)',
+                                        border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                        color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                    }}
+                                >
+                                    <Icon className='h-3.5 w-3.5' />
+                                </button>
+                            ))}
                         </div>
                     </div>
 
-                    <div className='space-y-3'>
-                        <label className='text-xs text-white/70'>
-                            Alignment
-                        </label>
-                        <div className='grid grid-cols-3 gap-2'>
+                    <div className='space-y-2'>
+                        <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Alignment</label>
+                        <div className='grid grid-cols-3 gap-1.5'>
                             {TEXT_ALIGNMENTS.map((alignment) => {
                                 const Icon = alignment.icon
                                 const isSelected = textAlign === alignment.value
 
                                 return (
-                                    <Button
+                                    <button
                                         key={alignment.value}
                                         type="button"
-                                        variant={isSelected ? "default" : "outline"}
                                         onClick={() => applyTextAlign(alignment.value)}
                                         aria-label={`${alignment.label} align`}
-                                        className={isSelected ? "bg-cyan-500 text-white hover:bg-cyan-600" : "text-white/70 hover:text-white border-white/20"}
+                                        className="flex items-center justify-center h-8 rounded-lg editor-interactive"
+                                        style={{
+                                            background: isSelected ? 'rgba(0, 229, 255, 0.15)' : 'var(--bg-elevated)',
+                                            border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            color: isSelected ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                        }}
                                     >
-                                        <Icon className='h-4 w-4' />
-                                    </Button>
+                                        <Icon className='h-3.5 w-3.5' />
+                                    </button>
                                 )
                             })}
                         </div>
                     </div>
 
-                    <Button
+                    <button
                         type="button"
-                        variant="outline"
                         onClick={deleteSelectedText}
-                        className="w-full border-red-400/30 text-red-200 hover:border-red-300 hover:bg-red-500/10 hover:text-red-100"
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
+                        style={{ background: 'rgba(239, 68, 68, 0.08)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.2)' }}
                     >
-                        <Trash2 className='h-4 w-4 mr-2' />
+                        <Trash2 className='h-3.5 w-3.5' />
                         Delete Text
-                    </Button>
+                    </button>
 
-                    <div className='rounded-lg bg-slate-700/30 p-3'>
-                        <p className='text-xs font-medium text-white mb-2'>
-                            Keyboard Shortcuts
-                        </p>
-                        <div className='space-y-1 text-xs text-white/70'>
+                    <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+                        <p className='font-medium mb-1.5' style={{ color: 'var(--text-secondary)' }}>Shortcuts</p>
+                        <div className='space-y-1' style={{ color: 'var(--text-muted)' }}>
                             <div className='flex items-center justify-between gap-3'>
-                                <span>Delete selected text</span>
-                                <span className='text-white/50'>Delete / Backspace</span>
+                                <span>Delete</span>
+                                <span className="font-mono text-[9px]" style={{ color: 'var(--text-muted)' }}>⌫</span>
                             </div>
                             <div className='flex items-center justify-between gap-3'>
                                 <span>Bold</span>
-                                <span className='text-white/50'>Cmd/Ctrl + B</span>
+                                <span className="font-mono text-[9px]" style={{ color: 'var(--text-muted)' }}>⌘B</span>
                             </div>
                             <div className='flex items-center justify-between gap-3'>
                                 <span>Italic</span>
-                                <span className='text-white/50'>Cmd/Ctrl + I</span>
+                                <span className="font-mono text-[9px]" style={{ color: 'var(--text-muted)' }}>⌘I</span>
                             </div>
                             <div className='flex items-center justify-between gap-3'>
                                 <span>Underline</span>
-                                <span className='text-white/50'>Cmd/Ctrl + U</span>
+                                <span className="font-mono text-[9px]" style={{ color: 'var(--text-muted)' }}>⌘U</span>
                             </div>
                         </div>
                     </div>
