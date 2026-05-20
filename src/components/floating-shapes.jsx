@@ -1,58 +1,84 @@
 "use client"
 
 import React from 'react'
+import { motion } from 'framer-motion'
 import { useParallax } from '../../hooks/parallax-effect'
 
+/*
+ * ─── Floating Shapes ───
+ * Neutral glass haze, parallax reactive, soft glow, and breathing animation.
+ */
+
+const SHAPES = [
+    {
+        id: 1,
+        size: "w-72 h-72 md:w-96 md:h-96",
+        position: "top-20 left-5 md:left-10",
+        gradient: "from-white/10 via-white/5 to-transparent",
+        duration: "10s",
+        delay: "0s"
+    },
+    {
+        id: 2,
+        size: "w-64 h-64 md:w-80 md:h-80",
+        position: "top-1/3 right-5 md:right-10",
+        gradient: "from-white/10 via-white/5 to-transparent",
+        duration: "12s",
+        delay: "2s"
+    },
+    {
+        id: 3,
+        size: "w-48 h-48 md:w-64 md:h-64",
+        position: "bottom-20 left-1/4",
+        gradient: "from-white/10 via-white/5 to-transparent",
+        duration: "8s",
+        delay: "4s"
+    },
+    {
+        id: 4,
+        size: "w-56 h-56 md:w-80 md:h-80",
+        position: "bottom-1/3 right-1/4",
+        gradient: "from-white/10 via-white/5 to-transparent",
+        duration: "14s",
+        delay: "1s"
+    },
+    {
+        id: 5,
+        size: "w-40 h-40 md:w-56 md:h-56",
+        position: "top-1/2 left-1/3",
+        gradient: "from-white/10 via-white/5 to-transparent",
+        duration: "11s",
+        delay: "3s"
+    },
+    {
+        id: 6,
+        size: "w-32 h-32 md:w-48 md:h-48",
+        position: "top-3/4 right-1/3",
+        gradient: "from-white/10 via-white/5 to-transparent",
+        duration: "9s",
+        delay: "5s"
+    },
+]
+
 const FloatingShapes = () => {
-
     const scrollY = useParallax()
-
-    const shapes = [
-        {
-            id: 1,
-            size: "w-72 h-72",
-            position: "top-20 left-10",
-            gradient: "from-blue-500 to-purple-600",
-            duration: "4s",
-            delay: "0s"
-        },
-        {
-            id: 2,
-            size: "w-96 h-96",
-            position: "top-1/3 right-10",
-            gradient: "from-cyan-500 to-blue-600",
-            duration: "6s",
-            delay: "1s"
-        },
-        {
-            id: 3,
-            size: "w-64 h-64",
-            position: "bottom-20 left-1/4",
-            gradient: "from-purple-500 to-pink-600",
-            duration: "5s",
-            delay: "2s"
-        },
-        {
-            id: 4,
-            size: "w-80 h-80",
-            position: "bottom-1/3 right-1/4",
-            gradient: "from-green-400 to-cyan-500",
-            duration: "7s",
-            delay: "0.5s"
-        },
-    ]
 
     return (
         <div className='fixed inset-0 overflow-hidden pointer-events-none'>
-            {shapes.map((shape) => (
-                <div
+            {SHAPES.map((shape) => (
+                <motion.div
                     key={shape.id}
-                    className={`absolute ${shape.size} ${shape.position} bg-gradient-to-r ${shape.gradient} rounded-full blur-3xl opacity-20 animate-pulse`}
+                    className={`absolute ${shape.size} ${shape.position} bg-gradient-to-br ${shape.gradient} rounded-full blur-3xl`}
                     style={{
                         animationDuration: shape.duration,
                         animationDelay: shape.delay,
-                        transform: `translateY(${scrollY * 0.5}px) rotate(${scrollY * 0.1}deg)`
+                        animationName: 'float',
                     }}
+                    animate={{
+                        y: scrollY * 0.3,
+                        rotate: scrollY * 0.05,
+                    }}
+                    transition={{ type: 'spring', stiffness: 50, damping: 20 }}
                 />
             ))}
         </div>

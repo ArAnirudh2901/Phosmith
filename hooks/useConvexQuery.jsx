@@ -67,6 +67,7 @@ export const useConvexMutation = (mutation, ...args) => {
         } catch (err) {
             setError(err)
             toast.error(err.message)
+            throw err // Re-throw so callers know the mutation failed
         } finally {
             setIsLoading(false)
         }

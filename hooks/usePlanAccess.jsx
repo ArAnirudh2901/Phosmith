@@ -17,7 +17,8 @@ const usePlanAccess = () => {
         // Pro only tools
         ai_background: isPro,
         ai_extender: isPro,
-        ai_edit: isPro
+        ai_edit: isPro,
+        generative_expand: isPro,
     }
 
     // Helper function to check if the user has the access to a particular tool
@@ -44,7 +45,7 @@ const usePlanAccess = () => {
     }
 
     return {
-        userPlan: isPro ? "pro" : "free_user",
+          userPlan: isPro ? "pro" : "free",
         isPro,
         isFree,
         hasAccess,

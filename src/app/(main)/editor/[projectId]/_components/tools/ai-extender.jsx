@@ -1,75 +1,86 @@
 "use client"
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Button } from '@/components/ui/button'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { Sparkles, Layers3, MoveHorizontal, MoveVertical, Loader2, ImagePlus, SlidersHorizontal, Square, Trash2 } from 'lucide-react'
+import { Loader2, ImagePlus } from 'lucide-react'
 import { Rect } from 'fabric'
 import { useCanvas } from '../../../../../../../context/context'
 import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
 import { api } from '../../../../../../../convex/_generated/api'
-import { buildGenerativeFillUrl, getCanvasActiveImage, isImageKitUrl, normalizeImageKitUrl, replaceCanvasImageFromUrl } from '../../../../../../lib/imagekit-ai'
+import { buildGenerativeFillUrl, getCanvasActiveImage, isImageKitUrl, normalizeImageKitUrl } from '../../../../../../lib/imagekit-ai'
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 
-const EXPAND_MODES = [
-    { id: 'balanced', label: 'Balanced', description: 'Extend equally in all directions', icon: Layers3 },
-    { id: 'horizontal', label: 'Wide', description: 'Extend left and right', icon: MoveHorizontal },
-    { id: 'vertical', label: 'Tall', description: 'Extend top and bottom', icon: MoveVertical },
-    { id: 'freestyle', label: 'Free Style', description: 'Set a custom extension amount', icon: SlidersHorizontal },
-]
-
-const EXTEND_PRESETS = [
-    { id: 25, label: '25%', hint: 'Subtle extension' },
-    { id: 50, label: '50%', hint: 'Standard outpaint' },
-    { id: 75, label: '75%', hint: 'More canvas room' },
-    { id: 100, label: '100%', hint: 'Maximum expansion' },
-]
+const MAX_OUTPUT_DIMENSION = 4096
+const MAX_RETRIES = 8
+const BASE_RETRY_DELAY = 4000
 
 const getSourceUrl = (image, project) => {
-    return image?.getSrc?.() || image?._originalElement?.src || project?.currentImageUrl || project?.originalImageUrl || ''
+    const candidates = [
+        project?.currentImageUrl,
+        project?.originalImageUrl,
+        image?.getSrc?.(),
+        image?._originalElement?.src,
+    ].filter(Boolean)
+
+    const imagekitUrl = candidates.find(url => url.includes('ik.imagekit.io'))
+    return imagekitUrl || candidates[0] || ''
 }
 
-const getTargetDimensions = (image, mode, extensionPercent, freestyleAmount) => {
-    const width = Math.max(1, Math.round(image?.width || 0))
-    const height = Math.max(1, Math.round(image?.height || 0))
+/**
+ * Remove ALL leftover expansion frame Rects from the canvas.
+ * This prevents stale frames from accumulating across tool switches.
+ */
+const removeAllExpansionFrames = (canvas) => {
+    if (!canvas) return
+    const frames = canvas.getObjects().filter(obj => obj._isExpansionFrame)
+    frames.forEach(frame => {
+        try { canvas.remove(frame) } catch (_) { }
+    })
+    if (frames.length > 0) {
+        canvas.requestRenderAll()
+    }
+}
 
-    if (mode === 'freestyle') {
-        const freestyleScale = 1 + Math.max(0, freestyleAmount) / 100
-        return {
-            width: Math.round(width * freestyleScale),
-            height: Math.round(height * freestyleScale),
+/**
+ * Pre-fetch an image URL to verify it's ready (not still processing).
+ */
+const waitForImageReady = (url, timeoutMs = 20000) => {
+    return new Promise((resolve) => {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        const timer = setTimeout(() => {
+            img.onload = null
+            img.onerror = null
+            resolve(false)
+        }, timeoutMs)
+
+        img.onload = () => {
+            clearTimeout(timer)
+            // Also check that the image actually has content
+            resolve(img.naturalWidth > 0 && img.naturalHeight > 0)
         }
-    }
-
-    const scale = 1 + Math.max(0, extensionPercent) / 100
-
-    if (mode === 'horizontal') {
-        return { width: Math.round(width * scale), height }
-    }
-
-    if (mode === 'vertical') {
-        return { width, height: Math.round(height * scale) }
-    }
-
-    return {
-        width: Math.round(width * scale),
-        height: Math.round(height * scale),
-    }
+        img.onerror = () => {
+            clearTimeout(timer)
+            resolve(false)
+        }
+        img.src = url
+    })
 }
 
-const AIExtender = ({ project }) => {
+const AIExtender = ({ project, dominantColor, contrastingColor, lighterColor }) => {
     const { canvasEditor, setProcessingMessage } = useCanvas()
     const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
 
     const [prompt, setPrompt] = useState('soft cinematic continuation, realistic background, seamless outpainting')
-    const [expandMode, setExpandMode] = useState('balanced')
-    const [extendPercent, setExtendPercent] = useState(50)
-    const [freestyleAmount, setFreestyleAmount] = useState(50)
-    const [previewUrl, setPreviewUrl] = useState('')
     const [isApplying, setIsApplying] = useState(false)
+    const [frameDims, setFrameDims] = useState(null)
+    const [originalDims, setOriginalDims] = useState(null)
 
-    const selectionFrameRef = useRef(null)
+    const expansionFrameRef = useRef(null)
     const activeImageRef = useRef(null)
+    const originalImageStateRef = useRef(null)
+    // Store the REAL pixel dimensions of the image (not canvas display size)
+    const realImageDimsRef = useRef(null)
 
     const activeImage = useMemo(() => getCanvasActiveImage(canvasEditor), [canvasEditor])
     const sourceUrl = getSourceUrl(activeImage, project)
@@ -78,138 +89,351 @@ const AIExtender = ({ project }) => {
         activeImageRef.current = activeImage
     }, [activeImage])
 
-    useEffect(() => {
-        return () => {
-            if (canvasEditor && selectionFrameRef.current) {
-                canvasEditor.remove(selectionFrameRef.current)
-                canvasEditor.requestRenderAll()
-            }
+    const removeExpansionFrame = useCallback(() => {
+        if (!canvasEditor) return
+        // Remove the tracked frame
+        if (expansionFrameRef.current) {
+            try { canvasEditor.remove(expansionFrameRef.current) } catch (_) { }
+            expansionFrameRef.current = null
+        }
+        // Also clean up any orphaned expansion frames
+        removeAllExpansionFrames(canvasEditor)
+        setFrameDims(null)
+    }, [canvasEditor])
+
+    const unlockImage = useCallback(() => {
+        const image = activeImageRef.current
+        const original = originalImageStateRef.current
+        if (image && original) {
+            image.set({
+                selectable: original.selectable !== false,
+                evented: original.evented !== false,
+                hasControls: original.hasControls !== false,
+                hasBorders: original.hasBorders !== false,
+                lockMovementX: false,
+                lockMovementY: false,
+                lockScalingX: false,
+                lockScalingY: false,
+            })
+            originalImageStateRef.current = null
+            canvasEditor?.requestRenderAll?.()
         }
     }, [canvasEditor])
 
-    const clearSelectionFrame = () => {
-        if (canvasEditor && selectionFrameRef.current) {
-            canvasEditor.remove(selectionFrameRef.current)
-            canvasEditor.requestRenderAll()
+    const lockImage = useCallback((image) => {
+        originalImageStateRef.current = {
+            selectable: image.selectable,
+            evented: image.evented,
+            hasControls: image.hasControls,
+            hasBorders: image.hasBorders,
         }
-        selectionFrameRef.current = null
-    }
 
-    const createSelectionFrame = () => {
-        if (!canvasEditor || !activeImageRef.current) return
-
-        clearSelectionFrame()
-
-        const bounds = activeImageRef.current.getBoundingRect()
-        const frame = new Rect({
-            left: bounds.left + bounds.width * 0.12,
-            top: bounds.top + bounds.height * 0.12,
-            width: bounds.width * 0.76,
-            height: bounds.height * 0.76,
-            fill: 'rgba(34, 211, 238, 0.08)',
-            stroke: '#22d3ee',
-            strokeWidth: 2,
-            strokeDashArray: [6, 6],
-            cornerColor: '#22d3ee',
-            cornerSize: 10,
-            transparentCorners: false,
+        image.set({
             selectable: true,
             evented: true,
+            hasControls: false,
             hasBorders: true,
+            lockMovementX: false,
+            lockMovementY: false,
+            lockScalingX: true,
+            lockScalingY: true,
+        })
+    }, [])
+
+    /**
+     * Auto-create expansion frame when tool mounts.
+     */
+    useEffect(() => {
+        if (!canvasEditor || !activeImageRef.current) return
+
+        // FIRST: Clean up any leftover expansion frames from previous sessions
+        removeAllExpansionFrames(canvasEditor)
+
+        const image = activeImageRef.current
+        const bounds = image.getBoundingRect()
+        const centerX = bounds.left + bounds.width / 2
+        const centerY = bounds.top + bounds.height / 2
+
+        // Store the REAL pixel dimensions of the image (not scaled canvas coordinates)
+        // This is critical: ImageKit expects real pixel dimensions, not display pixels
+        const realW = image.width || bounds.width
+        const realH = image.height || bounds.height
+        realImageDimsRef.current = { width: realW, height: realH }
+
+        // Display dimensions use bounds (canvas coordinates)
+        setOriginalDims({ width: Math.round(bounds.width), height: Math.round(bounds.height) })
+
+        lockImage(image)
+
+        const frame = new Rect({
+            left: bounds.left,
+            top: bounds.top,
+            width: bounds.width,
+            height: bounds.height,
+            fill: 'rgba(125, 235, 255, 0.035)',
+            stroke: 'rgba(125, 235, 255, 0.95)',
+            strokeWidth: 3,
+            strokeDashArray: [6, 4],
+            cornerColor: '#F8FBFF',
+            cornerStrokeColor: '#031014',
+            cornerSize: 16,
+            touchCornerSize: 28,
+            padding: 8,
+            transparentCorners: false,
+            cornerStyle: 'circle',
+            borderColor: 'rgba(125, 235, 255, 0.95)',
+            borderScaleFactor: 2,
+            selectable: true,
+            evented: true,
             hasControls: true,
+            hasBorders: true,
+            centeredScaling: true,
+            lockMovementX: true,
+            lockMovementY: true,
+            lockUniScaling: false,
+            lockScalingFlip: true,
+            lockRotation: true,
+            hasRotatingPoint: false,
+            _isExpansionFrame: true,
         })
 
-        selectionFrameRef.current = frame
+        const getFrameSize = () => {
+            const scaledW = frame.getScaledWidth?.() || frame.width * (frame.scaleX || 1)
+            const scaledH = frame.getScaledHeight?.() || frame.height * (frame.scaleY || 1)
+            return {
+                width: Math.max(bounds.width, scaledW),
+                height: Math.max(bounds.height, scaledH),
+            }
+        }
+
+        const updateFrameDims = () => {
+            const next = getFrameSize()
+            setFrameDims({ width: Math.round(next.width), height: Math.round(next.height) })
+        }
+
+        const commitFrameSize = () => {
+            const next = getFrameSize()
+
+            frame.set({
+                left: centerX - next.width / 2,
+                top: centerY - next.height / 2,
+                width: next.width,
+                height: next.height,
+                scaleX: 1,
+                scaleY: 1,
+            })
+            frame.setCoords()
+            setFrameDims({ width: Math.round(next.width), height: Math.round(next.height) })
+            canvasEditor.requestRenderAll()
+        }
+
+        frame.on('scaling', updateFrameDims)
+        frame.on('modified', commitFrameSize)
+
+        expansionFrameRef.current = frame
         canvasEditor.add(frame)
         canvasEditor.setActiveObject(frame)
         canvasEditor.requestRenderAll()
-    }
+        setFrameDims({ width: Math.round(bounds.width), height: Math.round(bounds.height) })
 
-    const getSelectionBounds = () => {
-        const frame = selectionFrameRef.current
-        if (!frame) return null
-
-        const bounds = frame.getBoundingRect()
-        return {
-            width: Math.max(1, Math.round(bounds.width)),
-            height: Math.max(1, Math.round(bounds.height)),
+        // Cleanup when component unmounts
+        return () => {
+            unlockImage()
+            if (expansionFrameRef.current) {
+                try { canvasEditor.remove(expansionFrameRef.current) } catch (_) { }
+                expansionFrameRef.current = null
+            }
+            // Also clean orphaned frames
+            removeAllExpansionFrames(canvasEditor)
         }
-    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [canvasEditor])
 
-    const buildPreview = () => {
-        if (!activeImage || !sourceUrl) {
-            toast.error('Add an ImageKit image to extend first')
-            return null
+    const handleApply = async () => {
+        if (!activeImageRef.current || !sourceUrl) {
+            toast.error('Add an ImageKit image first')
+            return
         }
 
         if (!isImageKitUrl(sourceUrl)) {
             toast.error('Generative fill only works with ImageKit-hosted images')
-            return null
+            return
         }
 
-        const selectionBounds = getSelectionBounds()
-        const dimensions = selectionBounds
-            ? {
-                width: Math.round(selectionBounds.width * (1 + extendPercent / 100)),
-                height: Math.round(selectionBounds.height * (1 + (expandMode === 'freestyle' ? freestyleAmount : extendPercent) / 100)),
-            }
-            : getTargetDimensions(activeImage, expandMode, extendPercent, freestyleAmount)
+        const frame = expansionFrameRef.current
+        if (!frame) {
+            toast.error('Expansion frame not found')
+            return
+        }
 
+        const imageBounds = activeImageRef.current.getBoundingRect()
+        const realDims = realImageDimsRef.current
+
+        // Calculate the frame size in canvas coordinates
+        const frameDisplayW = Math.round(frame.width * (frame.scaleX || 1))
+        const frameDisplayH = Math.round(frame.height * (frame.scaleY || 1))
+
+        if (frameDisplayW <= imageBounds.width + 2 && frameDisplayH <= imageBounds.height + 2) {
+            toast.error('Drag the frame handles outward beyond the image to extend')
+            return
+        }
+
+        // Convert canvas display coordinates to REAL pixel dimensions
+        // Scale factor: how much the image is scaled down to fit on canvas
+        const scaleFactorX = realDims ? (realDims.width / imageBounds.width) : 1
+        const scaleFactorY = realDims ? (realDims.height / imageBounds.height) : 1
+
+        let targetW = Math.round(frameDisplayW * scaleFactorX)
+        let targetH = Math.round(frameDisplayH * scaleFactorY)
+
+        // Cap to max dimension
+        if (targetW > MAX_OUTPUT_DIMENSION) {
+            const ratio = MAX_OUTPUT_DIMENSION / targetW
+            targetW = MAX_OUTPUT_DIMENSION
+            targetH = Math.round(targetH * ratio)
+        }
+        if (targetH > MAX_OUTPUT_DIMENSION) {
+            const ratio = MAX_OUTPUT_DIMENSION / targetH
+            targetH = MAX_OUTPUT_DIMENSION
+            targetW = Math.round(targetW * ratio)
+        }
+
+        // Ensure minimum dimensions
+        targetW = Math.max(targetW, realDims?.width || 100)
+        targetH = Math.max(targetH, realDims?.height || 100)
+
+        // Build the generative fill URL using the ORIGINAL source
+        const baseSourceUrl = normalizeImageKitUrl(
+            project?.originalImageUrl || sourceUrl
+        )
         const url = buildGenerativeFillUrl({
-            sourceUrl: normalizeImageKitUrl(sourceUrl),
+            sourceUrl: baseSourceUrl,
             prompt,
-            width: dimensions.width,
-            height: dimensions.height,
+            width: targetW,
+            height: targetH,
         })
 
-        setPreviewUrl(url)
-        return url
-    }
-
-    const handlePreview = () => {
-        const url = buildPreview()
-        if (url) {
-            toast.success('Generative fill preview ready')
-        }
-    }
-
-    const handleApply = async () => {
-        const url = previewUrl || buildPreview()
-        if (!url || !activeImageRef.current) return
+        console.log('[AI Extender] Source URL:', baseSourceUrl)
+        console.log('[AI Extender] Generated URL:', url)
+        console.log('[AI Extender] Real image dims:', realDims)
+        console.log('[AI Extender] Display bounds:', { w: imageBounds.width, h: imageBounds.height })
+        console.log('[AI Extender] Scale factors:', { x: scaleFactorX, y: scaleFactorY })
+        console.log('[AI Extender] Target dims:', targetW, '×', targetH)
 
         setIsApplying(true)
-        setProcessingMessage('Applying AI image extender...')
+        setProcessingMessage('Extending image with AI...')
 
         try {
-            const nextImage = await replaceCanvasImageFromUrl(canvasEditor, activeImageRef.current, url, {
-                placement: 'native',
-                preserveDisplayedBounds: false,
-            })
+            unlockImage()
+            removeExpansionFrame()
 
-            if (nextImage) {
-                canvasEditor.setDimensions(
-                    {
-                        width: Math.max(nextImage.width || project.width, project.width),
-                        height: Math.max(nextImage.height || project.height, project.height),
-                    },
-                    { backstoreOnly: false }
-                )
-                canvasEditor.calcOffset()
-                canvasEditor.requestRenderAll()
+            const sourceImage = activeImageRef.current
+            const { FabricImage } = await import('fabric')
+
+            let nextImage = null
+            let lastError = null
+
+            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                try {
+                    setProcessingMessage(
+                        attempt === 1
+                            ? 'Extending image with AI...'
+                            : `Processing... (attempt ${attempt}/${MAX_RETRIES})`
+                    )
+
+                    // Pre-fetch to check readiness
+                    const isReady = await waitForImageReady(url, 25000)
+
+                    if (!isReady && attempt < MAX_RETRIES) {
+                        console.warn(`[AI Extender] Image not ready on attempt ${attempt}, retrying...`)
+                        const delay = Math.min(attempt * BASE_RETRY_DELAY, 20000)
+                        await new Promise(resolve => setTimeout(resolve, delay))
+                        continue
+                    }
+
+                    // Load into Fabric
+                    nextImage = await FabricImage.fromURL(url, {
+                        crossOrigin: 'anonymous',
+                    })
+
+                    if (nextImage && nextImage.width > 0 && nextImage.height > 0) {
+                        break
+                    } else {
+                        throw new Error('Loaded image has zero dimensions')
+                    }
+                } catch (err) {
+                    lastError = err
+                    console.warn(`[AI Extender] Attempt ${attempt}/${MAX_RETRIES} failed:`, err?.message)
+                    if (attempt < MAX_RETRIES) {
+                        const delay = Math.min(attempt * BASE_RETRY_DELAY, 20000)
+                        await new Promise(resolve => setTimeout(resolve, delay))
+                    }
+                }
             }
 
-            await updateProject({
-                projectId: project._id,
-                currentImageUrl: url,
-                width: nextImage?.width || project.width,
-                height: nextImage?.height || project.height,
-                canvasState: serializeCanvasState(canvasEditor),
+            if (!nextImage) {
+                throw new Error(
+                    `Failed to load extended image after ${MAX_RETRIES} attempts. ` +
+                    `ImageKit may still be processing — try again in a few seconds. ` +
+                    `(${lastError?.message || 'Unknown error'})`
+                )
+            }
+
+            const outputW = nextImage.width || targetW
+            const outputH = nextImage.height || targetH
+
+            nextImage.set({
+                left: outputW / 2,
+                top: outputH / 2,
+                originX: 'center',
+                originY: 'center',
+                scaleX: 1,
+                scaleY: 1,
+                selectable: true,
+                evented: true,
+                hasControls: true,
+                hasBorders: true,
+                lockMovementX: false,
+                lockMovementY: false,
+                lockScalingX: false,
+                lockScalingY: false,
             })
 
-            clearSelectionFrame()
-            toast.success('AI image extended')
+            canvasEditor.remove(sourceImage)
+            canvasEditor.add(nextImage)
+            canvasEditor.setActiveObject(nextImage)
+            nextImage.setCoords()
+            canvasEditor.__fitCanvasToProject?.({ width: outputW, height: outputH })
+            canvasEditor.requestRenderAll()
+
+            activeImageRef.current = nextImage
+
+            // Save state
+            try {
+                await updateProject({
+                    projectId: project._id,
+                    currentImageUrl: url,
+                    width: outputW,
+                    height: outputH,
+                    canvasState: serializeCanvasState(canvasEditor),
+                })
+            } catch (saveError) {
+                console.warn('Canvas state save failed:', saveError)
+                try {
+                    await updateProject({
+                        projectId: project._id,
+                        currentImageUrl: url,
+                        width: outputW,
+                        height: outputH,
+                    })
+                } catch (fallbackError) {
+                    console.warn('Fallback save also failed:', fallbackError)
+                }
+            }
+
+            toast.success('Image extended successfully!')
         } catch (error) {
-            console.warn('AI image extender failed:', error)
+            console.warn('AI extender failed:', error)
             toast.error(error?.message || 'Failed to extend image')
         } finally {
             setIsApplying(false)
@@ -218,161 +442,60 @@ const AIExtender = ({ project }) => {
     }
 
     return (
-        <div className='flex h-full min-h-0 flex-col gap-4 overflow-y-auto overflow-x-hidden pr-2'>
-            <div className='rounded-xl border border-white/10 bg-slate-900/60 p-4 shadow-lg'>
-                <div className='flex items-start gap-3'>
-                    <div className='rounded-lg bg-cyan-500/15 p-2 text-cyan-300'>
-                        <ImagePlus className='h-5 w-5' />
-                    </div>
-                    <div>
-                        <h3 className='text-sm font-semibold text-white'>AI Image Extender</h3>
-                        <p className='text-xs text-white/65'>Professional generative fill powered by ImageKit.</p>
-                    </div>
-                </div>
-            </div>
-
-            <div className='space-y-3 rounded-xl border border-white/10 bg-slate-800/40 p-4'>
-                <label className='text-sm font-medium text-white'>Outpaint Prompt</label>
+        <div className='flex h-full min-h-0 flex-col gap-4 overflow-y-auto overflow-x-hidden pr-2 panel-scroll'>
+            {/* Prompt */}
+            <div className='space-y-2'>
+                <label className='panel-label'>Outpaint Prompt</label>
                 <textarea
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
                     rows={3}
                     placeholder='Describe what should appear in the extended area'
-                    className='w-full resize-none rounded-lg border border-white/10 bg-slate-900/60 px-3 py-2 text-sm text-white outline-none placeholder:text-white/40 focus:border-cyan-300'
+                    className='panel-input resize-none'
+                    style={{ minHeight: '68px' }}
                 />
-                <p className='text-xs text-white/50'>Use short, concrete prompts for cleaner edge blending.</p>
             </div>
 
-            <div className='space-y-3'>
-                <label className='text-sm font-medium text-white'>Expansion Style</label>
-                <div className='grid gap-2 sm:grid-cols-2'>
-                    {EXPAND_MODES.map((mode) => {
-                        const Icon = mode.icon
-                        const active = expandMode === mode.id
-
-                        return (
-                            <button
-                                key={mode.id}
-                                type='button'
-                                onClick={() => setExpandMode(mode.id)}
-                                className={`rounded-xl border p-3 text-left transition ${active
-                                    ? 'border-cyan-300 bg-cyan-500/10'
-                                    : 'border-white/10 bg-slate-800/40 hover:border-white/20'
-                                    }`}
-                            >
-                                <Icon className='mb-2 h-4 w-4 text-cyan-300' />
-                                <div className='text-sm font-medium text-white'>{mode.label}</div>
-                                <div className='text-xs text-white/55'>{mode.description}</div>
-                            </button>
-                        )
-                    })}
-                </div>
-            </div>
-
-            {expandMode === 'freestyle' && (
-                <div className='space-y-3 rounded-xl border border-white/10 bg-slate-800/40 p-4'>
-                    <div className='flex items-center justify-between gap-3'>
-                        <label className='text-sm font-medium text-white'>Free Style Amount</label>
-                        <span className='text-xs text-white/60'>+{freestyleAmount}%</span>
+            {/* Dimension info */}
+            {frameDims && originalDims && (
+                <div className='panel-card text-[11px] space-y-1.5' style={{ borderColor: 'rgba(0, 229, 255, 0.25)' }}>
+                    <div className='flex items-center justify-between'>
+                        <span style={{ color: 'var(--text-muted)' }}>Original</span>
+                        <span className='font-mono' style={{ color: 'var(--text-secondary)' }}>
+                            {originalDims.width} × {originalDims.height}
+                        </span>
                     </div>
-                    <input
-                        type='range'
-                        min='10'
-                        max='150'
-                        step='5'
-                        value={freestyleAmount}
-                        onChange={(e) => setFreestyleAmount(Number(e.target.value))}
-                        className='w-full accent-cyan-400'
-                    />
-                    <div className='grid grid-cols-4 gap-2'>
-                        {[25, 50, 100, 150].map((amount) => (
-                            <button
-                                key={amount}
-                                type='button'
-                                onClick={() => setFreestyleAmount(amount)}
-                                className={`rounded-lg border px-2 py-2 text-xs transition ${freestyleAmount === amount
-                                    ? 'border-cyan-300 bg-cyan-500/10 text-white'
-                                    : 'border-white/10 bg-slate-900/40 text-white/70 hover:border-white/20'
-                                    }`}
-                            >
-                                <div className='font-medium'>+{amount}%</div>
-                                <div className='mt-0.5 text-[10px] text-white/45'>Free style</div>
-                            </button>
-                        ))}
+                    <div className='flex items-center justify-between'>
+                        <span style={{ color: 'var(--text-muted)' }}>Output</span>
+                        <span className='font-mono font-medium' style={{ color: 'var(--accent-primary)' }}>
+                            {frameDims.width} × {frameDims.height}
+                        </span>
                     </div>
                 </div>
             )}
 
-            <div className='space-y-3 rounded-xl border border-white/10 bg-slate-800/40 p-4'>
-                <div className='flex items-center justify-between gap-3'>
-                    <label className='text-sm font-medium text-white'>Extension Area</label>
-                    <span className='text-xs text-white/60'>+{extendPercent}%</span>
-                </div>
-                <input
-                    type='range'
-                    min='25'
-                    max='100'
-                    step='5'
-                    value={extendPercent}
-                    onChange={(e) => setExtendPercent(Number(e.target.value))}
-                    className='w-full accent-cyan-400'
-                />
-                <div className='grid grid-cols-4 gap-2'>
-                    {EXTEND_PRESETS.map((preset) => (
-                        <button
-                            key={preset.id}
-                            type='button'
-                            onClick={() => setExtendPercent(preset.id)}
-                            className={`rounded-lg border px-2 py-2 text-xs transition ${extendPercent === preset.id
-                                ? 'border-cyan-300 bg-cyan-500/10 text-white'
-                                : 'border-white/10 bg-slate-900/40 text-white/70 hover:border-white/20'
-                                }`}
-                        >
-                            <div className='font-medium'>+{preset.label}</div>
-                            <div className='mt-0.5 text-[10px] text-white/45'>{preset.hint}</div>
-                        </button>
-                    ))}
-                </div>
-            </div>
+            {/* Apply Button */}
+            <button
+                onClick={handleApply}
+                disabled={!activeImage || isApplying}
+                className='flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40'
+                style={{ 
+                    background: dominantColor || 'var(--accent-primary)', 
+                    color: contrastingColor || '#fff', 
+                    border: 'none',
+                    boxShadow: !isApplying ? `0 0 30px ${dominantColor}40` : 'none' 
+                }}
+            >
+                {isApplying ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : <ImagePlus className='h-3.5 w-3.5' />}
+                {isApplying ? 'Extending...' : 'Extend Image'}
+            </button>
 
-            <div className='space-y-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-4'>
-                <div className='flex items-center justify-between gap-3'>
-                    <label className='text-sm font-medium text-cyan-50'>Select Portion to Extend</label>
-                    <span className='text-xs text-cyan-50/75'>Draw a frame on the canvas</span>
-                </div>
-                <div className='grid grid-cols-2 gap-2'>
-                    <Button variant='outline' onClick={createSelectionFrame} disabled={!activeImage} className='w-full'>
-                        Select Area
-                    </Button>
-                    <Button variant='ghost' onClick={clearSelectionFrame} disabled={!selectionFrameRef.current} className='w-full text-white'>
-                        <Trash2 className='mr-2 h-4 w-4' />
-                        Clear
-                    </Button>
-                </div>
-            </div>
-
-            <div className='grid grid-cols-2 gap-2'>
-                <Button variant='outline' onClick={handlePreview} disabled={!activeImage} className='w-full'>
-                    <Sparkles className='mr-2 h-4 w-4' />
-                    Preview
-                </Button>
-                <Button variant='primary' onClick={handleApply} disabled={!activeImage || isApplying} className='w-full'>
-                    {isApplying ? <Loader2 className='mr-2 h-4 w-4 animate-spin' /> : <ImagePlus className='mr-2 h-4 w-4' />}
-                    Apply
-                </Button>
-            </div>
-
-            {previewUrl && (
-                <div className='overflow-hidden rounded-xl border border-white/10 bg-slate-900/60'>
-                    <div className='border-b border-white/10 px-4 py-3 text-xs font-medium uppercase tracking-wide text-white/55'>
-                        Generative Fill Preview
-                    </div>
-                    <img src={previewUrl} alt='Generative fill preview' className='h-32 w-full object-cover' />
-                </div>
-            )}
-
-            <div className='rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-4 text-xs text-cyan-50/90'>
-                Generative fill works best with a source image hosted on ImageKit. If the current asset is external, upload it first.
+            {/* Instructions */}
+            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+                <p style={{ color: 'var(--text-muted)' }}>
+                    Drag the frame handles outward to define the extension area.
+                    The frame expands from the image center so the generated result aligns with the canvas. Click <strong style={{ color: 'var(--text-secondary)' }}>Extend Image</strong> to AI-fill the empty space.
+                </p>
             </div>
         </div>
     )

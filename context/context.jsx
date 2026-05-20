@@ -11,3 +11,11 @@ export const useCanvas = () => {
 
     return context
 }
+
+export const DynamicAccentContext = createContext({
+    accent: '#00E5FF',
+    accentRgb: '0, 229, 255',
+    isDark: true,
+})
+
+export const useDynamicAccent = () => useContext(DynamicAccentContext)
