@@ -2,11 +2,34 @@ import { auth } from "@clerk/nextjs/server";
 import ImageKit from "imagekit";
 import { NextResponse } from "next/server";
 
-const imagekit = new ImageKit({
-    publicKey: process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY,
-    privateKey: process.env.IMAGEKIT_PRIVATE_KEY,
-    urlEndpoint: process.env.NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT
-})
+let imagekit = null
+
+const getImageKit = () => {
+    if (!imagekit) {
+        imagekit = new ImageKit({
+            publicKey: process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY,
+            privateKey: process.env.IMAGEKIT_PRIVATE_KEY,
+            urlEndpoint: process.env.NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT
+        })
+    }
+
+    return imagekit
+}
+
+const isUploadableFile = (value) =>
+    value && typeof value.arrayBuffer === "function" && Number(value.size || 0) > 0
+
+const getFormString = (formData, key) => {
+    const value = formData.get(key)
+    return typeof value === "string" ? value : ""
+}
+
+const sanitizeFileName = (fileName) =>
+    String(fileName || "upload")
+        .replace(/[/\\?%*:|"<>]/g, "_")
+        .replace(/[^a-zA-Z0-9._-]/g, "_")
+        .replace(/_+/g, "_")
+        .slice(0, 140) || "upload"
 
 export async function POST(request) {
     try {
@@ -17,26 +40,34 @@ export async function POST(request) {
 
         const formData = await request.formData()
         const file = formData.get("file")
-        const fileName = formData.get("fileName")
+        const rasterFile = formData.get("rasterFile")
+        const fileName = getFormString(formData, "fileName")
+        const rasterFileName = getFormString(formData, "rasterFileName")
+        const usingRasterFile = isUploadableFile(rasterFile)
+        const uploadFile = usingRasterFile ? rasterFile : file
 
-        if (!file)
+        if (!isUploadableFile(uploadFile))
             return NextResponse.json({ error: "No file provided" }, { status: 400 })
 
-        const bytes = await file.arrayBuffer()
+        const bytes = await uploadFile.arrayBuffer()
         const buffer = Buffer.from(bytes)
 
         const timestamp = Date.now()
-        const sanitizedFileName = fileName?.replace(/[^a-zA-Z0-9.-]/g, "_") || "upload"
+        const uploadName = usingRasterFile
+            ? rasterFileName || uploadFile.name || fileName
+            : fileName || uploadFile.name
+        const sanitizedFileName = sanitizeFileName(uploadName)
 
         const uniqueFileName = `${userId}/${timestamp}_${sanitizedFileName}`
 
-        const uploadResponse = await imagekit.upload({
+        const ik = getImageKit()
+        const uploadResponse = await ik.upload({
             file: buffer,
             fileName: uniqueFileName,
             folder: "/yt-projects"
         })
 
-        const thumbnailUrl = imagekit.url({
+        const thumbnailUrl = ik.url({
             src: uploadResponse.url,
             transformation: [
                 {
@@ -53,10 +84,11 @@ export async function POST(request) {
             url: uploadResponse.url,
             thumbnailUrl: thumbnailUrl,
             fileId: uploadResponse.fileId,
-            width: uploadResponse.width,
-            height: uploadResponse.height,
+            width: uploadResponse.width || Number(getFormString(formData, "rasterWidth")) || undefined,
+            height: uploadResponse.height || Number(getFormString(formData, "rasterHeight")) || undefined,
             size: uploadResponse.size,
             name: uploadResponse.name,
+            source: usingRasterFile ? "browser-raster" : "raw-upload",
         })
     } catch (error) {
         console.error("ImageKit upload error", error)

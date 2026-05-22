@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Slider } from '@/components/ui/slider'
+import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
 import { IText } from 'fabric'
 import Colorful from '@uiw/react-color-colorful'
 
@@ -356,47 +356,41 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                     </div>
 
                     <div className='space-y-2'>
-                        <div className='flex items-center justify-between'>
-                            <label className='text-[10px]' style={{ color: 'var(--text-muted)' }}>Size</label>
-                            <span className='text-[10px] font-mono px-1.5 py-0.5 rounded'
-                                  style={{ color: 'var(--accent-primary)', background: 'rgba(0, 229, 255, 0.1)' }}>
-                                {fontSize}px
-                            </span>
-                        </div>
                         <div className='flex items-center gap-2'>
                             <button
                                 type="button"
                                 onClick={() => applyFontSize(fontSize - 1)}
-                                className="flex items-center justify-center w-7 h-7 rounded-lg editor-interactive"
+                                className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                                 style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                                aria-label="Decrease font size"
                             >
-                                <Minus className='h-3 w-3' />
+                                <Minus className='h-3.5 w-3.5' />
                             </button>
-                            <Slider
-                                value={[fontSize]}
+                            <ProRulerSlider
+                                className="flex-1 min-w-0"
+                                label="Size"
+                                value={fontSize}
                                 min={FONT_SIZES.min}
                                 max={FONT_SIZES.max}
                                 step={1}
-                                onValueChange={(value) => applyFontSize(value[0])}
-                                className='flex-1'
+                                suffix="px"
+                                onChange={applyFontSize}
+                                visual={{
+                                    fill: "rgba(47, 143, 203, 0.45)",
+                                    accent: dominantColor || "#5eb8ff",
+                                    trackBg: "rgba(18, 22, 30, 0.96)",
+                                }}
                             />
                             <button
                                 type="button"
                                 onClick={() => applyFontSize(fontSize + 1)}
-                                className="flex items-center justify-center w-7 h-7 rounded-lg editor-interactive"
+                                className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                                 style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                                aria-label="Increase font size"
                             >
-                                <Plus className='h-3 w-3' />
+                                <Plus className='h-3.5 w-3.5' />
                             </button>
                         </div>
-                        <input
-                            type="number"
-                            value={fontSize}
-                            min={FONT_SIZES.min}
-                            max={FONT_SIZES.max}
-                            onChange={(e) => applyFontSize(e.target.value)}
-                            className="panel-input"
-                        />
                     </div>
 
                     <div className='space-y-2'>

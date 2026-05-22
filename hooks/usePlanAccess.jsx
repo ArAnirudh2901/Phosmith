@@ -18,7 +18,7 @@ const usePlanAccess = () => {
         ai_background: isPro,
         ai_extender: isPro,
         ai_edit: isPro,
-        generative_expand: isPro,
+        ai_agent: true,
     }
 
     // Helper function to check if the user has the access to a particular tool

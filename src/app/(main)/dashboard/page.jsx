@@ -11,6 +11,8 @@ import { toast } from "sonner"
 import { Calendar, Check, ImageIcon, Loader2, Plus, Trash2, X } from "lucide-react"
 import NewProjectModel from "./_components/newProjectModel"
 import { motion, AnimatePresence } from "framer-motion"
+import { duration, easeOut, staggerDelay } from "@/lib/motion"
+import { createProjectPixelDissolver } from "@/lib/project-pixel-effect"
 import {
     AlertDialog,
     AlertDialogAction,
@@ -48,6 +50,23 @@ const formatRelativeTime = (timestamp) => {
 const getProjectPreview = (project) =>
     project.thumbnailUrl || project.currentImageUrl || project.originalImageUrl
 
+const emptyDeleteConfirm = {
+    open: false,
+    type: null,
+    projectId: null,
+    projectIds: [],
+    projectTitle: null,
+}
+
+const getReducedMotionPreference = () =>
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+
+const getProjectCardElement = (projectId) => {
+    if (typeof document === "undefined" || !projectId) return null
+    return document.querySelector(`[data-project-card-id="${projectId}"]`)
+}
+
 const ProjectCard = ({
     project,
     index,
@@ -55,27 +74,34 @@ const ProjectCard = ({
     isSelected,
     isDeletingThisProject,
     isBulkDeleting,
+    isPendingDelete,
     onSelect,
     onDelete,
 }) => {
     const previewUrl = getProjectPreview(project)
-    const accentRgb = "0, 229, 255"
+    const accentRgb = "83, 216, 255"
 
     return (
         <motion.article
-            initial={{ opacity: 0, scale: 0.9, y: 15 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: Math.min(index * 0.06, 0.4), ease: [0.22, 1, 0.36, 1] }}
-            whileHover={!isSelectionMode ? { y: -6, scale: 1.02 } : {}}
-            whileTap={!isSelectionMode ? { scale: 0.98 } : {}}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{
+                duration: duration.normal,
+                delay: staggerDelay(index),
+                ease: easeOut,
+            }}
+            whileHover={!isSelectionMode ? { y: -4 } : {}}
             onClick={isSelectionMode ? (event) => onSelect(event, project._id) : undefined}
             role={isSelectionMode ? "button" : undefined}
             tabIndex={isSelectionMode ? 0 : undefined}
             aria-pressed={isSelectionMode ? isSelected : undefined}
+            data-project-card-id={project._id}
+            data-pending-delete={isPendingDelete ? "true" : undefined}
             className={cn(
                 "group/card relative overflow-hidden rounded-2xl border glass-panel transition-all duration-500 will-change-transform",
                 isSelectionMode && "cursor-pointer",
                 isSelectionMode ? "border-white/16 bg-white/[0.04]" : "border-white/12",
+                isPendingDelete && "project-card-pending-delete pointer-events-none",
             )}
         >
             <div className="relative aspect-[16/10] overflow-hidden">
@@ -100,7 +126,7 @@ const ProjectCard = ({
                         style={{ backgroundImage: `url(${previewUrl})` }}
                     />
                 ) : (
-                    <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_30%_30%,rgba(0,229,255,0.15),transparent_50%),linear-gradient(160deg,rgba(8,11,16,0.96),rgba(12,15,21,0.85))]" />
+                    <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_30%_30%,rgba(83,216,255,0.15),transparent_50%),linear-gradient(160deg,rgba(8,8,7,0.96),rgba(17,17,15,0.85))]" />
                 )}
 
                 {/* Dark gradient at bottom */}
@@ -109,7 +135,7 @@ const ProjectCard = ({
                 {/* Decorative corner glow */}
                 <div className="absolute top-2 right-2 w-16 h-16 rounded-full pointer-events-none opacity-0 group-hover/card:opacity-100 transition-opacity duration-500"
                     style={{
-                        background: "radial-gradient(circle, rgba(0,229,255,0.15), transparent 70%)",
+                        background: "radial-gradient(circle, rgba(83,216,255,0.15), transparent 70%)",
                         filter: "blur(8px)",
                     }}
                 />
@@ -174,7 +200,8 @@ const Dashboard = () => {
     const [selectedProjectIds, setSelectedProjectIds] = useState([])
     const [deletingProjectId, setDeletingProjectId] = useState(null)
     const [isBulkDeleting, setIsBulkDeleting] = useState(false)
-    const [deleteConfirm, setDeleteConfirm] = useState({ open: false, type: null, projectId: null, projectTitle: null })
+    const [pendingDeleteIds, setPendingDeleteIds] = useState([])
+    const [deleteConfirm, setDeleteConfirm] = useState(emptyDeleteConfirm)
 
     const { data: projects = [], isLoading: isProjectsLoading } = useConvexQuery(
         api.projects.getUserProjects,
@@ -186,6 +213,7 @@ const Dashboard = () => {
     const projectCount = projects.length
     const hasProjects = projectCount > 0
     const prevProjectIdsRef = useRef(null)
+    const pixelControllersRef = useRef(new Map())
 
     useEffect(() => {
         const currentIds = projects.map((p) => p._id).join(",")
@@ -195,11 +223,87 @@ const Dashboard = () => {
         setSelectedProjectIds((currentSelectedIds) =>
             currentSelectedIds.filter((projectId) => availableProjectIds.has(projectId))
         )
+        setPendingDeleteIds((currentIds) =>
+            currentIds.filter((projectId) => availableProjectIds.has(projectId))
+        )
     }, [projects])
 
     useEffect(() => {
         if (selectedProjectIds.length === 0 && !hasProjects) setIsSelectionMode(false)
     }, [hasProjects, selectedProjectIds.length])
+
+    useEffect(() => {
+        const controllers = pixelControllersRef.current
+        return () => {
+            controllers.forEach((controller) => controller?.cleanup?.())
+            controllers.clear()
+        }
+    }, [])
+
+    const stageProjectDisintegration = useCallback(async (projectIds) => {
+        const ids = [...new Set(projectIds.filter(Boolean))]
+        if (ids.length === 0) {
+            return { finished: Promise.resolve(), stagedIds: [] }
+        }
+
+        const reduced = getReducedMotionPreference()
+        const controllerEntries = await Promise.all(ids.map(async (projectId) => {
+            pixelControllersRef.current.get(projectId)?.cleanup?.()
+
+            const target = getProjectCardElement(projectId)
+            const controller = await createProjectPixelDissolver(target, { reduced }).catch(() => null)
+            if (controller) pixelControllersRef.current.set(projectId, controller)
+            return { projectId, controller }
+        }))
+
+        const stagedIds = controllerEntries
+            .filter(({ controller }) => Boolean(controller))
+            .map(({ projectId }) => projectId)
+        const controllers = controllerEntries
+            .map(({ controller }) => controller)
+            .filter(Boolean)
+
+        if (stagedIds.length > 0) {
+            setPendingDeleteIds((currentIds) => [...new Set([...currentIds, ...stagedIds])])
+        }
+
+        const finished = Promise.allSettled(
+            controllers.map((controller) => controller.disintegrate())
+        )
+
+        return { finished, stagedIds }
+    }, [])
+
+    const restoreProjectIntegration = useCallback(async (projectIds) => {
+        const ids = [...new Set(projectIds.filter(Boolean))]
+        if (ids.length === 0) return
+
+        const controllers = ids
+            .map((projectId) => pixelControllersRef.current.get(projectId))
+            .filter(Boolean)
+
+        await Promise.allSettled(controllers.map((controller) => controller.integrate()))
+
+        ids.forEach((projectId) => {
+            pixelControllersRef.current.get(projectId)?.cleanup?.()
+            pixelControllersRef.current.delete(projectId)
+        })
+
+        setPendingDeleteIds((currentIds) =>
+            currentIds.filter((projectId) => !ids.includes(projectId))
+        )
+    }, [])
+
+    const cleanupProjectPixels = useCallback((projectIds) => {
+        const ids = [...new Set(projectIds.filter(Boolean))]
+        ids.forEach((projectId) => {
+            pixelControllersRef.current.get(projectId)?.cleanup?.()
+            pixelControllersRef.current.delete(projectId)
+        })
+        setPendingDeleteIds((currentIds) =>
+            currentIds.filter((projectId) => !ids.includes(projectId))
+        )
+    }, [])
 
     const handleSelectionModeToggle = () => {
         setIsSelectionMode((currentValue) => {
@@ -221,18 +325,24 @@ const Dashboard = () => {
     const handleDeleteProject = async (event, projectId, projectTitle) => {
         event.preventDefault()
         event.stopPropagation()
-        if (deletingProjectId || isBulkDeleting) return
-        setDeleteConfirm({ open: true, type: "single", projectId, projectTitle })
+        if (deletingProjectId || isBulkDeleting || pendingDeleteIds.includes(projectId)) return
+        setDeleteConfirm({ ...emptyDeleteConfirm, open: true, type: "single", projectId, projectIds: [projectId], projectTitle })
     }
 
     const handleDeleteSelectedProjects = async () => {
         if (selectedProjectIds.length === 0 || isBulkDeleting) return
         const selectedCount = selectedProjectIds.length
         const projectLabel = selectedCount === 1 ? "project" : "projects"
-        setDeleteConfirm({ open: true, type: "bulk", projectId: null, projectTitle: `${selectedCount} ${projectLabel}` })
+        setDeleteConfirm({
+            ...emptyDeleteConfirm,
+            open: true,
+            type: "bulk",
+            projectIds: selectedProjectIds,
+            projectTitle: `${selectedCount} ${projectLabel}`,
+        })
     }
 
-    const performDelete = useCallback(async (type, projectId, projectTitle) => {
+    const performDelete = useCallback(async (type, projectId, projectIds = []) => {
         if (type === "single") {
             setDeletingProjectId(projectId)
             try {
@@ -248,7 +358,7 @@ const Dashboard = () => {
         } else if (type === "bulk") {
             setIsBulkDeleting(true)
             try {
-                const result = await bulkDeleteProjectsMutate({ projectIds: selectedProjectIds })
+                const result = await bulkDeleteProjectsMutate({ projectIds })
                 if (result?.success) {
                     setSelectedProjectIds([])
                     setIsSelectionMode(false)
@@ -257,29 +367,66 @@ const Dashboard = () => {
                 setIsBulkDeleting(false)
             }
         }
-    }, [deleteProjectMutate, bulkDeleteProjectsMutate, selectedProjectIds])
+    }, [deleteProjectMutate, bulkDeleteProjectsMutate])
 
     const confirmDelete = useCallback(async () => {
-        const { type, projectId, projectTitle } = deleteConfirm
-        setDeleteConfirm({ open: false, type: null, projectId: null, projectTitle: null })
+        const { type, projectId, projectIds, projectTitle } = deleteConfirm
+        const ids = type === "bulk" ? projectIds : [projectId].filter(Boolean)
+        if (!type || ids.length === 0) {
+            setDeleteConfirm(emptyDeleteConfirm)
+            return
+        }
+        setDeleteConfirm(emptyDeleteConfirm)
         const label = type === "single" ? `"${projectTitle}"` : projectTitle
         let undone = false
-        toast(`Deleted ${label}`, {
+        let finalized = false
+        const stagedEffectPromise = stageProjectDisintegration(ids)
+        const toastId = toast(`Deleting ${label}`, {
             duration: 5000,
+            description: "Undo now to rebuild the card from pixels.",
             action: {
                 label: "Undo",
-                onClick: () => {
+                onClick: async () => {
                     undone = true
+                    toast.dismiss(toastId)
+                    await stagedEffectPromise
+                    await restoreProjectIntegration(ids)
                 },
             },
             onAutoClose: async () => {
-                if (!undone) await performDelete(type, projectId, projectTitle)
+                if (undone || finalized) return
+                finalized = true
+                const stagedEffect = await stagedEffectPromise
+                await stagedEffect.finished
+                try {
+                    await performDelete(type, projectId, ids)
+                    cleanupProjectPixels(ids)
+                } catch (error) {
+                    await restoreProjectIntegration(ids)
+                    toast.error(error?.message || "Failed to delete project")
+                }
             },
             onDismiss: async () => {
-                if (!undone) await performDelete(type, projectId, projectTitle)
+                if (undone || finalized) return
+                finalized = true
+                const stagedEffect = await stagedEffectPromise
+                await stagedEffect.finished
+                try {
+                    await performDelete(type, projectId, ids)
+                    cleanupProjectPixels(ids)
+                } catch (error) {
+                    await restoreProjectIntegration(ids)
+                    toast.error(error?.message || "Failed to delete project")
+                }
             },
         })
-    }, [deleteConfirm, performDelete])
+    }, [
+        cleanupProjectPixels,
+        deleteConfirm,
+        performDelete,
+        restoreProjectIntegration,
+        stageProjectDisintegration,
+    ])
 
     return (
         <div className="min-h-[calc(100svh-3rem)] pt-28 pb-12 relative">
@@ -304,29 +451,28 @@ const Dashboard = () => {
                                 )}
                             </div>
                         </div>
-                        <motion.button
+                        <button
+                            type="button"
                             onClick={() => setShowNewProjectModal(true)}
-                            whileHover={{ scale: 1.03, y: -1 }}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold pill-control"
+                            className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold pill-control glass-interactive"
                             style={{
-                                background: "linear-gradient(135deg, rgba(0,229,255,0.2), rgba(217,70,239,0.1))",
-                                borderColor: "rgba(0,229,255,0.3)",
+                                background: "linear-gradient(135deg, rgba(83,216,255,0.18), rgba(255,78,205,0.10))",
+                                borderColor: "rgba(83,216,255,0.3)",
                                 color: "#fff",
-                                boxShadow: "0 0 24px rgba(0,229,255,0.12)",
+                                boxShadow: "0 0 24px rgba(83,216,255,0.12)",
                             }}
                             onMouseEnter={(e) => {
-                                e.currentTarget.style.boxShadow = "0 0 40px rgba(0,229,255,0.2)"
-                                e.currentTarget.style.background = "linear-gradient(135deg, rgba(0,229,255,0.25), rgba(217,70,239,0.15))"
+                                e.currentTarget.style.boxShadow = "0 0 40px rgba(83,216,255,0.2)"
+                                e.currentTarget.style.background = "linear-gradient(135deg, rgba(83,216,255,0.24), rgba(255,78,205,0.14))"
                             }}
                             onMouseLeave={(e) => {
-                                e.currentTarget.style.boxShadow = "0 0 24px rgba(0,229,255,0.12)"
+                                e.currentTarget.style.boxShadow = "0 0 24px rgba(83,216,255,0.12)"
                                 e.currentTarget.style.background = ""
                             }}
                         >
                             <Plus className="h-4 w-4" />
                             New Project
-                        </motion.button>
+                        </button>
                     </div>
                 </GlassPanel>
 
@@ -376,6 +522,7 @@ const Dashboard = () => {
                         <section className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                             {projects.map((project, index) => {
                                 const isSelected = selectedProjectIds.includes(project._id)
+                                const isPendingDelete = pendingDeleteIds.includes(project._id)
                                 const isDeletingThisProject = deletingProjectId === project._id
                                 const cardContent = (
                                     <ProjectCard
@@ -385,18 +532,23 @@ const Dashboard = () => {
                                         isSelected={isSelected}
                                         isDeletingThisProject={isDeletingThisProject}
                                         isBulkDeleting={isBulkDeleting}
+                                        isPendingDelete={isPendingDelete}
                                         onSelect={handleProjectSelection}
                                         onDelete={handleDeleteProject}
                                     />
                                 )
                                 if (isSelectionMode)
                                     return (
-                                        <div key={project._id} className="group block">
+                                        <div key={project._id} className={cn("group block", isPendingDelete && "pointer-events-none")}>
                                             {cardContent}
                                         </div>
                                     )
                                 return (
-                                    <Link key={project._id} href={`/editor/${project._id}`} className="group block">
+                                    <Link
+                                        key={project._id}
+                                        href={`/editor/${project._id}`}
+                                        className={cn("group block", isPendingDelete && "pointer-events-none")}
+                                    >
                                         {cardContent}
                                     </Link>
                                 )
@@ -408,21 +560,20 @@ const Dashboard = () => {
                                 <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-4xl opacity-40">🎨</div>
                                 <p className="text-lg font-medium text-[var(--text-secondary)]">No projects yet</p>
                                 <p className="text-sm text-[var(--text-muted)] mt-1">Upload an image to get started.</p>
-                                <motion.button
+                                <button
+                                    type="button"
                                     onClick={() => setShowNewProjectModal(true)}
-                                    whileHover={{ scale: 1.03, y: -1 }}
-                                    whileTap={{ scale: 0.97 }}
-                                    className="mt-4 px-5 py-2.5 rounded-full text-sm font-semibold inline-flex items-center gap-2 pill-control"
+                                    className="mt-4 px-5 py-2.5 rounded-full text-sm font-semibold inline-flex items-center gap-2 pill-control glass-interactive"
                                     style={{
-                                        background: "linear-gradient(135deg, rgba(0,229,255,0.2), rgba(217,70,239,0.1))",
-                                        borderColor: "rgba(0,229,255,0.3)",
+                                        background: "linear-gradient(135deg, rgba(83,216,255,0.18), rgba(255,78,205,0.10))",
+                                        borderColor: "rgba(83,216,255,0.3)",
                                         color: "#fff",
-                                        boxShadow: "0 0 24px rgba(0,229,255,0.12)",
+                                        boxShadow: "0 0 24px rgba(83,216,255,0.12)",
                                     }}
                                 >
                                     <Plus className="h-4 w-4" />
                                     Create Project
-                                </motion.button>
+                                </button>
                             </div>
                         </GlassPanel>
                     )}
@@ -437,7 +588,7 @@ const Dashboard = () => {
                 <AlertDialog
                     open={deleteConfirm.open}
                     onOpenChange={(open) => {
-                        if (!open) setDeleteConfirm({ open: false, type: null, projectId: null, projectTitle: null })
+                        if (!open) setDeleteConfirm(emptyDeleteConfirm)
                     }}
                 >
                     <AlertDialogContent>
@@ -448,10 +599,10 @@ const Dashboard = () => {
                                     : `Delete "${deleteConfirm.projectTitle}"?`}
                             </AlertDialogTitle>
                             <AlertDialogDescription>
-                                This action cannot be undone.{" "}
+                                The selected card will dissolve now, with a short undo window before permanent deletion.{" "}
                                 {deleteConfirm.type === "bulk"
-                                    ? "All selected projects will be permanently removed."
-                                    : "This project will be permanently removed."}
+                                    ? "Undo will rebuild all selected cards."
+                                    : "Undo will rebuild this project card."}
                             </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>

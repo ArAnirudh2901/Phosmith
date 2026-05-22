@@ -1,8 +1,9 @@
 "use client"
 
-import { Expand, Eye, Maximize2, Palette, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Wand2, Undo2, Redo2, ZoomIn } from 'lucide-react'
+import { Bot, Expand, Eye, Maximize2, Palette, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Undo2, Redo2, ZoomIn } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { useCanvas, useDynamicAccent } from '../../../../../../context/context'
 import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
@@ -23,7 +24,7 @@ const TOOLS = [
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
     { id: "ai_edit", label: "AI Edit", icon: Eye, proOnly: true },
-    { id: "generative_expand", label: "Gen Fill", icon: Wand2, proOnly: true },
+    { id: "ai_agent", label: "Agent", icon: Bot },
 ]
 
 const EditorTopbar = ({ project }) => {
@@ -34,6 +35,8 @@ const EditorTopbar = ({ project }) => {
     const [showUpgradeModel, setShowUpgradeModel] = useState(false)
     const [restrictedTool, setRestrictedTool] = useState(null)
     const [showExportMenu, setShowExportMenu] = useState(false)
+    const [canUndo, setCanUndo] = useState(false)
+    const [canRedo, setCanRedo] = useState(false)
 
     const { canvasEditor, activeTool, onToolChange } = useCanvas()
     const { hasAccess } = usePlanAccess()
@@ -54,6 +57,44 @@ const EditorTopbar = ({ project }) => {
         window.addEventListener('mousedown', handleClickOutside)
         return () => window.removeEventListener('mousedown', handleClickOutside)
     }, [])
+
+    useEffect(() => {
+        if (!canvasEditor) {
+            const resetHistoryState = () => {
+                setCanUndo(false)
+                setCanRedo(false)
+            }
+            if (typeof queueMicrotask === 'function') queueMicrotask(resetHistoryState)
+            else setTimeout(resetHistoryState, 0)
+            return undefined
+        }
+
+        const syncHistory = () => {
+            const state = canvasEditor.__getHistoryState?.()
+            if (state) {
+                setCanUndo(state.canUndo)
+                setCanRedo(state.canRedo)
+            }
+        }
+
+        syncHistory()
+        canvasEditor.on('history:changed', syncHistory)
+        return () => canvasEditor.off('history:changed', syncHistory)
+    }, [canvasEditor])
+
+    const handleUndo = async () => {
+        if (!canvasEditor?.__undoCanvasState) return
+        const didUndo = await canvasEditor.__undoCanvasState()
+        if (!didUndo) toast.message('Nothing to undo')
+        else await canvasEditor.__saveCanvasState?.()
+    }
+
+    const handleRedo = async () => {
+        if (!canvasEditor?.__redoCanvasState) return
+        const didRedo = await canvasEditor.__redoCanvasState()
+        if (!didRedo) toast.message('Nothing to redo')
+        else await canvasEditor.__saveCanvasState?.()
+    }
 
     const handleBackToDashboard = () => {
         router.push("/dashboard")
@@ -154,18 +195,20 @@ const EditorTopbar = ({ project }) => {
                 <div className="ml-4 flex w-[340px] flex-none items-center justify-end gap-1">
                     {/* Undo / Redo */}
                     <motion.button
-                        whileTap={{ scale: 0.9 }}
-                        onClick={() => canvasEditor?.__undoCanvasState?.()}
-                        className="editor-icon-button flex items-center justify-center"
+                        whileTap={{ scale: canUndo ? 0.9 : 1 }}
+                        onClick={handleUndo}
+                        disabled={!canUndo}
+                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none"
                         title="Undo (⌘Z)"
                     >
                         <Undo2 className="h-3.5 w-3.5" />
                     </motion.button>
 
                     <motion.button
-                        whileTap={{ scale: 0.9 }}
-                        onClick={() => canvasEditor?.__redoCanvasState?.()}
-                        className="editor-icon-button flex items-center justify-center"
+                        whileTap={{ scale: canRedo ? 0.9 : 1 }}
+                        onClick={handleRedo}
+                        disabled={!canRedo}
+                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none"
                         title="Redo (⌘⇧Z)"
                     >
                         <Redo2 className="h-3.5 w-3.5" />

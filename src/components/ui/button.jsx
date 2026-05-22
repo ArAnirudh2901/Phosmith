@@ -20,9 +20,9 @@ const buttonVariants = cva(
           "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
         link: "text-primary underline-offset-4 hover:underline",
         primary:
-          "rounded-full border border-[#00E5FF]/20 bg-[linear-gradient(135deg,#00E5FF,#00B8D4)] text-[#050508] font-semibold shadow-[0_10px_24px_rgba(0,229,255,0.2)] duration-300 ease-out hover:-translate-y-0.5 hover:brightness-105 hover:shadow-[0_14px_28px_rgba(0,229,255,0.3)] focus-visible:border-[#00E5FF]/35 focus-visible:ring-[#00E5FF]/20",
+          "rounded-full border border-[rgba(83,216,255,0.25)] bg-[linear-gradient(135deg,var(--accent-emerald),var(--accent-ink))] text-[#050508] font-semibold shadow-[0_10px_24px_rgba(83,216,255,0.18)] duration-300 ease-out hover:-translate-y-0.5 hover:brightness-105 hover:shadow-[0_14px_28px_rgba(155,249,91,0.22)] focus-visible:border-[rgba(155,249,91,0.45)] focus-visible:ring-[rgba(155,249,91,0.2)]",
         glass:
-          "rounded-full border border-white/10 bg-white/[0.04] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl duration-300 ease-out hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.08] hover:text-white hover:shadow-[0_10px_24px_rgba(0,0,0,0.34)] focus-visible:border-[#00E5FF]/35 focus-visible:ring-[#00E5FF]/20",
+          "rounded-full border border-white/10 bg-white/[0.04] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl duration-300 ease-out hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.08] hover:text-white hover:shadow-[0_10px_24px_rgba(0,0,0,0.34)] focus-visible:border-[rgba(83,216,255,0.35)] focus-visible:ring-[rgba(83,216,255,0.2)]",
       },
       size: {
         default:

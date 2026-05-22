@@ -1,4 +1,4 @@
-import { Inter } from "next/font/google";
+import { JetBrains_Mono } from "next/font/google";
 import { Suspense } from "react";
 import "./globals.css";
 import "../styles/animations.css";
@@ -11,12 +11,16 @@ import { ConvexClientProvider } from "./ConvexClientProvider";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 
-const inter = Inter({ subsets: ["latin"] })
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+  display: "swap",
+})
 
 const clerkAppearance = {
   baseTheme: dark,
   variables: {
-    colorPrimary: "#00E5FF",
+    colorPrimary: "#53D8FF",
     colorPrimaryForeground: "#050508",
     colorTextOnPrimaryBackground: "#050508",
     colorBackground: "#0C0F15",
@@ -46,19 +50,19 @@ const clerkAppearance = {
       "bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl backdrop-blur-md",
     formFieldHintText: "text-white",
     formFieldErrorText: "text-rose-300",
-    formResendCodeLink: "text-[#00E5FF] hover:text-[#00E5FF]",
+    formResendCodeLink: "text-[#53D8FF] hover:text-[#53D8FF]",
     formButtonPrimary:
-      "bg-[#00E5FF] !text-[#050508] hover:!text-[#050508] focus:!text-[#050508] !justify-center !items-center !text-center gap-2 border border-white/10 rounded-xl font-semibold hover:brightness-110 transition-all",
+      "bg-[#53D8FF] !text-[#050508] hover:!text-[#050508] focus:!text-[#050508] !justify-center !items-center !text-center gap-2 border border-white/10 rounded-xl font-semibold hover:brightness-110 transition-all",
     footerActionText: "text-white",
-    footerActionLink: "text-[#00E5FF] hover:text-[#00E5FF]",
-    userButtonAvatarBox: "ring-2 ring-[#00E5FF]/30",
+    footerActionLink: "text-[#53D8FF] hover:text-[#53D8FF]",
+    userButtonAvatarBox: "ring-2 ring-[#53D8FF]/30",
     userButtonPopoverCard: "bg-[#0C0F15]/95 border border-white/10 shadow-2xl backdrop-blur-xl !text-white",
     userButtonPopoverMain: "text-white",
     userButtonPopoverActions: "border-t border-white/10",
     userButtonPopoverActionButton: "text-white hover:bg-white/10",
     userButtonPopoverActionButtonIcon: "text-white",
     userButtonPopoverFooter: "border-t border-white/10",
-    userButtonPopoverFooterPagesLink: "text-[#00E5FF] hover:text-[#00E5FF]",
+    userButtonPopoverFooterPagesLink: "text-[#53D8FF] hover:text-[#53D8FF]",
     userPreviewTextContainer: "text-white",
     userPreviewMainIdentifier: "text-white",
     userPreviewMainIdentifierText: "text-white",
@@ -79,7 +83,7 @@ export default function RootLayout({ children }) {
       appearance={clerkAppearance}
     >
       <html lang="en" className="dark" suppressHydrationWarning>
-        <body className={`${inter.className} bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
+        <body className={`${jetbrainsMono.variable} pixxel-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
           <ThemeProvider
             attribute="class"
             defaultTheme="dark"
@@ -89,7 +93,16 @@ export default function RootLayout({ children }) {
             <ConvexClientProvider>
               <SmoothScrollProvider>
                 <LiquidCursorEffect />
-                <Suspense fallback={null}>
+                <Suspense
+                  fallback={
+                    <div
+                      className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4 sm:pt-6 px-4 pointer-events-none"
+                      aria-hidden="true"
+                    >
+                      <div className="h-[52px] sm:h-[56px] w-full max-w-6xl rounded-full bg-white/[0.04] border border-white/10" />
+                    </div>
+                  }
+                >
                   <Header />
                 </Suspense>
                 <main className="relative z-10 min-h-screen">

@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model ImageKitDocPage {
+  id          String             @id @default(cuid())
+  url         String             @unique
+  title       String
+  description String?
+  contentHash String?
+  scrapedAt   DateTime           @default(now())
+  chunks      ImageKitDocChunk[]
+
+  @@index([scrapedAt])
+}
+
+model ImageKitDocChunk {
+  id        String          @id @default(cuid())
+  pageId    String
+  page      ImageKitDocPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  url       String
+  heading   String
+  content   String
+  keywords  String[]
+  tokenSize Int
+  createdAt DateTime        @default(now())
+
+  @@index([pageId])
+  @@index([url])
+}
+
+model ImageKitAgentRun {
+  id                 String   @id @default(cuid())
+  userId             String?
+  projectId          String?
+  prompt             String
+  sourceUrl          String?
+  outputUrl          String?
+  mode               String
+  model              String?
+  imageAnalysis      Json?
+  retrievedDocs      Json?
+  transformations    String[]
+  fabricAdjustments  Json?
+  createdAt          DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([projectId, createdAt])
+}

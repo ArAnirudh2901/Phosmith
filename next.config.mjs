@@ -7,6 +7,10 @@ const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const nextConfig = {
   reactCompiler: true,
   reactStrictMode: false,
+  // Full-res extend composites can exceed the default 10MB proxy buffer.
+  experimental: {
+    proxyClientMaxBodySize: '32mb',
+  },
   turbopack: {
     root: projectRoot,
   },

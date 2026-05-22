@@ -14,6 +14,82 @@ import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
 import UpgradeModel from '@/components/upgradeModel'
 
+const loadImageFromObjectUrl = (url) =>
+    new Promise((resolve, reject) => {
+        const image = new Image()
+
+        image.onload = () => resolve(image)
+        image.onerror = () => reject(new Error("Could not read the selected image"))
+        image.decoding = "async"
+        image.src = url
+    })
+
+const canvasToBlob = (canvas, mimeType, quality) =>
+    new Promise((resolve) => {
+        canvas.toBlob(resolve, mimeType, quality)
+    })
+
+const getSafeBaseName = (fileName) => {
+    const baseName = String(fileName || "upload").replace(/\.[^/.]+$/, "") || "upload"
+    return baseName
+        .replace(/[/\\?%*:|"<>]/g, "_")
+        .replace(/[^a-zA-Z0-9._-]/g, "_")
+        .replace(/_+/g, "_")
+        .slice(0, 96) || "upload"
+}
+
+const rasterizeSelectedImage = async (file, objectUrl) => {
+    if (!file || !objectUrl) {
+        throw new Error("No image selected")
+    }
+
+    const image = await loadImageFromObjectUrl(objectUrl)
+    const width = Math.round(image.naturalWidth || image.width || 0)
+    const height = Math.round(image.naturalHeight || image.height || 0)
+
+    if (!width || !height) {
+        throw new Error("Could not read the selected image dimensions")
+    }
+
+    const canvas = document.createElement("canvas")
+    canvas.width = width
+    canvas.height = height
+
+    const context = canvas.getContext("2d", {
+        alpha: true,
+        colorSpace: "srgb",
+    }) || canvas.getContext("2d")
+
+    if (!context) {
+        throw new Error("Could not prepare the selected image")
+    }
+
+    context.clearRect(0, 0, width, height)
+    context.drawImage(image, 0, 0, width, height)
+
+    let blob = await canvasToBlob(canvas, "image/webp", 0.98)
+    if (!blob?.size || blob.type !== "image/webp") {
+        blob = await canvasToBlob(canvas, "image/png", 1)
+    }
+
+    if (!blob?.size) {
+        throw new Error("Could not lock in the visible image edits")
+    }
+
+    const extension = blob.type === "image/webp" ? "webp" : "png"
+    const rasterFileName = `${getSafeBaseName(file.name)}-visible.${extension}`
+
+    return {
+        file: new File([blob], rasterFileName, {
+            type: blob.type || `image/${extension}`,
+            lastModified: Date.now(),
+        }),
+        width,
+        height,
+        rasterFileName,
+    }
+}
+
 const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
 
     const [isUploading, setIsUploading] = useState(false)
@@ -75,9 +151,21 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
         setIsUploading(true)
 
         try {
+            const rasterizedImage = await rasterizeSelectedImage(selectedFile, previewUrl)
             const formData = new FormData()
-            formData.append("file", selectedFile)
             formData.append("fileName", selectedFile.name)
+            formData.append("rasterFile", rasterizedImage.file)
+            formData.append("rasterFileName", rasterizedImage.rasterFileName)
+            formData.append("rasterWidth", String(rasterizedImage.width))
+            formData.append("rasterHeight", String(rasterizedImage.height))
+            formData.append("sourceMetadata", JSON.stringify({
+                originalName: selectedFile.name,
+                originalType: selectedFile.type,
+                originalSize: selectedFile.size,
+                originalLastModified: selectedFile.lastModified,
+                rasterizedType: rasterizedImage.file.type,
+                rasterizedSize: rasterizedImage.file.size,
+            }))
 
             const uploadResponse = await fetch("/api/imagekit/upload", {
                 method: "POST",

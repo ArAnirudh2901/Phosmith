@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
+import { useReducedMotion } from "@/lib/motion";
 
 const VERT = `
 attribute vec2 a_position;
@@ -32,11 +33,20 @@ float segDist(vec2 p, vec2 a, vec2 b) {
 
 float wake(vec2 fc, vec2 prev, vec2 cur, vec2 res, float r) {
   vec2 a = prev * res, b = cur * res;
+  vec2 ab = b - a;
+  float abLen = length(ab);
+  vec2 ap = fc - a;
+  float t = clamp(dot(ap, ab) / max(abLen * abLen, 1e-5), 0.0, 1.0);
+  
   float distToLine = segDist(fc, a, b);
   float distToPoint = distance(fc, b);
-  // Make tail thinner at start by using sharper falloff
-  return smoothstep(r, 0.0, distToLine) * 0.65
-       + smoothstep(r * 0.5, 0.0, distToPoint) * 0.35;
+  
+  // Modulate width based on position: thinner at rear (t=0), thicker at front (t=1)
+  float widthMod = smoothstep(0.0, 0.3, t) * 0.4 + 0.6;
+  
+  // Make tail thinner at rear by using sharper falloff
+  return smoothstep(r * widthMod, 0.0, distToLine) * 0.65
+       + smoothstep(r * 0.5 * widthMod, 0.0, distToPoint) * 0.35;
 }
 
 void main() {
@@ -75,11 +85,11 @@ varying vec2 v_uv;
 
 vec3 getColor(float t) {
   float cycle = mod(t, 12.0);
-  if (cycle < 3.0) return mix(vec3(0.29, 0.56, 0.89), vec3(0.31, 0.78, 0.47), cycle * 0.333);
-  if (cycle < 6.0) return mix(vec3(0.31, 0.78, 0.47), vec3(1.0, 0.42, 0.42), (cycle - 3.0) * 0.333);
-  if (cycle < 9.0) return mix(vec3(1.0, 0.42, 0.42), vec3(1.0, 0.85, 0.24), (cycle - 6.0) * 0.333);
-  if (cycle < 12.0) return mix(vec3(1.0, 0.85, 0.24), vec3(0.61, 0.35, 0.71), (cycle - 9.0) * 0.333);
-  return vec3(0.29, 0.56, 0.89);
+  if (cycle < 3.0) return mix(vec3(0.4, 0.7, 1.0), vec3(0.4, 0.9, 0.6), cycle * 0.333);
+  if (cycle < 6.0) return mix(vec3(0.4, 0.9, 0.6), vec3(1.0, 0.5, 0.5), (cycle - 3.0) * 0.333);
+  if (cycle < 9.0) return mix(vec3(1.0, 0.5, 0.5), vec3(1.0, 0.95, 0.4), (cycle - 6.0) * 0.333);
+  if (cycle < 12.0) return mix(vec3(1.0, 0.95, 0.4), vec3(0.8, 0.5, 0.9), (cycle - 9.0) * 0.333);
+  return vec3(0.4, 0.7, 1.0);
 }
 
 void main() {
@@ -180,6 +190,8 @@ const AM = 0.1;
 
 export default function LiquidCursorEffect() {
   const pathname = usePathname();
+  const reduced = useReducedMotion();
+  const enabled = pathname === "/" && !reduced;
   const canvasRef = useRef(null);
   const animRef = useRef(null);
 
@@ -213,8 +225,10 @@ export default function LiquidCursorEffect() {
   });
 
   useEffect(() => {
+    if (!enabled) return undefined;
+
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) return undefined;
 
     const gl = canvas.getContext("webgl", {
       alpha: true,
@@ -297,7 +311,7 @@ export default function LiquidCursorEffect() {
       state.ay = R(AM, 0.45);
       state.pax = state.ax;
       state.pay = state.ay;
-      state.aPulse = 0.3;
+      state.aPulse = 0.35;
       pickT(state, now);
 
       const angle = Math.atan2(state.aty - state.ay, state.atx - state.ax);
@@ -319,6 +333,7 @@ export default function LiquidCursorEffect() {
       const angle = Math.atan2(state.bty - state.by, state.btx - state.bx);
       state.bdx = Math.cos(angle);
       state.bdy = Math.sin(angle);
+      spawnD(state, now, true);
       state.energy = 1;
     };
 
@@ -358,24 +373,24 @@ export default function LiquidCursorEffect() {
     const advB = (state, now, dt) => {
       state.pbx = state.bx;
       state.pby = state.by;
-      if (Math.hypot(state.btx - state.bx, state.bty - state.by) < 0.16 || now >= state.bNext) {
+      if (Math.hypot(state.btx - state.bx, state.bty - state.by) < 0.14 || now >= state.bNext) {
         pickTB(state, now);
       }
 
       let dx = state.btx - state.bx;
       let dy = state.bty - state.by;
-      if (state.bx < 0.55) dx += (0.55 - state.bx) * 4.2;
-      if (state.bx > 1 - AM) dx -= (state.bx - (1 - AM)) * 4.2;
-      if (state.by < 0.55) dy += (0.55 - state.by) * 4.2;
-      if (state.by > 1 - AM) dy -= (state.by - (1 - AM)) * 4.2;
+      if (state.bx < 0.55) dx += (0.55 - state.bx) * 5;
+      if (state.bx > 1 - AM) dx -= (state.bx - (1 - AM)) * 5;
+      if (state.by < 0.55) dy += (0.55 - state.by) * 5;
+      if (state.by > 1 - AM) dy -= (state.by - (1 - AM)) * 5;
 
       const currentAngle = Math.atan2(state.bdy, state.bdx);
       const desiredAngle = Math.atan2(dy, dx);
-      const nextAngle = currentAngle + CL(SA(currentAngle, desiredAngle), -AT * 0.82 * dt, AT * 0.82 * dt);
+      const nextAngle = currentAngle + CL(SA(currentAngle, desiredAngle), -AT * dt, AT * dt);
       state.bdx = Math.cos(nextAngle);
       state.bdy = Math.sin(nextAngle);
-      state.bx = C01(state.bx + state.bdx * AS * 0.72 * dt);
-      state.by = C01(state.by + state.bdy * AS * 0.72 * dt);
+      state.bx = C01(state.bx + state.bdx * AS * dt);
+      state.by = C01(state.by + state.bdy * AS * dt);
 
       if (state.bx <= 0.55 || state.bx >= 1 - AM || state.by <= 0.55 || state.by >= 1 - AM) {
         state.bx = CL(state.bx, 0.55, 1 - AM);
@@ -384,7 +399,7 @@ export default function LiquidCursorEffect() {
         state.bty = R(0.55, 1 - AM);
       }
 
-      state.bPulse *= Math.exp(-1.5 * dt);
+      state.bPulse *= Math.exp(-2.5 * dt);
       return Math.hypot(state.bx - state.pbx, state.by - state.pby);
     };
 
@@ -520,9 +535,9 @@ export default function LiquidCursorEffect() {
       gl.deleteProgram(simProgram);
       gl.deleteProgram(renderProgram);
     };
-  }, []);
+  }, [enabled]);
 
-  if (pathname?.includes("/editor")) return null;
+  if (!enabled) return null;
 
   return (
     <canvas
