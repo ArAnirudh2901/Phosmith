@@ -9,7 +9,7 @@ import {
 import { useCanvas } from "../../../../../../context/context"
 
 const ContextualActionBar = ({ visible = false, position = { x: 0, y: 0 } }) => {
-    const { canvasEditor } = useCanvas()
+    const { canvasEditor, onToolChange } = useCanvas()
     const [selectedObject, setSelectedObject] = useState(null)
     const [objectType, setObjectType] = useState(null)
 
@@ -107,8 +107,8 @@ const ContextualActionBar = ({ visible = false, position = { x: 0, y: 0 } }) => 
                     {objectType === 'image' && (
                         <>
                             <div className="w-px h-5 rounded-full" style={{ background: 'var(--border-subtle)' }} />
-                            <ActionButton icon={Palette} title="AI BG" />
-                            <ActionButton icon={Wand2} title="AI Enhance" />
+                            <ActionButton icon={Palette} title="AI BG" onClick={() => onToolChange?.("ai_background")} />
+                            <ActionButton icon={Wand2} title="ImageKit Agent" onClick={() => onToolChange?.("ai_agent")} />
                         </>
                     )}
                 </div>

@@ -17,7 +17,7 @@ import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 const UNSPLASH_ACCESS_KEY = process.env.NEXT_PUBLIC_UNSPLASH_ACCESS_KEY
 const UNSPLASH_API_URL = "https://api.unsplash.com"
 const MAX_BACKGROUND_REMOVAL_DIMENSION = 1600
-const MAX_BACKGROUND_REMOVAL_RETRIES = 20
+const MAX_BACKGROUND_REMOVAL_RETRIES = 2
 const INITIAL_RETRY_DELAY = 1500
 const MAX_RETRY_DELAY = 8000
 const UNSPLASH_RESULTS_PER_PAGE = 30
@@ -152,6 +152,9 @@ const getMainImage = (canvasEditor) => {
 
 const getToastErrorMessage = (error) => {
     const message = error?.message || ""
+    if (message.toLowerCase().includes("extensions limit exceeded")) {
+        return "ImageKit extension limit exceeded. Try again after the quota resets or disable AI transforms."
+    }
     if (message.includes("Internal Server Error") || message.includes("generate")) {
         return "AI service busy. Try again in 1-2 minutes."
     }
@@ -209,15 +212,15 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
             return Promise.resolve(url)
         }
 
+        if (pendingBackgroundUrlRef.current === url && pendingBackgroundPromiseRef.current) {
+            return pendingBackgroundPromiseRef.current
+        }
+
         // Abort previous request
         if (abortControllerRef.current) {
             abortControllerRef.current.abort()
         }
         abortControllerRef.current = new AbortController()
-
-        if (pendingBackgroundUrlRef.current === url && pendingBackgroundPromiseRef.current) {
-            return pendingBackgroundPromiseRef.current
-        }
 
         pendingBackgroundUrlRef.current = url
         const controller = abortControllerRef.current

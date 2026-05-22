@@ -14,6 +14,7 @@ import { useEffect, useRef, useCallback } from "react"
  *   H  → Hand/Pan tool
  *   Z  → Zoom tool (maps clicks to canvas.zoomToPoint())
  *   G  → Generative Expand tool
+ *   A  → ImageKit Agent
  *   B  → Brush/Masking tool
  *   [  → Decrease brush size
  *   ]  → Increase brush size
@@ -99,9 +100,10 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             // Ignore key combos beyond this point
             if (metaOrCtrl || event.altKey) return
 
-            // ─── Spacebar hold → temporary pan ───
+            // ─── Spacebar hold → temporary pan (not during AI Extender) ───
             if (key === " " && !event.repeat) {
                 event.preventDefault()
+                if (activeTool === 'ai_extender') return
                 if (!spaceHeldRef.current) {
                     spaceHeldRef.current = true
                     previousToolRef.current = activeTool
@@ -167,7 +169,11 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                     break
                 case "g":
                     event.preventDefault()
-                    onToolChange?.("generative_expand")
+                    onToolChange?.("ai_extender")
+                    break
+                case "a":
+                    event.preventDefault()
+                    onToolChange?.("ai_agent")
                     break
                 case "b":
                     event.preventDefault()

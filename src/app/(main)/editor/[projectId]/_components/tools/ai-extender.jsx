@@ -2,393 +2,171 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { Loader2, ImagePlus } from 'lucide-react'
+import { Loader2, ImagePlus, Square } from 'lucide-react'
 import { Rect } from 'fabric'
 import { useCanvas } from '../../../../../../../context/context'
 import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
 import { api } from '../../../../../../../convex/_generated/api'
-import { buildGenerativeFillUrl, getCanvasActiveImage, isImageKitUrl, normalizeImageKitUrl } from '../../../../../../lib/imagekit-ai'
+import {
+    getCanvasActiveImage,
+} from '../../../../../../lib/imagekit-ai'
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
+import {
+    canvasBoundsToScreen,
+    buildVisibleImageBlob,
+    frameToPixelExpansion,
+    getFrameBoundsFromFabricRect,
+    getSourcePixelDimensions,
+    isCanvasLive,
+    removeExpansionFramesFromCanvas,
+    showEdgeControlsOnly,
+    silenceImageForExpansion,
+    validateExpansion,
+} from '../../../../../../lib/expansion-pipeline'
 
-const MAX_OUTPUT_DIMENSION = 4096
-const MAX_RETRIES = 8
-const BASE_RETRY_DELAY = 4000
+const isRemoteImageUrl = (url) =>
+    typeof url === 'string' &&
+    /^https?:\/\//i.test(url) &&
+    !url.startsWith('data:') &&
+    !url.startsWith('blob:')
 
-const getSourceUrl = (image, project) => {
-    const candidates = [
-        project?.currentImageUrl,
-        project?.originalImageUrl,
+const getVisibleImageUrl = (image, project) =>
+    [
         image?.getSrc?.(),
         image?._originalElement?.src,
-    ].filter(Boolean)
+        image?._element?.src,
+        project?.currentImageUrl,
+        project?.originalImageUrl,
+    ].find(isRemoteImageUrl) || ''
 
-    const imagekitUrl = candidates.find(url => url.includes('ik.imagekit.io'))
-    return imagekitUrl || candidates[0] || ''
+const getBlobExtension = (blob) => {
+    const type = String(blob?.type || '').toLowerCase()
+    if (type.includes('webp')) return 'webp'
+    if (type.includes('jpeg') || type.includes('jpg')) return 'jpg'
+    return 'png'
 }
 
-/**
- * Remove ALL leftover expansion frame Rects from the canvas.
- * This prevents stale frames from accumulating across tool switches.
- */
-const removeAllExpansionFrames = (canvas) => {
-    if (!canvas) return
-    const frames = canvas.getObjects().filter(obj => obj._isExpansionFrame)
-    frames.forEach(frame => {
-        try { canvas.remove(frame) } catch (_) { }
-    })
-    if (frames.length > 0) {
-        canvas.requestRenderAll()
+const buildExtendRequest = ({ sourceUrl, sourceRender, expansion, prompt }) => {
+    if (sourceRender?.blob?.size) {
+        const formData = new FormData()
+        formData.append(
+            'sourceFile',
+            sourceRender.blob,
+            `visible-source-${Date.now()}.${getBlobExtension(sourceRender.blob)}`
+        )
+        if (sourceUrl) formData.append('sourceUrl', sourceUrl)
+        formData.append('expansion', JSON.stringify(expansion))
+        formData.append('prompt', prompt || '')
+        formData.append('targetWidth', String(expansion.targetWidth))
+        formData.append('targetHeight', String(expansion.targetHeight))
+
+        return {
+            body: formData,
+            headers: undefined,
+            sourceMode: 'visible-canvas-upload',
+        }
+    }
+
+    return {
+        body: JSON.stringify({
+            sourceUrl,
+            expansion,
+            prompt,
+            targetWidth: expansion.targetWidth,
+            targetHeight: expansion.targetHeight,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        sourceMode: 'remote-url',
     }
 }
 
-/**
- * Pre-fetch an image URL to verify it's ready (not still processing).
- */
-const waitForImageReady = (url, timeoutMs = 20000) => {
-    return new Promise((resolve) => {
-        const img = new Image()
-        img.crossOrigin = 'anonymous'
-        const timer = setTimeout(() => {
-            img.onload = null
-            img.onerror = null
-            resolve(false)
-        }, timeoutMs)
-
-        img.onload = () => {
-            clearTimeout(timer)
-            // Also check that the image actually has content
-            resolve(img.naturalWidth > 0 && img.naturalHeight > 0)
-        }
-        img.onerror = () => {
-            clearTimeout(timer)
-            resolve(false)
-        }
-        img.src = url
-    })
-}
-
-const AIExtender = ({ project, dominantColor, contrastingColor, lighterColor }) => {
-    const { canvasEditor, setProcessingMessage } = useCanvas()
+const AIExtender = ({ project }) => {
+    const { canvasEditor, setProcessingMessage, setExpansionPreview } = useCanvas()
     const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
 
-    const [prompt, setPrompt] = useState('soft cinematic continuation, realistic background, seamless outpainting')
+    const [prompt, setPrompt] = useState(
+        'soft cinematic continuation, realistic background, seamless extension'
+    )
     const [isApplying, setIsApplying] = useState(false)
-    const [frameDims, setFrameDims] = useState(null)
-    const [originalDims, setOriginalDims] = useState(null)
+    const [sourceDims, setSourceDims] = useState(null)
+    const [targetDims, setTargetDims] = useState(null)
 
     const expansionFrameRef = useRef(null)
-    const activeImageRef = useRef(null)
-    const originalImageStateRef = useRef(null)
-    // Store the REAL pixel dimensions of the image (not canvas display size)
-    const realImageDimsRef = useRef(null)
+    const frameDimsRafRef = useRef(null)
+    const setupGenerationRef = useRef(0)
+    const abortControllerRef = useRef(null)
 
     const activeImage = useMemo(() => getCanvasActiveImage(canvasEditor), [canvasEditor])
-    const sourceUrl = getSourceUrl(activeImage, project)
 
-    useEffect(() => {
-        activeImageRef.current = activeImage
-    }, [activeImage])
+    const syncExpansionPreview = useCallback(() => {
+        const canvas = canvasEditor
+        const frame = expansionFrameRef.current
+        const image = activeImage
+        if (!isCanvasLive(canvas) || !frame || !image) return
+
+        try {
+            const imageBounds = image.getBoundingRect()
+            const frameBounds = getFrameBoundsFromFabricRect(frame)
+            const pixelDims = getSourcePixelDimensions(image)
+            if (!pixelDims.width || !pixelDims.height) return
+
+            const expansion = frameToPixelExpansion(imageBounds, frameBounds, pixelDims)
+            setSourceDims({ width: pixelDims.width, height: pixelDims.height })
+            setTargetDims({ width: expansion.targetWidth, height: expansion.targetHeight })
+
+            const host =
+                canvas.upperCanvasEl?.closest?.('.editor-canvas-host') ||
+                canvas.upperCanvasEl?.parentElement?.parentElement
+            const hostSize = {
+                width: host?.clientWidth || canvas.getWidth(),
+                height: host?.clientHeight || canvas.getHeight(),
+            }
+
+            setExpansionPreview?.({
+                targetWidth: expansion.targetWidth,
+                targetHeight: expansion.targetHeight,
+                insets: expansion.insets,
+                frameScreen: canvasBoundsToScreen(canvas, frameBounds),
+                imageScreen: canvasBoundsToScreen(canvas, imageBounds),
+                hostSize,
+            })
+        } catch (err) {
+            console.warn('[ai-extender] preview sync skipped:', err)
+        }
+    }, [activeImage, canvasEditor, setExpansionPreview])
+
+    const schedulePreviewSync = useCallback(() => {
+        if (frameDimsRafRef.current) return
+        frameDimsRafRef.current = requestAnimationFrame(() => {
+            frameDimsRafRef.current = null
+            syncExpansionPreview()
+        })
+    }, [syncExpansionPreview])
 
     const removeExpansionFrame = useCallback(() => {
         if (!canvasEditor) return
-        // Remove the tracked frame
+        if (frameDimsRafRef.current) {
+            cancelAnimationFrame(frameDimsRafRef.current)
+            frameDimsRafRef.current = null
+        }
         if (expansionFrameRef.current) {
-            try { canvasEditor.remove(expansionFrameRef.current) } catch (_) { }
+            try {
+                canvasEditor.remove(expansionFrameRef.current)
+            } catch {
+                /* ignore */
+            }
             expansionFrameRef.current = null
         }
-        // Also clean up any orphaned expansion frames
-        removeAllExpansionFrames(canvasEditor)
-        setFrameDims(null)
-    }, [canvasEditor])
+        removeExpansionFramesFromCanvas(canvasEditor)
+        setTargetDims(null)
+        setExpansionPreview?.(null)
+    }, [canvasEditor, setExpansionPreview])
 
-    const unlockImage = useCallback(() => {
-        const image = activeImageRef.current
-        const original = originalImageStateRef.current
-        if (image && original) {
-            image.set({
-                selectable: original.selectable !== false,
-                evented: original.evented !== false,
-                hasControls: original.hasControls !== false,
-                hasBorders: original.hasBorders !== false,
-                lockMovementX: false,
-                lockMovementY: false,
-                lockScalingX: false,
-                lockScalingY: false,
-            })
-            originalImageStateRef.current = null
-            canvasEditor?.requestRenderAll?.()
-        }
-    }, [canvasEditor])
-
-    const lockImage = useCallback((image) => {
-        originalImageStateRef.current = {
-            selectable: image.selectable,
-            evented: image.evented,
-            hasControls: image.hasControls,
-            hasBorders: image.hasBorders,
-        }
-
-        image.set({
-            selectable: true,
-            evented: true,
-            hasControls: false,
-            hasBorders: true,
-            lockMovementX: false,
-            lockMovementY: false,
-            lockScalingX: true,
-            lockScalingY: true,
-        })
-    }, [])
-
-    /**
-     * Auto-create expansion frame when tool mounts.
-     */
-    useEffect(() => {
-        if (!canvasEditor || !activeImageRef.current) return
-
-        // FIRST: Clean up any leftover expansion frames from previous sessions
-        removeAllExpansionFrames(canvasEditor)
-
-        const image = activeImageRef.current
-        const bounds = image.getBoundingRect()
-        const centerX = bounds.left + bounds.width / 2
-        const centerY = bounds.top + bounds.height / 2
-
-        // Store the REAL pixel dimensions of the image (not scaled canvas coordinates)
-        // This is critical: ImageKit expects real pixel dimensions, not display pixels
-        const realW = image.width || bounds.width
-        const realH = image.height || bounds.height
-        realImageDimsRef.current = { width: realW, height: realH }
-
-        // Display dimensions use bounds (canvas coordinates)
-        setOriginalDims({ width: Math.round(bounds.width), height: Math.round(bounds.height) })
-
-        lockImage(image)
-
-        const frame = new Rect({
-            left: bounds.left,
-            top: bounds.top,
-            width: bounds.width,
-            height: bounds.height,
-            fill: 'rgba(125, 235, 255, 0.035)',
-            stroke: 'rgba(125, 235, 255, 0.95)',
-            strokeWidth: 3,
-            strokeDashArray: [6, 4],
-            cornerColor: '#F8FBFF',
-            cornerStrokeColor: '#031014',
-            cornerSize: 16,
-            touchCornerSize: 28,
-            padding: 8,
-            transparentCorners: false,
-            cornerStyle: 'circle',
-            borderColor: 'rgba(125, 235, 255, 0.95)',
-            borderScaleFactor: 2,
-            selectable: true,
-            evented: true,
-            hasControls: true,
-            hasBorders: true,
-            centeredScaling: true,
-            lockMovementX: true,
-            lockMovementY: true,
-            lockUniScaling: false,
-            lockScalingFlip: true,
-            lockRotation: true,
-            hasRotatingPoint: false,
-            _isExpansionFrame: true,
-        })
-
-        const getFrameSize = () => {
-            const scaledW = frame.getScaledWidth?.() || frame.width * (frame.scaleX || 1)
-            const scaledH = frame.getScaledHeight?.() || frame.height * (frame.scaleY || 1)
-            return {
-                width: Math.max(bounds.width, scaledW),
-                height: Math.max(bounds.height, scaledH),
-            }
-        }
-
-        const updateFrameDims = () => {
-            const next = getFrameSize()
-            setFrameDims({ width: Math.round(next.width), height: Math.round(next.height) })
-        }
-
-        const commitFrameSize = () => {
-            const next = getFrameSize()
-
-            frame.set({
-                left: centerX - next.width / 2,
-                top: centerY - next.height / 2,
-                width: next.width,
-                height: next.height,
-                scaleX: 1,
-                scaleY: 1,
-            })
-            frame.setCoords()
-            setFrameDims({ width: Math.round(next.width), height: Math.round(next.height) })
-            canvasEditor.requestRenderAll()
-        }
-
-        frame.on('scaling', updateFrameDims)
-        frame.on('modified', commitFrameSize)
-
-        expansionFrameRef.current = frame
-        canvasEditor.add(frame)
-        canvasEditor.setActiveObject(frame)
-        canvasEditor.requestRenderAll()
-        setFrameDims({ width: Math.round(bounds.width), height: Math.round(bounds.height) })
-
-        // Cleanup when component unmounts
-        return () => {
-            unlockImage()
-            if (expansionFrameRef.current) {
-                try { canvasEditor.remove(expansionFrameRef.current) } catch (_) { }
-                expansionFrameRef.current = null
-            }
-            // Also clean orphaned frames
-            removeAllExpansionFrames(canvasEditor)
-        }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [canvasEditor])
-
-    const handleApply = async () => {
-        if (!activeImageRef.current || !sourceUrl) {
-            toast.error('Add an ImageKit image first')
-            return
-        }
-
-        if (!isImageKitUrl(sourceUrl)) {
-            toast.error('Generative fill only works with ImageKit-hosted images')
-            return
-        }
-
-        const frame = expansionFrameRef.current
-        if (!frame) {
-            toast.error('Expansion frame not found')
-            return
-        }
-
-        const imageBounds = activeImageRef.current.getBoundingRect()
-        const realDims = realImageDimsRef.current
-
-        // Calculate the frame size in canvas coordinates
-        const frameDisplayW = Math.round(frame.width * (frame.scaleX || 1))
-        const frameDisplayH = Math.round(frame.height * (frame.scaleY || 1))
-
-        if (frameDisplayW <= imageBounds.width + 2 && frameDisplayH <= imageBounds.height + 2) {
-            toast.error('Drag the frame handles outward beyond the image to extend')
-            return
-        }
-
-        // Convert canvas display coordinates to REAL pixel dimensions
-        // Scale factor: how much the image is scaled down to fit on canvas
-        const scaleFactorX = realDims ? (realDims.width / imageBounds.width) : 1
-        const scaleFactorY = realDims ? (realDims.height / imageBounds.height) : 1
-
-        let targetW = Math.round(frameDisplayW * scaleFactorX)
-        let targetH = Math.round(frameDisplayH * scaleFactorY)
-
-        // Cap to max dimension
-        if (targetW > MAX_OUTPUT_DIMENSION) {
-            const ratio = MAX_OUTPUT_DIMENSION / targetW
-            targetW = MAX_OUTPUT_DIMENSION
-            targetH = Math.round(targetH * ratio)
-        }
-        if (targetH > MAX_OUTPUT_DIMENSION) {
-            const ratio = MAX_OUTPUT_DIMENSION / targetH
-            targetH = MAX_OUTPUT_DIMENSION
-            targetW = Math.round(targetW * ratio)
-        }
-
-        // Ensure minimum dimensions
-        targetW = Math.max(targetW, realDims?.width || 100)
-        targetH = Math.max(targetH, realDims?.height || 100)
-
-        // Build the generative fill URL using the ORIGINAL source
-        const baseSourceUrl = normalizeImageKitUrl(
-            project?.originalImageUrl || sourceUrl
-        )
-        const url = buildGenerativeFillUrl({
-            sourceUrl: baseSourceUrl,
-            prompt,
-            width: targetW,
-            height: targetH,
-        })
-
-        console.log('[AI Extender] Source URL:', baseSourceUrl)
-        console.log('[AI Extender] Generated URL:', url)
-        console.log('[AI Extender] Real image dims:', realDims)
-        console.log('[AI Extender] Display bounds:', { w: imageBounds.width, h: imageBounds.height })
-        console.log('[AI Extender] Scale factors:', { x: scaleFactorX, y: scaleFactorY })
-        console.log('[AI Extender] Target dims:', targetW, '×', targetH)
-
-        setIsApplying(true)
-        setProcessingMessage('Extending image with AI...')
-
-        try {
-            unlockImage()
-            removeExpansionFrame()
-
-            const sourceImage = activeImageRef.current
-            const { FabricImage } = await import('fabric')
-
-            let nextImage = null
-            let lastError = null
-
-            for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-                try {
-                    setProcessingMessage(
-                        attempt === 1
-                            ? 'Extending image with AI...'
-                            : `Processing... (attempt ${attempt}/${MAX_RETRIES})`
-                    )
-
-                    // Pre-fetch to check readiness
-                    const isReady = await waitForImageReady(url, 25000)
-
-                    if (!isReady && attempt < MAX_RETRIES) {
-                        console.warn(`[AI Extender] Image not ready on attempt ${attempt}, retrying...`)
-                        const delay = Math.min(attempt * BASE_RETRY_DELAY, 20000)
-                        await new Promise(resolve => setTimeout(resolve, delay))
-                        continue
-                    }
-
-                    // Load into Fabric
-                    nextImage = await FabricImage.fromURL(url, {
-                        crossOrigin: 'anonymous',
-                    })
-
-                    if (nextImage && nextImage.width > 0 && nextImage.height > 0) {
-                        break
-                    } else {
-                        throw new Error('Loaded image has zero dimensions')
-                    }
-                } catch (err) {
-                    lastError = err
-                    console.warn(`[AI Extender] Attempt ${attempt}/${MAX_RETRIES} failed:`, err?.message)
-                    if (attempt < MAX_RETRIES) {
-                        const delay = Math.min(attempt * BASE_RETRY_DELAY, 20000)
-                        await new Promise(resolve => setTimeout(resolve, delay))
-                    }
-                }
-            }
-
-            if (!nextImage) {
-                throw new Error(
-                    `Failed to load extended image after ${MAX_RETRIES} attempts. ` +
-                    `ImageKit may still be processing — try again in a few seconds. ` +
-                    `(${lastError?.message || 'Unknown error'})`
-                )
-            }
-
-            const outputW = nextImage.width || targetW
-            const outputH = nextImage.height || targetH
-
-            nextImage.set({
-                left: outputW / 2,
-                top: outputH / 2,
-                originX: 'center',
-                originY: 'center',
-                scaleX: 1,
-                scaleY: 1,
+    const unlockImage = useCallback(
+        (image) => {
+            const target = image || activeImage
+            if (!target) return
+            target.set({
                 selectable: true,
                 evented: true,
                 hasControls: true,
@@ -398,103 +176,499 @@ const AIExtender = ({ project, dominantColor, contrastingColor, lighterColor }) 
                 lockScalingX: false,
                 lockScalingY: false,
             })
+            canvasEditor?.requestRenderAll?.()
+        },
+        [activeImage, canvasEditor]
+    )
 
-            canvasEditor.remove(sourceImage)
+    const lockImage = useCallback((image) => {
+        silenceImageForExpansion(image)
+    }, [])
+
+    /**
+     * Silence image for expansion without visually dirtying it.
+     * We avoid calling image.set() with properties that trigger a full
+     * re-render from the source element (which loses edited pixels).
+     * Instead we set properties individually, then clear the dirty flag.
+     */
+    const safelyLockImage = useCallback((image) => {
+        if (!image) return
+        // Lock without triggering a full dirty re-render
+        image.selectable = false
+        image.evented = false
+        image.hasControls = false
+        image.hasBorders = false
+        image.hoverCursor = 'default'
+        image.moveCursor = 'default'
+        image.lockMovementX = true
+        image.lockMovementY = true
+        image.lockScalingX = true
+        image.lockScalingY = true
+        image.lockRotation = true
+        // Don't mark dirty — preserve the current rendered state
+        image.dirty = false
+    }, [])
+
+    useEffect(() => {
+        if (!canvasEditor || !activeImage) {
+            canvasEditor && (canvasEditor.__expansionMode = false)
+            removeExpansionFrame()
+            return undefined
+        }
+
+        const pixelDims = getSourcePixelDimensions(activeImage)
+        if (pixelDims.width < 1 || pixelDims.height < 1) {
+            return undefined
+        }
+
+        const setupGen = ++setupGenerationRef.current
+        canvasEditor.__expansionMode = true
+        removeExpansionFramesFromCanvas(canvasEditor)
+
+        // Use safelyLockImage instead of silenceImageForExpansion to avoid
+        // dirtying the image (which causes it to re-render from the original
+        // source element, losing edited pixel data)
+        canvasEditor.getObjects().forEach((obj) => {
+            if (obj?.type?.toLowerCase() === 'image') {
+                safelyLockImage(obj)
+            }
+        })
+
+        const image = activeImage
+        const bounds = image.getBoundingRect()
+        setSourceDims({ width: pixelDims.width, height: pixelDims.height })
+
+        const minFrame = { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height }
+
+        const frame = new Rect({
+            left: minFrame.left,
+            top: minFrame.top,
+            width: minFrame.width,
+            height: minFrame.height,
+            originX: 'left',
+            originY: 'top',
+            fill: 'rgba(125, 235, 255, 0.08)',
+            stroke: 'rgba(125, 235, 255, 0.95)',
+            strokeWidth: 1.5,
+            strokeDashArray: [6, 4],
+            cornerColor: '#F8FBFF',
+            cornerStrokeColor: '#031014',
+            cornerSize: 14,
+            touchCornerSize: 24,
+            transparentCorners: false,
+            cornerStyle: 'circle',
+            borderColor: 'rgba(125, 235, 255, 0.95)',
+            borderScaleFactor: 1.5,
+            selectable: true,
+            evented: true,
+            hasControls: true,
+            hasBorders: false,
+            centeredScaling: false,
+            lockMovementX: true,
+            lockMovementY: true,
+            lockUniScaling: false,
+            lockScalingFlip: true,
+            lockRotation: true,
+            hasRotatingPoint: false,
+            _isExpansionFrame: true,
+        })
+
+        showEdgeControlsOnly(frame)
+
+        const commitFrameSize = () => {
+            const imgBounds = image.getBoundingRect()
+            const frameBounds = getFrameBoundsFromFabricRect(frame)
+            const w = Math.max(imgBounds.width, frameBounds.width)
+            const h = Math.max(imgBounds.height, frameBounds.height)
+
+            const left = Math.min(frameBounds.left, imgBounds.left)
+            const top = Math.min(frameBounds.top, imgBounds.top)
+
+            frame.set({
+                left,
+                top,
+                width: w,
+                height: h,
+                scaleX: 1,
+                scaleY: 1,
+                originX: 'left',
+                originY: 'top',
+            })
+            frame.setCoords()
+            schedulePreviewSync()
+        }
+
+        frame.on('scaling', schedulePreviewSync)
+        frame.on('modified', commitFrameSize)
+
+        if (setupGen !== setupGenerationRef.current) {
+            return undefined
+        }
+
+        expansionFrameRef.current = frame
+        canvasEditor.add(frame)
+        canvasEditor.bringObjectToFront(frame)
+        canvasEditor.discardActiveObject()
+        canvasEditor.setActiveObject(frame)
+        showEdgeControlsOnly(frame)
+        safelyLockImage(image)
+
+        canvasEditor.skipTargetFind = false
+        canvasEditor.defaultCursor = 'default'
+        canvasEditor.hoverCursor = 'default'
+        canvasEditor.moveCursor = 'default'
+        if (canvasEditor.upperCanvasEl) {
+            canvasEditor.upperCanvasEl.style.cursor = 'default'
+        }
+
+        canvasEditor.requestRenderAll()
+        schedulePreviewSync()
+
+        const guardPointer = (opt) => {
+            if (!canvasEditor.__expansionMode) return
+            const target = opt.target
+            if (target?.type?.toLowerCase() === 'image') {
+                canvasEditor.setActiveObject(frame)
+                canvasEditor.requestRenderAll()
+            }
+        }
+
+        canvasEditor.on('mouse:down', guardPointer)
+
+        const focusFrame = requestAnimationFrame(() => {
+            if (setupGen !== setupGenerationRef.current || !isCanvasLive(canvasEditor)) return
+            canvasEditor.setActiveObject(frame)
+            showEdgeControlsOnly(frame)
+            safelyLockImage(image)
+            canvasEditor.requestRenderAll()
+        })
+
+        return () => {
+            cancelAnimationFrame(focusFrame)
+            canvasEditor.off('mouse:down', guardPointer)
+            frame.off('scaling', schedulePreviewSync)
+            frame.off('modified', commitFrameSize)
+            if (frameDimsRafRef.current) {
+                cancelAnimationFrame(frameDimsRafRef.current)
+                frameDimsRafRef.current = null
+            }
+            canvasEditor.__expansionMode = false
+            unlockImage(image)
+            removeExpansionFrame()
+        }
+    }, [
+        activeImage,
+        canvasEditor,
+        lockImage,
+        removeExpansionFrame,
+        safelyLockImage,
+        schedulePreviewSync,
+        unlockImage,
+    ])
+
+    const handleCancel = useCallback(() => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort()
+            abortControllerRef.current = null
+        }
+        setIsApplying(false)
+        setProcessingMessage(null)
+        toast.info('Extension cancelled')
+    }, [setProcessingMessage])
+
+    const handleApply = async () => {
+        if (isApplying) return
+        if (!activeImage) {
+            toast.error('Add an image to the canvas first')
+            return
+        }
+
+        const frame = expansionFrameRef.current
+        if (!frame) {
+            toast.error('Expansion frame not found — reselect the Extender tool')
+            return
+        }
+
+        const imageBounds = activeImage.getBoundingRect()
+        const frameBounds = getFrameBoundsFromFabricRect(frame)
+
+        // Abort any prior running request
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort()
+        }
+        const controller = new AbortController()
+        abortControllerRef.current = controller
+
+        setIsApplying(true)
+        setProcessingMessage('Preparing extension...')
+
+        try {
+            const sourceUrl = getVisibleImageUrl(activeImage, project)
+
+            if (!sourceUrl) {
+                toast.error('No image URL found for this project')
+                return
+            }
+
+            const visibleSource = await buildVisibleImageBlob(activeImage)
+            console.log('[AI Extender] Source URL:', sourceUrl)
+            console.log('[AI Extender] Source render:', visibleSource
+                ? { width: visibleSource.width, height: visibleSource.height, bytes: visibleSource.blob.size, type: visibleSource.blob.type }
+                : 'visible-export-failed'
+            )
+
+            if (!visibleSource?.blob?.size) {
+                throw new Error('Could not export the visible edited pixels for AI Extend. Reload the project and try again.')
+            }
+
+            const fabricDims = visibleSource
+                ? { width: visibleSource.width, height: visibleSource.height }
+                : getSourcePixelDimensions(activeImage)
+            const pixelDims = {
+                width: fabricDims.width > 0 ? fabricDims.width : project?.width,
+                height: fabricDims.height > 0 ? fabricDims.height : project?.height,
+            }
+
+            if (!pixelDims.width || !pixelDims.height) {
+                toast.error('Image dimensions are not available yet')
+                return
+            }
+
+            const expansion = frameToPixelExpansion(imageBounds, frameBounds, pixelDims)
+            const validation = validateExpansion(expansion)
+
+            if (!validation.valid) {
+                toast.error(validation.error)
+                return
+            }
+
+            console.log('[AI Extender] Expansion:', JSON.stringify(expansion))
+
+            if (controller.signal.aborted) return
+
+            setProcessingMessage('Extending with AI (full image)...')
+            const request = buildExtendRequest({
+                sourceUrl,
+                sourceRender: visibleSource,
+                expansion,
+                prompt,
+            })
+
+            const res = await fetch('/api/ai/extend', {
+                method: 'POST',
+                ...(request.headers ? { headers: request.headers } : {}),
+                body: request.body,
+                signal: controller.signal,
+            })
+
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok) {
+                throw new Error(data.error || `Extension failed (${res.status})`)
+            }
+
+            const genfillUrl = data.url
+            if (!genfillUrl) throw new Error('No result URL returned')
+
+            console.log('[AI Extender] API response:', {
+                method: data.method,
+                sourceMode: request.sourceMode,
+                uploadedUrl: data.uploadedUrl,
+                url: genfillUrl,
+            })
+
+            if (controller.signal.aborted) return
+            const readyUrl = genfillUrl
+
+            if (controller.signal.aborted) return
+
+            // Try to load the result image FIRST, before modifying canvas state.
+            // If loading fails, we want the canvas to stay in its current state.
+            setProcessingMessage('Loading extended image...')
+            let nextImage
+            try {
+                const { FabricImage } = await import('fabric')
+                nextImage = await FabricImage.fromURL(readyUrl, {
+                    crossOrigin: readyUrl.startsWith('data:') || readyUrl.startsWith('blob:') ? undefined : 'anonymous',
+                })
+            } catch (loadErr) {
+                console.warn('[AI Extender] Image load failed, restoring canvas:', loadErr)
+                // Don't touch the canvas — leave it as-is with expansion frame
+                throw new Error('Extended image could not be loaded. Your original image is preserved.')
+            }
+
+            if (!nextImage?.width || !nextImage?.height) {
+                throw new Error('Extended image failed to load on canvas')
+            }
+
+            // Image loaded successfully — now safe to modify the canvas
+            unlockImage(activeImage)
+            removeExpansionFrame()
+
+            nextImage.set({
+                left: 0,
+                top: 0,
+                angle: activeImage.angle,
+                originX: 'left',
+                originY: 'top',
+                scaleX: 1,
+                scaleY: 1,
+                selectable: activeImage.selectable,
+                evented: activeImage.evented,
+            })
+
+            canvasEditor.remove(activeImage)
             canvasEditor.add(nextImage)
             canvasEditor.setActiveObject(nextImage)
             nextImage.setCoords()
-            canvasEditor.__fitCanvasToProject?.({ width: outputW, height: outputH })
             canvasEditor.requestRenderAll()
 
-            activeImageRef.current = nextImage
+            const outputW = nextImage.width || expansion.targetWidth
+            const outputH = nextImage.height || expansion.targetHeight
 
-            // Save state
+            canvasEditor.__fitCanvasToProject?.({ width: outputW, height: outputH })
+            canvasEditor.__pushHistoryState?.()
+
             try {
                 await updateProject({
                     projectId: project._id,
-                    currentImageUrl: url,
+                    currentImageUrl: readyUrl,
                     width: outputW,
                     height: outputH,
                     canvasState: serializeCanvasState(canvasEditor),
                 })
             } catch (saveError) {
                 console.warn('Canvas state save failed:', saveError)
-                try {
-                    await updateProject({
-                        projectId: project._id,
-                        currentImageUrl: url,
-                        width: outputW,
-                        height: outputH,
-                    })
-                } catch (fallbackError) {
-                    console.warn('Fallback save also failed:', fallbackError)
-                }
+                await updateProject({
+                    projectId: project._id,
+                    currentImageUrl: readyUrl,
+                    width: outputW,
+                    height: outputH,
+                }).catch(() => {})
             }
 
-            toast.success('Image extended successfully!')
+            if (data.method === 'local-soft-extend') {
+                toast.warning('ImageKit is still preparing, so a soft extension was applied.')
+            } else {
+                toast.success('Image extended successfully!')
+            }
         } catch (error) {
+            if (error?.name === 'AbortError') return
             console.warn('AI extender failed:', error)
             toast.error(error?.message || 'Failed to extend image')
         } finally {
+            if (abortControllerRef.current === controller) {
+                abortControllerRef.current = null
+            }
             setIsApplying(false)
             setProcessingMessage(null)
         }
     }
 
+    // Cleanup abort controller on unmount
+    useEffect(() => {
+        return () => {
+            abortControllerRef.current?.abort()
+        }
+    }, [])
+
+    if (!canvasEditor) {
+        return (
+            <div className="p-4">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    Load an image to extend
+                </p>
+            </div>
+        )
+    }
+
+    if (!activeImage) {
+        return (
+            <div className="p-4">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    Add an image to the canvas first
+                </p>
+            </div>
+        )
+    }
+
     return (
-        <div className='flex h-full min-h-0 flex-col gap-4 overflow-y-auto overflow-x-hidden pr-2 panel-scroll'>
-            {/* Prompt */}
-            <div className='space-y-2'>
-                <label className='panel-label'>Outpaint Prompt</label>
+        <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto overflow-x-hidden pr-2 panel-scroll">
+            <div className="space-y-2">
+                <label className="panel-label">Extension Prompt</label>
                 <textarea
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
                     rows={3}
-                    placeholder='Describe what should appear in the extended area'
-                    className='panel-input resize-none'
+                    placeholder="Describe what should appear in the extended area"
+                    className="panel-input resize-none"
                     style={{ minHeight: '68px' }}
+                    disabled={isApplying}
                 />
             </div>
 
-            {/* Dimension info */}
-            {frameDims && originalDims && (
-                <div className='panel-card text-[11px] space-y-1.5' style={{ borderColor: 'rgba(0, 229, 255, 0.25)' }}>
-                    <div className='flex items-center justify-between'>
-                        <span style={{ color: 'var(--text-muted)' }}>Original</span>
-                        <span className='font-mono' style={{ color: 'var(--text-secondary)' }}>
-                            {originalDims.width} × {originalDims.height}
+            {sourceDims && targetDims && (
+                <div
+                    className="panel-card text-[11px] space-y-1.5"
+                    style={{ borderColor: 'rgba(125, 235, 255, 0.25)' }}
+                >
+                    <div className="flex items-center justify-between">
+                        <span style={{ color: 'var(--text-muted)' }}>Source</span>
+                        <span className="font-mono" style={{ color: 'var(--text-secondary)' }}>
+                            {sourceDims.width} × {sourceDims.height}
                         </span>
                     </div>
-                    <div className='flex items-center justify-between'>
-                        <span style={{ color: 'var(--text-muted)' }}>Output</span>
-                        <span className='font-mono font-medium' style={{ color: 'var(--accent-primary)' }}>
-                            {frameDims.width} × {frameDims.height}
+                    <div className="flex items-center justify-between">
+                        <span style={{ color: 'var(--text-muted)' }}>Target output</span>
+                        <span className="font-mono font-medium" style={{ color: 'var(--accent-primary)' }}>
+                            {targetDims.width} × {targetDims.height} px
                         </span>
                     </div>
                 </div>
             )}
 
-            {/* Apply Button */}
-            <button
-                onClick={handleApply}
-                disabled={!activeImage || isApplying}
-                className='flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40'
-                style={{ 
-                    background: dominantColor || 'var(--accent-primary)', 
-                    color: contrastingColor || '#fff', 
-                    border: 'none',
-                    boxShadow: !isApplying ? `0 0 30px ${dominantColor}40` : 'none' 
-                }}
-            >
-                {isApplying ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : <ImagePlus className='h-3.5 w-3.5' />}
-                {isApplying ? 'Extending...' : 'Extend Image'}
-            </button>
+            {/* Action buttons */}
+            <div className="flex gap-2">
+                <button
+                    type="button"
+                    onClick={handleApply}
+                    disabled={isApplying}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
+                    style={{
+                        background: 'var(--accent-primary)',
+                        color: '#fff',
+                        border: 'none',
+                    }}
+                >
+                    {isApplying ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                        <ImagePlus className="h-3.5 w-3.5" />
+                    )}
+                    {isApplying ? 'Extending...' : 'Extend Image'}
+                </button>
 
-            {/* Instructions */}
-            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+                {isApplying && (
+                    <button
+                        type="button"
+                        onClick={handleCancel}
+                        className="flex items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-xs font-medium editor-interactive"
+                        style={{
+                            background: 'rgba(239, 68, 68, 0.15)',
+                            color: '#ef4444',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                        }}
+                    >
+                        <Square className="h-3 w-3" style={{ fill: 'currentColor' }} />
+                        Stop
+                    </button>
+                )}
+            </div>
+
+            <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(125, 235, 255, 0.12)' }}>
                 <p style={{ color: 'var(--text-muted)' }}>
-                    Drag the frame handles outward to define the extension area.
-                    The frame expands from the image center so the generated result aligns with the canvas. Click <strong style={{ color: 'var(--text-secondary)' }}>Extend Image</strong> to AI-fill the empty space.
+                    Drag the <strong style={{ color: 'var(--text-secondary)' }}>cyan edge handles</strong> outward
+                    past the photo (into the dark area you want filled). The badge shows output size. Click{' '}
+                    <strong style={{ color: 'var(--text-secondary)' }}>Extend Image</strong> to generate.
                 </p>
             </div>
         </div>

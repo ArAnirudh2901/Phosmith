@@ -23,6 +23,7 @@ import {
     RotateCw,
     ZoomIn,
     ZoomOut,
+    Bot,
 } from "lucide-react"
 import { useCanvas } from "../../../../../../context/context"
 import useEditorShortcuts from "../../../../../../hooks/useEditorShortcuts"
@@ -56,6 +57,7 @@ const COMMANDS = [
     { id: "ai-extend", label: "AI Extend", category: "AI", icon: ArrowUp, pro: true },
     { id: "ai-background", label: "AI Background", category: "AI", icon: Layers, pro: true },
     { id: "ai-enhance", label: "AI Enhance", category: "AI", icon: Zap, pro: true },
+    { id: "ai-agent", label: "ImageKit Agent", category: "AI", icon: Bot },
 ]
 
 const CommandPalette = ({ isOpen, onClose, onExecute }) => {
@@ -125,7 +127,7 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                     onToolChange?.("text")
                     break
                 case "tool-generative":
-                    onToolChange?.("generative_expand")
+                    onToolChange?.("ai_extender")
                     break
                 case "ai-extend":
                     onToolChange?.("ai_extender")
@@ -135,6 +137,9 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                     break
                 case "ai-enhance":
                     onToolChange?.("ai_edit")
+                    break
+                case "ai-agent":
+                    onToolChange?.("ai_agent")
                     break
                 default:
                     onExecute?.(cmd)

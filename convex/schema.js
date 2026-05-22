@@ -53,6 +53,23 @@ export default defineSchema({
         .index("by_user_updated", ["userId", "updatedAt"])
         .index("by_folder", ["folderId"]), // Projects in Folder
 
+    projectRevisions: defineTable({
+        projectId: v.id("projects"),
+        userId: v.id("users"),
+        canvasState: v.any(),
+        width: v.number(),
+        height: v.number(),
+        currentImageUrl: v.optional(v.string()),
+        activeTransformations: v.optional(v.string()),
+        title: v.optional(v.string()),
+        summary: v.optional(v.string()),
+        prompt: v.optional(v.string()),
+        changes: v.optional(v.any()),
+        createdAt: v.number(),
+    })
+        .index("by_projectId_and_createdAt", ["projectId", "createdAt"])
+        .index("by_userId_and_createdAt", ["userId", "createdAt"]),
+
     folders: defineTable({
         name: v.string(),              // Folder name
         userId: v.id("users"),         // Owner 

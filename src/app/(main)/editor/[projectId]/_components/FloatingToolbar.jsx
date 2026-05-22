@@ -44,7 +44,7 @@ const FloatingToolbar = ({
 
   const inputRef = useRef(null)
   const { hasAccess } = usePlanAccess()
-  const canUseTool = hasAccess("generative_expand")
+  const canUseTool = hasAccess("ai_extender")
 
   const handleRatioSelect = (ratio) => {
     setSelectedRatio(ratio.id)
