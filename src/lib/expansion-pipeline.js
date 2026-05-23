@@ -33,7 +33,8 @@ export function isExpansionFrameLike(obj) {
   return false
 }
 
-const EDGE_CONTROL_KEYS = new Set(['mt', 'mb', 'ml', 'mr'])
+/** Edge midpoints + corner controls for the expansion frame. */
+const EXPANSION_CONTROL_KEYS = new Set(['mt', 'mb', 'ml', 'mr', 'tl', 'tr', 'bl', 'br'])
 
 /** Hide every control handle on an object (Fabric 6/7). */
 export function hideAllObjectControls(obj) {
@@ -46,13 +47,13 @@ export function hideAllObjectControls(obj) {
   obj.hasBorders = false
 }
 
-/** Show only edge midpoint handles — used for the expansion frame. */
+/** Show edge midpoint + corner handles — used for the expansion frame. */
 export function showEdgeControlsOnly(obj) {
   if (!obj?.controls) return
   for (const key of Object.keys(obj.controls)) {
     const control = obj.controls[key]
     if (!control) continue
-    control.visible = EDGE_CONTROL_KEYS.has(key)
+    control.visible = EXPANSION_CONTROL_KEYS.has(key)
   }
   obj.set?.({
     hasControls: true,
@@ -231,6 +232,28 @@ export function frameToPixelExpansion(imageBounds, frameBounds, pixelDims) {
 
   targetWidth = Math.min(targetWidth, MAX_OUTPUT_DIMENSION)
   targetHeight = Math.min(targetHeight, MAX_OUTPUT_DIMENSION)
+
+  // Multi-axis sequential extension guard:
+  // When both axes have insets, buildSequentialGenfillUrl splits the work into
+  // step 1 (horizontal: sourceWidth + left + right) then step 2 (vertical).
+  // The intermediate width (step 1 output) must also not exceed MAX_OUTPUT_DIMENSION.
+  const hasHorizontal = insetLeftC >= 1 || insetRightC >= 1
+  const hasVertical = insetTopC >= 1 || insetBottomC >= 1
+  if (hasHorizontal && hasVertical) {
+    const intermediateWidth = pixelDims.width + insetLeftC + insetRightC
+    if (intermediateWidth > MAX_OUTPUT_DIMENSION) {
+      const overflowH = intermediateWidth - MAX_OUTPUT_DIMENSION
+      // Trim proportionally from left/right
+      const totalH = insetLeftC + insetRightC
+      if (totalH > 0) {
+        const leftRatio = insetLeftC / totalH
+        insetLeftC = Math.max(0, Math.round(insetLeftC - overflowH * leftRatio))
+        insetRightC = Math.max(0, Math.round(insetRightC - overflowH * (1 - leftRatio)))
+      }
+      // Recalculate target width
+      targetWidth = Math.min(pixelDims.width + insetLeftC + insetRightC, MAX_OUTPUT_DIMENSION)
+    }
+  }
 
   const offsetX = insetLeftC
   const offsetY = insetTopC

@@ -1,5 +1,62 @@
 export const isImageKitUrl = (url) => typeof url === 'string' && url.includes('ik.imagekit.io')
 
+/**
+ * Check if a URL belongs to the currently configured ImageKit endpoint.
+ * Returns false for URLs belonging to a different ImageKit account.
+ */
+export const isCurrentImageKitEndpoint = (url) => {
+    if (!isImageKitUrl(url)) return false
+    const endpoint = (typeof window !== 'undefined'
+        ? process.env.NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT
+        : process.env.NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT) || ''
+    if (!endpoint) return true // no endpoint configured, skip check
+    // Extract the path segment after ik.imagekit.io/ (the ImageKit ID)
+    const urlId = String(url).match(/ik\.imagekit\.io\/([^/]+)/)?.[1] || ''
+    const endpointId = String(endpoint).match(/ik\.imagekit\.io\/([^/]+)/)?.[1] || ''
+    return urlId && endpointId && urlId === endpointId
+}
+
+/**
+ * If the image URL belongs to a different ImageKit account, re-upload it
+ * to the current account. Returns the new URL (or the original if already current).
+ * This is needed because AI extension units are charged to the account that
+ * owns the URL endpoint, not the account making the API call.
+ */
+export const ensureCurrentImageKitEndpoint = async (url, { onStatus } = {}) => {
+    if (!isImageKitUrl(url)) return url
+    if (isCurrentImageKitEndpoint(url)) return url
+
+    onStatus?.('Re-uploading image to current account...')
+    console.log('[ImageKit] Re-uploading foreign image to current account', { url })
+
+    // Fetch the image as a blob
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`Failed to fetch image for re-upload (${response.status})`)
+    const blob = await response.blob()
+
+    // Extract a filename from the URL
+    const urlPath = new URL(url).pathname
+    const fileName = urlPath.split('/').pop() || `reupload-${Date.now()}.jpg`
+
+    // Upload to current account via the existing upload API
+    const formData = new FormData()
+    formData.append('file', blob, fileName)
+    formData.append('fileName', fileName)
+
+    const uploadResponse = await fetch('/api/imagekit/upload', {
+        method: 'POST',
+        body: formData,
+    })
+    const data = await uploadResponse.json()
+
+    if (!uploadResponse.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to re-upload image to current ImageKit account')
+    }
+
+    console.log('[ImageKit] Re-upload complete', { oldUrl: url, newUrl: data.url })
+    return data.url
+}
+
 export const normalizeImageKitUrl = (url) =>
     String(url || '').split('?')[0].split('#')[0]
 
@@ -22,6 +79,64 @@ const getImageKitTransformSteps = (url) =>
         .map((step) => step.trim())
         .filter(Boolean)
 
+const CHAINED_AI_TRANSFORM_PREFIXES = [
+    'e-bgremove',
+    'e-removedotbg',
+    'e-changebg',
+    'e-dropshadow',
+    'e-edit',
+    'e-genvar',
+    'e-retouch',
+    'e-upscale',
+]
+
+export const isImageKitAiTransform = (token) => {
+    const value = String(token || '').trim()
+    return CHAINED_AI_TRANSFORM_PREFIXES.some((prefix) =>
+        value === prefix ||
+        value.startsWith(`${prefix}-`) ||
+        value.startsWith(`${prefix}_`)
+    )
+}
+
+export const buildImageKitAiTransformSteps = (transformations = []) => {
+    const steps = []
+
+    for (const step of transformations.flatMap((item) => String(item || '').split(':'))) {
+        const regularTokens = []
+        const tokens = step
+            .split(',')
+            .map((token) => token.trim())
+            .filter(Boolean)
+
+        for (const token of tokens) {
+            if (isImageKitAiTransform(token)) {
+                if (regularTokens.length) {
+                    steps.push(regularTokens.splice(0).join(','))
+                }
+                steps.push(token)
+            } else {
+                regularTokens.push(token)
+            }
+        }
+
+        if (regularTokens.length) {
+            steps.push(regularTokens.join(','))
+        }
+    }
+
+    return steps
+}
+
+export const hasImageKitAiTransform = (transformations = []) =>
+    transformations
+        .flatMap((item) => {
+            const value = String(item || '')
+            const chain = value.includes('?') ? getImageKitTransformChain(value) : ''
+            return (chain || value).split(/[,:]/)
+        })
+        .some((token) => isImageKitAiTransform(token))
+
 export const buildImageKitChainedTransformUrl = (sourceUrl, transformSteps) => {
     const baseUrl = normalizeImageKitUrl(sourceUrl)
     const chain = transformSteps
@@ -32,6 +147,20 @@ export const buildImageKitChainedTransformUrl = (sourceUrl, transformSteps) => {
 
     if (!baseUrl || !chain) return baseUrl || ''
     return `${baseUrl}?tr=${chain}`
+}
+
+export const buildImageKitAiTransformUrl = (
+    sourceUrl,
+    transformations,
+    { preserveExistingTransforms = false, existingPosition = 'after' } = {}
+) => {
+    const nextSteps = buildImageKitAiTransformSteps(transformations)
+    const existingSteps = preserveExistingTransforms ? getImageKitTransformSteps(sourceUrl) : []
+    const steps = existingPosition === 'before'
+        ? [...existingSteps, ...nextSteps]
+        : [...nextSteps, ...existingSteps]
+
+    return buildImageKitChainedTransformUrl(sourceUrl, steps)
 }
 
 /**
@@ -172,21 +301,64 @@ export const buildSequentialGenfillUrl = ({ sourceUrl, prompt, expansion }) => {
     const fallbackSourceHeight = Number(expansion?.targetHeight) - top - bottom
     const initialWidth = Number(expansion?.sourceWidth) || fallbackSourceWidth
     const initialHeight = Number(expansion?.sourceHeight) || fallbackSourceHeight
-    const targetWidth = Math.max(
-        1,
-        Math.round(Number(expansion?.targetWidth) || Number(initialWidth || 1) + left + right)
-    )
-    const targetHeight = Math.max(
-        1,
-        Math.round(Number(expansion?.targetHeight) || Number(initialHeight || 1) + top + bottom)
-    )
 
-    // Determine the best fo-* focus for cm-pad_resize.
-    // The focus anchors the ORIGINAL image — genfill fills the padding on the opposite side(s).
-    // ImageKit supports: center, left, right, top, bottom, top_left, top_right, bottom_left, bottom_right
-    const focus = getMultiSideFocus({ left, right, top, bottom })
+    const hasH = left >= 1 || right >= 1   // horizontal extension
+    const hasV = top >= 1 || bottom >= 1   // vertical extension
 
-    if (left || right || top || bottom) {
+    // ── Single-axis only: one step is enough ──
+    if ((hasH && !hasV) || (hasV && !hasH)) {
+        const targetWidth = Math.max(1, Math.round(
+            Number(expansion?.targetWidth) || initialWidth + left + right
+        ))
+        const targetHeight = Math.max(1, Math.round(
+            Number(expansion?.targetHeight) || initialHeight + top + bottom
+        ))
+        const focus = getMultiSideFocus({ left, right, top, bottom })
+        steps.push([
+            `w-${targetWidth}`,
+            `h-${targetHeight}`,
+            'cm-pad_resize',
+            `fo-${focus}`,
+            promptSegment,
+        ].join(','))
+        return buildImageKitChainedTransformUrl(sourceUrl, steps)
+    }
+
+    // ── Multi-axis (2+ sides on both axes): split into TWO sequential steps ──
+    // Step 1: extend horizontally (left/right) first
+    // Step 2: extend vertically (top/bottom) on the intermediate result
+    // This gives genfill a clear single-axis anchor each time.
+
+    if (hasH) {
+        const hWidth = Math.max(1, Math.round(initialWidth + left + right))
+        const hHeight = Math.max(1, Math.round(initialHeight)) // keep original height
+        const hFocus = getMultiSideFocus({ left, right, top: 0, bottom: 0 })
+        steps.push([
+            `w-${hWidth}`,
+            `h-${hHeight}`,
+            'cm-pad_resize',
+            `fo-${hFocus}`,
+            promptSegment,
+        ].join(','))
+
+        // Step 2: extend vertically on the now-wider intermediate image
+        if (hasV) {
+            const vWidth = hWidth // same as step 1 output
+            const vHeight = Math.max(1, Math.round(hHeight + top + bottom))
+            const vFocus = getMultiSideFocus({ left: 0, right: 0, top, bottom })
+            steps.push([
+                `w-${vWidth}`,
+                `h-${vHeight}`,
+                'cm-pad_resize',
+                `fo-${vFocus}`,
+                promptSegment,
+            ].join(','))
+        }
+    } else if (hasV) {
+        // Only vertical — shouldn't reach here (caught by single-axis branch above)
+        const targetWidth = Math.max(1, Math.round(initialWidth))
+        const targetHeight = Math.max(1, Math.round(initialHeight + top + bottom))
+        const focus = getMultiSideFocus({ left: 0, right: 0, top, bottom })
         steps.push([
             `w-${targetWidth}`,
             `h-${targetHeight}`,
@@ -205,7 +377,8 @@ export const buildSequentialGenfillUrl = ({ sourceUrl, prompt, expansion }) => {
  * Single side:   extend right → anchor left (fo-left)
  * Two adjacent:  extend right+bottom → anchor top-left (fo-top_left)
  * Two opposing:  extend left+right → anchor center (fo-center)
- * Three+ sides:  fo-center
+ * Three sides:   anchor to the ONE side NOT being extended
+ * Four sides:    fo-center
  */
 function getMultiSideFocus({ left, right, top, bottom }) {
     const hasLeft = left >= 1
@@ -234,23 +407,57 @@ function getMultiSideFocus({ left, right, top, bottom }) {
         if (hasLeft && hasTop) return 'bottom_right'
 
         // Opposing pairs (left+right or top+bottom) — center is the best we can do
-        // cm-pad_resize with fo-center distributes padding equally on both sides
         return 'center'
     }
 
-    // Three or four sides → center (distributes padding as evenly as possible)
+    // Three sides — anchor to the ONE side that is NOT being extended.
+    // E.g., extending left+right+bottom → image at top → fo-top
+    if (activeSides === 3) {
+        if (!hasTop) return 'top'       // extending left+right+bottom → anchor top
+        if (!hasBottom) return 'bottom'  // extending left+right+top → anchor bottom
+        if (!hasLeft) return 'left'      // extending right+top+bottom → anchor left
+        if (!hasRight) return 'right'    // extending left+top+bottom → anchor right
+    }
+
+    // Four sides → center
     return 'center'
 }
 
-export const buildAiEditPresetUrl = (sourceUrl, preset) => {
+/**
+ * Build AI edit preset URL using chained transform steps.
+ * 
+ * IMPORTANT: AI transforms (e-retouch, e-upscale, etc.) must each be a separate
+ * chained step (colon-separated), not comma-separated in a single step.
+ * Each AI transform processes the output of the previous one.
+ * 
+ * e-upscale has a 16MP input limit — skip it for images that are already large
+ * (e.g. post-extension results). The function detects this from the source URL
+ * or an explicit sourceDims parameter.
+ */
+export const buildAiEditPresetUrl = (sourceUrl, preset, { sourceDims } = {}) => {
     const presetMap = {
         retouch: ['e-retouch'],
         upscale: ['e-upscale'],
-        enhanceSharpen: ['e-retouch', 'e-contrast', 'e-sharpen-10'],
+        enhanceSharpen: ['e-contrast', 'e-sharpen-10'],
         premiumQuality: ['e-retouch', 'e-upscale', 'e-contrast', 'e-sharpen-10'],
     }
 
-    return buildImageKitTransformUrl(sourceUrl, presetMap[preset] || [])
+    let transforms = [...(presetMap[preset] || [])]
+
+    // e-upscale fails on images > 16MP (ImageKit limit).
+    // Skip it if source dimensions are known and exceed the threshold,
+    // or if the source is an extend-result (already large).
+    const isLikelyLarge =
+        (sourceDims?.width && sourceDims?.height && sourceDims.width * sourceDims.height > 14_000_000) ||
+        /extend-result/i.test(sourceUrl)
+
+    if (isLikelyLarge) {
+        transforms = transforms.filter((t) => t !== 'e-upscale')
+    }
+
+    if (!transforms.length) return normalizeImageKitUrl(sourceUrl)
+
+    return buildImageKitAiTransformUrl(sourceUrl, transforms)
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -269,19 +476,34 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * @param {number} opts.minBytes - Minimum content-length to accept (default 2048)
  * @param {AbortSignal} opts.signal - Optional AbortController signal for cancellation
  */
-export async function waitForImageKitUrl(url, { maxAttempts = 2, retryDelayMs = 4000, onStatus, minBytes = 2048, signal } = {}) {
-    const totalAttempts = Math.max(1, Math.min(Number(maxAttempts) || 2, 2))
+export async function waitForImageKitUrl(url, { maxAttempts = 8, retryDelayMs = 4000, onStatus, minBytes = 2048, signal } = {}) {
+    const totalAttempts = Math.max(1, Math.min(Number(maxAttempts) || 8, 20))
     const delay = Math.max(1000, Math.min(Number(retryDelayMs) || 4000, 30000))
     const base = url
+    const startedAt = Date.now()
+
+    console.log('[ImageKit] wait start', {
+        url: base,
+        totalAttempts,
+        retryDelayMs: delay,
+        minBytes,
+    })
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
         if (signal?.aborted) {
+            console.warn('[ImageKit] wait aborted', { url: base, attempt })
             throw new DOMException('Extension cancelled', 'AbortError')
         }
 
         onStatus?.(attempt, totalAttempts)
 
         try {
+            console.log('[ImageKit] wait attempt', {
+                url: base,
+                attempt,
+                totalAttempts,
+                elapsedMs: Date.now() - startedAt,
+            })
             const response = await fetch(base, {
                 mode: 'cors',
                 cache: 'no-store',
@@ -290,6 +512,19 @@ export async function waitForImageKitUrl(url, { maxAttempts = 2, retryDelayMs = 
             const contentType = response.headers.get('content-type') || ''
             const isIntermediate = response.headers.get('is-intermediate-response') === 'true'
             const length = Number(response.headers.get('content-length') || 0)
+            const ikError = response.headers.get('ik-error') || ''
+
+            console.log('[ImageKit] wait response', {
+                url: base,
+                attempt,
+                status: response.status,
+                ok: response.ok,
+                contentType,
+                contentLength: length,
+                isIntermediate,
+                ikError,
+                elapsedMs: Date.now() - startedAt,
+            })
 
             if (
                 response.ok &&
@@ -297,31 +532,64 @@ export async function waitForImageKitUrl(url, { maxAttempts = 2, retryDelayMs = 
                 !isIntermediate &&
                 (length === 0 || length >= minBytes)
             ) {
+                console.log('[ImageKit] wait ready', {
+                    url: base,
+                    attempt,
+                    elapsedMs: Date.now() - startedAt,
+                })
                 return base
             }
 
             if (!response.ok && response.status >= 400 && !isIntermediate) {
                 let detail = ''
                 try {
-                    detail = (await response.text()).slice(0, 180).trim()
+                    const ikError = response.headers.get('ik-error') || ''
+                    const body = (await response.text()).slice(0, 180).trim()
+                    detail = [ikError, body].filter(Boolean).join(': ')
                 } catch {
                     /* ignore response body read failures */
                 }
+
+                // Specific user-friendly message for extension unit exhaustion
+                if (response.status === 403 && /extension.?limit|limit.?exceeded/i.test(detail)) {
+                    throw new Error(
+                        'ImageKit AI extension units exhausted for this month. ' +
+                        'Free plans include 650 units/month (each AI Extend costs 90, Retouch costs 5, Upscale costs 5). ' +
+                        'Upgrade your ImageKit plan or wait for the monthly reset. ' +
+                        'Non-AI transforms (contrast, sharpen, crop) still work.'
+                    )
+                }
+
                 throw new Error(
-                    `ImageKit rejected the extension URL (${response.status})${detail ? `: ${detail}` : ''}`
+                    `ImageKit rejected the transform URL (${response.status})${detail ? `: ${detail}` : ''}`
                 )
             }
         } catch (err) {
             if (err?.name === 'AbortError') throw err
             if (String(err?.message || '').includes('ImageKit rejected')) throw err
+            console.warn('[ImageKit] wait request failed; retrying if attempts remain', {
+                url: base,
+                attempt,
+                message: err?.message || String(err),
+            })
             /* retry on network errors */
         }
 
         if (attempt < totalAttempts) {
+            console.log('[ImageKit] wait sleep', {
+                url: base,
+                nextAttempt: attempt + 1,
+                delayMs: delay,
+            })
             await sleep(delay)
         }
     }
 
+    console.warn('[ImageKit] wait timed out', {
+        url: base,
+        attempts: totalAttempts,
+        elapsedMs: Date.now() - startedAt,
+    })
     throw new Error('ImageKit is still processing this generated image. Try again in a few seconds.')
 }
 
@@ -342,22 +610,54 @@ export const replaceCanvasImageFromUrl = async (
     canvasEditor,
     sourceImage,
     nextUrl,
-    { preserveDisplayedBounds = true, placement = 'fit', maxRetries = 2 } = {}
+    { preserveDisplayedBounds = true, placement = 'fit', maxRetries = 4 } = {}
 ) => {
     if (!canvasEditor || !sourceImage || !nextUrl) return null
 
     const { FabricImage } = await import('fabric')
 
-    // Retry logic — ImageKit genfill can take 10-30s for the first request
+    // Retry logic — ImageKit AI transforms can take 10-30s for the first request
     let nextImage = null
     let lastError = null
 
-    const totalRetries = Math.max(1, Math.min(Number(maxRetries) || 2, 2))
+    const totalRetries = Math.max(1, Math.min(Number(maxRetries) || 4, 10))
+
+    console.log('[ImageKit] canvas replace start', {
+        nextUrl,
+        preserveDisplayedBounds,
+        placement,
+        totalRetries,
+        source: {
+            width: sourceImage.width,
+            height: sourceImage.height,
+            scaledWidth: sourceImage.getScaledWidth?.(),
+            scaledHeight: sourceImage.getScaledHeight?.(),
+            left: sourceImage.left,
+            top: sourceImage.top,
+        },
+    })
 
     for (let attempt = 1; attempt <= totalRetries; attempt++) {
         try {
-            nextImage = await FabricImage.fromURL(nextUrl, {
+            // Add a cache-bust parameter to avoid CDN edge caching of
+            // intermediate HTML responses from prior failed attempts.
+            const cacheBustUrl = nextUrl.includes('?')
+                ? `${nextUrl}&_t=${Date.now()}`
+                : `${nextUrl}?_t=${Date.now()}`
+
+            console.log('[ImageKit] canvas load attempt', {
+                attempt,
+                totalRetries,
+                cacheBustUrl,
+            })
+            nextImage = await FabricImage.fromURL(cacheBustUrl, {
                 crossOrigin: nextUrl.startsWith('data:') || nextUrl.startsWith('blob:') ? undefined : 'anonymous',
+            })
+            console.log('[ImageKit] canvas load success', {
+                attempt,
+                width: nextImage.width,
+                height: nextImage.height,
+                cacheBustUrl,
             })
             break // Success
         } catch (err) {
@@ -365,7 +665,7 @@ export const replaceCanvasImageFromUrl = async (
             console.warn(`[ImageKit] Load attempt ${attempt}/${totalRetries} failed:`, err?.message || err)
 
             if (attempt < totalRetries) {
-                const delay = 2500
+                const delay = 4000
                 console.log(`[ImageKit] Retrying in ${delay / 1000}s...`)
                 await new Promise(resolve => setTimeout(resolve, delay))
             }
@@ -424,6 +724,17 @@ export const replaceCanvasImageFromUrl = async (
     canvasEditor.setActiveObject(nextImage)
     nextImage.setCoords()
     canvasEditor.requestRenderAll()
+
+    console.log('[ImageKit] canvas replace complete', {
+        nextUrl,
+        width: nextImage.width,
+        height: nextImage.height,
+        scaleX: nextImage.scaleX,
+        scaleY: nextImage.scaleY,
+        left: nextImage.left,
+        top: nextImage.top,
+        placement,
+    })
 
     return nextImage
 }

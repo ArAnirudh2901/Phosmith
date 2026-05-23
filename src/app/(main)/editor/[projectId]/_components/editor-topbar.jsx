@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Expand, Eye, Maximize2, Palette, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Undo2, Redo2, ZoomIn } from 'lucide-react'
+import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Undo2, Redo2, ZoomIn } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
@@ -19,7 +19,9 @@ const EXPORT_PRESETS = [
 const TOOLS = [
     { id: "resize", label: "Resize", icon: Expand },
     { id: "crop", label: "Crop", icon: Crop },
+    { id: "images", label: "Images", icon: ImagePlus },
     { id: "adjust", label: "Adjust", icon: Sliders },
+    { id: "draw", label: "Draw", icon: Pen },
     { id: "text", label: "Text", icon: Text },
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
@@ -112,48 +114,73 @@ const EditorTopbar = ({ project }) => {
     const handleExport = async ({ format, quality }) => {
         if (!canvasEditor || !project) return
 
-        const multiplier = 1
-        const backgroundColor = format === 'png' ? null : (canvasEditor.backgroundColor || '#ffffff')
-        const dataUrl = canvasEditor.toDataURL({
-            format,
-            quality,
-            multiplier,
-            backgroundColor,
-        })
+        try {
+            // Use project dimensions for full-resolution export
+            const projectW = project.width || canvasEditor.getWidth()
+            const projectH = project.height || canvasEditor.getHeight()
 
-        const link = document.createElement('a')
-        link.href = dataUrl
-        link.download = `${project.title || 'export'}.${format === 'jpeg' ? 'jpg' : format}`
-        link.click()
-        setShowExportMenu(false)
+            // toCanvasElement renders the canvas objects onto a fresh HTML canvas
+            // at the specified dimensions, bypassing the viewport zoom/pan
+            const exportCanvas = canvasEditor.toCanvasElement(1, {
+                width: projectW,
+                height: projectH,
+                left: 0,
+                top: 0,
+            })
+
+            // For JPEG/WebP, composite onto a white background (they don't support transparency)
+            let finalCanvas = exportCanvas
+            if (format !== 'png') {
+                finalCanvas = document.createElement('canvas')
+                finalCanvas.width = exportCanvas.width
+                finalCanvas.height = exportCanvas.height
+                const ctx = finalCanvas.getContext('2d')
+                ctx.fillStyle = canvasEditor.backgroundColor || '#ffffff'
+                ctx.fillRect(0, 0, finalCanvas.width, finalCanvas.height)
+                ctx.drawImage(exportCanvas, 0, 0)
+            }
+
+            const mimeType = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png'
+            const dataUrl = finalCanvas.toDataURL(mimeType, quality)
+
+            const link = document.createElement('a')
+            link.href = dataUrl
+            link.download = `${project.title || 'export'}.${format === 'jpeg' ? 'jpg' : format}`
+            link.click()
+            setShowExportMenu(false)
+            toast.success(`Exported as ${format.toUpperCase()}`)
+        } catch (error) {
+            console.error('[Export] Failed:', error)
+            toast.error('Export failed: ' + (error?.message || 'Unknown error'))
+        }
     }
 
     return (
         <>
             {/* ── Top Navigation Bar ── */}
-            <div className="editor-topbar flex items-center px-3">
+            <div className="editor-topbar flex items-center px-3 justify-between">
 
                 {/* Left section: Back + Project name */}
-                <div className="flex w-[340px] flex-none items-center gap-2 min-w-0 mr-4">
+                <div className="flex flex-1 items-center gap-2 min-w-0">
                     <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
                         onClick={handleBackToDashboard}
-                        className="editor-icon-button flex items-center justify-center"
+                        className="editor-icon-button flex items-center justify-center flex-none"
                         title="Back to projects"
                     >
                         <ArrowLeft className="h-4 w-4" />
                     </motion.button>
 
-                    <div className="h-5 w-px" style={{ background: 'var(--border-default)' }} />
+                    <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
-                    <span className="text-sm font-semibold truncate max-w-[160px]"
+                    <span className="text-sm font-semibold truncate max-w-[80px] sm:max-w-[120px] xl:max-w-[160px] flex-none"
                           style={{ color: 'var(--text-primary)' }}>
                         {project.title}
                     </span>
 
                     {exportResolutionLabel && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded"
+                        <span className="text-[10px] px-1.5 py-0.5 rounded flex-none"
                               style={{ color: 'var(--text-secondary)', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)' }}>
                             {exportResolutionLabel}
                         </span>
@@ -161,7 +188,7 @@ const EditorTopbar = ({ project }) => {
                 </div>
 
                 {/* Center: Tool buttons */}
-                <div className="flex min-w-0 flex-1 items-center justify-center gap-0.5 overflow-hidden">
+                <div className="flex flex-none items-center justify-center gap-1 xl:gap-1.5 px-4">
                     {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
@@ -181,10 +208,10 @@ const EditorTopbar = ({ project }) => {
                                     boxShadow: `0 0 0 1px rgba(${accentRgb}, 0.45), 0 8px 22px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.95)`,
                                 } : {}}
                             >
-                                <Icon className="h-3.5 w-3.5" />
+                                <Icon className="h-3.5 w-3.5 flex-none" />
                                 <span className="hidden xl:inline">{tool.label}</span>
                                 {tool.proOnly && !hasToolAccess && (
-                                    <Lock className="h-2.5 w-2.5 ml-0.5" style={{ color: 'var(--accent-warning)' }} />
+                                    <Lock className="h-2.5 w-2.5 ml-0.5 flex-none" style={{ color: 'var(--accent-warning)' }} />
                                 )}
                             </motion.button>
                         )
@@ -192,13 +219,13 @@ const EditorTopbar = ({ project }) => {
                 </div>
 
                 {/* Right: Actions */}
-                <div className="ml-4 flex w-[340px] flex-none items-center justify-end gap-1">
+                <div className="flex flex-1 items-center justify-end gap-1 min-w-0">
                     {/* Undo / Redo */}
                     <motion.button
                         whileTap={{ scale: canUndo ? 0.9 : 1 }}
                         onClick={handleUndo}
                         disabled={!canUndo}
-                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none"
+                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
                         title="Undo (⌘Z)"
                     >
                         <Undo2 className="h-3.5 w-3.5" />
@@ -208,19 +235,19 @@ const EditorTopbar = ({ project }) => {
                         whileTap={{ scale: canRedo ? 0.9 : 1 }}
                         onClick={handleRedo}
                         disabled={!canRedo}
-                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none"
+                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
                         title="Redo (⌘⇧Z)"
                     >
                         <Redo2 className="h-3.5 w-3.5" />
                     </motion.button>
 
-                    <div className="h-5 w-px mx-1" style={{ background: 'var(--border-default)' }} />
+                    <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Reset View */}
                     <motion.button
                         whileTap={{ scale: 0.9 }}
                         onClick={() => canvasEditor?.__resetCanvasView?.()}
-                        className="editor-icon-button flex items-center justify-center"
+                        className="editor-icon-button flex items-center justify-center flex-none"
                         title="Reset view"
                     >
                         <ZoomIn className="h-3.5 w-3.5" />
@@ -230,16 +257,16 @@ const EditorTopbar = ({ project }) => {
                     <motion.button
                         whileTap={{ scale: 0.9 }}
                         onClick={() => canvasEditor?.__saveCanvasState?.()}
-                        className="editor-icon-button flex items-center justify-center"
+                        className="editor-icon-button flex items-center justify-center flex-none"
                         title="Save"
                     >
                         <Save className="h-3.5 w-3.5" />
                     </motion.button>
 
-                    <div className="h-5 w-px mx-1" style={{ background: 'var(--border-default)' }} />
+                    <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Export dropdown */}
-                    <div className="relative" ref={exportMenuRef}>
+                    <div className="relative flex-none" ref={exportMenuRef}>
                         <motion.button
                             whileTap={{ scale: 0.95 }}
                             onClick={() => setShowExportMenu(prev => !prev)}

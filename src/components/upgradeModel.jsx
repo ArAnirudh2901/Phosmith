@@ -1,7 +1,7 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Crown, Zap } from "lucide-react"
 import { Alert, AlertDescription } from "./ui/alert"
 import { PricingTable } from "@clerk/nextjs"
@@ -37,9 +37,9 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason }) => {
                             <DialogTitle className="text-2xl font-bold text-white tracking-tight">
                                 Upgrade to Master
                             </DialogTitle>
-                            <p className="text-sm text-[var(--text-muted)] mt-1">
+                            <DialogDescription className="text-sm text-[var(--text-muted)] mt-1">
                                 Unlock the full creative suite with AI-powered tools
-                            </p>
+                            </DialogDescription>
                         </div>
                     </div>
                 </DialogHeader>
