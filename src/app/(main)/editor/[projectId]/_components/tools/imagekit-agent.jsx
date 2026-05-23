@@ -22,10 +22,12 @@ import { useCanvas } from "../../../../../../../context/context";
 import { useConvexMutation, useConvexQuery } from "../../../../../../../hooks/useConvexQuery";
 import { api } from "../../../../../../../convex/_generated/api";
 import {
-  buildImageKitTransformUrl,
+  buildImageKitAiTransformUrl,
   getCanvasActiveImage,
+  hasImageKitAiTransform,
   isImageKitUrl,
   replaceCanvasImageFromUrl,
+  waitForImageKitUrl,
 } from "../../../../../../lib/imagekit-ai";
 import { restoreCanvasFromHistory } from "../../../../../../lib/canvas-history";
 import { serializeCanvasState } from "../../../../../../lib/canvas-state";
@@ -35,7 +37,7 @@ const QUICK_PROMPTS = [
   { label: "Editorial", prompt: "Give it a premium editorial polish", hint: "Retouch, contrast, detail" },
   { label: "Cinematic", prompt: "Give it a cinematic color grade with crisp depth", hint: "Tone, drama, focus" },
   { label: "Studio", prompt: "Polish this for ecommerce with crisp studio detail", hint: "Clean product finish" },
-  { label: "Natural", prompt: "Make it clean, realistic, and subtly enhanced", hint: "Soft, believable edit" },
+  { label: "Extend", prompt: "Extend all sides by 20%", hint: "AI outpaint edges" },
 ];
 
 const SAMPLE_SIZE = 48;
@@ -190,7 +192,7 @@ const buildEffectivePlan = (plan, enabledMap, fallbackSourceUrl) => {
     imageKitTransforms: transforms,
     fabricAdjustments,
     url: transforms.length
-      ? buildImageKitTransformUrl(baseUrl, transforms, {
+      ? buildImageKitAiTransformUrl(baseUrl, transforms, {
           preserveExistingTransforms: true,
           existingPosition: "before",
         })
@@ -394,7 +396,7 @@ const MessageBubble = ({ message }) => {
 };
 
 const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor }) => {
-  const { canvasEditor } = useCanvas();
+  const { canvasEditor, setProcessingMessage } = useCanvas();
   const { mutate: updateProject } = useConvexMutation(api.projects.updateProject);
   const { mutate: createProjectRevision } = useConvexMutation(api.projects.createProjectRevision);
   const { mutate: restoreProjectRevision } = useConvexMutation(api.projects.restoreProjectRevision);
@@ -475,9 +477,24 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     let targetImage = image;
 
     if (effectivePlan?.url && effectivePlan.url !== getSourceUrl(image, project)) {
-      targetImage = await replaceCanvasImageFromUrl(canvasEditor, image, effectivePlan.url, {
+      let readyUrl = effectivePlan.url;
+
+      if (hasImageKitAiTransform(effectivePlan.imageKitTransforms)) {
+        try {
+          readyUrl = await waitForImageKitUrl(effectivePlan.url, {
+            maxAttempts: 10,
+            retryDelayMs: 4000,
+            onStatus: (attempt, total) => {
+              setProcessingMessage?.(`ImageKit AI processing (${attempt}/${total})...`);
+            },
+          });
+        } finally {
+          setProcessingMessage?.(null);
+        }
+      }
+
+      targetImage = await replaceCanvasImageFromUrl(canvasEditor, image, readyUrl, {
         preserveDisplayedBounds: true,
-        maxRetries: 2,
       });
     }
 
@@ -541,6 +558,61 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       if (!response.ok || !data?.success) throw new Error(data?.error || "Agent could not build an edit");
 
       const plan = { ...data.plan, userPrompt: cleanPrompt };
+
+      // ──── Extension request: route to AI Extend instead of transforms ────
+      if (plan.extensionRequest) {
+        const ext = plan.extensionRequest;
+        toast.loading("Extending image with AI...", { id: toastId });
+
+        const extendRes = await fetch("/api/ai/extend", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourceUrl: latestUrl,
+            expansion: {
+              sourceWidth: ext.sourceWidth,
+              sourceHeight: ext.sourceHeight,
+              targetWidth: ext.targetWidth,
+              targetHeight: ext.targetHeight,
+              offsetX: ext.insets.left,
+              offsetY: ext.insets.top,
+              insets: ext.insets,
+            },
+            prompt: ext.prompt || "seamless natural continuation",
+            targetWidth: ext.targetWidth,
+            targetHeight: ext.targetHeight,
+          }),
+        });
+
+        const extendData = await extendRes.json().catch(() => ({}));
+        if (!extendRes.ok || !extendData?.url) {
+          throw new Error(extendData?.error || "AI extension failed");
+        }
+
+        // Load the extended image onto the canvas
+        const extendedImage = await replaceCanvasImageFromUrl(
+          canvasEditor,
+          image,
+          extendData.url,
+          { preserveDisplayedBounds: false, maxRetries: 2 }
+        );
+
+        canvasEditor.__fitCanvasToProject?.({
+          width: ext.targetWidth,
+          height: ext.targetHeight,
+        });
+        canvasEditor.setActiveObject?.(extendedImage);
+        canvasEditor.requestRenderAll();
+        canvasEditor.__pushHistoryState?.();
+
+        setMessages((current) => [
+          ...current,
+          newMessage("assistant", `${plan.summary} — extended image loaded.`),
+        ]);
+        toast.success("Image extended", { id: toastId });
+        return;
+      }
+
       const nextEnabledChanges = createEnabledMap(plan);
       setActivePlan(plan);
       setEnabledChanges(nextEnabledChanges);

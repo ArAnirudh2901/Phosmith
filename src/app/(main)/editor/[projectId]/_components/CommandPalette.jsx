@@ -24,7 +24,14 @@ import {
     ZoomIn,
     ZoomOut,
     Bot,
+    ImagePlus,
+    Pen,
+    Type,
+    Trash2,
+    Copy,
+    MousePointerSquareDashed,
 } from "lucide-react"
+import { ActiveSelection } from "fabric"
 import { useCanvas } from "../../../../../../context/context"
 import useEditorShortcuts from "../../../../../../hooks/useEditorShortcuts"
 
@@ -40,24 +47,28 @@ import useEditorShortcuts from "../../../../../../hooks/useEditorShortcuts"
 
 const COMMANDS = [
     // Tools
-    { id: "tool-resize", label: "Resize Tool", category: "Tools", icon: Move, shortcut: "V" },
-    { id: "tool-crop", label: "Crop Tool", category: "Tools", icon: Maximize2, shortcut: "C" },
-    { id: "tool-adjust", label: "Adjust Tool", category: "Tools", icon: Settings },
-    { id: "tool-text", label: "Text Tool", category: "Tools", icon: Layers },
-    { id: "tool-generative", label: "Generative Fill", category: "Tools", icon: Sparkles, shortcut: "G" },
+    { id: "tool-resize", label: "Resize / Move", category: "Tools", icon: Move, shortcut: "V" },
+    { id: "tool-crop", label: "Crop", category: "Tools", icon: Maximize2, shortcut: "C" },
+    { id: "tool-images", label: "Images", category: "Tools", icon: ImagePlus, shortcut: "I" },
+    { id: "tool-adjust", label: "Adjust", category: "Tools", icon: Settings, shortcut: "A" },
+    { id: "tool-draw", label: "Draw", category: "Tools", icon: Pen, shortcut: "D" },
+    { id: "tool-text", label: "Text", category: "Tools", icon: Type, shortcut: "T" },
 
     // Actions
     { id: "action-undo", label: "Undo", category: "Actions", icon: Undo2, shortcut: "⌘Z" },
     { id: "action-redo", label: "Redo", category: "Actions", icon: Redo2, shortcut: "⌘⇧Z" },
+    { id: "action-delete", label: "Delete Selected", category: "Actions", icon: Trash2, shortcut: "⌫" },
+    { id: "action-duplicate", label: "Duplicate", category: "Actions", icon: Copy, shortcut: "⌘D" },
+    { id: "action-select-all", label: "Select All", category: "Actions", icon: MousePointerSquareDashed, shortcut: "⌘A" },
     { id: "action-export", label: "Export Image", category: "Actions", icon: Download },
-    { id: "action-reset-view", label: "Reset View", category: "Actions", icon: ZoomOut },
-    { id: "action-save", label: "Save Project", category: "Actions", icon: Command },
+    { id: "action-reset-view", label: "Reset View", category: "Actions", icon: ZoomOut, shortcut: "0" },
+    { id: "action-save", label: "Save Project", category: "Actions", icon: Command, shortcut: "⌘S" },
 
     // AI Actions
-    { id: "ai-extend", label: "AI Extend", category: "AI", icon: ArrowUp, pro: true },
-    { id: "ai-background", label: "AI Background", category: "AI", icon: Layers, pro: true },
-    { id: "ai-enhance", label: "AI Enhance", category: "AI", icon: Zap, pro: true },
-    { id: "ai-agent", label: "ImageKit Agent", category: "AI", icon: Bot },
+    { id: "ai-extend", label: "AI Extend", category: "AI", icon: ArrowUp, shortcut: "G", pro: true },
+    { id: "ai-background", label: "AI Background", category: "AI", icon: Layers, shortcut: "B", pro: true },
+    { id: "ai-enhance", label: "AI Edit", category: "AI", icon: Zap, shortcut: "E", pro: true },
+    { id: "ai-agent", label: "ImageKit Agent", category: "AI", icon: Bot, shortcut: "Q" },
 ]
 
 const CommandPalette = ({ isOpen, onClose, onExecute }) => {
@@ -120,14 +131,17 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                 case "tool-crop":
                     onToolChange?.("crop")
                     break
+                case "tool-images":
+                    onToolChange?.("images")
+                    break
                 case "tool-adjust":
                     onToolChange?.("adjust")
                     break
+                case "tool-draw":
+                    onToolChange?.("draw")
+                    break
                 case "tool-text":
                     onToolChange?.("text")
-                    break
-                case "tool-generative":
-                    onToolChange?.("ai_extender")
                     break
                 case "ai-extend":
                     onToolChange?.("ai_extender")
@@ -141,6 +155,42 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                 case "ai-agent":
                     onToolChange?.("ai_agent")
                     break
+                case "action-delete": {
+                    const active = canvasEditor?.getActiveObject?.()
+                    if (active) {
+                        canvasEditor.remove(active)
+                        canvasEditor.discardActiveObject()
+                        canvasEditor.requestRenderAll()
+                        canvasEditor.__pushHistoryState?.()
+                    }
+                    break
+                }
+                case "action-duplicate": {
+                    const activeObj = canvasEditor?.getActiveObject?.()
+                    if (activeObj) {
+                        activeObj.clone().then((cloned) => {
+                            cloned.set({ left: (cloned.left || 0) + 20, top: (cloned.top || 0) + 20 })
+                            cloned.setCoords()
+                            canvasEditor.add(cloned)
+                            canvasEditor.setActiveObject(cloned)
+                            canvasEditor.requestRenderAll()
+                            canvasEditor.__pushHistoryState?.()
+                        })
+                    }
+                    break
+                }
+                case "action-select-all": {
+                    if (canvasEditor) {
+                        const objects = canvasEditor.getObjects()
+                        if (objects.length > 0) {
+                            canvasEditor.discardActiveObject()
+                            const sel = new ActiveSelection(objects, { canvas: canvasEditor })
+                            canvasEditor.setActiveObject(sel)
+                            canvasEditor.requestRenderAll()
+                        }
+                    }
+                    break
+                }
                 default:
                     onExecute?.(cmd)
             }

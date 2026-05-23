@@ -8,9 +8,10 @@ import { RotateCcw, SlidersHorizontal, Sparkles, WandSparkles } from "lucide-rea
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider"
 import { useCanvas } from "../../../../../../../context/context"
 import {
-    buildImageKitTransformUrl,
+    buildImageKitChainedTransformUrl,
+    ensureCurrentImageKitEndpoint,
     isImageKitUrl,
-    waitForImageKitUrl,
+    normalizeImageKitUrl,
 } from "../../../../../../lib/imagekit-ai"
 
 const TEMP_WARM = "#ffb45f"
@@ -458,6 +459,10 @@ const ColorWheelCard = ({ config, values, onColor, onAmount }) => (
     </div>
 )
 
+// AI transforms that are model calls — must be chained as SEPARATE steps (colon-separated).
+const AI_TRANSFORM_PREFIXES = ['e-retouch', 'e-upscale']
+const isAiTransform = (token) => AI_TRANSFORM_PREFIXES.some((p) => token.startsWith(p))
+
 const buildImageKitTokens = (values) => {
     const tokens = []
     if (values.autoContrast) tokens.push("e-contrast")
@@ -481,7 +486,15 @@ const buildImageKitTokens = (values) => {
 const ImageKitPanel = ({ imageKitValues, setImageKitValues, onApply, isApplying }) => {
     const tokens = buildImageKitTokens(imageKitValues)
     const setValue = (key, value) => setImageKitValues((prev) => ({ ...prev, [key]: value }))
-    const toggle = (key) => setValue(key, !imageKitValues[key])
+    const toggle = (key) => {
+        const nextValue = !imageKitValues[key]
+        console.log("[Adjust ImageKit] toggle", {
+            key,
+            nextValue,
+            tokensBefore: tokens,
+        })
+        setValue(key, nextValue)
+    }
 
     return (
         <div className="adjust-imagekit-panel">
@@ -645,6 +658,42 @@ const AdjustControls = () => {
         applyNextValues(next, { commit, updateState: commit })
     }
 
+    const resolveImageKitUrl = async (url, { source, tokens }) => {
+        console.log("[Adjust ImageKit] resolve request", {
+            source,
+            tokens,
+            url,
+        })
+
+        const response = await fetch("/api/imagekit/resolve", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                url,
+                source,
+                preset: tokens.join(","),
+                maxAttempts: 12,
+                retryDelayMs: 5000,
+            }),
+        })
+        const data = await response.json().catch(() => ({}))
+
+        console.log("[Adjust ImageKit] resolve response", {
+            source,
+            tokens,
+            ok: response.ok,
+            status: response.status,
+            data,
+            url,
+        })
+
+        if (!response.ok || !data?.success) {
+            throw new Error(data?.error || "ImageKit transform did not finish")
+        }
+
+        return data.url || url
+    }
+
     const setLook = (look) => {
         const next = { ...latestRef.current, look }
         applyNextValues(next, { commit: true, updateState: true })
@@ -684,32 +733,96 @@ const AdjustControls = () => {
             return
         }
 
-        const baseUrl = img._pixxelImageKitAdjustBaseSrc || img.pixxelImageKitAdjustBaseSrc || sourceUrl
+        let baseUrl = img._pixxelImageKitAdjustBaseSrc || img.pixxelImageKitAdjustBaseSrc || sourceUrl
+
+        // AI transforms (e-retouch, e-upscale) must be separate chained steps,
+        // not comma-joined in a single step. Split them out.
+        const aiTokens = tokens.filter(isAiTransform)
+        const regularTokens = tokens.filter((t) => !isAiTransform(t))
+
+        // If AI transforms are present and the image belongs to a different
+        // ImageKit account, re-upload it so units are charged correctly.
+        if (aiTokens.length > 0) {
+            try {
+                baseUrl = await ensureCurrentImageKitEndpoint(baseUrl, {
+                    onStatus: (msg) => setProcessingMessage?.(msg),
+                })
+            } catch (reuploadErr) {
+                console.warn('[Adjust ImageKit] Re-upload failed:', reuploadErr)
+                toast.error('Failed to re-upload image to current account: ' + (reuploadErr?.message || ''))
+                return
+            }
+        }
+
         img._pixxelImageKitAdjustBaseSrc = baseUrl
         img.pixxelImageKitAdjustBaseSrc = baseUrl
         img.pixxelImageKitAdjustValues = imageKitValues
 
-        const nextUrl = buildImageKitTransformUrl(baseUrl, tokens, {
-            preserveExistingTransforms: true,
-            existingPosition: "before",
+        // Build: existing-transforms : regular-tokens : ai-token-1 : ai-token-2
+        const base = normalizeImageKitUrl(baseUrl)
+        const allSteps = []
+        // Regular transforms as one comma-joined step
+        if (regularTokens.length) allSteps.push(regularTokens.join(','))
+        // Each AI transform as its own step
+        aiTokens.forEach((t) => allSteps.push(t))
+
+        const nextUrl = buildImageKitChainedTransformUrl(base, allSteps)
+
+        console.log("[Adjust ImageKit] apply start", {
+            sourceUrl,
+            baseUrl,
+            base,
+            tokens,
+            regularTokens,
+            aiTokens,
+            allSteps,
+            nextUrl,
+            image: {
+                width: img.width,
+                height: img.height,
+                scaledWidth: img.getScaledWidth?.(),
+                scaledHeight: img.getScaledHeight?.(),
+            },
         })
 
         setIsApplyingImageKit(true)
         setProcessingMessage?.("Applying ImageKit URL transforms...")
         try {
-            const readyUrl = await waitForImageKitUrl(nextUrl, {
-                maxAttempts: 2,
-                onStatus: (attempt, max) => setProcessingMessage?.(`Waiting for ImageKit... (${attempt}/${max})`),
-            })
+            let readyUrl = nextUrl
+
+            // Only poll when AI transforms are present — they're async.
+            // Standard transforms (e-contrast, e-sharpen, etc.) are instant
+            // and don't need polling. Polling standard URLs can fail due to CORS.
+            if (aiTokens.length > 0) {
+                setProcessingMessage?.("Waiting for ImageKit AI processing...")
+                readyUrl = await resolveImageKitUrl(nextUrl, {
+                    source: "adjust-imagekit-apply",
+                    tokens,
+                })
+            }
+
             await img.setSrc(readyUrl, { crossOrigin: "anonymous" })
             img.set("dirty", true)
             img.setCoords()
             canvasEditor.requestRenderAll()
             canvasEditor.fire("object:modified", { target: img })
+            console.log("[Adjust ImageKit] apply complete", {
+                readyUrl,
+                width: img.width,
+                height: img.height,
+                scaledWidth: img.getScaledWidth?.(),
+                scaledHeight: img.getScaledHeight?.(),
+            })
             toast.success("ImageKit transforms applied")
         } catch (error) {
             console.warn("ImageKit adjustment failed:", error)
-            toast.error(error?.message || "ImageKit transform failed")
+            // Provide a user-friendly message for extension quota errors
+            const msg = error?.message || ''
+            if (/extension.?limit|limit.?exceeded|units.?exhausted/i.test(msg)) {
+                toast.error('ImageKit AI extension units exhausted. Only free transforms (contrast, sharpen) are available this month.')
+            } else {
+                toast.error(msg || "ImageKit transform failed")
+            }
         } finally {
             setIsApplyingImageKit(false)
             setProcessingMessage?.(null)

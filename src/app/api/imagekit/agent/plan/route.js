@@ -5,7 +5,7 @@ import {
   callOllamaVisionPlanner,
   getImageKitAgentSourceUrl,
 } from "@/lib/imagekit-agent";
-import { buildImageKitTransformUrl, isImageKitUrl } from "@/lib/imagekit-ai";
+import { buildImageKitAiTransformUrl, isImageKitUrl } from "@/lib/imagekit-ai";
 import { getPrisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
@@ -130,7 +130,7 @@ export async function POST(request) {
     : fallbackPlan.imageKitTransforms;
 
   const outputUrl = imageKitTransforms.length
-    ? buildImageKitTransformUrl(sourceUrl, imageKitTransforms, {
+    ? buildImageKitAiTransformUrl(sourceUrl, imageKitTransforms, {
         preserveExistingTransforms: true,
         existingPosition: "before",
       })

@@ -429,7 +429,68 @@ const CanvasEditor = ({ project }) => {
         } else if (canvas.__expansionMode) {
             canvas.__expansionMode = false
         }
+
+        // Drawing mode management (handled in draw.jsx useEffect, but ensure cleanup here)
+        if (activeTool !== 'draw' && canvas.isDrawingMode) {
+            canvas.isDrawingMode = false
+        }
     }, [activeTool, canvasEditor])
+
+    // ─── Image drag-and-drop onto canvas ───
+    useEffect(() => {
+        const container = containerRef.current
+        if (!container) return
+
+        const handleDragOver = (e) => {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'copy'
+        }
+
+        const handleDrop = async (e) => {
+            e.preventDefault()
+            const canvas = canvasInstanceRef.current
+            if (!canvas) return
+
+            const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'))
+            if (files.length === 0) return
+
+            for (const file of files) {
+                try {
+                    const url = URL.createObjectURL(file)
+                    const img = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
+                    const pW = Math.max(1, project?.width || 800)
+                    const pH = Math.max(1, project?.height || 600)
+                    const iW = Math.max(1, img.width || 1)
+                    const iH = Math.max(1, img.height || 1)
+                    const scale = Math.min((pW * 0.6) / iW, (pH * 0.6) / iH, 1)
+                    img.set({
+                        left: pW / 2,
+                        top: pH / 2,
+                        originX: 'center',
+                        originY: 'center',
+                        scaleX: scale,
+                        scaleY: scale,
+                        selectable: true,
+                        evented: true,
+                    })
+                    img.setCoords()
+                    canvas.add(img)
+                    canvas.setActiveObject(img)
+                    canvas.requestRenderAll()
+                    canvas.__pushHistoryState?.()
+                } catch (err) {
+                    console.error('[Canvas] Drop image error:', err)
+                }
+            }
+        }
+
+        container.addEventListener('dragover', handleDragOver)
+        container.addEventListener('drop', handleDrop)
+        return () => {
+            container.removeEventListener('dragover', handleDragOver)
+            container.removeEventListener('drop', handleDrop)
+        }
+    }, [canvasEditor, project?.width, project?.height])
 
     useEffect(() => {
         if (!canvasEditor) return

@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useCallback } from "react"
+import { ActiveSelection } from "fabric"
 
 /**
  * Global keyboard shortcut hook for the Pixxel editor.
@@ -8,22 +9,32 @@ import { useEffect, useRef, useCallback } from "react"
  * Immediately bypasses shortcut logic when the user is typing inside
  * an <input>, <textarea>, or contentEditable element.
  *
- * Industry-standard keybindings inspired by Adobe Photoshop:
- *   V  → Selection/Move tool
- *   M  → Marquee/Selection tool (masking operations)
- *   H  → Hand/Pan tool
- *   Z  → Zoom tool (maps clicks to canvas.zoomToPoint())
- *   G  → Generative Expand tool
- *   A  → ImageKit Agent
- *   B  → Brush/Masking tool
+ * Keybindings:
+ *   V  → Selection/Move (Resize)
+ *   C  → Crop
+ *   I  → Images
+ *   A  → Adjust
+ *   D  → Draw
+ *   T  → Text
+ *   G  → Generative Extend (AI Extender)
+ *   B  → AI Background
+ *   E  → AI Edit
+ *   Q  → Agent
  *   [  → Decrease brush size
  *   ]  → Increase brush size
- *   Cmd/Ctrl + Z         → Undo
+ *   Delete/Backspace → Delete selected object
+ *   Enter            → Enter editing mode (text) / Deselect
+ *   Escape           → Deselect / Exit editing mode
+ *   Cmd/Ctrl + Z     → Undo
  *   Cmd/Ctrl + Shift + Z → Redo
- *   Cmd/Ctrl + K         → Command Palette
- *   Spacebar (hold)      → Temporary pan override
+ *   Cmd/Ctrl + K     → Command Palette
+ *   Cmd/Ctrl + S     → Save
+ *   Cmd/Ctrl + D     → Duplicate
+ *   Cmd/Ctrl + A     → Select all
+ *   Spacebar (hold)  → Temporary pan override
  *   +  → Zoom in
  *   -  → Zoom out
+ *   0  → Reset view
  */
 
 const INTERACTIVE_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"])
@@ -34,12 +45,16 @@ const ZOOM_STEP = 0.15
 
 const isTypingContext = () => {
     if (typeof document === 'undefined') return false
-
     const el = document.activeElement
     if (!el) return false
     if (INTERACTIVE_TAGS.has(el.tagName)) return true
     if (el.isContentEditable) return true
     return false
+}
+
+const isTextObject = (obj) => {
+    const t = obj?.type?.toLowerCase()
+    return t === 'i-text' || t === 'textbox' || t === 'text'
 }
 
 const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleCommandPalette) => {
@@ -48,11 +63,41 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
 
     const handleKeyDown = useCallback(
         (event) => {
-            // Never intercept shortcuts when the user is typing
-            if (isTypingContext()) return
-
             const key = event.key
             const metaOrCtrl = event.metaKey || event.ctrlKey
+            const activeObject = canvasEditor?.getActiveObject?.()
+            const isEditing = activeObject?.isEditing
+
+            // ─── Always-active shortcuts (work even while typing) ───
+
+            // Cmd/Ctrl + K → Command Palette
+            if (metaOrCtrl && key === "k") {
+                event.preventDefault()
+                onToggleCommandPalette?.()
+                return
+            }
+
+            // Cmd/Ctrl + S → Save
+            if (metaOrCtrl && key === "s") {
+                event.preventDefault()
+                canvasEditor?.__saveCanvasState?.()
+                return
+            }
+
+            // Escape → exit editing / deselect
+            if (key === "Escape") {
+                if (isEditing) {
+                    activeObject.exitEditing()
+                    canvasEditor?.requestRenderAll()
+                } else if (activeObject) {
+                    canvasEditor?.discardActiveObject()
+                    canvasEditor?.requestRenderAll()
+                }
+                return
+            }
+
+            // Don't process further shortcuts when typing in inputs
+            if (isTypingContext()) return
 
             // ─── Undo / Redo ───
             if (metaOrCtrl && key === "z") {
@@ -65,10 +110,34 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 return
             }
 
-            // ─── Command Palette (Cmd/Ctrl + K) ───
-            if (metaOrCtrl && key === "k") {
+            // ─── Cmd/Ctrl + D → Duplicate ───
+            if (metaOrCtrl && key === "d") {
                 event.preventDefault()
-                onToggleCommandPalette?.()
+                if (activeObject && canvasEditor) {
+                    activeObject.clone().then((cloned) => {
+                        cloned.set({ left: (cloned.left || 0) + 20, top: (cloned.top || 0) + 20 })
+                        cloned.setCoords()
+                        canvasEditor.add(cloned)
+                        canvasEditor.setActiveObject(cloned)
+                        canvasEditor.requestRenderAll()
+                        canvasEditor.__pushHistoryState?.()
+                    }).catch(() => {})
+                }
+                return
+            }
+
+            // ─── Cmd/Ctrl + A → Select all ───
+            if (metaOrCtrl && key === "a") {
+                event.preventDefault()
+                if (canvasEditor && !isEditing) {
+                    const objects = canvasEditor.getObjects()
+                    if (objects.length > 0) {
+                        canvasEditor.discardActiveObject()
+                        const sel = new ActiveSelection(objects, { canvas: canvasEditor })
+                        canvasEditor.setActiveObject(sel)
+                        canvasEditor.requestRenderAll()
+                    }
+                }
                 return
             }
 
@@ -78,8 +147,7 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 if (canvasEditor) {
                     const center = canvasEditor.getCenterPoint()
                     const currentZoom = canvasEditor.getZoom()
-                    const newZoom = Math.min(20, currentZoom + ZOOM_STEP)
-                    canvasEditor.zoomToPoint(center, newZoom)
+                    canvasEditor.zoomToPoint(center, Math.min(20, currentZoom + ZOOM_STEP))
                     canvasEditor.requestRenderAll()
                 }
                 return
@@ -90,17 +158,46 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 if (canvasEditor) {
                     const center = canvasEditor.getCenterPoint()
                     const currentZoom = canvasEditor.getZoom()
-                    const newZoom = Math.max(0.1, currentZoom - ZOOM_STEP)
-                    canvasEditor.zoomToPoint(center, newZoom)
+                    canvasEditor.zoomToPoint(center, Math.max(0.1, currentZoom - ZOOM_STEP))
                     canvasEditor.requestRenderAll()
                 }
                 return
             }
 
-            // Ignore key combos beyond this point
+            // ─── Cmd/Ctrl + 0 → Reset view ───
+            if (metaOrCtrl && key === "0") {
+                event.preventDefault()
+                canvasEditor?.__resetCanvasView?.()
+                return
+            }
+
+            // Ignore remaining key combos with modifier
             if (metaOrCtrl || event.altKey) return
 
-            // ─── Spacebar hold → temporary pan (not during AI Extender) ───
+            // ─── Delete / Backspace → Delete selected object ───
+            if (key === "Delete" || key === "Backspace") {
+                if (activeObject && !isEditing && canvasEditor) {
+                    event.preventDefault()
+                    canvasEditor.remove(activeObject)
+                    canvasEditor.discardActiveObject()
+                    canvasEditor.requestRenderAll()
+                    canvasEditor.__pushHistoryState?.()
+                }
+                return
+            }
+
+            // ─── Enter → enter text editing or deselect ───
+            if (key === "Enter" && !event.shiftKey) {
+                if (activeObject && isTextObject(activeObject) && !isEditing) {
+                    event.preventDefault()
+                    activeObject.enterEditing()
+                    activeObject.selectAll()
+                    canvasEditor?.requestRenderAll()
+                }
+                return
+            }
+
+            // ─── Spacebar hold → temporary pan ───
             if (key === " " && !event.repeat) {
                 event.preventDefault()
                 if (activeTool === 'ai_extender') return
@@ -126,26 +223,30 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 return
             }
 
-            // ─── Zoom with +/- keys (without Cmd) when Z tool is active ───
+            // ─── Zoom with +/- keys ───
             if (key === "+" || key === "=") {
                 event.preventDefault()
                 if (canvasEditor) {
                     const center = canvasEditor.getCenterPoint()
-                    const currentZoom = canvasEditor.getZoom()
-                    canvasEditor.zoomToPoint(center, Math.min(20, currentZoom + ZOOM_STEP))
+                    canvasEditor.zoomToPoint(center, Math.min(20, canvasEditor.getZoom() + ZOOM_STEP))
+                    canvasEditor.requestRenderAll()
+                }
+                return
+            }
+            if (key === "-") {
+                event.preventDefault()
+                if (canvasEditor) {
+                    const center = canvasEditor.getCenterPoint()
+                    canvasEditor.zoomToPoint(center, Math.max(0.1, canvasEditor.getZoom() - ZOOM_STEP))
                     canvasEditor.requestRenderAll()
                 }
                 return
             }
 
-            if (key === "-") {
+            // ─── 0 → Reset view ───
+            if (key === "0") {
                 event.preventDefault()
-                if (canvasEditor) {
-                    const center = canvasEditor.getCenterPoint()
-                    const currentZoom = canvasEditor.getZoom()
-                    canvasEditor.zoomToPoint(center, Math.max(0.1, currentZoom - ZOOM_STEP))
-                    canvasEditor.requestRenderAll()
-                }
+                canvasEditor?.__resetCanvasView?.()
                 return
             }
 
@@ -153,31 +254,43 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             switch (key.toLowerCase()) {
                 case "v":
                     event.preventDefault()
-                    onToolChange?.("resize") // Selection/Move — maps to existing "resize" as default
+                    onToolChange?.("resize")
                     break
-                case "m":
+                case "c":
                     event.preventDefault()
-                    onToolChange?.("crop") // Marquee/Selection — maps to "crop" for selection-based operations
+                    onToolChange?.("crop")
                     break
-                case "h":
+                case "i":
                     event.preventDefault()
-                    onToolChange?.("hand")
+                    onToolChange?.("images")
                     break
-                case "z":
+                case "a":
                     event.preventDefault()
-                    onToolChange?.("zoom")
+                    onToolChange?.("adjust")
+                    break
+                case "d":
+                    event.preventDefault()
+                    onToolChange?.("draw")
+                    break
+                case "t":
+                    event.preventDefault()
+                    onToolChange?.("text")
                     break
                 case "g":
                     event.preventDefault()
                     onToolChange?.("ai_extender")
                     break
-                case "a":
-                    event.preventDefault()
-                    onToolChange?.("ai_agent")
-                    break
                 case "b":
                     event.preventDefault()
-                    onToolChange?.("brush")
+                    onToolChange?.("ai_background")
+                    break
+                case "e":
+                    event.preventDefault()
+                    onToolChange?.("ai_edit")
+                    break
+                case "q":
+                    event.preventDefault()
+                    onToolChange?.("ai_agent")
                     break
                 default:
                     break

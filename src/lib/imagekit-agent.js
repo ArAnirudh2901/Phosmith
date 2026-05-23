@@ -1,4 +1,4 @@
-import { buildImageKitTransformUrl } from "@/lib/imagekit-ai";
+import { buildImageKitAiTransformUrl } from "@/lib/imagekit-ai";
 import { retrieveImageKitDocs } from "@/lib/imagekit-docs";
 
 const MAX_PROMPT = 900;
@@ -28,6 +28,27 @@ export const buildLocalVisualPlan = async ({
 }) => {
   const normalizedPrompt = cleanPrompt(prompt);
   const lower = normalizedPrompt.toLowerCase();
+
+  // ──── Extension / Outpaint detection ────
+  const extensionPlan = parseExtensionIntent(lower, project);
+  if (extensionPlan) {
+    const docs = await retrieveImageKitDocs({ prompt: normalizedPrompt, imageAnalysis });
+    return {
+      title: extensionPlan.title,
+      summary: extensionPlan.summary,
+      mode: "local-extension",
+      model: "deterministic-planner",
+      prompt: normalizedPrompt,
+      imageKitTransforms: [],
+      fabricAdjustments: {},
+      url: sourceUrl,
+      docs,
+      steps: extensionPlan.steps,
+      confidence: 0.9,
+      extensionRequest: extensionPlan.extensionRequest,
+    };
+  }
+
   const docs = await retrieveImageKitDocs({ prompt: normalizedPrompt, imageAnalysis });
 
   const transforms = [];
@@ -80,7 +101,11 @@ export const buildLocalVisualPlan = async ({
   }
 
   if (wantsUpscale || (wantsBetter && (project.width || 0) < 1400)) {
-    transforms.push("e-upscale");
+    // e-upscale has a 16MP input limit — skip for large images
+    const pixelCount = (project.width || 0) * (project.height || 0)
+    if (pixelCount < 14_000_000) {
+      transforms.push("e-upscale");
+    }
   }
 
   if (wantsBetter || imageAnalysis.isLowContrast || wantsCinematic) {
@@ -145,7 +170,7 @@ export const buildLocalVisualPlan = async ({
 
   const imageKitTransforms = dedupeTransforms(transforms);
   const nextUrl = imageKitTransforms.length
-    ? buildImageKitTransformUrl(sourceUrl, imageKitTransforms, {
+    ? buildImageKitAiTransformUrl(sourceUrl, imageKitTransforms, {
         preserveExistingTransforms: true,
         existingPosition: "before",
       })
@@ -282,3 +307,162 @@ export const callOllamaVisionPlanner = async ({
     },
   };
 };
+
+// ──────────────────────────────────────────────────────────────────────
+// Extension / outpaint intent parser
+// ──────────────────────────────────────────────────────────────────────
+
+const EXTEND_TRIGGERS = [
+  "extend", "outpaint", "expand", "widen", "stretch canvas",
+  "make wider", "make taller", "add space", "add margin",
+  "increase canvas", "enlarge canvas",
+];
+
+const DIRECTION_PATTERNS = [
+  { regex: /(?:to\s+the\s+)?(?:right|east)\b/i, side: "right" },
+  { regex: /(?:to\s+the\s+)?(?:left|west)\b/i, side: "left" },
+  { regex: /(?:to\s+the\s+)?(?:top|up(?:ward)?|north)\b/i, side: "top" },
+  { regex: /(?:to\s+the\s+)?(?:bottom|down(?:ward)?|south)\b/i, side: "bottom" },
+  { regex: /horizontal(?:ly)?/i, sides: ["left", "right"] },
+  { regex: /vertical(?:ly)?/i, sides: ["top", "bottom"] },
+  { regex: /all\s+(?:four\s+)?sides?|every\s+side|all\s+around/i, sides: ["top", "bottom", "left", "right"] },
+];
+
+const PIXEL_PATTERN = /(\d{1,5})\s*(?:px|pixels?)/i;
+const PERCENT_PATTERN = /(\d{1,3})\s*%/;
+const RESOLUTION_PATTERN = /(\d{3,5})\s*[x×]\s*(\d{3,5})/i;
+
+function parseExtensionIntent(lower, project) {
+  const isExtendIntent = EXTEND_TRIGGERS.some((t) => lower.includes(t));
+  if (!isExtendIntent) return null;
+
+  const sourceWidth = project?.width || 0;
+  const sourceHeight = project?.height || 0;
+  if (!sourceWidth || !sourceHeight) return null;
+
+  const MAX_DIM = 4096;
+
+  // Try to parse target resolution: "extend to 1920x1080"
+  const resMatch = lower.match(RESOLUTION_PATTERN);
+  if (resMatch) {
+    const targetW = clamp(Number(resMatch[1]), sourceWidth, MAX_DIM);
+    const targetH = clamp(Number(resMatch[2]), sourceHeight, MAX_DIM);
+    const extraW = targetW - sourceWidth;
+    const extraH = targetH - sourceHeight;
+
+    if (extraW < 1 && extraH < 1) return null;
+
+    // Distribute extra pixels equally on opposing sides
+    const insets = {
+      left: Math.floor(extraW / 2),
+      right: Math.ceil(extraW / 2),
+      top: Math.floor(extraH / 2),
+      bottom: Math.ceil(extraH / 2),
+    };
+
+    return buildExtensionPlanResult({
+      insets,
+      sourceWidth, sourceHeight,
+      targetWidth: targetW, targetHeight: targetH,
+      description: `Extend to ${targetW}×${targetH}`,
+    });
+  }
+
+  // Parse pixel or percent amount
+  const pxMatch = lower.match(PIXEL_PATTERN);
+  const pctMatch = lower.match(PERCENT_PATTERN);
+
+  let amount = 0;
+  let isPercent = false;
+  if (pxMatch) {
+    amount = Number(pxMatch[1]);
+  } else if (pctMatch) {
+    amount = Number(pctMatch[1]);
+    isPercent = true;
+  } else {
+    // Default to 20% extension
+    amount = 20;
+    isPercent = true;
+  }
+
+  // Parse directions
+  const matchedSides = new Set();
+  for (const pattern of DIRECTION_PATTERNS) {
+    if (pattern.regex.test(lower)) {
+      if (pattern.sides) {
+        pattern.sides.forEach((s) => matchedSides.add(s));
+      } else {
+        matchedSides.add(pattern.side);
+      }
+    }
+  }
+
+  // Default: if no direction specified, extend all sides
+  if (matchedSides.size === 0) {
+    matchedSides.add("top");
+    matchedSides.add("bottom");
+    matchedSides.add("left");
+    matchedSides.add("right");
+  }
+
+  const insets = { left: 0, right: 0, top: 0, bottom: 0 };
+  for (const side of matchedSides) {
+    const ref = (side === "left" || side === "right") ? sourceWidth : sourceHeight;
+    const px = isPercent ? Math.round(ref * (amount / 100)) : amount;
+    insets[side] = Math.max(1, px);
+  }
+
+  let targetWidth = sourceWidth + insets.left + insets.right;
+  let targetHeight = sourceHeight + insets.top + insets.bottom;
+
+  // Cap to MAX_DIM
+  if (targetWidth > MAX_DIM) {
+    const over = targetWidth - MAX_DIM;
+    if (insets.right >= insets.left) insets.right = Math.max(0, insets.right - over);
+    else insets.left = Math.max(0, insets.left - over);
+    targetWidth = sourceWidth + insets.left + insets.right;
+  }
+  if (targetHeight > MAX_DIM) {
+    const over = targetHeight - MAX_DIM;
+    if (insets.bottom >= insets.top) insets.bottom = Math.max(0, insets.bottom - over);
+    else insets.top = Math.max(0, insets.top - over);
+    targetHeight = sourceHeight + insets.top + insets.bottom;
+  }
+
+  const hasExtension = insets.left + insets.right + insets.top + insets.bottom > 0;
+  if (!hasExtension) return null;
+
+  const dirs = [...matchedSides].join(", ");
+  const amtLabel = isPercent ? `${amount}%` : `${amount}px`;
+
+  return buildExtensionPlanResult({
+    insets,
+    sourceWidth, sourceHeight,
+    targetWidth, targetHeight,
+    description: `Extend ${dirs} by ${amtLabel}`,
+  });
+}
+
+function buildExtensionPlanResult({ insets, sourceWidth, sourceHeight, targetWidth, targetHeight, description }) {
+  const activeSides = Object.entries(insets).filter(([, v]) => v > 0).map(([s]) => s);
+
+  return {
+    title: "AI Image Extension",
+    summary: `${description} → ${targetWidth}×${targetHeight} (from ${sourceWidth}×${sourceHeight})`,
+    steps: [
+      {
+        label: "Extension",
+        value: `${activeSides.join(", ")} | ${targetWidth}×${targetHeight}`,
+        reason: `Outpaint ${activeSides.length} side(s) using AI generative fill.`,
+      },
+    ],
+    extensionRequest: {
+      insets,
+      sourceWidth,
+      sourceHeight,
+      targetWidth,
+      targetHeight,
+      prompt: "seamless natural continuation",
+    },
+  };
+}
