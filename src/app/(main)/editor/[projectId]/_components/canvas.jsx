@@ -9,10 +9,12 @@ import { Canvas, FabricImage, Point } from "fabric"
 import { normalizeCanvasState, serializeCanvasState } from "../../../../../lib/canvas-state"
 import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../lib/canvas-history"
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
+import { addImageFileToCanvas } from "../../../../../lib/canvas-images"
 
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 64
 const VIEWPORT_PADDING = 88
+const MAX_PERSISTED_HISTORY = 30
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 const getPrimaryRemoteImageUrl = (canvas) => {
     const image = canvas
@@ -143,6 +145,10 @@ const CanvasEditor = ({ project }) => {
         if (nextSignature === currentSignature) return
         historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1)
         historyRef.current.push(nextState)
+        while (historyRef.current.length > MAX_PERSISTED_HISTORY) {
+            historyRef.current.shift()
+            historyIndexRef.current = Math.max(0, historyIndexRef.current - 1)
+        }
         historyIndexRef.current = historyRef.current.length - 1
         emitHistoryChange(canvas)
     }, [])
@@ -189,7 +195,11 @@ const CanvasEditor = ({ project }) => {
             const currentImageUrl = getPrimaryRemoteImageUrl(canvas)
             await updateProject({
                 projectId: proj._id,
-                canvasState: canvasJSON,
+                canvasState: {
+                    ...canvasJSON,
+                    history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
+                    historyIndex: historyIndexRef.current,
+                },
                 ...(currentImageUrl ? { currentImageUrl } : {}),
             })
         } catch (error) { console.error("Error saving canvas state ", error) }
@@ -229,7 +239,9 @@ const CanvasEditor = ({ project }) => {
             canvasInstanceRef.current = canvas
             canvas.setDimensions({ width: width || project.width, height: height || project.height }, { backstoreOnly: false })
 
-            const canvasState = normalizeCanvasState(project.canvasState)
+            const rawCanvasState = project.canvasState
+            const canvasState = normalizeCanvasState(rawCanvasState)
+            const persistedHistory = Array.isArray(rawCanvasState?.history) ? rawCanvasState.history : null
             let hasRestoredViewport = false
 
             if (!canvasState && (project.currentImageUrl || project.originalImageUrl)) {
@@ -368,7 +380,15 @@ const CanvasEditor = ({ project }) => {
                 canvas.requestRenderAll()
             }
 
-            pushHistoryState(canvas)
+            if (persistedHistory?.length) {
+                historyRef.current = persistedHistory.slice(-MAX_PERSISTED_HISTORY)
+                historyIndexRef.current = Math.min(
+                    Math.max(0, rawCanvasState.historyIndex ?? historyRef.current.length - 1),
+                    historyRef.current.length - 1
+                )
+            } else {
+                pushHistoryState(canvas)
+            }
             emitHistoryChange(canvas)
             setIsLoading(false)
         }
@@ -455,32 +475,7 @@ const CanvasEditor = ({ project }) => {
             if (files.length === 0) return
 
             for (const file of files) {
-                try {
-                    const url = URL.createObjectURL(file)
-                    const img = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
-                    const pW = Math.max(1, project?.width || 800)
-                    const pH = Math.max(1, project?.height || 600)
-                    const iW = Math.max(1, img.width || 1)
-                    const iH = Math.max(1, img.height || 1)
-                    const scale = Math.min((pW * 0.6) / iW, (pH * 0.6) / iH, 1)
-                    img.set({
-                        left: pW / 2,
-                        top: pH / 2,
-                        originX: 'center',
-                        originY: 'center',
-                        scaleX: scale,
-                        scaleY: scale,
-                        selectable: true,
-                        evented: true,
-                    })
-                    img.setCoords()
-                    canvas.add(img)
-                    canvas.setActiveObject(img)
-                    canvas.requestRenderAll()
-                    canvas.__pushHistoryState?.()
-                } catch (err) {
-                    console.error('[Canvas] Drop image error:', err)
-                }
+                await addImageFileToCanvas(canvas, file, project)
             }
         }
 

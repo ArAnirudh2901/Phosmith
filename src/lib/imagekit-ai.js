@@ -479,6 +479,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 export async function waitForImageKitUrl(url, { maxAttempts = 8, retryDelayMs = 4000, onStatus, minBytes = 2048, signal } = {}) {
     const totalAttempts = Math.max(1, Math.min(Number(maxAttempts) || 8, 20))
     const delay = Math.max(1000, Math.min(Number(retryDelayMs) || 4000, 30000))
+    // Keep full URL including ?tr= — normalizeImageKitUrl is for source assets only, not genfill results.
     const base = url
     const startedAt = Date.now()
 

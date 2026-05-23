@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { useCanvas, useDynamicAccent } from '../../../../../../context/context'
 import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
+import { addImageFileToCanvas } from '@/lib/canvas-images'
 import { motion, AnimatePresence } from 'framer-motion'
 
 const EXPORT_PRESETS = [
@@ -33,6 +34,7 @@ const EditorTopbar = ({ project }) => {
 
     const router = useRouter()
     const exportMenuRef = useRef(null)
+    const addImageInputRef = useRef(null)
 
     const [showUpgradeModel, setShowUpgradeModel] = useState(false)
     const [restrictedTool, setRestrictedTool] = useState(null)
@@ -239,6 +241,31 @@ const EditorTopbar = ({ project }) => {
                         title="Redo (⌘⇧Z)"
                     >
                         <Redo2 className="h-3.5 w-3.5" />
+                    </motion.button>
+
+                    <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
+
+                    <input
+                        ref={addImageInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => {
+                            const files = Array.from(e.target.files || [])
+                            files.forEach((file) => addImageFileToCanvas(canvasEditor, file, project))
+                            e.target.value = ''
+                        }}
+                    />
+                    <motion.button
+                        whileTap={{ scale: 0.9 }}
+                        onClick={() => addImageInputRef.current?.click()}
+                        disabled={!canvasEditor}
+                        className="editor-icon-button flex items-center justify-center gap-1.5 px-2 disabled:opacity-35 flex-none"
+                        title="Add image"
+                    >
+                        <ImagePlus className="h-3.5 w-3.5" />
+                        <span className="hidden lg:inline text-[10px] font-medium">Add image</span>
                     </motion.button>
 
                     <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />

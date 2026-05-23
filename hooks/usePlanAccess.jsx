@@ -12,9 +12,11 @@ const usePlanAccess = () => {
         resize: true,
         crop: true,
         adjust: true,
-        text: true,
 
         // Pro only tools
+        text: isPro,
+        draw: isPro,
+        images: isPro,
         ai_background: isPro,
         ai_extender: isPro,
         ai_edit: isPro,
