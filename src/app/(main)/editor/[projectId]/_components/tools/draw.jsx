@@ -38,7 +38,16 @@ const COLOR_SWATCHES = [
 const DEFAULT_BRUSH_SIZE = 4
 const DEFAULT_BRUSH_COLOR = '#111827'
 
-const isPathObject = (obj) => obj?.type?.toLowerCase() === 'path'
+const isPathObject = (obj) => {
+    const type = obj?.type?.toLowerCase()
+    return type === 'path' || type === 'pathgroup'
+}
+
+const commitDrawChange = (canvasEditor) => {
+    canvasEditor?.requestRenderAll()
+    canvasEditor?.__pushHistoryState?.()
+    canvasEditor?.__saveCanvasState?.()
+}
 
 const DrawControls = ({ dominantColor }) => {
     const { canvasEditor } = useCanvas()
@@ -47,40 +56,133 @@ const DrawControls = ({ dominantColor }) => {
     const [brushColor, setBrushColor] = useState(DEFAULT_BRUSH_COLOR)
     const [brushOpacity, setBrushOpacity] = useState(100)
     const [drawingPaths, setDrawingPaths] = useState(0)
-    const prevToolRef = useRef(null)
+    const strokeStackRef = useRef([])
+    const erasingRef = useRef(false)
 
-    // Count drawn paths
+    const hexWithOpacity = (hex, opacityPercent) => {
+        if (opacityPercent >= 100) return hex
+        const alpha = Math.round((opacityPercent / 100) * 255)
+            .toString(16)
+            .padStart(2, '0')
+        return `${hex.slice(0, 7)}${alpha}`
+    }
+
     const syncPathCount = useCallback(() => {
         if (!canvasEditor) return
-        const count = canvasEditor.getObjects().filter(isPathObject).length
-        setDrawingPaths(count)
+        const paths = canvasEditor.getObjects().filter(isPathObject)
+        setDrawingPaths(paths.length)
+        const stackIds = new Set(strokeStackRef.current.map((p) => p))
+        strokeStackRef.current = strokeStackRef.current.filter((p) => paths.includes(p))
+        paths.forEach((p) => {
+            if (!stackIds.has(p)) strokeStackRef.current.push(p)
+        })
     }, [canvasEditor])
 
-    // Enable drawing mode when this tool mounts
+    const erasePathsAtPointer = useCallback(
+        (opt) => {
+            if (!canvasEditor || !opt?.e) return
+
+            const pointer = canvasEditor.getScenePoint(opt.e)
+            const eraserRadius = brushType === 'marker' ? brushSize * 3 : brushSize
+            let removed = false
+
+            for (const path of canvasEditor.getObjects().filter(isPathObject)) {
+                try {
+                    if (typeof path.containsPoint === 'function' && path.containsPoint(pointer)) {
+                        canvasEditor.remove(path)
+                        strokeStackRef.current = strokeStackRef.current.filter((p) => p !== path)
+                        removed = true
+                        continue
+                    }
+                } catch {
+                    /* fall through to bounds check */
+                }
+
+                const bounds = path.getBoundingRect?.()
+                if (!bounds) continue
+                const pad = eraserRadius
+                if (
+                    pointer.x >= bounds.left - pad &&
+                    pointer.x <= bounds.left + bounds.width + pad &&
+                    pointer.y >= bounds.top - pad &&
+                    pointer.y <= bounds.top + bounds.height + pad
+                ) {
+                    canvasEditor.remove(path)
+                    strokeStackRef.current = strokeStackRef.current.filter((p) => p !== path)
+                    removed = true
+                }
+            }
+
+            if (removed) {
+                canvasEditor.requestRenderAll()
+                syncPathCount()
+            }
+        },
+        [canvasEditor, brushSize, brushType, syncPathCount]
+    )
+
     useEffect(() => {
         if (!canvasEditor) return
 
-        canvasEditor.isDrawingMode = true
         syncPathCount()
 
-        const onPathCreated = () => {
-            canvasEditor.__pushHistoryState?.()
+        const onPathCreated = (e) => {
+            if (e?.path) strokeStackRef.current.push(e.path)
             syncPathCount()
         }
+
+        const onObjectRemoved = () => syncPathCount()
+
         canvasEditor.on('path:created', onPathCreated)
-        canvasEditor.on('object:removed', syncPathCount)
+        canvasEditor.on('object:removed', onObjectRemoved)
 
         return () => {
-            canvasEditor.isDrawingMode = false
             canvasEditor.off('path:created', onPathCreated)
-            canvasEditor.off('object:removed', syncPathCount)
-            canvasEditor.requestRenderAll()
+            canvasEditor.off('object:removed', onObjectRemoved)
         }
     }, [canvasEditor, syncPathCount])
 
-    // Configure brush when settings change
     useEffect(() => {
         if (!canvasEditor) return
+
+        if (brushType === 'eraser') {
+            canvasEditor.isDrawingMode = false
+            canvasEditor.defaultCursor = 'crosshair'
+            canvasEditor.hoverCursor = 'crosshair'
+            if (canvasEditor.upperCanvasEl) canvasEditor.upperCanvasEl.style.cursor = 'crosshair'
+
+            const onEraserDown = (opt) => {
+                erasingRef.current = true
+                erasePathsAtPointer(opt)
+            }
+            const onEraserMove = (opt) => {
+                if (!erasingRef.current) return
+                erasePathsAtPointer(opt)
+            }
+            const onEraserUp = () => {
+                if (!erasingRef.current) return
+                erasingRef.current = false
+                commitDrawChange(canvasEditor)
+            }
+
+            canvasEditor.on('mouse:down', onEraserDown)
+            canvasEditor.on('mouse:move', onEraserMove)
+            canvasEditor.on('mouse:up', onEraserUp)
+
+            return () => {
+                erasingRef.current = false
+                canvasEditor.off('mouse:down', onEraserDown)
+                canvasEditor.off('mouse:move', onEraserMove)
+                canvasEditor.off('mouse:up', onEraserUp)
+                canvasEditor.defaultCursor = 'default'
+                canvasEditor.hoverCursor = 'default'
+                if (canvasEditor.upperCanvasEl) canvasEditor.upperCanvasEl.style.cursor = 'default'
+            }
+        }
+
+        canvasEditor.isDrawingMode = true
+        canvasEditor.defaultCursor = 'crosshair'
+        canvasEditor.hoverCursor = 'crosshair'
 
         let brush
         switch (brushType) {
@@ -96,11 +198,6 @@ const DrawControls = ({ dominantColor }) => {
                 brush.strokeLineJoin = 'round'
                 break
             }
-            case 'eraser': {
-                // Eraser uses a pencil brush with a white color and composite mode
-                brush = new PencilBrush(canvasEditor)
-                break
-            }
             default:
                 brush = new PencilBrush(canvasEditor)
                 break
@@ -108,9 +205,7 @@ const DrawControls = ({ dominantColor }) => {
 
         const effectiveSize = brushType === 'marker' ? brushSize * 3 : brushSize
         brush.width = effectiveSize
-        brush.color = brushType === 'eraser'
-            ? canvasEditor.backgroundColor || '#ffffff'
-            : hexWithOpacity(brushColor, brushOpacity)
+        brush.color = hexWithOpacity(brushColor, brushOpacity)
 
         if (brushType === 'spray') {
             brush.density = Math.max(10, Math.round(brushSize * 2))
@@ -118,16 +213,13 @@ const DrawControls = ({ dominantColor }) => {
         }
 
         canvasEditor.freeDrawingBrush = brush
-        canvasEditor.isDrawingMode = true
-    }, [canvasEditor, brushType, brushSize, brushColor, brushOpacity])
 
-    const hexWithOpacity = (hex, opacityPercent) => {
-        if (opacityPercent >= 100) return hex
-        const alpha = Math.round((opacityPercent / 100) * 255)
-            .toString(16)
-            .padStart(2, '0')
-        return `${hex.slice(0, 7)}${alpha}`
-    }
+        return () => {
+            canvasEditor.isDrawingMode = false
+            canvasEditor.defaultCursor = 'default'
+            canvasEditor.hoverCursor = 'default'
+        }
+    }, [canvasEditor, brushType, brushSize, brushColor, brushOpacity, erasePathsAtPointer])
 
     const clearAllDrawings = () => {
         if (!canvasEditor) return
@@ -136,23 +228,33 @@ const DrawControls = ({ dominantColor }) => {
             toast.message('No drawings to clear')
             return
         }
-        paths.forEach(p => canvasEditor.remove(p))
-        canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
+        paths.forEach((p) => canvasEditor.remove(p))
+        strokeStackRef.current = []
+        commitDrawChange(canvasEditor)
         syncPathCount()
         toast.success(`Cleared ${paths.length} stroke(s)`)
     }
 
     const undoLastStroke = () => {
         if (!canvasEditor) return
-        const paths = canvasEditor.getObjects().filter(isPathObject)
-        if (paths.length === 0) {
-            toast.message('No strokes to undo')
-            return
+
+        let path = strokeStackRef.current.pop()
+        while (path && !canvasEditor.getObjects().includes(path)) {
+            path = strokeStackRef.current.pop()
         }
-        canvasEditor.remove(paths[paths.length - 1])
-        canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
+
+        if (!path) {
+            const paths = canvasEditor.getObjects().filter(isPathObject)
+            if (paths.length === 0) {
+                toast.message('No strokes to undo')
+                return
+            }
+            path = paths[paths.length - 1]
+        }
+
+        canvasEditor.remove(path)
+        strokeStackRef.current = strokeStackRef.current.filter((p) => p !== path)
+        commitDrawChange(canvasEditor)
         syncPathCount()
     }
 
@@ -166,7 +268,6 @@ const DrawControls = ({ dominantColor }) => {
 
     return (
         <div className="space-y-4 overflow-y-auto pr-1 panel-scroll">
-            {/* Brush Type */}
             <div className="space-y-2">
                 <label className="panel-label">Brush Type</label>
                 <div className="grid grid-cols-1 gap-1">
@@ -205,7 +306,6 @@ const DrawControls = ({ dominantColor }) => {
                 </div>
             </div>
 
-            {/* Brush Size */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <label className="panel-label">Brush Size</label>
                 <div className="flex items-center gap-2">
@@ -242,7 +342,6 @@ const DrawControls = ({ dominantColor }) => {
                     </button>
                 </div>
 
-                {/* Size preview */}
                 <div className="flex items-center justify-center py-2">
                     <div
                         className="rounded-full"
@@ -258,7 +357,6 @@ const DrawControls = ({ dominantColor }) => {
                 </div>
             </div>
 
-            {/* Opacity */}
             <div className="space-y-1.5">
                 <label className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Opacity</label>
                 <ProRulerSlider
@@ -277,7 +375,6 @@ const DrawControls = ({ dominantColor }) => {
                 />
             </div>
 
-            {/* Color */}
             {brushType !== 'eraser' && (
                 <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                     <label className="panel-label">Color</label>
@@ -323,7 +420,6 @@ const DrawControls = ({ dominantColor }) => {
                 </div>
             )}
 
-            {/* Actions */}
             <div className="space-y-1.5" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <label className="panel-label">Actions ({drawingPaths} strokes)</label>
                 <button
@@ -352,9 +448,8 @@ const DrawControls = ({ dominantColor }) => {
                 <p className="font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Tips</p>
                 <div className="space-y-1" style={{ color: 'var(--text-muted)' }}>
                     <p>• Draw directly on the canvas</p>
-                    <p>• Switch tools to stop drawing mode</p>
-                    <p>• Use Eraser to paint over with background</p>
-                    <p>• Drawings are saved with the project</p>
+                    <p>• Eraser removes vector strokes under the cursor</p>
+                    <p>• Drawings sync when you undo, clear, or after edits</p>
                 </div>
             </div>
         </div>

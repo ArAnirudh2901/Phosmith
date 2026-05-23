@@ -15,6 +15,9 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason }) => {
             ai_extender: "AI Image Extender",
             ai_edit: "AI Editor",
             projects: "Unlimited Projects",
+            draw: "Doodle & Drawing Tools",
+            text: "Professional Text Editor",
+            images: "Multiple Image Operations",
         }
         return toolNames[restrictedTool] || "Premium Feature"
     }

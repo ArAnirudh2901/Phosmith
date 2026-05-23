@@ -15,10 +15,10 @@ import {
     Replace,
     Trash2,
     Unlock,
-    Upload,
 } from 'lucide-react'
 import { FabricImage } from 'fabric'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
+import { addImageFileToCanvas } from '@/lib/canvas-images'
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -35,29 +35,8 @@ const getImageThumbSrc = (img) => {
     }
 }
 
-const fitNewImage = (fabricImage, projectSize) => {
-    const pW = Math.max(1, projectSize?.width || 800)
-    const pH = Math.max(1, projectSize?.height || 600)
-    const iW = Math.max(1, fabricImage.width || 1)
-    const iH = Math.max(1, fabricImage.height || 1)
-    const scale = Math.min((pW * 0.6) / iW, (pH * 0.6) / iH, 1)
-
-    fabricImage.set({
-        left: pW / 2,
-        top: pH / 2,
-        originX: 'center',
-        originY: 'center',
-        scaleX: scale,
-        scaleY: scale,
-        selectable: true,
-        evented: true,
-    })
-    fabricImage.setCoords()
-}
-
 const ImageManager = ({ project, dominantColor }) => {
     const { canvasEditor } = useCanvas()
-    const fileInputRef = useRef(null)
     const replaceInputRef = useRef(null)
     const [images, setImages] = useState([])
     const [selectedImage, setSelectedImage] = useState(null)
@@ -88,38 +67,10 @@ const ImageManager = ({ project, dominantColor }) => {
         return () => events.forEach(e => canvasEditor.off(e, syncImages))
     }, [canvasEditor, syncImages])
 
-    const addImageFromFile = useCallback(async (file) => {
-        if (!canvasEditor || !file) return
-        if (!file.type.startsWith('image/')) {
-            toast.error('Only image files are supported')
-            return
-        }
-        if (file.size > 25 * 1024 * 1024) {
-            toast.error('Image must be under 25 MB')
-            return
-        }
-
-        const toastId = toast.loading('Adding image...')
-        try {
-            const url = URL.createObjectURL(file)
-            const img = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
-            fitNewImage(img, project)
-            canvasEditor.add(img)
-            canvasEditor.setActiveObject(img)
-            canvasEditor.requestRenderAll()
-            canvasEditor.__pushHistoryState?.()
-            toast.success('Image added', { id: toastId })
-        } catch (err) {
-            toast.error('Failed to load image', { id: toastId })
-            console.error('[Images] Load error:', err)
-        }
-    }, [canvasEditor, project])
-
-    const handleFileChange = (e) => {
-        const files = Array.from(e.target.files || [])
-        files.forEach(f => addImageFromFile(f))
-        e.target.value = ''
-    }
+    const addImageFromFile = useCallback(
+        (file) => addImageFileToCanvas(canvasEditor, file, project),
+        [canvasEditor, project]
+    )
 
     const handlePaste = useCallback((e) => {
         const items = e.clipboardData?.items
@@ -267,30 +218,6 @@ const ImageManager = ({ project, dominantColor }) => {
 
     return (
         <div className="space-y-4 overflow-y-auto pr-1 panel-scroll">
-            {/* Upload */}
-            <div className="space-y-3">
-                <label className="panel-label">Add Image</label>
-                <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
-                    style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
-                >
-                    <ImagePlus className="h-3.5 w-3.5" />
-                    Upload Image
-                </button>
-                <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={handleFileChange}
-                    className="hidden"
-                />
-                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    Or paste from clipboard (⌘V)
-                </p>
-            </div>
-
             {/* Layer List */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <label className="panel-label">Layers ({images.length})</label>
@@ -312,14 +239,21 @@ const ImageManager = ({ project, dominantColor }) => {
                         const thumb = getImageThumbSrc(img)
 
                         return (
-                            <motion.button
+                            <motion.div
                                 key={img.__uid || `img-${idx}`}
-                                type="button"
+                                role="button"
+                                tabIndex={0}
                                 onClick={() => selectImage(img)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault()
+                                        selectImage(img)
+                                    }
+                                }}
                                 initial={{ opacity: 0, y: 6 }}
                                 animate={{ opacity: 1, y: 0 }}
                                 exit={{ opacity: 0, y: -6 }}
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left editor-interactive"
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left editor-interactive cursor-pointer"
                                 style={{
                                     background: isSelected ? 'rgba(0,229,255,0.08)' : 'transparent',
                                     border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
@@ -364,7 +298,7 @@ const ImageManager = ({ project, dominantColor }) => {
                                         : <Unlock className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
                                     }
                                 </button>
-                            </motion.button>
+                            </motion.div>
                         )
                     })}
                 </AnimatePresence>

@@ -516,6 +516,10 @@ const AIExtender = ({ project }) => {
                 evented: activeImage.evented,
             })
 
+            if (typeof nextImage.setSrc === 'function') {
+                await nextImage.setSrc(readyUrl, { crossOrigin: 'anonymous' })
+            }
+
             canvasEditor.remove(activeImage)
             canvasEditor.add(nextImage)
             canvasEditor.setActiveObject(nextImage)

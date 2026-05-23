@@ -10,10 +10,10 @@ import usePlanAccess from "../../../../../../hooks/usePlanAccess"
 
 const TOOLS = [
     { id: "crop", label: "Crop", icon: Crop, shortcut: "C" },
-    { id: "images", label: "Images", icon: ImagePlus, shortcut: "I" },
+    { id: "images", label: "Images", icon: ImagePlus, shortcut: "I", pro: true },
     { id: "adjust", label: "Adjust", icon: Sliders, shortcut: "A" },
-    { id: "draw", label: "Draw", icon: Pen, shortcut: "D" },
-    { id: "text", label: "Text", icon: Type, shortcut: "T" },
+    { id: "draw", label: "Draw", icon: Pen, shortcut: "D", pro: true },
+    { id: "text", label: "Text", icon: Type, shortcut: "T", pro: true },
     { id: "ai_background", label: "AI BG", icon: Palette, pro: true },
     { id: "ai_extender", label: "Extend", icon: Maximize2, pro: true },
     { id: "ai_edit", label: "AI Edit", icon: Sparkles, pro: true },

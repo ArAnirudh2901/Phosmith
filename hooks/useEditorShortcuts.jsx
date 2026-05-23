@@ -43,6 +43,8 @@ const MIN_BRUSH_WIDTH = 1
 const MAX_BRUSH_WIDTH = 200
 const ZOOM_STEP = 0.15
 
+import usePlanAccess from "./usePlanAccess"
+
 const isTypingContext = () => {
     if (typeof document === 'undefined') return false
     const el = document.activeElement
@@ -60,6 +62,7 @@ const isTextObject = (obj) => {
 const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleCommandPalette) => {
     const previousToolRef = useRef(null)
     const spaceHeldRef = useRef(false)
+    const { hasAccess } = usePlanAccess()
 
     const handleKeyDown = useCallback(
         (event) => {
@@ -254,43 +257,43 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             switch (key.toLowerCase()) {
                 case "v":
                     event.preventDefault()
-                    onToolChange?.("resize")
+                    if (hasAccess("resize")) onToolChange?.("resize")
                     break
                 case "c":
                     event.preventDefault()
-                    onToolChange?.("crop")
+                    if (hasAccess("crop")) onToolChange?.("crop")
                     break
                 case "i":
                     event.preventDefault()
-                    onToolChange?.("images")
+                    if (hasAccess("images")) onToolChange?.("images")
                     break
                 case "a":
                     event.preventDefault()
-                    onToolChange?.("adjust")
+                    if (hasAccess("adjust")) onToolChange?.("adjust")
                     break
                 case "d":
                     event.preventDefault()
-                    onToolChange?.("draw")
+                    if (hasAccess("draw")) onToolChange?.("draw")
                     break
                 case "t":
                     event.preventDefault()
-                    onToolChange?.("text")
+                    if (hasAccess("text")) onToolChange?.("text")
                     break
                 case "g":
                     event.preventDefault()
-                    onToolChange?.("ai_extender")
+                    if (hasAccess("ai_extender")) onToolChange?.("ai_extender")
                     break
                 case "b":
                     event.preventDefault()
-                    onToolChange?.("ai_background")
+                    if (hasAccess("ai_background")) onToolChange?.("ai_background")
                     break
                 case "e":
                     event.preventDefault()
-                    onToolChange?.("ai_edit")
+                    if (hasAccess("ai_edit")) onToolChange?.("ai_edit")
                     break
                 case "q":
                     event.preventDefault()
-                    onToolChange?.("ai_agent")
+                    if (hasAccess("ai_agent")) onToolChange?.("ai_agent")
                     break
                 default:
                     break
