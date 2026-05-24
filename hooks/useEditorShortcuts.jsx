@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useCallback } from "react"
+import { useEffect, useCallback } from "react"
 import { ActiveSelection } from "fabric"
 
 /**
@@ -60,8 +60,6 @@ const isTextObject = (obj) => {
 }
 
 const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleCommandPalette) => {
-    const previousToolRef = useRef(null)
-    const spaceHeldRef = useRef(false)
     const { hasAccess } = usePlanAccess()
 
     const handleKeyDown = useCallback(
@@ -204,11 +202,6 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             if (key === " " && !event.repeat) {
                 event.preventDefault()
                 if (activeTool === 'ai_extender') return
-                if (!spaceHeldRef.current) {
-                    spaceHeldRef.current = true
-                    previousToolRef.current = activeTool
-                    onToolChange?.("hand")
-                }
                 return
             }
 
@@ -218,6 +211,8 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 if (canvasEditor?.freeDrawingBrush) {
                     const currentWidth = canvasEditor.freeDrawingBrush.width || 10
                     const delta = key === "[" ? -BRUSH_STEP : BRUSH_STEP
+                    // Fabric brushes are mutable editor objects; update the live brush in place.
+                    // eslint-disable-next-line react-hooks/immutability
                     canvasEditor.freeDrawingBrush.width = Math.max(
                         MIN_BRUSH_WIDTH,
                         Math.min(MAX_BRUSH_WIDTH, currentWidth + delta)
@@ -299,21 +294,17 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                     break
             }
         },
-        [canvasEditor, activeTool, onToolChange, onToggleCommandPalette]
+        [canvasEditor, activeTool, onToolChange, onToggleCommandPalette, hasAccess]
     )
 
     const handleKeyUp = useCallback(
         (event) => {
-            // ─── Spacebar release → restore previous tool ───
-            if (event.key === " " && spaceHeldRef.current) {
+            // ─── Spacebar release → let canvas leave temporary pan without changing tools ───
+            if (event.key === " ") {
                 event.preventDefault()
-                spaceHeldRef.current = false
-                const restoreTo = previousToolRef.current || "resize"
-                previousToolRef.current = null
-                onToolChange?.(restoreTo)
             }
         },
-        [onToolChange]
+        []
     )
 
     useEffect(() => {

@@ -44,6 +44,13 @@ export const serializeCanvasState = (canvas) => {
                         indexedObj.pixxelAdjustmentOverlay ||
                         indexedObj._pixxelAdjustmentOverlay ||
                         'vignette',
+                    ...(indexedObj.pixxelAdjustmentTargetId || indexedObj._pixxelAdjustmentTargetId
+                        ? {
+                            pixxelAdjustmentTargetId:
+                                indexedObj.pixxelAdjustmentTargetId ||
+                                indexedObj._pixxelAdjustmentTargetId,
+                        }
+                        : {}),
                 }
             }
 
@@ -61,6 +68,11 @@ export const serializeCanvasState = (canvas) => {
                 if (matchingObj?.pixxelAdjustValues || matchingObj?._pixxelAdjustValues) {
                     cleaned.pixxelAdjustValues =
                         matchingObj.pixxelAdjustValues || matchingObj._pixxelAdjustValues
+                }
+
+                if (matchingObj?.pixxelAdjustmentId || matchingObj?._pixxelAdjustmentId) {
+                    cleaned.pixxelAdjustmentId =
+                        matchingObj.pixxelAdjustmentId || matchingObj._pixxelAdjustmentId
                 }
 
                 if (matchingObj?.pixxelImageKitAdjustBaseSrc || matchingObj?._pixxelImageKitAdjustBaseSrc) {

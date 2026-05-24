@@ -1,293 +1,412 @@
 "use client"
 
-import React, { useEffect, useState } from 'react'
-import { useCanvas } from '../../../../../../../context/context';
-import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery';
-import { api } from '../../../../../../../convex/_generated/api';
-import { Button } from '@/components/ui/button';
-import { Expand, Lock, Monitor, Unlock } from 'lucide-react';
-import { Input } from '@/components/ui/input';
-import { toast } from 'sonner';
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCanvas } from '../../../../../../../context/context'
+import { Expand, Image as ImageIcon, Lock, Maximize2, Unlock } from 'lucide-react'
+import { toast } from 'sonner'
+import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
+import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
+import { api } from '../../../../../../../convex/_generated/api'
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 
-const ASPECT_RATIOS = [
-    {
-        name: "Instagram Story",
-        ratio: [9, 16],
-        label: "9:16"
-    },
+const isImageObject = (obj) => obj?.type?.toLowerCase() === 'image'
 
-    {
-        name: "Instagram Post",
-        ratio: [1, 1],
-        label: "1:1"
-    },
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 
-    {
-        name: "YouTube Thumbnail",
-        ratio: [16, 9],
-        label: "16:9"
-    },
+const getBaseSize = (image) => ({
+    width: Math.max(1, Math.round(image?.width || image?._originalElement?.naturalWidth || 1)),
+    height: Math.max(1, Math.round(image?.height || image?._originalElement?.naturalHeight || 1)),
+})
 
-    {
-        name: "Portrait",
-        ratio: [2, 3],
-        label: "2:3"
-    },
+const getScaledSize = (image) => ({
+    width: Math.max(1, Math.round(Math.abs(image?.getScaledWidth?.() || (image?.width || 1) * (image?.scaleX || 1)))),
+    height: Math.max(1, Math.round(Math.abs(image?.getScaledHeight?.() || (image?.height || 1) * (image?.scaleY || 1)))),
+})
 
-    {
-        name: "Facebook Cover",
-        ratio: [851, 315],
-        label: "2.7:1"
-    },
+const getVisibleImages = (canvasEditor) =>
+    (canvasEditor?.getObjects?.() || []).filter((obj) => isImageObject(obj) && obj.visible !== false)
 
-    {
-        name: "Twitter Header",
-        ratio: [3, 1],
-        label: "3:1"
-    },
-];
-
-const ResizeControls = ({ project, dominantColor, contrastingColor, lighterColor }) => {
-
-    const { canvasEditor, processingMessage, setProcessingMessage } = useCanvas()
-
-    const data = project
-    const isLoading = !data
-
-    const [newWidth, setNewWidth] = useState(project?.width || 800)       // Target width
-    const [newHeight, setNewHeight] = useState(project?.height || 600)    // Target height
-    const [lockAspectRatio, setLockAspectRatio] = useState(true)          // Whether to maintain proportions
-    const [selectedPreset, setSelectedPreset] = useState(null)            // Currectly selected preset
-
+const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
+    const { canvasEditor } = useCanvas()
+    const [selectedImage, setSelectedImage] = useState(null)
+    const [currentSize, setCurrentSize] = useState({ width: 0, height: 0 })
+    const [newWidth, setNewWidth] = useState(0)
+    const [newHeight, setNewHeight] = useState(0)
+    const [scalePercent, setScalePercent] = useState(100)
+    const [lockAspectRatio, setLockAspectRatio] = useState(true)
+    const [canvasWidth, setCanvasWidth] = useState(project?.width || 0)
+    const [canvasHeight, setCanvasHeight] = useState(project?.height || 0)
+    const [lockCanvasAspectRatio, setLockCanvasAspectRatio] = useState(true)
     const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
 
+    const baseSize = useMemo(() => getBaseSize(selectedImage), [selectedImage])
+    const aspectRatio = baseSize.height / baseSize.width
+    const projectAspectRatio = Math.max(1, project?.height || 1) / Math.max(1, project?.width || 1)
+
     useEffect(() => {
-        if (isLoading || !data?.width || !data?.height)
+        const syncFrame = requestAnimationFrame(() => {
+            setCanvasWidth(project?.width || 0)
+            setCanvasHeight(project?.height || 0)
+        })
+        return () => cancelAnimationFrame(syncFrame)
+    }, [project?.width, project?.height])
+
+    const syncFromImage = useCallback((image) => {
+        if (!image) {
+            setSelectedImage(null)
+            setCurrentSize({ width: 0, height: 0 })
+            setNewWidth(0)
+            setNewHeight(0)
+            setScalePercent(100)
             return
-
-        setNewWidth(data.width)
-        setNewHeight(data.height)
-        setSelectedPreset(null)
-
-        const resizeTimeout = setTimeout(() => {
-            // Work around for initial resize issues
-            window.dispatchEvent(new Event("resize"))
-        }, 500)
-
-        // window.location.reload()                                            // Force reload to apply new changes to the image
-        return () => clearTimeout(resizeTimeout)
-    }, [data, isLoading])
-
-    const handleWidthChange = (value) => {
-        const width = parseInt(value) || 0
-        setNewWidth(width)
-
-        if (lockAspectRatio && project) {
-            const ratio = project.height / project.width        // Current aspect ratio
-            setNewHeight(Math.round(width * ratio))             // Apply ratio to new width
         }
 
-        setSelectedPreset(null)
+        const scaled = getScaledSize(image)
+        const base = getBaseSize(image)
+        setSelectedImage(image)
+        setCurrentSize(scaled)
+        setNewWidth(scaled.width)
+        setNewHeight(scaled.height)
+        setScalePercent(Math.round((scaled.width / base.width) * 100))
+    }, [])
+
+    const syncSelection = useCallback(() => {
+        if (!canvasEditor) return
+        const active = canvasEditor.getActiveObject?.()
+        if (isImageObject(active) && active.visible !== false) {
+            syncFromImage(active)
+            return
+        }
+        syncFromImage(null)
+    }, [canvasEditor, syncFromImage])
+
+    useEffect(() => {
+        if (!canvasEditor) return
+
+        const active = canvasEditor.getActiveObject?.()
+        if (!isImageObject(active) || active.visible === false) {
+            const topVisibleImage = getVisibleImages(canvasEditor).at(-1)
+            if (topVisibleImage) {
+                canvasEditor.setActiveObject(topVisibleImage)
+                canvasEditor.requestRenderAll()
+            }
+        }
+
+        const syncFrame = requestAnimationFrame(syncSelection)
+        const events = [
+            'selection:created',
+            'selection:updated',
+            'selection:cleared',
+            'object:added',
+            'object:removed',
+            'object:modified',
+            'object:scaling',
+        ]
+        events.forEach((eventName) => canvasEditor.on(eventName, syncSelection))
+        return () => {
+            cancelAnimationFrame(syncFrame)
+            events.forEach((eventName) => canvasEditor.off(eventName, syncSelection))
+        }
+    }, [canvasEditor, syncSelection])
+
+    const resizeImage = useCallback((width, height, { commit = false } = {}) => {
+        if (!canvasEditor || !selectedImage) return
+
+        const base = getBaseSize(selectedImage)
+        const safeWidth = clamp(Math.round(width) || 1, 1, 20000)
+        const safeHeight = clamp(Math.round(height) || 1, 1, 20000)
+        selectedImage.set({
+            scaleX: safeWidth / base.width,
+            scaleY: safeHeight / base.height,
+        })
+        selectedImage.setCoords()
+        canvasEditor.setActiveObject(selectedImage)
+        canvasEditor.requestRenderAll()
+
+        if (commit) {
+            setCurrentSize({ width: safeWidth, height: safeHeight })
+            canvasEditor.fire('object:modified', { target: selectedImage })
+            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__saveCanvasState?.()
+        }
+    }, [canvasEditor, selectedImage])
+
+    const handleWidthChange = (value) => {
+        const width = clamp(parseInt(value, 10) || 1, 1, 20000)
+        const height = lockAspectRatio ? Math.max(1, Math.round(width * aspectRatio)) : newHeight
+        setNewWidth(width)
+        setNewHeight(height)
+        setScalePercent(Math.round((width / baseSize.width) * 100))
     }
 
     const handleHeightChange = (value) => {
-        const height = parseInt(value) || 0
+        const height = clamp(parseInt(value, 10) || 1, 1, 20000)
+        const width = lockAspectRatio ? Math.max(1, Math.round(height / aspectRatio)) : newWidth
         setNewHeight(height)
+        setNewWidth(width)
+        setScalePercent(Math.round((width / baseSize.width) * 100))
+    }
 
-        if (lockAspectRatio && project) {
-            const ratio = project.width / project.height        // Current aspect ratio
-            setNewWidth(Math.round(height * ratio))             // Apply ratio to new height
+    const setImageScale = (percent, commit = false) => {
+        if (!selectedImage) return
+        const nextScale = clamp(percent, 1, 500)
+        const width = Math.max(1, Math.round(baseSize.width * (nextScale / 100)))
+        const height = Math.max(1, Math.round(baseSize.height * (nextScale / 100)))
+        setScalePercent(nextScale)
+        setNewWidth(width)
+        setNewHeight(height)
+        resizeImage(width, height, { commit })
+    }
+
+    const applyImageResize = () => {
+        if (!selectedImage) {
+            toast.error('Select an image layer first')
+            return
         }
 
-        setSelectedPreset(null)
+        resizeImage(newWidth, newHeight, { commit: true })
+        toast.success('Image resized')
     }
-    const calculateAspectRatioDimensions = (ratio) => {
-        if (!project)
-            return { width: newWidth, height: newHeight }
 
-        const [ratioW, ratioH] = ratio
-        const originalArea = project.width * project.height      // Preserve total pixel area
+    const fitImageToCanvas = (mode) => {
+        if (!selectedImage || !project?.width || !project?.height) return
+        const fitScale = mode === 'fill'
+            ? Math.max(project.width / baseSize.width, project.height / baseSize.height)
+            : Math.min(project.width / baseSize.width, project.height / baseSize.height)
+        setImageScale(Math.round(fitScale * 100), true)
+        toast.success(mode === 'fill' ? 'Image filled the canvas frame' : 'Image fit inside the canvas frame')
+    }
 
-        const aspectRatio = ratioW / ratioH
-        const newHeight = Math.sqrt(originalArea / aspectRatio)
-        const newWidth = newHeight * aspectRatio
+    const handleCanvasWidthChange = (value) => {
+        const width = clamp(parseInt(value, 10) || 1, 1, 20000)
+        const height = lockCanvasAspectRatio ? Math.max(1, Math.round(width * projectAspectRatio)) : canvasHeight
+        setCanvasWidth(width)
+        setCanvasHeight(height)
+    }
 
-        return {
-            width: Math.round(newWidth),
-            height: Math.round(newHeight)
+    const handleCanvasHeightChange = (value) => {
+        const height = clamp(parseInt(value, 10) || 1, 1, 20000)
+        const width = lockCanvasAspectRatio ? Math.max(1, Math.round(height / projectAspectRatio)) : canvasWidth
+        setCanvasHeight(height)
+        setCanvasWidth(width)
+    }
+
+    const applyCanvasResize = async () => {
+        if (!project?._id || !canvasEditor) return
+        const width = clamp(Math.round(canvasWidth) || 1, 1, 20000)
+        const height = clamp(Math.round(canvasHeight) || 1, 1, 20000)
+        if (width === project.width && height === project.height) {
+            toast.message('Canvas size is already applied')
+            return
         }
-    }
 
-    const applyAspectRatio = (aspectRatio) => {
-        const dimensions = calculateAspectRatioDimensions(aspectRatio.ratio)
-        setNewHeight(dimensions.height)
-        setNewWidth(dimensions.width)
-        setSelectedPreset(aspectRatio.name)
-    }
-
-    const handleApplyResize = async () => {
-
-        if (!canvasEditor || !project || (newWidth === project.width && newHeight === project.height))
-            return                                              // No changes needed
-
-        setProcessingMessage("Resizing Canvas...")
-
+        const toastId = toast.loading('Updating canvas size...')
         try {
-            canvasEditor.__fitCanvasToProject?.({ width: newWidth, height: newHeight })
-            canvasEditor.calcOffset()
-            canvasEditor.requestRenderAll()
-
+            canvasEditor.__fitCanvasToProject?.({ width, height })
             await updateProject({
                 projectId: project._id,
-                width: newWidth,
-                height: newHeight,
-                canvasState: serializeCanvasState(canvasEditor), // Save current canvas state and viewport
+                width,
+                height,
+                canvasState: serializeCanvasState(canvasEditor),
             })
+            canvasEditor.__pushHistoryState?.()
+            toast.success('Canvas size updated', { id: toastId })
         } catch (error) {
-            console.error("Error resizing canvas: ", error)
-            toast.error("Failed to resize canvas. Please try again.")
-        } finally {
-            setProcessingMessage(null)
+            console.error('[Resize] Failed to update canvas size:', error)
+            toast.error(error?.message || 'Failed to update canvas size', { id: toastId })
         }
     }
 
     if (!canvasEditor || !project) {
         return (
             <div className='p-4'>
-                <p className='text-white/70 text-sm'>
-                    Canvas not ready
-                </p>
+                <p className='text-white/70 text-sm'>Canvas not ready</p>
             </div>
         )
     }
 
-    const hasChanges = newWidth !== project.width || newHeight !== project.height
+    const hasChanges = selectedImage && (newWidth !== currentSize.width || newHeight !== currentSize.height)
+    const hasCanvasChanges = project && (canvasWidth !== project.width || canvasHeight !== project.height)
 
     return (
         <div className='space-y-4'>
             <div className='panel-card'>
-                <label className='panel-label'>Current Size</label>
-                <div className='text-xs mt-1.5 font-mono' style={{ color: 'var(--text-secondary)' }}>
-                    {project.width} × {project.height} px
-                </div>
-            </div>
-
-            <div className='space-y-3'>
-                <div className='flex items-center justify-between'>
-                    <label className='panel-label'>Custom Size</label>
+                <div className='flex items-center justify-between gap-2'>
+                    <label className='panel-label'>Canvas Size</label>
                     <button
-                        onClick={() => setLockAspectRatio(!lockAspectRatio)}
-                        className="flex items-center justify-center w-7 h-7 rounded-lg editor-interactive"
-                        style={{ color: lockAspectRatio ? dominantColor || 'var(--accent-primary)' : 'var(--text-muted)', background: 'transparent' }}
+                        type='button'
+                        onClick={() => setLockCanvasAspectRatio(!lockCanvasAspectRatio)}
+                        className="flex h-7 w-7 items-center justify-center rounded-lg editor-interactive"
+                        style={{ color: lockCanvasAspectRatio ? dominantColor || 'var(--accent-primary)' : 'var(--text-muted)', background: 'transparent' }}
+                        title={lockCanvasAspectRatio ? 'Unlock canvas aspect ratio' : 'Lock canvas aspect ratio'}
                     >
-                        {lockAspectRatio ? <Lock className='h-3.5 w-3.5' /> : <Unlock className='h-3.5 w-3.5' />}
+                        {lockCanvasAspectRatio ? <Lock className='h-3.5 w-3.5' /> : <Unlock className='h-3.5 w-3.5' />}
                     </button>
                 </div>
-                <div className='grid grid-cols-2 gap-2'>
+
+                <div className='mt-3 grid grid-cols-2 gap-2'>
                     <div>
-                        <label className='text-[10px] mb-1 block' style={{ color: 'var(--text-muted)' }}>Width</label>
+                        <label className='mb-1 block text-[10px]' style={{ color: 'var(--text-muted)' }}>Width</label>
                         <input
                             type="number"
-                            value={newWidth}
-                            onChange={(e) => handleWidthChange(e.target.value)}
-                            min="100"
-                            max="5000"
+                            value={canvasWidth}
+                            onChange={(e) => handleCanvasWidthChange(e.target.value)}
+                            min="1"
+                            max="20000"
                             className="panel-input"
                         />
                     </div>
                     <div>
-                        <label className='text-[10px] mb-1 block' style={{ color: 'var(--text-muted)' }}>Height</label>
+                        <label className='mb-1 block text-[10px]' style={{ color: 'var(--text-muted)' }}>Height</label>
                         <input
                             type="number"
-                            value={newHeight}
-                            onChange={(e) => handleHeightChange(e.target.value)}
-                            min="100"
-                            max="5000"
+                            value={canvasHeight}
+                            onChange={(e) => handleCanvasHeightChange(e.target.value)}
+                            min="1"
+                            max="20000"
                             className="panel-input"
                         />
                     </div>
                 </div>
-                <div className='text-[10px]' style={{ color: 'var(--text-muted)' }}>
-                    {lockAspectRatio ? "🔒 Aspect ratio locked" : "🔓 Free resize"}
-                </div>
+
+                <button
+                    type='button'
+                    onClick={applyCanvasResize}
+                    disabled={!hasCanvasChanges}
+                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
+                    style={{
+                        background: hasCanvasChanges ? dominantColor || 'var(--accent-primary)' : 'var(--bg-elevated)',
+                        color: hasCanvasChanges ? contrastingColor || '#fff' : 'var(--text-secondary)',
+                        border: hasCanvasChanges ? 'none' : '1px solid var(--border-subtle)',
+                        boxShadow: hasCanvasChanges ? `0 0 30px ${dominantColor || '#06b8d4'}40` : 'none',
+                    }}
+                >
+                    <Maximize2 className='h-3.5 w-3.5' />
+                    Apply Canvas Size
+                </button>
             </div>
 
-            <div className='space-y-2.5'>
-                <label className='panel-label'>Aspect Ratios</label>
-                <div className='grid grid-cols-1 max-h-56 overflow-y-auto gap-1.5 panel-scroll'>
-                    {ASPECT_RATIOS.map((aspectRatio) => {
-                        const dimensions = calculateAspectRatioDimensions(aspectRatio.ratio)
-                        const active = selectedPreset === aspectRatio.name
-
-                        return (
+            {!selectedImage ? (
+                <div className='panel-card flex flex-col items-center justify-center gap-3 text-center'>
+                    <ImageIcon className='h-6 w-6' style={{ color: dominantColor || 'var(--accent-primary)' }} />
+                    <div>
+                        <p className='text-xs font-semibold' style={{ color: 'var(--text-primary)' }}>Select an image layer</p>
+                        <p className='mt-1 text-[11px]' style={{ color: 'var(--text-muted)' }}>Choose an image on the canvas or in Layers to resize it.</p>
+                    </div>
+                </div>
+            ) : (
+                <>
+                    <div className='space-y-3'>
+                        <div className='flex items-center justify-between'>
+                            <label className='panel-label'>Image Size</label>
                             <button
-                                key={aspectRatio.name}
-                                onClick={() => applyAspectRatio(aspectRatio)}
-                                className='flex items-center justify-between rounded-lg px-3 py-2 text-left editor-interactive'
+                                type='button'
+                                onClick={() => setLockAspectRatio(!lockAspectRatio)}
+                                className="flex h-7 w-7 items-center justify-center rounded-lg editor-interactive"
+                                style={{ color: lockAspectRatio ? dominantColor || 'var(--accent-primary)' : 'var(--text-muted)', background: 'transparent' }}
+                                title={lockAspectRatio ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
+                            >
+                                {lockAspectRatio ? <Lock className='h-3.5 w-3.5' /> : <Unlock className='h-3.5 w-3.5' />}
+                            </button>
+                        </div>
+
+                        <div className='grid grid-cols-2 gap-2'>
+                            <div>
+                                <label className='mb-1 block text-[10px]' style={{ color: 'var(--text-muted)' }}>Width</label>
+                                <input
+                                    type="number"
+                                    value={newWidth}
+                                    onChange={(e) => handleWidthChange(e.target.value)}
+                                    min="1"
+                                    max="20000"
+                                    className="panel-input"
+                                />
+                            </div>
+                            <div>
+                                <label className='mb-1 block text-[10px]' style={{ color: 'var(--text-muted)' }}>Height</label>
+                                <input
+                                    type="number"
+                                    value={newHeight}
+                                    onChange={(e) => handleHeightChange(e.target.value)}
+                                    min="1"
+                                    max="20000"
+                                    className="panel-input"
+                                />
+                            </div>
+                        </div>
+
+                        <ProRulerSlider
+                            variant="instrument"
+                            value={scalePercent}
+                            min={1}
+                            max={500}
+                            step={1}
+                            label="Scale"
+                            suffix="%"
+                            onPreview={(value) => setImageScale(value, false)}
+                            onCommit={(value) => setImageScale(value, true)}
+                            visual={{
+                                fill: 'rgba(47, 143, 203, 0.45)',
+                                accent: dominantColor || '#5eb8ff',
+                                trackBg: 'rgba(18, 22, 30, 0.96)',
+                            }}
+                        />
+                    </div>
+
+                    <div className='grid grid-cols-2 gap-1.5'>
+                        {[
+                            { label: 'Original', icon: ImageIcon, action: () => setImageScale(100, true) },
+                            { label: '50%', icon: Expand, action: () => setImageScale(50, true) },
+                            { label: 'Fit', icon: Maximize2, action: () => fitImageToCanvas('fit') },
+                            { label: 'Fill', icon: Maximize2, action: () => fitImageToCanvas('fill') },
+                        ].map(({ label, icon: Icon, action }) => (
+                            <button
+                                key={label}
+                                type='button'
+                                onClick={action}
+                                className='flex h-8 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive'
                                 style={{
-                                    border: `1px solid ${active ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                    background: active ? `${dominantColor}1a` : 'var(--bg-elevated)',
+                                    background: 'var(--bg-elevated)',
+                                    border: '1px solid var(--border-subtle)',
+                                    color: 'var(--text-secondary)',
                                 }}
                             >
-                                <div>
-                                    <div className='text-xs font-medium' style={{ color: active ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
-                                        {aspectRatio.name}
-                                    </div>
-                                    <div className='text-[10px] mt-0.5' style={{ color: 'var(--text-muted)' }}>
-                                        {dimensions.width} × {dimensions.height} ({aspectRatio.label})
-                                    </div>
-                                </div>
-                                <Monitor className='h-3.5 w-3.5' style={{ color: active ? dominantColor || 'var(--accent-primary)' : 'var(--text-muted)' }} />
+                                <Icon className='h-3.5 w-3.5' />
+                                {label}
                             </button>
-                        )
-                    })}
-                </div>
-            </div>
-
-            {hasChanges && (
-                <div className='panel-card' style={{ borderColor: 'rgba(6, 184, 212, 0.2)' }}>
-                    <label className='panel-label'>New Size</label>
-                    <div className='text-xs mt-1.5' style={{ color: 'var(--text-secondary)' }}>
-                        <div className="font-mono">{newWidth} × {newHeight} px</div>
-                        <div className='mt-1' style={{ color: 'var(--accent-primary)' }}>
-                            {newWidth > project.width || newHeight > project.height
-                                ? "↗ Canvas will expand"
-                                : "↙ Canvas will crop"
-                            }
-                        </div>
-                        <div className='mt-1' style={{ color: 'var(--text-muted)' }}>
-                            Objects maintain their size and position
-                        </div>
+                        ))}
                     </div>
-                </div>
+
+                    {hasChanges && (
+                        <div className='panel-card' style={{ borderColor: 'rgba(6, 184, 212, 0.2)' }}>
+                            <label className='panel-label'>Pending Image Size</label>
+                            <div className='mt-1.5 text-xs' style={{ color: 'var(--text-secondary)' }}>
+                                <div className="font-mono">{newWidth} × {newHeight} px</div>
+                                <div className='mt-1' style={{ color: 'var(--accent-primary)' }}>
+                                    Canvas remains {project.width} × {project.height} px
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    <button
+                        type='button'
+                        onClick={applyImageResize}
+                        disabled={!hasChanges}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
+                        style={{
+                            background: dominantColor || 'var(--accent-primary)',
+                            color: contrastingColor || '#fff',
+                            border: 'none',
+                            boxShadow: hasChanges ? `0 0 30px ${dominantColor || '#06b8d4'}40` : 'none',
+                        }}
+                    >
+                        <Expand className='h-3.5 w-3.5' />
+                        Apply Image Resize
+                    </button>
+                </>
             )}
-
-            <button
-                onClick={handleApplyResize}
-                disabled={!hasChanges || processingMessage}
-                className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
-                style={{ 
-                    background: dominantColor || 'var(--accent-primary)', 
-                    color: contrastingColor || '#fff', 
-                    border: 'none',
-                    boxShadow: hasChanges ? `0 0 30px ${dominantColor}40` : 'none' 
-                }}
-            >
-                <Expand className='h-3.5 w-3.5' />
-                Apply Resize
-            </button>
-
-            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(6, 184, 212, 0.1)' }}>
-                <p style={{ color: 'var(--text-muted)' }}>
-                    <strong style={{ color: 'var(--text-secondary)' }}>Resize:</strong> Changes canvas dimensions
-                    <br />
-                    <strong style={{ color: 'var(--text-secondary)' }}>Ratios:</strong> Smart sizing based on your canvas
-                    <br />
-                    Objects maintain their size and position
-                </p>
-            </div>
-        </div >
+        </div>
     )
 }
 

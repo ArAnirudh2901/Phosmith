@@ -7,12 +7,15 @@ import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { createPortal } from 'react-dom'
 
-const ASPECT_RATIOS = [
-    { label: "Freeform", value: null, icon: Maximize },
-    { label: "Square", value: 1, icon: Square, ratio: "1:1" },
-    { label: "Widescreen", value: 16 / 9, icon: RectangleHorizontal, ratio: "16:9" },
-    { label: "Portrait", value: 4 / 5, icon: RectangleVertical, ratio: "4:5" },
-    { label: "Story", value: 9 / 16, icon: Smartphone, ratio: "9:16" },
+const CROP_PRESETS = [
+    { id: "freeform", label: "Freeform", value: null, icon: Maximize, ratio: "Any" },
+    { id: "square", label: "Square Post", value: 1, icon: Square, ratio: "1:1", size: "1080×1080" },
+    { id: "instagram-portrait", label: "IG Portrait", value: 4 / 5, icon: RectangleVertical, ratio: "4:5", size: "1080×1350" },
+    { id: "instagram-story", label: "IG Story", value: 9 / 16, icon: Smartphone, ratio: "9:16", size: "1080×1920" },
+    { id: "youtube-thumbnail", label: "YouTube Thumb", value: 16 / 9, icon: RectangleHorizontal, ratio: "16:9", size: "1280×720" },
+    { id: "youtube-short", label: "YouTube Short", value: 9 / 16, icon: Smartphone, ratio: "9:16", size: "1080×1920" },
+    { id: "pinterest-pin", label: "Pinterest Pin", value: 2 / 3, icon: RectangleVertical, ratio: "2:3", size: "1000×1500" },
+    { id: "facebook-cover", label: "FB Cover", value: 820 / 312, icon: RectangleHorizontal, ratio: "820:312", size: "820×312" },
 ]
 
 const HANDLE_SIZE = 10
@@ -55,33 +58,130 @@ const getImageCanvasBounds = (image) => {
     return { left, top, width: w, height: h }
 }
 
+const getCropBoxForPreset = (image, ratioValue) => {
+    const imgBounds = getImageCanvasBounds(image)
+    if (!imgBounds) return null
+
+    let nextWidth = imgBounds.width
+    let nextHeight = imgBounds.height
+
+    if (ratioValue) {
+        const maxWidthFromHeight = imgBounds.height * ratioValue
+
+        if (maxWidthFromHeight <= imgBounds.width) {
+            nextWidth = maxWidthFromHeight
+            nextHeight = imgBounds.height
+        } else {
+            nextWidth = imgBounds.width
+            nextHeight = imgBounds.width / ratioValue
+        }
+    }
+
+    return {
+        left: imgBounds.left + (imgBounds.width - nextWidth) / 2,
+        top: imgBounds.top + (imgBounds.height - nextHeight) / 2,
+        width: nextWidth,
+        height: nextHeight,
+    }
+}
+
+const isCropBoxInsideImage = (cropBox, image) => {
+    const imgBounds = getImageCanvasBounds(image)
+    if (!cropBox || !imgBounds) return false
+    const tolerance = 0.5
+    return (
+        cropBox.left >= imgBounds.left - tolerance &&
+        cropBox.top >= imgBounds.top - tolerance &&
+        cropBox.left + cropBox.width <= imgBounds.left + imgBounds.width + tolerance &&
+        cropBox.top + cropBox.height <= imgBounds.top + imgBounds.height + tolerance
+    )
+}
+
+const hasUnsupportedCropTransform = (image) => {
+    const angle = Math.abs(((image?.angle || 0) % 360 + 360) % 360)
+    const hasRotation = angle > 0.01 && Math.abs(angle - 360) > 0.01
+    return hasRotation || Math.abs(image?.skewX || 0) > 0.01 || Math.abs(image?.skewY || 0) > 0.01
+}
+
+const copyDefinedProps = (source, keys) => {
+    const props = {}
+    keys.forEach((key) => {
+        if (source?.[key] !== undefined) props[key] = source[key]
+    })
+    return props
+}
+
+const PRESERVED_IMAGE_PROPS = [
+    'opacity',
+    'visible',
+    'flipX',
+    'flipY',
+    'lockMovementX',
+    'lockMovementY',
+    'lockScalingX',
+    'lockScalingY',
+    'lockRotation',
+    'lockSkewingX',
+    'lockSkewingY',
+    'lockScalingFlip',
+    'hoverCursor',
+    'moveCursor',
+    'perPixelTargetFind',
+    'globalCompositeOperation',
+    'name',
+    'id',
+    'data',
+]
+
+const canvasToPngBlob = (canvas) =>
+    new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (blob) resolve(blob)
+            else reject(new Error("Could not encode cropped image"))
+        }, 'image/png')
+    })
+
+const uploadCroppedCanvas = async (canvas) => {
+    const blob = await canvasToPngBlob(canvas)
+    const fileName = `crop-${Date.now()}.png`
+    const formData = new FormData()
+    formData.append('fileName', fileName)
+    formData.append('rasterFile', blob, fileName)
+    formData.append('rasterFileName', fileName)
+    formData.append('rasterWidth', String(canvas.width))
+    formData.append('rasterHeight', String(canvas.height))
+
+    const response = await fetch('/api/imagekit/upload', {
+        method: 'POST',
+        body: formData,
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.success || !data?.url) {
+        throw new Error(data?.error || 'Could not upload cropped image')
+    }
+    return data.url
+}
+
 // ─── Crop Overlay ────────────────────────────────────────────────────────────
 // Renders as an HTML overlay on top of the canvas. Handles are attached
 // to the crop region's borders, just like Photoshop / Canva.
 
-const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl }) => {
+const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl, interactionMode }) => {
     const draggingRef = useRef(null) // { type: 'move'|'handle', handle?, startMouse, startBox }
 
     if (!canvasEditor || !image || !cropBox || !containerEl) return null
+    const isImageAdjustMode = interactionMode === 'image'
 
     const imgBounds = getImageCanvasBounds(image)
     if (!imgBounds) return null
 
     // Convert image bounds & crop box from canvas-space to screen-space
-    const imgScreen = {
-        ...canvasToScreen(canvasEditor, imgBounds.left, imgBounds.top),
-        w: imgBounds.width * (canvasEditor.viewportTransform?.[0] || 1),
-        h: imgBounds.height * (canvasEditor.viewportTransform?.[3] || 1),
-    }
-
     const cropScreen = {
         x: canvasToScreen(canvasEditor, cropBox.left, cropBox.top).x,
         y: canvasToScreen(canvasEditor, cropBox.left, cropBox.top).y,
         w: cropBox.width * (canvasEditor.viewportTransform?.[0] || 1),
         h: cropBox.height * (canvasEditor.viewportTransform?.[3] || 1),
     }
-
-    const containerRect = containerEl.getBoundingClientRect()
 
     // Positions relative to the container
     const rel = (screenX, screenY) => ({
@@ -90,7 +190,6 @@ const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl }
     })
 
     const cropRel = rel(cropScreen.x, cropScreen.y)
-    const imgRel = rel(imgScreen.x, imgScreen.y)
 
     // Handle definitions: corners + edge midpoints
     const handles = [
@@ -227,8 +326,8 @@ const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl }
                     width: cropScreen.w,
                     height: cropScreen.h,
                     border: '2px solid #00E5FF',
-                    cursor: 'move',
-                    pointerEvents: 'auto',
+                    cursor: isImageAdjustMode ? 'default' : 'move',
+                    pointerEvents: isImageAdjustMode ? 'none' : 'auto',
                     boxSizing: 'border-box',
                 }}
                 onPointerDown={(e) => handlePointerDown(e, 'move', null)}
@@ -241,7 +340,7 @@ const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl }
             </div>
 
             {/* Drag handles */}
-            {handles.map((h) => {
+            {!isImageAdjustMode && handles.map((h) => {
                 const hx = cropRel.left + cropScreen.w * h.cx - HANDLE_SIZE / 2
                 const hy = cropRel.top + cropScreen.h * h.cy - HANDLE_SIZE / 2
                 const isCorner = h.id.length === 2
@@ -296,7 +395,8 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
     const { canvasEditor, activeTool } = useCanvas()
     const [selectedImage, setSelectedImage] = useState(null)
     const [isCropMode, setIsCropMode] = useState(false)
-    const [selectedRatio, setSelectedRatio] = useState(null)
+    const [selectedPresetId, setSelectedPresetId] = useState("freeform")
+    const [interactionMode, setInteractionMode] = useState("frame")
     const [cropBox, setCropBox] = useState(null) // { left, top, width, height } in canvas-space
     const [originalProps, setOriginalProps] = useState(null)
     const [containerEl, setContainerEl] = useState(null)
@@ -321,7 +421,8 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
     const resetCropState = useCallback(() => {
         setCropBox(null)
         setSelectedImage(null)
-        setSelectedRatio(null)
+        setSelectedPresetId("freeform")
+        setInteractionMode("frame")
         setOriginalProps(null)
         setIsCropMode(false)
     }, [])
@@ -334,6 +435,8 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                 ...originalProps,
                 selectable: originalProps.selectable ?? true,
                 evented: originalProps.evented ?? true,
+                hasControls: originalProps.hasControls ?? true,
+                hasBorders: originalProps.hasBorders ?? true,
             })
             canvasEditor.setActiveObject(selectedImage)
         } else {
@@ -344,7 +447,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         canvasEditor.requestRenderAll()
     }, [canvasEditor, isCropMode, selectedImage, originalProps, resetCropState])
 
-    const initializeCropMode = useCallback((image) => {
+    const initializeCropMode = useCallback((image, preset = CROP_PRESETS[0]) => {
         if (!image || isCropMode || !canvasEditor) return
 
         const original = {
@@ -357,25 +460,21 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
             angle: image.angle,
             selectable: image.selectable,
             evented: image.evented,
+            hasControls: image.hasControls,
+            hasBorders: image.hasBorders,
         }
 
         setOriginalProps(original)
         setSelectedImage(image)
+        setSelectedPresetId(preset.id)
+        setInteractionMode("frame")
         setIsCropMode(true)
 
-        // Set crop box to full image bounds
-        const bounds = getImageCanvasBounds(image)
-        if (bounds) {
-            setCropBox({
-                left: bounds.left,
-                top: bounds.top,
-                width: bounds.width,
-                height: bounds.height,
-            })
-        }
+        const box = getCropBoxForPreset(image, preset.value)
+        if (box) setCropBox(box)
 
         // Disable image interaction while cropping
-        image.set({ selectable: false, evented: false })
+        image.set({ selectable: false, evented: false, hasControls: false, hasBorders: false })
         canvasEditor.discardActiveObject()
         canvasEditor.requestRenderAll()
     }, [isCropMode, canvasEditor])
@@ -384,46 +483,73 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         setCropBox(newBox)
     }, [])
 
-    const applyAspectRatio = useCallback((ratioValue) => {
-        if (!canvasEditor || !cropBox || !selectedImage) return
+    const applyCropPreset = useCallback((preset) => {
+        if (!canvasEditor || !selectedImage) return
 
-        setSelectedRatio(ratioValue)
+        setSelectedPresetId(preset.id)
 
-        const imgBounds = getImageCanvasBounds(selectedImage)
-        if (!imgBounds) return
+        const box = getCropBoxForPreset(selectedImage, preset.value)
+        if (box) setCropBox(box)
+        setInteractionMode("frame")
+    }, [canvasEditor, selectedImage])
 
-        let nextWidth = imgBounds.width
-        let nextHeight = imgBounds.height
+    const handlePresetSelect = useCallback((preset) => {
+        const image = selectedImage || getActiveImage(canvasEditor)
+        if (!image) {
+            toast.error("Select an image first")
+            return
+        }
+        if (!isCropMode) {
+            initializeCropMode(image, preset)
+            return
+        }
+        applyCropPreset(preset)
+    }, [applyCropPreset, canvasEditor, getActiveImage, initializeCropMode, isCropMode, selectedImage])
 
-        if (ratioValue) {
-            const maxWidthFromHeight = imgBounds.height * ratioValue
+    useEffect(() => {
+        if (!canvasEditor || !selectedImage || !isCropMode) return
 
-            if (maxWidthFromHeight <= imgBounds.width) {
-                nextWidth = maxWidthFromHeight
-                nextHeight = imgBounds.height
-            } else {
-                nextWidth = imgBounds.width
-                nextHeight = imgBounds.width / ratioValue
-            }
+        const canAdjustImage = interactionMode === "image"
+        selectedImage.set({
+            selectable: canAdjustImage,
+            evented: canAdjustImage,
+            hasControls: canAdjustImage,
+            hasBorders: canAdjustImage,
+        })
+
+        if (canAdjustImage) {
+            canvasEditor.setActiveObject(selectedImage)
+        } else {
+            canvasEditor.discardActiveObject()
         }
 
-        setCropBox({
-            left: imgBounds.left + (imgBounds.width - nextWidth) / 2,
-            top: imgBounds.top + (imgBounds.height - nextHeight) / 2,
-            width: nextWidth,
-            height: nextHeight,
-        })
-    }, [canvasEditor, cropBox, selectedImage])
+        selectedImage.setCoords()
+        canvasEditor.requestRenderAll()
+    }, [canvasEditor, selectedImage, isCropMode, interactionMode])
 
-    const applyCrop = useCallback(() => {
+    const applyCrop = useCallback(async () => {
         if (!canvasEditor || !selectedImage || !cropBox) return
+        const toastId = toast.loading("Cropping image...")
 
         try {
+            if (hasUnsupportedCropTransform(selectedImage)) {
+                toast.error("Crop currently supports straight images only. Reset rotation/skew first.", { id: toastId })
+                return
+            }
+
             const imgBounds = getImageCanvasBounds(selectedImage)
             if (!imgBounds) throw new Error("Cannot determine image bounds")
 
-            const imageScaleX = selectedImage.scaleX || 1
-            const imageScaleY = selectedImage.scaleY || 1
+            if (!isCropBoxInsideImage(cropBox, selectedImage)) {
+                toast.error("Move or scale the image so it covers the crop frame", { id: toastId })
+                return
+            }
+
+            const originalIndex = canvasEditor.getObjects().indexOf(selectedImage)
+            if (originalIndex < 0) throw new Error("Selected image is no longer on the canvas")
+
+            const imageScaleX = Math.abs(selectedImage.scaleX || 1)
+            const imageScaleY = Math.abs(selectedImage.scaleY || 1)
 
             // Convert crop box canvas-coords to source image pixel coords
             const cropX = (cropBox.left - imgBounds.left) / imageScaleX
@@ -432,23 +558,34 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
             const cropHeight = cropBox.height / imageScaleY
 
             if (cropWidth <= 1 || cropHeight <= 1) {
-                toast.error("Choose a larger crop area")
+                toast.error("Choose a larger crop area", { id: toastId })
                 return
             }
 
             const sourceElement =
+                selectedImage._originalElement ||
                 selectedImage.getElement?.() ||
-                selectedImage._element ||
-                selectedImage._originalElement
+                selectedImage._element
 
             if (!sourceElement) throw new Error("Selected image is not ready")
 
             // Offscreen canvas to extract cropped pixels
             const offscreen = document.createElement('canvas')
-            const sx = Math.max(0, Math.round(cropX + (selectedImage.cropX || 0)))
-            const sy = Math.max(0, Math.round(cropY + (selectedImage.cropY || 0)))
-            const sw = Math.round(Math.min(cropWidth, (sourceElement.naturalWidth || sourceElement.width) - sx))
-            const sh = Math.round(Math.min(cropHeight, (sourceElement.naturalHeight || sourceElement.height) - sy))
+            const sourceWidth = sourceElement.naturalWidth || sourceElement.videoWidth || sourceElement.width
+            const sourceHeight = sourceElement.naturalHeight || sourceElement.videoHeight || sourceElement.height
+            if (!sourceWidth || !sourceHeight) throw new Error("Selected image source has no dimensions")
+
+            const baseCropX = selectedImage.flipX ? (selectedImage.width || 0) - cropX - cropWidth : cropX
+            const baseCropY = selectedImage.flipY ? (selectedImage.height || 0) - cropY - cropHeight : cropY
+            const sx = Math.max(0, Math.round(baseCropX + (selectedImage.cropX || 0)))
+            const sy = Math.max(0, Math.round(baseCropY + (selectedImage.cropY || 0)))
+            const sw = Math.round(Math.min(cropWidth, sourceWidth - sx))
+            const sh = Math.round(Math.min(cropHeight, sourceHeight - sy))
+
+            if (sw <= 1 || sh <= 1) {
+                toast.error("Choose a larger crop area", { id: toastId })
+                return
+            }
 
             offscreen.width = sw
             offscreen.height = sh
@@ -456,22 +593,34 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
             const ctx = offscreen.getContext('2d')
             ctx.drawImage(sourceElement, sx, sy, sw, sh, 0, 0, sw, sh)
 
-            const croppedImage = new FabricImage(offscreen, {
-                left: 0,
-                top: 0,
+            const uploadedUrl = await uploadCroppedCanvas(offscreen)
+            const croppedImage = await FabricImage.fromURL(uploadedUrl, { crossOrigin: 'anonymous' })
+            croppedImage.set({
+                ...copyDefinedProps(selectedImage, PRESERVED_IMAGE_PROPS),
+                left: cropBox.left,
+                top: cropBox.top,
                 originX: "left",
                 originY: "top",
-                selectable: true,
-                evented: true,
-                scaleX: 1,
-                scaleY: 1,
+                selectable: originalProps?.selectable ?? true,
+                evented: originalProps?.evented ?? true,
+                hasControls: originalProps?.hasControls ?? true,
+                hasBorders: originalProps?.hasBorders ?? true,
+                angle: 0,
+                skewX: 0,
+                skewY: 0,
+                cropX: 0,
+                cropY: 0,
+                scaleX: cropBox.width / sw,
+                scaleY: cropBox.height / sh,
+                filters: selectedImage.filters?.slice?.() || [],
+                resizeFilter: selectedImage.resizeFilter,
             })
+            if (croppedImage.filters?.length) {
+                croppedImage.applyFilters()
+            }
 
             canvasEditor.remove(selectedImage)
-            canvasEditor.add(croppedImage)
-
-            // Let the project-level resize handler fit the canvas to new dimensions
-            canvasEditor.__fitCanvasToProject?.({ width: sw, height: sh })
+            canvasEditor.insertAt(originalIndex, croppedImage)
             canvasEditor.setActiveObject(croppedImage)
             croppedImage.setCoords()
             canvasEditor.requestRenderAll()
@@ -479,13 +628,13 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
 
             canvasEditor.__pushHistoryState?.()
             canvasEditor.__saveCanvasState?.()
-            toast.success("Crop applied")
+            toast.success("Crop applied", { id: toastId })
         } catch (error) {
             console.error("Error applying crop: ", error)
-            toast.error("Failed to apply crop, please try again")
+            toast.error(error?.message || "Failed to apply crop, please try again", { id: toastId })
             exitCropMode()
         }
-    }, [canvasEditor, selectedImage, cropBox, resetCropState, exitCropMode])
+    }, [canvasEditor, selectedImage, cropBox, originalProps, resetCropState, exitCropMode])
 
     // Cleanup on unmount
     useEffect(() => {
@@ -495,6 +644,8 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                     ...originalProps,
                     selectable: originalProps.selectable ?? true,
                     evented: originalProps.evented ?? true,
+                    hasControls: originalProps.hasControls ?? true,
+                    hasBorders: originalProps.hasBorders ?? true,
                 })
                 canvasEditor.requestRenderAll()
             }
@@ -522,7 +673,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                             ✂️ Crop Mode Active
                         </p>
                         <p className='text-[11px] mt-1' style={{ color: 'var(--text-muted)' }}>
-                            Drag handles to adjust crop area
+                            {interactionMode === "image" ? "Move or scale the image, then crop" : "Drag handles to adjust crop area"}
                         </p>
                     </div>
                 )}
@@ -543,34 +694,65 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                     </button>
                 )}
 
-                {isCropMode && (
+                {activeImage && (
                     <div>
-                        <label className='panel-label mb-2.5 block'>Aspect Ratios</label>
-                        <div className='grid grid-cols-3 gap-1.5'>
-                            {ASPECT_RATIOS.map((ratio) => {
-                                const IconComponent = ratio.icon
-                                const isSelected = selectedRatio === ratio.value
+                        <label className='panel-label mb-2.5 block'>Crop Presets</label>
+                        <div className='grid grid-cols-2 gap-1.5'>
+                            {CROP_PRESETS.map((preset) => {
+                                const IconComponent = preset.icon
+                                const isSelected = isCropMode && selectedPresetId === preset.id
 
                                 return (
                                     <button
-                                        key={ratio.label}
+                                        key={preset.id}
                                         type="button"
-                                        onClick={() => applyAspectRatio(ratio.value)}
-                                        className='rounded-lg p-2.5 text-center editor-interactive'
+                                        onClick={() => handlePresetSelect(preset)}
+                                        className='rounded-lg p-2.5 text-left editor-interactive'
                                         style={{
                                             border: `1px solid ${isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            background: isSelected ? `${dominantColor}1a` : 'var(--bg-elevated)',
+                                            background: isSelected ? (dominantColor ? `${dominantColor}1a` : 'rgba(6,184,212,0.14)') : 'var(--bg-elevated)',
                                         }}
                                     >
-                                        <IconComponent className="mx-auto mb-1.5 h-5 w-5" style={{ color: isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--text-secondary)' }} />
-                                        <div className="text-[10px] font-medium" style={{ color: isSelected ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
-                                            {ratio.label}
-                                        </div>
-                                        {ratio.ratio && (
-                                            <div className="mt-0.5 text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                                                {ratio.ratio}
+                                        <div className="flex items-center gap-2">
+                                            <IconComponent className="h-4 w-4 flex-none" style={{ color: isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--text-secondary)' }} />
+                                            <div className="min-w-0">
+                                                <div className="truncate text-[10px] font-semibold" style={{ color: isSelected ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
+                                                    {preset.label}
+                                                </div>
+                                                <div className="mt-0.5 text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                                                    {preset.ratio}{preset.size ? ` · ${preset.size}` : ''}
+                                                </div>
                                             </div>
-                                        )}
+                                        </div>
+                                    </button>
+                                )
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                {isCropMode && (
+                    <div>
+                        <label className='panel-label mb-2.5 block'>Adjust</label>
+                        <div className='grid grid-cols-2 gap-1.5'>
+                            {[
+                                ["frame", "Frame"],
+                                ["image", "Image"],
+                            ].map(([mode, label]) => {
+                                const isSelected = interactionMode === mode
+                                return (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        onClick={() => setInteractionMode(mode)}
+                                        className="rounded-lg px-3 py-2 text-xs font-semibold editor-interactive"
+                                        style={{
+                                            border: `1px solid ${isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            background: isSelected ? (dominantColor ? `${dominantColor}1a` : 'rgba(6,184,212,0.14)') : 'var(--bg-elevated)',
+                                            color: isSelected ? contrastingColor || 'var(--text-primary)' : 'var(--text-secondary)',
+                                        }}
+                                    >
+                                        {label}
                                     </button>
                                 )
                             })}
@@ -591,7 +773,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                             }}
                         >
                             <CheckCheck className='h-3.5 w-3.5' />
-                            Apply Crop
+                            Crop
                         </button>
 
                         <button
@@ -613,9 +795,9 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                         <br />
                         2. Drag handles on the image edges
                         <br />
-                        3. Choose aspect ratio (optional)
+                        3. Choose a preset or adjust the image
                         <br />
-                        4. Click &quot;Apply Crop&quot; to finalize
+                        4. Click &quot;Crop&quot; to finalize
                     </p>
                 </div>
             </div>
@@ -628,6 +810,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                     cropBox={cropBox}
                     onCropChange={handleCropChange}
                     containerEl={containerEl}
+                    interactionMode={interactionMode}
                 />,
                 containerEl
             )}
