@@ -9,6 +9,8 @@ import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
 import { api } from '../../../../../../../convex/_generated/api'
 import { buildAiEditPresetUrl, ensureCurrentImageKitEndpoint, getCanvasActiveImage, hasImageKitAiTransform, isImageKitUrl, replaceCanvasImageFromUrl } from '../../../../../../lib/imagekit-ai'
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
+import BeforeAfterCompare from '@/components/neo/BeforeAfterCompare'
+import { ArrowLeftRight } from 'lucide-react'
 
 const PRESETS = [
     {
@@ -52,6 +54,8 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
     const [isPreviewing, setIsPreviewing] = useState(false)
     const [isApplying, setIsApplying] = useState(false)
     const [, setImageRevision] = useState(0)
+    const [comparison, setComparison] = useState(null)
+    const [isCompareOpen, setIsCompareOpen] = useState(false)
 
     useEffect(() => {
         if (!canvasEditor) return undefined
@@ -292,48 +296,32 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
 
             setProcessingMessage('Loading enhanced image...')
             const didUpscale = !usedFallback && requestedUpscale && readyUrl.includes('e-upscale')
+            const beforeUrlForComparison = didUpscale ? sourceUrl : null
             const nextImage = await replaceCanvasImageFromUrl(canvasEditor, activeImage, readyUrl, {
-                preserveDisplayedBounds: !didUpscale,
-                placement: didUpscale ? 'native' : 'fit',
+                preserveDisplayedBounds: true,
+                placement: 'fit',
             })
             const nextWidth = Math.max(1, Math.round(nextImage?.width || project?.width || 1))
             const nextHeight = Math.max(1, Math.round(nextImage?.height || project?.height || 1))
 
-            if (didUpscale) {
-                console.log('[AI Edit] upscale dimensions resolved', {
-                    preset: selectedPreset,
-                    readyUrl,
-                    nextWidth,
-                    nextHeight,
-                    previousProjectWidth: project?.width,
-                    previousProjectHeight: project?.height,
-                })
-                canvasEditor.__fitCanvasToProject?.({ width: nextWidth, height: nextHeight })
-            }
-
             setPreviewUrl(readyUrl)
+
+            if (didUpscale && beforeUrlForComparison) {
+                setComparison({ beforeUrl: beforeUrlForComparison, afterUrl: readyUrl, width: nextWidth, height: nextHeight })
+            }
 
             await updateProject({
                 projectId: project._id,
                 currentImageUrl: readyUrl,
-                ...(didUpscale ? { width: nextWidth, height: nextHeight } : {}),
                 canvasState: serializeCanvasState(canvasEditor),
-            })
-
-            console.log('[AI Edit] project updated', {
-                preset: selectedPreset,
-                requestedUpscale,
-                didUpscale,
-                usedFallback,
-                currentImageUrl: readyUrl,
-                width: didUpscale ? nextWidth : project?.width,
-                height: didUpscale ? nextHeight : project?.height,
             })
 
             if (usedFallback) {
                 toast.warning('AI extension units exhausted — applied free enhancements (contrast + sharpen) instead.')
             } else if (didUpscale) {
-                toast.success(`Upscaled to ${nextWidth} × ${nextHeight}`)
+                toast.success(`Upscaled to ${nextWidth} × ${nextHeight}`, {
+                    description: 'Image kept at the same visual size. Click Compare to view before/after.',
+                })
             } else {
                 toast.success('AI edit applied')
             }
@@ -364,12 +352,12 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                                 className='rounded-lg p-3 text-left editor-interactive'
                                 style={{
                                     border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                    background: active ? 'rgba(0, 229, 255, 0.1)' : 'var(--bg-elevated)',
+                                    background: active ? 'rgba(6, 184, 212, 0.1)' : 'var(--bg-elevated)',
                                 }}
                             >
                                 <div className='flex items-start gap-3'>
                                     <div className='rounded-md p-1.5'
-                                         style={{ background: 'rgba(0, 229, 255, 0.1)', color: 'var(--accent-primary)' }}>
+                                         style={{ background: 'rgba(6, 184, 212, 0.1)', color: 'var(--accent-primary)' }}>
                                         <Icon className='h-3.5 w-3.5' />
                                     </div>
                                     <div className='min-w-0 flex-1'>
@@ -404,6 +392,29 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                 </button>
             </div>
 
+            {comparison && (
+                <button
+                    type='button'
+                    onClick={() => setIsCompareOpen(true)}
+                    className='flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-semibold'
+                    style={{
+                        background: '#0E1118',
+                        border: '2px solid #F4F4F5',
+                        color: '#F4F4F5',
+                        boxShadow: '3px 3px 0 0 #06B8D4',
+                        fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                        letterSpacing: '0.12em',
+                        textTransform: 'uppercase',
+                    }}
+                >
+                    <ArrowLeftRight className='h-3.5 w-3.5' style={{ color: '#06B8D4' }} strokeWidth={2.5} />
+                    Compare Before / After
+                    <span style={{ color: '#06B8D4', marginLeft: 4 }}>
+                        {comparison.width} × {comparison.height}
+                    </span>
+                </button>
+            )}
+
             {previewUrl && (
                 <div className='panel-card overflow-hidden p-0'>
                     <div className='px-3 py-2 text-[10px] font-semibold uppercase tracking-widest'
@@ -433,7 +444,16 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                 </div>
             )}
 
-            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.15)' }}>
+            <BeforeAfterCompare
+                open={isCompareOpen}
+                beforeUrl={comparison?.beforeUrl}
+                afterUrl={comparison?.afterUrl}
+                beforeLabel='Original'
+                afterLabel='Upscaled'
+                onClose={() => setIsCompareOpen(false)}
+            />
+
+            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(6, 184, 212, 0.15)' }}>
                 <p style={{ color: 'var(--text-muted)' }}>
                     Best results with ImageKit-hosted images. The Premium preset stacks multiple passes for cleanest output.
                 </p>

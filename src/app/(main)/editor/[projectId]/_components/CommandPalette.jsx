@@ -315,7 +315,7 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                                             >
                                                 <div className="flex h-7 w-7 items-center justify-center rounded-lg"
                                                      style={{
-                                                         background: isSelected ? 'rgba(0, 229, 255, 0.2)' : 'var(--bg-elevated)',
+                                                         background: isSelected ? 'rgba(6, 184, 212, 0.2)' : 'var(--bg-elevated)',
                                                          color: isSelected ? 'var(--accent-primary)' : 'var(--text-muted)',
                                                      }}>
                                                     <Icon className="h-3.5 w-3.5" />

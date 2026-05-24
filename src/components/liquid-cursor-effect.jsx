@@ -430,6 +430,8 @@ export default function LiquidCursorEffect() {
     };
 
     let lastTime = performance.now();
+    let lastVarSync = 0;
+    const root = typeof document !== "undefined" ? document.documentElement : null;
 
     const frame = (now) => {
       animRef.current = null;
@@ -440,6 +442,18 @@ export default function LiquidCursorEffect() {
       const dt = Math.min((now - lastTime) / 1000, 0.05);
       lastTime = now;
       state.t += dt;
+
+      if (root && now - lastVarSync > 33) {
+        const ax = (state.ax * 100).toFixed(2)
+        const ay = ((1 - state.ay) * 100).toFixed(2)
+        const bx = (state.bx * 100).toFixed(2)
+        const by = ((1 - state.by) * 100).toFixed(2)
+        root.style.setProperty("--liquid-a-x", ax + "%")
+        root.style.setProperty("--liquid-a-y", ay + "%")
+        root.style.setProperty("--liquid-b-x", bx + "%")
+        root.style.setProperty("--liquid-b-y", by + "%")
+        lastVarSync = now
+      }
 
       const autoTravel = advA(state, now, dt);
       const autoTravelB = advB(state, now, dt);

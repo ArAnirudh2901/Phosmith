@@ -1,13 +1,15 @@
 "use client"
 
-import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Undo2, Redo2, ZoomIn } from 'lucide-react'
+import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
 import { useRouter } from 'next/navigation'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { useCanvas, useDynamicAccent } from '../../../../../../context/context'
 import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
-import { addImageFileToCanvas } from '@/lib/canvas-images'
+import { addImageFilesToCanvas } from '@/lib/canvas-images'
+import ProBadge from '@/components/pro-badge'
+import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
 import { motion, AnimatePresence } from 'framer-motion'
 
 const EXPORT_PRESETS = [
@@ -41,6 +43,34 @@ const EditorTopbar = ({ project }) => {
     const [showExportMenu, setShowExportMenu] = useState(false)
     const [canUndo, setCanUndo] = useState(false)
     const [canRedo, setCanRedo] = useState(false)
+    const [showShortcuts, setShowShortcuts] = useState(false)
+
+    const triggerAddImage = useCallback(() => {
+        addImageInputRef.current?.click()
+    }, [])
+
+    useEffect(() => {
+        const isTypingTarget = (target) => {
+            if (!target) return false
+            const tag = target.tagName
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+            return Boolean(target.isContentEditable)
+        }
+        const onKeyDown = (event) => {
+            if (event.repeat || isTypingTarget(event.target)) return
+            if ((event.key === 'I' || event.key === 'i') && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                event.preventDefault()
+                triggerAddImage()
+                return
+            }
+            if (event.key === '?' || (event.key === '/' && event.shiftKey)) {
+                event.preventDefault()
+                setShowShortcuts((prev) => !prev)
+            }
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+    }, [triggerAddImage])
 
     const { canvasEditor, activeTool, onToolChange } = useCanvas()
     const { hasAccess } = usePlanAccess()
@@ -165,8 +195,7 @@ const EditorTopbar = ({ project }) => {
                 {/* Left section: Back + Project name */}
                 <div className="flex flex-1 items-center gap-2 min-w-0">
                     <motion.button
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
+
                         onClick={handleBackToDashboard}
                         className="editor-icon-button flex items-center justify-center flex-none"
                         title="Back to projects"
@@ -180,6 +209,8 @@ const EditorTopbar = ({ project }) => {
                           style={{ color: 'var(--text-primary)' }}>
                         {project.title}
                     </span>
+
+                    <ProBadge size="sm" />
 
                     {exportResolutionLabel && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded flex-none"
@@ -199,16 +230,8 @@ const EditorTopbar = ({ project }) => {
                         return (
                             <motion.button
                                 key={tool.id}
-                                whileTap={{ scale: 0.93 }}
-                                transition={{ type: "spring", stiffness: 600, damping: 30 }}
                                 onClick={() => handleToolChange(tool.id)}
                                 className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
-                                style={isActive ? {
-                                    color: '#03050A',
-                                    borderColor: 'rgba(255,255,255,0.92)',
-                                    background: 'linear-gradient(180deg, #F8FAFC 0%, #DDE5F0 100%)',
-                                    boxShadow: `0 0 0 1px rgba(${accentRgb}, 0.45), 0 8px 22px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.95)`,
-                                } : {}}
                             >
                                 <Icon className="h-3.5 w-3.5 flex-none" />
                                 <span className="hidden xl:inline">{tool.label}</span>
@@ -224,7 +247,6 @@ const EditorTopbar = ({ project }) => {
                 <div className="flex flex-1 items-center justify-end gap-1 min-w-0">
                     {/* Undo / Redo */}
                     <motion.button
-                        whileTap={{ scale: canUndo ? 0.9 : 1 }}
                         onClick={handleUndo}
                         disabled={!canUndo}
                         className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
@@ -234,7 +256,6 @@ const EditorTopbar = ({ project }) => {
                     </motion.button>
 
                     <motion.button
-                        whileTap={{ scale: canRedo ? 0.9 : 1 }}
                         onClick={handleRedo}
                         disabled={!canRedo}
                         className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
@@ -251,28 +272,27 @@ const EditorTopbar = ({ project }) => {
                         accept="image/*"
                         multiple
                         className="hidden"
-                        onChange={(e) => {
+                        onChange={async (e) => {
                             const files = Array.from(e.target.files || [])
-                            files.forEach((file) => addImageFileToCanvas(canvasEditor, file, project))
                             e.target.value = ''
+                            if (files.length === 0) return
+                            await addImageFilesToCanvas(canvasEditor, files, project)
                         }}
                     />
                     <motion.button
-                        whileTap={{ scale: 0.9 }}
                         onClick={() => addImageInputRef.current?.click()}
                         disabled={!canvasEditor}
-                        className="editor-icon-button flex items-center justify-center gap-1.5 px-2 disabled:opacity-35 flex-none"
-                        title="Add image"
+                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 flex-none"
+                        title="Add image (Shift + I)"
+                        aria-label="Add image"
                     >
                         <ImagePlus className="h-3.5 w-3.5" />
-                        <span className="hidden lg:inline text-[10px] font-medium">Add image</span>
                     </motion.button>
 
                     <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Reset View */}
                     <motion.button
-                        whileTap={{ scale: 0.9 }}
                         onClick={() => canvasEditor?.__resetCanvasView?.()}
                         className="editor-icon-button flex items-center justify-center flex-none"
                         title="Reset view"
@@ -282,7 +302,6 @@ const EditorTopbar = ({ project }) => {
 
                     {/* Save */}
                     <motion.button
-                        whileTap={{ scale: 0.9 }}
                         onClick={() => canvasEditor?.__saveCanvasState?.()}
                         className="editor-icon-button flex items-center justify-center flex-none"
                         title="Save"
@@ -290,22 +309,39 @@ const EditorTopbar = ({ project }) => {
                         <Save className="h-3.5 w-3.5" />
                     </motion.button>
 
+                    {/* Keyboard shortcuts */}
+                    <motion.button
+                        onClick={() => setShowShortcuts(true)}
+                        className="editor-icon-button flex items-center justify-center flex-none"
+                        title="Keyboard shortcuts (?)"
+                        aria-label="Show keyboard shortcuts"
+                    >
+                        <Keyboard className="h-3.5 w-3.5" />
+                    </motion.button>
+
                     <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Export dropdown */}
                     <div className="relative flex-none" ref={exportMenuRef}>
                         <motion.button
-                            whileTap={{ scale: 0.95 }}
                             onClick={() => setShowExportMenu(prev => !prev)}
                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium editor-interactive pill-control"
                             style={{
-                                background: 'linear-gradient(180deg, #FFE28A 0%, #D9A72E 100%)',
-                                border: '1px solid rgba(255,232,150,0.78)',
-                                color: '#080A0F',
-                                boxShadow: '0 10px 26px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.55)',
+                                background: '#A8794E',
+                                border: '2px solid #F4F4F5',
+                                color: '#03050A',
+                                boxShadow: '4px 4px 0 0 #F4F4F5',
+                                fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                letterSpacing: '0.12em',
+                                textTransform: 'uppercase',
+                                fontWeight: 800,
+                                fontSize: '0.7rem',
+                                padding: '0.5rem 0.85rem',
+                                borderRadius: 0,
                             }}
+                            className="flex items-center gap-1.5"
                         >
-                            <Download className="h-3.5 w-3.5" />
+                            <Download className="h-3.5 w-3.5" strokeWidth={2.5} />
                             Export
                             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showExportMenu ? 'rotate-180' : ''}`} />
                         </motion.button>
@@ -365,6 +401,8 @@ const EditorTopbar = ({ project }) => {
                         : undefined
                 }
             />
+
+            <ShortcutsGuide open={showShortcuts} onClose={() => setShowShortcuts(false)} />
         </>
     )
 }
