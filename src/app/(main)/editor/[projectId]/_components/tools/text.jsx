@@ -587,7 +587,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                                 onClick={() => setFontCategory(cat)}
                                                 className="px-2 py-0.5 rounded-full text-[10px] font-medium whitespace-nowrap editor-interactive"
                                                 style={{
-                                                    background: fontCategory === cat ? 'rgba(0,229,255,0.15)' : 'transparent',
+                                                    background: fontCategory === cat ? 'rgba(6,184,212,0.15)' : 'transparent',
                                                     color: fontCategory === cat ? 'var(--accent-primary)' : 'var(--text-muted)',
                                                     border: `1px solid ${fontCategory === cat ? 'var(--accent-primary)' : 'transparent'}`,
                                                 }}
@@ -610,7 +610,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                                 onMouseEnter={() => { if (font.source === 'google') loadGoogleFont(font.family) }}
                                                 className="flex w-full items-center justify-between px-3 py-1.5 text-left editor-interactive"
                                                 style={{
-                                                    background: fontFamily === font.family ? 'rgba(0,229,255,0.08)' : 'transparent',
+                                                    background: fontFamily === font.family ? 'rgba(6,184,212,0.08)' : 'transparent',
                                                     color: 'var(--text-primary)',
                                                 }}
                                             >
@@ -660,7 +660,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                 <button key={label} type="button" onClick={toggle}
                                     className="flex items-center justify-center h-8 rounded-lg editor-interactive"
                                     style={{
-                                        background: active ? 'rgba(0,229,255,0.15)' : 'var(--bg-elevated)',
+                                        background: active ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
                                         border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                         color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
                                     }}>
@@ -680,7 +680,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                     <button key={a.value} type="button" onClick={() => applyAlign(a.value)}
                                         className="flex items-center justify-center h-8 rounded-lg editor-interactive"
                                         style={{
-                                            background: sel ? 'rgba(0,229,255,0.15)' : 'var(--bg-elevated)',
+                                            background: sel ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
                                             border: `1px solid ${sel ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                             color: sel ? 'var(--accent-primary)' : 'var(--text-secondary)',
                                         }}>
@@ -701,7 +701,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                     <button key={t.value} type="button" onClick={() => applyTextTransform(t.value)}
                                         className="flex items-center justify-center h-8 rounded-lg text-[11px] font-bold editor-interactive"
                                         style={{
-                                            background: sel ? 'rgba(0,229,255,0.15)' : 'var(--bg-elevated)',
+                                            background: sel ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
                                             border: `1px solid ${sel ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                             color: sel ? 'var(--accent-primary)' : 'var(--text-secondary)',
                                         }}>
@@ -734,7 +734,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                     style={{
                                         backgroundColor: c,
                                         border: `2px solid ${textColor.toLowerCase() === c ? 'var(--accent-primary)' : 'transparent'}`,
-                                        boxShadow: textColor.toLowerCase() === c ? '0 0 0 1px rgba(0,229,255,0.3)' : 'none',
+                                        boxShadow: textColor.toLowerCase() === c ? '0 0 0 1px rgba(6,184,212,0.3)' : 'none',
                                     }} />
                             ))}
                         </div>
@@ -810,7 +810,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                             <button type="button" onClick={() => setShadowEnabled(!shadowEnabled)}
                                                 className="text-[10px] px-2 py-0.5 rounded-full editor-interactive"
                                                 style={{
-                                                    background: shadowEnabled ? 'rgba(0,229,255,0.15)' : 'var(--bg-elevated)',
+                                                    background: shadowEnabled ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
                                                     color: shadowEnabled ? 'var(--accent-primary)' : 'var(--text-muted)',
                                                     border: `1px solid ${shadowEnabled ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                                 }}>
@@ -855,7 +855,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                     </button>
 
                     {/* Shortcuts */}
-                    <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(0,229,255,0.1)' }}>
+                    <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(6,184,212,0.1)' }}>
                         <p className="font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Shortcuts</p>
                         <div className="space-y-1" style={{ color: 'var(--text-muted)' }}>
                             {[['Delete', '⌫'], ['Bold', '⌘B'], ['Italic', '⌘I'], ['Underline', '⌘U']].map(([l, k]) => (

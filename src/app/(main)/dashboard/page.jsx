@@ -24,6 +24,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import GlassPanel from "@/components/ui/glass-panel"
+import NeoButton from "@/components/neo/NeoButton"
 
 const loadingCards = Array.from({ length: 6 })
 
@@ -98,9 +99,8 @@ const ProjectCard = ({
             data-project-card-id={project._id}
             data-pending-delete={isPendingDelete ? "true" : undefined}
             className={cn(
-                "group/card relative overflow-hidden rounded-2xl border glass-panel transition-all duration-500 will-change-transform",
+                "group/card relative overflow-hidden glass-panel transition-all duration-500 will-change-transform",
                 isSelectionMode && "cursor-pointer",
-                isSelectionMode ? "border-white/16 bg-white/[0.04]" : "border-white/12",
                 isPendingDelete && "project-card-pending-delete pointer-events-none",
             )}
         >
@@ -108,14 +108,13 @@ const ProjectCard = ({
                 {/* Selection overlay */}
                 <div
                     className={cn(
-                        "pointer-events-none absolute inset-0 z-20 rounded-2xl transition-opacity duration-300",
+                        "pointer-events-none absolute inset-0 z-20 transition-opacity duration-300",
                         isSelected ? "opacity-100" : "opacity-0"
                     )}
                     style={{
-                        background: `linear-gradient(135deg, rgba(${accentRgb}, 0.35) 0%, rgba(${accentRgb}, 0.2) 100%), radial-gradient(circle at top left, rgba(255,255,255,0.15) 0%, transparent 42%)`,
-                        border: `1px solid rgba(255,255,255,0.2)`,
-                        boxShadow: `inset 0 1px 0 rgba(255,255,255,0.1), inset 0 0 0 1px rgba(${accentRgb},0.25), 0 10px 30px rgba(${accentRgb},0.15)`,
-                        backdropFilter: "blur(18px) saturate(165%)",
+                        background: `linear-gradient(135deg, rgba(${accentRgb}, 0.35) 0%, rgba(${accentRgb}, 0.18) 100%)`,
+                        border: `2px solid #F4F4F5`,
+                        boxShadow: `inset 0 0 0 4px rgba(${accentRgb},0.35)`,
                     }}
                 />
 
@@ -451,28 +450,14 @@ const Dashboard = () => {
                                 )}
                             </div>
                         </div>
-                        <button
-                            type="button"
+                        <NeoButton
+                            variant="primary"
+                            size="md"
                             onClick={() => setShowNewProjectModal(true)}
-                            className="flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold pill-control glass-interactive"
-                            style={{
-                                background: "linear-gradient(135deg, rgba(83,216,255,0.18), rgba(255,78,205,0.10))",
-                                borderColor: "rgba(83,216,255,0.3)",
-                                color: "#fff",
-                                boxShadow: "0 0 24px rgba(83,216,255,0.12)",
-                            }}
-                            onMouseEnter={(e) => {
-                                e.currentTarget.style.boxShadow = "0 0 40px rgba(83,216,255,0.2)"
-                                e.currentTarget.style.background = "linear-gradient(135deg, rgba(83,216,255,0.24), rgba(255,78,205,0.14))"
-                            }}
-                            onMouseLeave={(e) => {
-                                e.currentTarget.style.boxShadow = "0 0 24px rgba(83,216,255,0.12)"
-                                e.currentTarget.style.background = ""
-                            }}
                         >
-                            <Plus className="h-4 w-4" />
+                            <Plus className="h-4 w-4" strokeWidth={2.5} />
                             New Project
-                        </button>
+                        </NeoButton>
                     </div>
                 </GlassPanel>
 
@@ -513,8 +498,16 @@ const Dashboard = () => {
                     {isLoading ? (
                         <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                             {loadingCards.map((_, index) => (
-                                <div key={index} className="overflow-hidden rounded-2xl border border-white/8 bg-white/[0.02]">
-                                    <div className="aspect-[16/10] animate-pulse bg-white/[0.05]" />
+                                <div
+                                    key={index}
+                                    className="overflow-hidden"
+                                    style={{
+                                        border: "2px solid #F4F4F5",
+                                        boxShadow: "6px 6px 0 0 #F4F4F5",
+                                        background: "rgba(14,17,24,0.6)",
+                                    }}
+                                >
+                                    <div className="aspect-[16/10] animate-pulse bg-white/[0.04]" />
                                 </div>
                             ))}
                         </section>
@@ -560,20 +553,16 @@ const Dashboard = () => {
                                 <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-4xl opacity-40">🎨</div>
                                 <p className="text-lg font-medium text-[var(--text-secondary)]">No projects yet</p>
                                 <p className="text-sm text-[var(--text-muted)] mt-1">Upload an image to get started.</p>
-                                <button
-                                    type="button"
-                                    onClick={() => setShowNewProjectModal(true)}
-                                    className="mt-4 px-5 py-2.5 rounded-full text-sm font-semibold inline-flex items-center gap-2 pill-control glass-interactive"
-                                    style={{
-                                        background: "linear-gradient(135deg, rgba(83,216,255,0.18), rgba(255,78,205,0.10))",
-                                        borderColor: "rgba(83,216,255,0.3)",
-                                        color: "#fff",
-                                        boxShadow: "0 0 24px rgba(83,216,255,0.12)",
-                                    }}
-                                >
-                                    <Plus className="h-4 w-4" />
-                                    Create Project
-                                </button>
+                                <div className="mt-4">
+                                    <NeoButton
+                                        variant="primary"
+                                        size="md"
+                                        onClick={() => setShowNewProjectModal(true)}
+                                    >
+                                        <Plus className="h-4 w-4" strokeWidth={2.5} />
+                                        Create Project
+                                    </NeoButton>
+                                </div>
                             </div>
                         </GlassPanel>
                     )}
