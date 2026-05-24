@@ -8,6 +8,7 @@ import {
     EyeOff,
     FlipHorizontal,
     FlipVertical,
+    GripVertical,
     ImagePlus,
     Lock,
     MoveDown,
@@ -41,6 +42,8 @@ const ImageManager = ({ project, dominantColor }) => {
     const [images, setImages] = useState([])
     const [selectedImage, setSelectedImage] = useState(null)
     const [opacity, setOpacity] = useState(100)
+    const [draggingImage, setDraggingImage] = useState(null)
+    const [dragOverImage, setDragOverImage] = useState(null)
     const [, setRevision] = useState(0)
 
     const bump = useCallback(() => setRevision(v => v + 1), [])
@@ -59,18 +62,35 @@ const ImageManager = ({ project, dominantColor }) => {
         }
     }, [canvasEditor])
 
+    const commitLayerState = useCallback((target) => {
+        if (!canvasEditor) return
+        if (target) canvasEditor.fire('object:modified', { target })
+        canvasEditor.requestRenderAll()
+        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__saveCanvasState?.()
+        syncImages()
+        bump()
+    }, [canvasEditor, syncImages, bump])
+
     useEffect(() => {
         if (!canvasEditor) return
-        syncImages()
+        const syncFrame = requestAnimationFrame(syncImages)
         const events = ['object:added', 'object:removed', 'object:modified', 'selection:created', 'selection:updated', 'selection:cleared']
         events.forEach(e => canvasEditor.on(e, syncImages))
-        return () => events.forEach(e => canvasEditor.off(e, syncImages))
+        return () => {
+            cancelAnimationFrame(syncFrame)
+            events.forEach(e => canvasEditor.off(e, syncImages))
+        }
     }, [canvasEditor, syncImages])
 
     const addImageFromFile = useCallback(
         (file) => addImageFileToCanvas(canvasEditor, file, project),
         [canvasEditor, project]
     )
+
+    const triggerReplaceImage = useCallback(() => {
+        replaceInputRef.current?.click()
+    }, [])
 
     const handlePaste = useCallback((e) => {
         const items = e.clipboardData?.items
@@ -91,6 +111,10 @@ const ImageManager = ({ project, dominantColor }) => {
 
     const selectImage = (img) => {
         if (!canvasEditor) return
+        if (img.visible === false) {
+            setSelectedImage(img)
+            return
+        }
         canvasEditor.setActiveObject(img)
         canvasEditor.requestRenderAll()
     }
@@ -101,7 +125,9 @@ const ImageManager = ({ project, dominantColor }) => {
         canvasEditor.discardActiveObject()
         canvasEditor.requestRenderAll()
         canvasEditor.__pushHistoryState?.()
+        canvasEditor.__saveCanvasState?.()
         setSelectedImage(null)
+        syncImages()
     }
 
     const duplicateImage = async () => {
@@ -114,6 +140,7 @@ const ImageManager = ({ project, dominantColor }) => {
             canvasEditor.setActiveObject(cloned)
             canvasEditor.requestRenderAll()
             canvasEditor.__pushHistoryState?.()
+            canvasEditor.__saveCanvasState?.()
             toast.success('Image duplicated')
         } catch {
             toast.error('Failed to duplicate')
@@ -144,6 +171,7 @@ const ImageManager = ({ project, dominantColor }) => {
             canvasEditor.setActiveObject(newImg)
             canvasEditor.requestRenderAll()
             canvasEditor.__pushHistoryState?.()
+            canvasEditor.__saveCanvasState?.()
             toast.success('Image replaced')
         } catch {
             toast.error('Failed to replace image')
@@ -161,37 +189,108 @@ const ImageManager = ({ project, dominantColor }) => {
     const flipH = () => {
         if (!selectedImage) return
         selectedImage.set('flipX', !selectedImage.flipX)
-        canvasEditor?.requestRenderAll()
-        canvasEditor?.__pushHistoryState?.()
+        commitLayerState(selectedImage)
     }
 
     const flipV = () => {
         if (!selectedImage) return
         selectedImage.set('flipY', !selectedImage.flipY)
-        canvasEditor?.requestRenderAll()
-        canvasEditor?.__pushHistoryState?.()
+        commitLayerState(selectedImage)
     }
 
-    const bringForward = () => {
-        if (!canvasEditor || !selectedImage) return
-        canvasEditor.bringObjectForward(selectedImage)
-        canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
-        bump()
+    const moveImageLayer = (img, direction) => {
+        if (!canvasEditor || !img) return
+        const imageLayers = canvasEditor.getObjects().filter(isImageObject)
+        const imageIndex = imageLayers.indexOf(img)
+        const targetLayer = imageLayers[imageIndex + direction]
+        if (!targetLayer) return
+
+        const objects = canvasEditor.getObjects()
+        const targetIndex = objects.indexOf(targetLayer)
+        if (typeof canvasEditor.moveObjectTo === 'function') {
+            canvasEditor.moveObjectTo(img, targetIndex)
+        } else {
+            if (direction > 0) canvasEditor.bringObjectForward(img)
+            else canvasEditor.sendObjectBackwards(img)
+        }
+        if (img.visible !== false) canvasEditor.setActiveObject(img)
+        commitLayerState(img)
     }
 
-    const sendBackward = () => {
-        if (!canvasEditor || !selectedImage) return
-        canvasEditor.sendObjectBackwards(selectedImage)
-        canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
-        bump()
+    const reorderImageLayer = (dragged, target) => {
+        if (!canvasEditor || !dragged || !target || dragged === target) return
+
+        const objects = canvasEditor.getObjects()
+        const targetIndex = objects.indexOf(target)
+        if (targetIndex < 0 || !objects.includes(dragged)) return
+
+        if (typeof canvasEditor.moveObjectTo === 'function') {
+            canvasEditor.moveObjectTo(dragged, targetIndex)
+        } else {
+            canvasEditor.remove(dragged)
+            canvasEditor.insertAt(targetIndex, dragged)
+        }
+        if (dragged.visible !== false) canvasEditor.setActiveObject(dragged)
+        commitLayerState(dragged)
     }
+
+    const handleLayerDragStart = (event, img) => {
+        setDraggingImage(img)
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/plain', img.__uid || 'image-layer')
+    }
+
+    const handleLayerDragOver = (event, img) => {
+        if (!draggingImage || draggingImage === img) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+        setDragOverImage(img)
+    }
+
+    const handleLayerDrop = (event, img) => {
+        event.preventDefault()
+        reorderImageLayer(draggingImage, img)
+        setDraggingImage(null)
+        setDragOverImage(null)
+    }
+
+    const handleLayerDragEnd = () => {
+        setDraggingImage(null)
+        setDragOverImage(null)
+    }
+
+    const bringForward = () => moveImageLayer(selectedImage, 1)
+
+    const sendBackward = () => moveImageLayer(selectedImage, -1)
 
     const toggleVisibility = (img) => {
-        img.set('visible', !img.visible)
-        canvasEditor?.requestRenderAll()
-        bump()
+        if (!canvasEditor || !img) return
+        const willShow = img.visible === false
+
+        if (willShow) {
+            img.set({
+                visible: true,
+                selectable: img._pixxelSelectableBeforeHide ?? true,
+                evented: img._pixxelEventedBeforeHide ?? true,
+            })
+            canvasEditor.setActiveObject(img)
+            setSelectedImage(img)
+        } else {
+            img._pixxelSelectableBeforeHide = img.selectable !== false
+            img._pixxelEventedBeforeHide = img.evented !== false
+            if (canvasEditor.getActiveObject() === img) {
+                canvasEditor.discardActiveObject()
+            }
+            img.set({
+                visible: false,
+                selectable: false,
+                evented: false,
+            })
+            setSelectedImage(null)
+        }
+
+        img.setCoords()
+        commitLayerState(img)
     }
 
     const toggleLock = (img) => {
@@ -204,8 +303,7 @@ const ImageManager = ({ project, dominantColor }) => {
             lockRotation: locked,
             hasControls: !locked,
         })
-        canvasEditor?.requestRenderAll()
-        bump()
+        commitLayerState(img)
     }
 
     if (!canvasEditor) {
@@ -236,6 +334,11 @@ const ImageManager = ({ project, dominantColor }) => {
                         const isSelected = img === selectedImage
                         const isLocked = img.lockMovementX
                         const isHidden = img.visible === false
+                        const isDragging = draggingImage === img
+                        const isDragTarget = dragOverImage === img && draggingImage !== img
+                        const imageLayerIndex = images.indexOf(img)
+                        const canMoveUp = imageLayerIndex < images.length - 1
+                        const canMoveDown = imageLayerIndex > 0
                         const thumb = getImageThumbSrc(img)
 
                         return (
@@ -243,6 +346,11 @@ const ImageManager = ({ project, dominantColor }) => {
                                 key={img.__uid || `img-${idx}`}
                                 role="button"
                                 tabIndex={0}
+                                draggable
+                                onDragStart={(e) => handleLayerDragStart(e, img)}
+                                onDragOver={(e) => handleLayerDragOver(e, img)}
+                                onDrop={(e) => handleLayerDrop(e, img)}
+                                onDragEnd={handleLayerDragEnd}
                                 onClick={() => selectImage(img)}
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter' || e.key === ' ') {
@@ -255,11 +363,12 @@ const ImageManager = ({ project, dominantColor }) => {
                                 exit={{ opacity: 0, y: -6 }}
                                 className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left editor-interactive cursor-pointer"
                                 style={{
-                                    background: isSelected ? 'rgba(6,184,212,0.08)' : 'transparent',
-                                    border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                    opacity: isHidden ? 0.4 : 1,
+                                    background: isDragTarget ? 'rgba(168,121,78,0.16)' : isSelected ? 'rgba(6,184,212,0.08)' : 'transparent',
+                                    border: `1px solid ${isDragTarget ? 'rgba(168,121,78,0.9)' : isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                    opacity: isDragging ? 0.55 : isHidden ? 0.4 : 1,
                                 }}
                             >
+                                <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab active:cursor-grabbing" style={{ color: 'var(--text-muted)' }} />
                                 {thumb ? (
                                     <img
                                         src={thumb}
@@ -276,6 +385,24 @@ const ImageManager = ({ project, dominantColor }) => {
                                 <span className="text-[11px] font-medium flex-1 truncate" style={{ color: 'var(--text-primary)' }}>
                                     Image {images.length - idx}
                                 </span>
+                                <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); moveImageLayer(img, 1) }}
+                                    disabled={!canMoveUp}
+                                    className="p-1 rounded editor-interactive shrink-0 disabled:opacity-30"
+                                    title="Move layer up"
+                                >
+                                    <MoveUp className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); moveImageLayer(img, -1) }}
+                                    disabled={!canMoveDown}
+                                    className="p-1 rounded editor-interactive shrink-0 disabled:opacity-30"
+                                    title="Move layer down"
+                                >
+                                    <MoveDown className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
+                                </button>
                                 <button
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); toggleVisibility(img) }}
@@ -319,8 +446,11 @@ const ImageManager = ({ project, dominantColor }) => {
                             max={100}
                             step={1}
                             suffix="%"
-                            onChange={setImageOpacity}
-                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.()}
+                            onPreview={setImageOpacity}
+                            onCommit={(value) => {
+                                setImageOpacity(value)
+                                commitLayerState(selectedImage)
+                            }}
                             visual={{
                                 fill: 'rgba(47, 143, 203, 0.45)',
                                 accent: dominantColor || '#5eb8ff',
@@ -331,29 +461,60 @@ const ImageManager = ({ project, dominantColor }) => {
 
                     {/* Actions grid */}
                     <div className="grid grid-cols-2 gap-1.5">
-                        {[
-                            { icon: FlipHorizontal, label: 'Flip H', action: flipH },
-                            { icon: FlipVertical, label: 'Flip V', action: flipV },
-                            { icon: MoveUp, label: 'Forward', action: bringForward },
-                            { icon: MoveDown, label: 'Backward', action: sendBackward },
-                            { icon: Copy, label: 'Duplicate', action: duplicateImage },
-                            { icon: Replace, label: 'Replace', action: () => replaceInputRef.current?.click() },
-                        ].map(({ icon: Icon, label, action }) => (
-                            <button
-                                key={label}
-                                type="button"
-                                onClick={action}
-                                className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'var(--bg-elevated)',
-                                    border: '1px solid var(--border-subtle)',
-                                    color: 'var(--text-secondary)',
-                                }}
-                            >
-                                <Icon className="h-3.5 w-3.5" />
-                                {label}
-                            </button>
-                        ))}
+                        <button
+                            type="button"
+                            onClick={flipH}
+                            className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        >
+                            <FlipHorizontal className="h-3.5 w-3.5" />
+                            Flip H
+                        </button>
+                        <button
+                            type="button"
+                            onClick={flipV}
+                            className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        >
+                            <FlipVertical className="h-3.5 w-3.5" />
+                            Flip V
+                        </button>
+                        <button
+                            type="button"
+                            onClick={bringForward}
+                            className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        >
+                            <MoveUp className="h-3.5 w-3.5" />
+                            Forward
+                        </button>
+                        <button
+                            type="button"
+                            onClick={sendBackward}
+                            className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        >
+                            <MoveDown className="h-3.5 w-3.5" />
+                            Backward
+                        </button>
+                        <button
+                            type="button"
+                            onClick={duplicateImage}
+                            className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        >
+                            <Copy className="h-3.5 w-3.5" />
+                            Duplicate
+                        </button>
+                        <button
+                            type="button"
+                            onClick={triggerReplaceImage}
+                            className="flex items-center justify-center gap-1.5 h-8 rounded-lg text-[11px] font-medium editor-interactive"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                        >
+                            <Replace className="h-3.5 w-3.5" />
+                            Replace
+                        </button>
                     </div>
 
                     <input

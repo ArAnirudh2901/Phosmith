@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react"
 import { useCanvas } from "../../../../../../context/context"
 import { useConvexMutation } from "../../../../../../hooks/useConvexQuery"
 import { api } from "../../../../../../convex/_generated/api"
-import { Hand, Loader2 } from "lucide-react"
+import { Hand, Maximize2, ZoomIn, ZoomOut } from "lucide-react"
 import { Canvas, FabricImage, Point } from "fabric"
 import { normalizeCanvasState, serializeCanvasState } from "../../../../../lib/canvas-state"
 import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../lib/canvas-history"
@@ -13,9 +13,13 @@ import { addImageFilesToCanvas } from "../../../../../lib/canvas-images"
 
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 64
+const MIN_PREVIEW_ZOOM_PERCENT = 5
+const MAX_PREVIEW_ZOOM_PERCENT = 400
+const PREVIEW_ZOOM_STEP_PERCENT = 10
 const VIEWPORT_PADDING = 88
 const MAX_PERSISTED_HISTORY = 30
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
+const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
 const getPrimaryRemoteImageUrl = (canvas) => {
     const image = canvas
         ?.getObjects?.()
@@ -62,6 +66,7 @@ const CanvasEditor = ({ project }) => {
     const handToolActiveRef = useRef(false)
     const [isHandToolActive, setIsHandToolActive] = useState(false)
     const [isProjectFrameVisible, setIsProjectFrameVisible] = useState(false)
+    const [previewZoomPercent, setPreviewZoomPercent] = useState(100)
     const projectFrameStyleRef = useRef({ left: 0, top: 0, width: 0, height: 0 })
     const [projectFrameStyle, setProjectFrameStyle] = useState({ left: 0, top: 0, width: 0, height: 0 })
     const [imageNativeSize, setImageNativeSize] = useState(null)
@@ -71,6 +76,7 @@ const CanvasEditor = ({ project }) => {
     const isRestoringRef = useRef(false)
     const resizeFrameRef = useRef(null)
     const initGenerationRef = useRef(0)
+    const previewZoomPercentRef = useRef(100)
     const projectRef = useRef(project)
     projectRef.current = project
 
@@ -112,6 +118,25 @@ const CanvasEditor = ({ project }) => {
         const center = viewportState?.center || fallbackCenter
         if (!center) return
         canvas.setViewportTransform([zoom, 0, 0, zoom, canvas.getWidth() / 2 - center.x * zoom, canvas.getHeight() / 2 - center.y * zoom])
+    }
+
+    const syncPreviewZoomState = (canvas) => {
+        const nextPercent = readPreviewZoomPercent(canvas)
+        if (previewZoomPercentRef.current === nextPercent) return
+        previewZoomPercentRef.current = nextPercent
+        setPreviewZoomPercent(nextPercent)
+    }
+
+    const setCanvasPreviewZoom = (canvas, percent) => {
+        if (!canvas) return
+        const viewportState = getViewportState(canvas)
+        setViewportState(canvas, {
+            ...viewportState,
+            zoom: clamp(Number(percent) / 100, MIN_ZOOM, MAX_ZOOM),
+        })
+        canvas.calcOffset()
+        canvas.requestRenderAll()
+        syncPreviewZoomState(canvas)
     }
 
     const fitProjectToViewport = (canvas, size = project) => {
@@ -303,23 +328,55 @@ const CanvasEditor = ({ project }) => {
                 return false
             }
 
-            const isPanIntent = (event) =>
-                Boolean(event?.ctrlKey) ||
-                ctrlPressedRef.current ||
+            const isPanModifierActive = () =>
                 spacePressedRef.current ||
                 handToolActiveRef.current
+
+            const isMiddleButtonDrag = (event) =>
+                event?.button === 1 ||
+                event?.buttons === 4
+
+            const shouldStartPan = (opt) => {
+                if (isExpansionMode()) return false
+                const event = opt?.e
+                if (isMiddleButtonDrag(event)) return true
+                if (opt?.target) return false
+                return isPanModifierActive()
+            }
 
             const applyCursorForMode = () => {
                 if (isExpansionMode()) {
                     canvas.skipTargetFind = false
                     canvas.defaultCursor = 'default'
+                    canvas.hoverCursor = 'default'
+                    canvas.moveCursor = 'default'
                     canvas.upperCanvasEl.style.cursor = 'default'
                     return
                 }
-                const wantsPan = isPanIntent({})
-                canvas.skipTargetFind = wantsPan
+                const wantsPan = isPanModifierActive()
+                canvas.skipTargetFind = false
                 canvas.defaultCursor = wantsPan ? 'grab' : 'default'
+                canvas.hoverCursor = 'move'
+                canvas.moveCursor = 'move'
                 canvas.upperCanvasEl.style.cursor = wantsPan ? 'grab' : 'default'
+            }
+
+            const endPanning = () => {
+                isPanningRef.current = false
+                lastPointerRef.current = null
+                applyCursorForMode()
+            }
+
+            const resetPanInputState = ({ resetHandTool = false } = {}) => {
+                isPanningRef.current = false
+                lastPointerRef.current = null
+                ctrlPressedRef.current = false
+                spacePressedRef.current = false
+                if (resetHandTool) {
+                    handToolActiveRef.current = false
+                    setIsHandToolActive(false)
+                }
+                applyCursorForMode()
             }
 
             const handleKeyDown = (event) => {
@@ -332,35 +389,22 @@ const CanvasEditor = ({ project }) => {
                 }
                 if (event.key === 'Control' && !event.repeat) {
                     ctrlPressedRef.current = true
-                    applyCursorForMode()
-                    event.preventDefault()
                 }
             }
             const handleKeyUp = (event) => {
                 if (event.key === ' ') {
                     spacePressedRef.current = false
-                    if (!isPanIntent({})) {
-                        isPanningRef.current = false
-                        lastPointerRef.current = null
-                    }
-                    applyCursorForMode()
+                    endPanning()
                     return
                 }
                 if (event.key === 'Control') {
                     ctrlPressedRef.current = false
-                    if (!isPanIntent({})) {
-                        isPanningRef.current = false
-                        lastPointerRef.current = null
-                    }
-                    applyCursorForMode()
                 }
             }
             const handleMouseDown = (opt) => {
-                if (isExpansionMode()) return
-                if (isPanIntent(opt.e)) {
+                if (shouldStartPan(opt)) {
                     isPanningRef.current = true
                     lastPointerRef.current = { x: opt.e.clientX, y: opt.e.clientY }
-                    canvas.discardActiveObject()
                     canvas.upperCanvasEl.style.cursor = 'grabbing'
                     canvas.requestRenderAll()
                     opt.e.preventDefault()
@@ -377,14 +421,13 @@ const CanvasEditor = ({ project }) => {
             }
             const handleMouseUp = () => {
                 if (isExpansionMode()) return
-                isPanningRef.current = false
-                lastPointerRef.current = null
-                canvas.upperCanvasEl.style.cursor = isPanIntent({}) ? 'grab' : 'default'
+                endPanning()
             }
             canvas.__setHandToolActive = (active) => {
                 handToolActiveRef.current = Boolean(active)
                 applyCursorForMode()
             }
+            canvas.__syncPanCursor = applyCursorForMode
             const handleMouseWheel = (opt) => {
                 if (isExpansionMode()) return
                 if (!(opt.e.ctrlKey || ctrlPressedRef.current)) return
@@ -394,9 +437,19 @@ const CanvasEditor = ({ project }) => {
                 canvas.zoomToPoint(new Point(pointer.x, pointer.y), zoom)
                 canvas.requestRenderAll()
             }
+            const handleWindowPointerUp = () => endPanning()
+            const handleWindowBlur = () => resetPanInputState({ resetHandTool: true })
+            const handleVisibilityChange = () => {
+                if (document.visibilityState === 'hidden') {
+                    resetPanInputState({ resetHandTool: true })
+                }
+            }
 
             window.addEventListener('keydown', handleKeyDown)
             window.addEventListener('keyup', handleKeyUp)
+            window.addEventListener('pointerup', handleWindowPointerUp)
+            window.addEventListener('blur', handleWindowBlur)
+            document.addEventListener('visibilitychange', handleVisibilityChange)
             canvas.on('mouse:down', handleMouseDown)
             canvas.on('mouse:move', handleMouseMove)
             canvas.on('mouse:up', handleMouseUp)
@@ -405,11 +458,15 @@ const CanvasEditor = ({ project }) => {
             canvas.__cleanupInfiniteWorkspace = () => {
                 window.removeEventListener('keydown', handleKeyDown)
                 window.removeEventListener('keyup', handleKeyUp)
+                window.removeEventListener('pointerup', handleWindowPointerUp)
+                window.removeEventListener('blur', handleWindowBlur)
+                document.removeEventListener('visibilitychange', handleVisibilityChange)
                 canvas.off('mouse:down', handleMouseDown)
                 canvas.off('mouse:move', handleMouseMove)
                 canvas.off('mouse:up', handleMouseUp)
                 canvas.off('mouse:wheel', handleMouseWheel)
-                canvas.off('after:render', syncProjectFrame)
+                canvas.off('after:render', syncViewportChrome)
+                delete canvas.__syncPanCursor
             }
             canvas.__undoCanvasState = () => undoCanvasState()
             canvas.__redoCanvasState = () => redoCanvasState()
@@ -424,13 +481,17 @@ const CanvasEditor = ({ project }) => {
                 canvas.calcOffset()
                 canvas.requestRenderAll()
                 syncProjectFrame()
+                syncPreviewZoomState(canvas)
             }
             canvas.__resetCanvasView = () => {
                 fitProjectToViewport(canvas)
                 canvas.calcOffset()
                 canvas.requestRenderAll()
                 syncProjectFrame()
+                syncPreviewZoomState(canvas)
             }
+            canvas.__setPreviewZoom = (percent) => setCanvasPreviewZoom(canvas, percent)
+            canvas.__getPreviewZoom = () => readPreviewZoomPercent(canvas)
 
             const syncProjectFrame = () => {
                 const proj = projectRef.current
@@ -460,8 +521,12 @@ const CanvasEditor = ({ project }) => {
                 setIsProjectFrameVisible(true)
             }
             canvas.__syncProjectFrame = syncProjectFrame
-            canvas.on('after:render', syncProjectFrame)
-            syncProjectFrame()
+            const syncViewportChrome = () => {
+                syncProjectFrame()
+                syncPreviewZoomState(canvas)
+            }
+            canvas.on('after:render', syncViewportChrome)
+            syncViewportChrome()
 
             if (persistedHistory?.length) {
                 historyRef.current = persistedHistory.slice(-MAX_PERSISTED_HISTORY)
@@ -534,11 +599,18 @@ const CanvasEditor = ({ project }) => {
             if (canvas.upperCanvasEl) canvas.upperCanvasEl.style.cursor = 'default'
         } else if (canvas.__expansionMode) {
             canvas.__expansionMode = false
+            canvas.__syncPanCursor?.()
         }
 
         // Drawing mode management (handled in draw.jsx useEffect, but ensure cleanup here)
         if (activeTool !== 'draw' && canvas.isDrawingMode) {
             canvas.isDrawingMode = false
+        }
+        if (activeTool !== 'draw' && activeTool !== 'ai_extender') {
+            canvas.skipTargetFind = false
+            canvas.hoverCursor = 'move'
+            canvas.moveCursor = 'move'
+            canvas.__syncPanCursor?.()
         }
     }, [activeTool, canvasEditor])
 
@@ -707,6 +779,26 @@ const CanvasEditor = ({ project }) => {
         canvas.requestRenderAll()
     }, [project?.width, project?.height])
 
+    const previewSliderValue = clamp(previewZoomPercent, MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
+    const canAdjustPreview = Boolean(canvasEditor)
+
+    const applyPreviewZoomPercent = (percent) => {
+        const nextPercent = clamp(Number(percent) || 100, MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
+        setCanvasPreviewZoom(canvasInstanceRef.current, nextPercent)
+    }
+
+    const adjustPreviewZoomPercent = (delta) => {
+        applyPreviewZoomPercent(previewZoomPercentRef.current + delta)
+    }
+
+    const handlePreviewZoomChange = (event) => {
+        applyPreviewZoomPercent(event.target.value)
+    }
+
+    const stopPreviewControlPropagation = (event) => {
+        event.stopPropagation()
+    }
+
     return (
         <div ref={containerRef} className='relative h-full min-h-0 w-full overflow-hidden editor-canvas-host'>
             {/* Dot grid */}
@@ -714,18 +806,19 @@ const CanvasEditor = ({ project }) => {
 
             {isProjectFrameVisible && (
                 <div
-                    className="editor-canvas-project-frame pointer-events-none absolute"
+                    className="editor-canvas-project-texture pointer-events-none absolute"
                     style={{
                         left: `${projectFrameStyle.left}px`,
                         top: `${projectFrameStyle.top}px`,
                         width: `${projectFrameStyle.width}px`,
                         height: `${projectFrameStyle.height}px`,
-                        boxShadow: '0 0 0 1.5px rgba(6, 184, 212, 0.55), 0 0 0 9999px rgba(7, 9, 14, 0.42)',
-                        borderRadius: 2,
-                        zIndex: 1,
                     }}
                 />
             )}
+
+            <div className='absolute inset-0 editor-canvas-fabric-layer'>
+                <canvas id='canvas' className='rounded-xl editor-canvas-surface' ref={canvasRef} />
+            </div>
 
             <button
                 type="button"
@@ -745,6 +838,70 @@ const CanvasEditor = ({ project }) => {
             >
                 <Hand className="h-4 w-4" />
             </button>
+
+            {isProjectFrameVisible && (
+                <div
+                    className="editor-canvas-project-frame pointer-events-none absolute"
+                    style={{
+                        left: `${projectFrameStyle.left}px`,
+                        top: `${projectFrameStyle.top}px`,
+                        width: `${projectFrameStyle.width}px`,
+                        height: `${projectFrameStyle.height}px`,
+                    }}
+                />
+            )}
+
+            <div
+                className="editor-canvas-preview-controls"
+                aria-label="Preview size"
+                onPointerDown={stopPreviewControlPropagation}
+                onMouseDown={stopPreviewControlPropagation}
+            >
+                <button
+                    type="button"
+                    className="editor-canvas-preview-button"
+                    onClick={() => adjustPreviewZoomPercent(-PREVIEW_ZOOM_STEP_PERCENT)}
+                    disabled={!canAdjustPreview}
+                    title="Shrink preview"
+                    aria-label="Shrink preview"
+                >
+                    <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <input
+                    className="editor-canvas-preview-slider"
+                    type="range"
+                    min={MIN_PREVIEW_ZOOM_PERCENT}
+                    max={MAX_PREVIEW_ZOOM_PERCENT}
+                    step="5"
+                    value={previewSliderValue}
+                    onChange={handlePreviewZoomChange}
+                    disabled={!canAdjustPreview}
+                    aria-label="Preview size"
+                />
+                <button
+                    type="button"
+                    className="editor-canvas-preview-button"
+                    onClick={() => adjustPreviewZoomPercent(PREVIEW_ZOOM_STEP_PERCENT)}
+                    disabled={!canAdjustPreview}
+                    title="Enlarge preview"
+                    aria-label="Enlarge preview"
+                >
+                    <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+                <button
+                    type="button"
+                    className="editor-canvas-preview-button"
+                    onClick={() => canvasInstanceRef.current?.__resetCanvasView?.()}
+                    disabled={!canAdjustPreview}
+                    title="Fit preview"
+                    aria-label="Fit preview"
+                >
+                    <Maximize2 className="h-3.5 w-3.5" />
+                </button>
+                <output className="editor-canvas-preview-percent" aria-live="polite">
+                    {previewZoomPercent}%
+                </output>
+            </div>
 
             {project?.width && project?.height && (
                 <div className="editor-canvas-resolution-hud">
@@ -770,10 +927,6 @@ const CanvasEditor = ({ project }) => {
                     </div>
                 </div>
             }
-
-            <div className='absolute inset-0'>
-                <canvas id='canvas' className='rounded-xl editor-canvas-surface' ref={canvasRef} />
-            </div>
         </div>
     )
 }

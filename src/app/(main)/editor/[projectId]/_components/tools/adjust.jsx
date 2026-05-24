@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useRef, useState } from "react"
+import React, { useCallback, useEffect, useRef, useState } from "react"
 import Colorful from "@uiw/react-color-colorful"
 import { toast } from "sonner"
 import { filters, Gradient, Rect } from "fabric"
@@ -17,6 +17,14 @@ import {
 const TEMP_WARM = "#ffb45f"
 const TEMP_COOL = "#72b7ff"
 const VIGNETTE_LAYER_NAME = "pixxel-vignette-overlay"
+const HISTOGRAM_BUCKETS = 256
+const HISTOGRAM_SAMPLE_SIZE = 260
+const CURVE_GRAPH = {
+    left: 8,
+    top: 8,
+    right: 92,
+    bottom: 92,
+}
 
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v))
 const stripHex = (hex) => String(hex || "000000").replace("#", "").slice(0, 6).padEnd(6, "0")
@@ -24,6 +32,56 @@ const signedToken = (value) => (value < 0 ? `N${Math.abs(value)}` : `${value}`)
 const imageKitOpacity = (opacity) => Math.round(clamp(opacity, 0, 100) * 0.99)
     .toString(10)
     .padStart(2, "0")
+
+const hexToRgb = (hex) => {
+    const clean = stripHex(hex)
+    return {
+        r: parseInt(clean.slice(0, 2), 16),
+        g: parseInt(clean.slice(2, 4), 16),
+        b: parseInt(clean.slice(4, 6), 16),
+    }
+}
+
+const rgbToHex = (r, g, b) =>
+    `#${[r, g, b].map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0")).join("")}`
+
+const rgbToHsv = ({ r, g, b }) => {
+    const rn = r / 255
+    const gn = g / 255
+    const bn = b / 255
+    const max = Math.max(rn, gn, bn)
+    const min = Math.min(rn, gn, bn)
+    const delta = max - min
+    let h = 0
+    if (delta) {
+        if (max === rn) h = ((gn - bn) / delta) % 6
+        else if (max === gn) h = (bn - rn) / delta + 2
+        else h = (rn - gn) / delta + 4
+        h *= 60
+    }
+    if (h < 0) h += 360
+    return { h, s: max === 0 ? 0 : delta / max, v: max }
+}
+
+const hsvToRgb = (h, s, v) => {
+    const c = v * s
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+    const m = v - c
+    let rp = 0
+    let gp = 0
+    let bp = 0
+    if (h < 60) [rp, gp, bp] = [c, x, 0]
+    else if (h < 120) [rp, gp, bp] = [x, c, 0]
+    else if (h < 180) [rp, gp, bp] = [0, c, x]
+    else if (h < 240) [rp, gp, bp] = [0, x, c]
+    else if (h < 300) [rp, gp, bp] = [x, 0, c]
+    else [rp, gp, bp] = [c, 0, x]
+    return {
+        r: (rp + m) * 255,
+        g: (gp + m) * 255,
+        b: (bp + m) * 255,
+    }
+}
 
 const isSharpnessFilter = (filter) => {
     if (filter?.type !== filters.Convolute.type || !Array.isArray(filter.matrix) || filter.matrix.length !== 9) return false
@@ -81,8 +139,64 @@ const WHEEL_CONFIGS = [
     { key: "colorizeIntensity", colorKey: "colorizeColor", label: "Colorize", defaultColor: "#ff3f7f", mode: "tint" },
 ]
 
+const CURVE_CHANNELS = [
+    {
+        id: "rgb",
+        label: "RGB",
+        shortLabel: "RGB",
+        color: "#e5e7eb",
+        histogramChannels: ["red", "green", "blue"],
+        keys: { shadows: "curveLumaShadows", midtones: "curveLumaMidtones", highlights: "curveLumaHighlights" },
+    },
+    {
+        id: "red",
+        label: "Red",
+        shortLabel: "Red",
+        color: "#ff5d65",
+        histogramChannels: ["red"],
+        keys: { shadows: "curveRedShadows", midtones: "curveRedMidtones", highlights: "curveRedHighlights" },
+    },
+    {
+        id: "green",
+        label: "Green",
+        shortLabel: "Green",
+        color: "#64d989",
+        histogramChannels: ["green"],
+        keys: { shadows: "curveGreenShadows", midtones: "curveGreenMidtones", highlights: "curveGreenHighlights" },
+    },
+    {
+        id: "blue",
+        label: "Blue",
+        shortLabel: "Blue",
+        color: "#69a7ff",
+        histogramChannels: ["blue"],
+        keys: { shadows: "curveBlueShadows", midtones: "curveBlueMidtones", highlights: "curveBlueHighlights" },
+    },
+    {
+        id: "luma",
+        label: "Luminance",
+        shortLabel: "Luma",
+        color: "#d8dde7",
+        histogramChannels: ["luma"],
+        keys: { shadows: "curveLumaShadows", midtones: "curveLumaMidtones", highlights: "curveLumaHighlights" },
+    },
+]
+
+const CURVE_VALUE_CONFIGS = CURVE_CHANNELS.flatMap((channel) => ([
+    { key: channel.keys.shadows, label: `${channel.shortLabel} Shadows`, min: -100, max: 100, defaultValue: 0, color: channel.color },
+    { key: channel.keys.midtones, label: `${channel.shortLabel} Midtones`, min: -100, max: 100, defaultValue: 0, color: channel.color },
+    { key: channel.keys.highlights, label: `${channel.shortLabel} Highlights`, min: -100, max: 100, defaultValue: 0, color: channel.color },
+]))
+
 const LOOKS = [
     { id: "none", label: "Clean", filterClass: null },
+    { id: "vibrant", label: "Vibrant", filterClass: null, preset: { contrast: 10, saturation: 18, vibrance: 42, clarity: 12 } },
+    { id: "dramatic", label: "Dramatic", filterClass: null, preset: { contrast: 28, highlights: -18, shadows: -24, clarity: 34, vibrance: 18, vignette: 22 } },
+    { id: "cinematic", label: "Cinematic", filterClass: null, preset: { contrast: 18, saturation: -8, vibrance: 18, temperature: -10, shadows: -10, highlights: -8, vignette: 16 } },
+    { id: "golden", label: "Golden Hour", filterClass: null, preset: { temperature: 30, tint: 8, highlights: 14, shadows: 12, vibrance: 24 } },
+    { id: "matte", label: "Matte", filterClass: null, preset: { contrast: -12, fade: 34, blacks: -14, saturation: -8, grain: 12 } },
+    { id: "coolfade", label: "Cool Fade", filterClass: null, preset: { temperature: -24, tint: -8, fade: 20, saturation: -10, blue: 10 } },
+    { id: "noir", label: "Noir", filterClass: filters.BlackWhite, preset: { contrast: 34, clarity: 24, blacks: 24, grain: 18, vignette: 28 } },
     { id: "vintage", label: "Vintage", filterClass: filters.Vintage },
     { id: "kodachrome", label: "Kodachrome", filterClass: filters.Kodachrome },
     { id: "technicolor", label: "Technicolor", filterClass: filters.Technicolor },
@@ -102,8 +216,14 @@ const DEFAULT_VALUES = {
         acc[c.colorKey] = c.defaultColor
         return acc
     }, {}),
+    ...CURVE_VALUE_CONFIGS.reduce((acc, c) => {
+        acc[c.key] = c.defaultValue
+        return acc
+    }, {}),
     look: "none",
 }
+
+const LOOK_PRESET_KEYS = Array.from(new Set(LOOKS.flatMap((look) => Object.keys(look.preset || {}))))
 
 const IMAGEKIT_DEFAULTS = {
     autoContrast: false,
@@ -127,15 +247,37 @@ const IMAGEKIT_DEFAULTS = {
     gradientOpacity: 0,
 }
 
-const FILTER_GROUPS = ["Tone", "Color", "Wheels", "Detail", "ImageKit"]
+const FILTER_GROUPS = ["Tone", "Color", "Curves", "Wheels", "Detail", "ImageKit"]
 const ALL_VALUE_KEYS = new Set([...Object.keys(DEFAULT_VALUES)])
 const getValuesSignature = (v) => JSON.stringify(v)
 
-const getActiveImage = (canvasEditor) => {
+const isImageObject = (obj) => obj?.type === "image" || obj?.type === "Image"
+const isVisibleImageObject = (obj) => isImageObject(obj) && obj.visible !== false
+
+const getSelectedImage = (canvasEditor) => {
     if (!canvasEditor) return null
     const active = canvasEditor.getActiveObject()
-    if (active?.type === "image") return active
-    return canvasEditor.getObjects().find((obj) => obj.type === "image") ?? null
+    return isVisibleImageObject(active) ? active : null
+}
+
+const getVisibleImages = (canvasEditor) =>
+    (canvasEditor?.getObjects?.() || []).filter(isVisibleImageObject)
+
+const getAdjustmentTargets = (canvasEditor) => {
+    const selected = getSelectedImage(canvasEditor)
+    return selected ? [selected] : getVisibleImages(canvasEditor)
+}
+
+const getAdjustmentSourceImage = (canvasEditor) =>
+    getSelectedImage(canvasEditor) || getVisibleImages(canvasEditor)[0] || null
+
+const ensureAdjustmentObjectId = (imageObject) => {
+    if (!imageObject) return null
+    const existing = imageObject.pixxelAdjustmentId || imageObject._pixxelAdjustmentId || imageObject.__uid
+    const id = existing || `image-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    imageObject.pixxelAdjustmentId = id
+    imageObject._pixxelAdjustmentId = id
+    return id
 }
 
 const getImageSrc = (image) =>
@@ -145,6 +287,64 @@ const getImageSrc = (image) =>
     image?.src ||
     ""
 
+const getHistogramSourceElement = (image) =>
+    image?._filteredEl ||
+    image?._cacheCanvas ||
+    image?.getElement?.() ||
+    image?._element ||
+    image?._originalElement ||
+    null
+
+const emptyHistogram = () => ({
+    red: Array(HISTOGRAM_BUCKETS).fill(0),
+    green: Array(HISTOGRAM_BUCKETS).fill(0),
+    blue: Array(HISTOGRAM_BUCKETS).fill(0),
+    luma: Array(HISTOGRAM_BUCKETS).fill(0),
+})
+
+const computeImageHistogram = (image) => {
+    if (typeof document === "undefined" || !image) return null
+    const source = getHistogramSourceElement(image)
+    const sourceWidth = Math.round(source?.naturalWidth || source?.videoWidth || source?.width || image.width || 0)
+    const sourceHeight = Math.round(source?.naturalHeight || source?.videoHeight || source?.height || image.height || 0)
+    if (!source || !sourceWidth || !sourceHeight) return null
+
+    const scale = Math.min(1, HISTOGRAM_SAMPLE_SIZE / Math.max(sourceWidth, sourceHeight))
+    const width = Math.max(1, Math.round(sourceWidth * scale))
+    const height = Math.max(1, Math.round(sourceHeight * scale))
+    const scratch = document.createElement("canvas")
+    scratch.width = width
+    scratch.height = height
+    const ctx = scratch.getContext("2d", { willReadFrequently: true })
+    if (!ctx) return null
+
+    try {
+        ctx.drawImage(source, 0, 0, width, height)
+        const { data } = ctx.getImageData(0, 0, width, height)
+        const histogram = emptyHistogram()
+        let pixels = 0
+
+        for (let i = 0; i < data.length; i += 4) {
+            const alpha = data[i + 3]
+            if (alpha < 16) continue
+            const r = data[i]
+            const g = data[i + 1]
+            const b = data[i + 2]
+            const luma = clamp(Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b), 0, 255)
+            histogram.red[r] += 1
+            histogram.green[g] += 1
+            histogram.blue[b] += 1
+            histogram.luma[luma] += 1
+            pixels += 1
+        }
+
+        return pixels ? histogram : null
+    } catch (error) {
+        console.warn("[Adjust] Histogram unavailable for selected image:", error)
+        return null
+    }
+}
+
 const normalizeStoredValues = (values) => {
     const next = { ...DEFAULT_VALUES, ...(values || {}) }
     for (const config of SLIDER_CONFIGS) {
@@ -153,6 +353,9 @@ const normalizeStoredValues = (values) => {
     for (const config of WHEEL_CONFIGS) {
         next[config.key] = clamp(Number(next[config.key] ?? 0), 0, 100)
         next[config.colorKey] = String(next[config.colorKey] || config.defaultColor)
+    }
+    for (const config of CURVE_VALUE_CONFIGS) {
+        next[config.key] = clamp(Number(next[config.key] ?? config.defaultValue), config.min, config.max)
     }
     next.look = LOOKS.some((look) => look.id === next.look) ? next.look : "none"
     return next
@@ -211,27 +414,45 @@ const markFilter = (filter, key) => {
 }
 
 const buildChannelMatrix = (values) => {
-    const r = 1 + Number(values.red || 0) / 115
-    const g = 1 + Number(values.green || 0) / 115
-    const b = 1 + Number(values.blue || 0) / 115
+    const curveShadow = (channel) => Number(values.curveLumaShadows || 0) + Number(values[`curve${channel}Shadows`] || 0)
+    const curveHighlight = (channel) => Number(values.curveLumaHighlights || 0) + Number(values[`curve${channel}Highlights`] || 0)
+    const curveScale = (channel) => 1 + curveHighlight(channel) / 220 - Math.min(0, curveShadow(channel)) / 360
+    const curveOffset = (channel) => curveShadow(channel) / 360
+
+    const r = (1 + Number(values.red || 0) / 115) * curveScale("Red")
+    const g = (1 + Number(values.green || 0) / 115) * curveScale("Green")
+    const b = (1 + Number(values.blue || 0) / 115) * curveScale("Blue")
     const exposure = Number(values.exposure || 0) / 260
     const whites = Number(values.whites || 0) / 420
     const blacks = -Number(values.blacks || 0) / 520
     const fade = Number(values.fade || 0) / 520
     const offset = exposure + whites + blacks + fade
+    const rOffset = offset + curveOffset("Red")
+    const gOffset = offset + curveOffset("Green")
+    const bOffset = offset + curveOffset("Blue")
     const active =
         Math.abs(r - 1) > 0.001 ||
         Math.abs(g - 1) > 0.001 ||
         Math.abs(b - 1) > 0.001 ||
-        Math.abs(offset) > 0.001
+        Math.abs(rOffset) > 0.001 ||
+        Math.abs(gOffset) > 0.001 ||
+        Math.abs(bOffset) > 0.001
 
     if (!active) return null
     return [
-        r, 0, 0, 0, offset,
-        0, g, 0, 0, offset,
-        0, 0, b, 0, offset,
+        r, 0, 0, 0, rOffset,
+        0, g, 0, 0, gOffset,
+        0, 0, b, 0, bOffset,
         0, 0, 0, 1, 0,
     ]
+}
+
+const buildGammaValues = (values) => {
+    const base = Number(values.gamma || 100) / 100
+    const lumaMid = Number(values.curveLumaMidtones || 0)
+    return ["Red", "Green", "Blue"].map((channel) =>
+        clamp(base - (lumaMid + Number(values[`curve${channel}Midtones`] || 0)) / 220, 0.2, 2.2)
+    )
 }
 
 const grayscaleMatrix = (amount) => {
@@ -266,7 +487,8 @@ const buildFabricFilters = (values) => {
     if (look?.filterClass) next.push(markFilter(new look.filterClass(), "look"))
     if (values.brightness) next.push(markFilter(new filters.Brightness({ brightness: values.brightness / 100 }), "brightness"))
     if (values.contrast) next.push(markFilter(new filters.Contrast({ contrast: values.contrast / 100 }), "contrast"))
-    if (values.gamma !== 100) next.push(markFilter(new filters.Gamma({ gamma: [values.gamma / 100, values.gamma / 100, values.gamma / 100] }), "gamma"))
+    const gamma = buildGammaValues(values)
+    if (gamma.some((value) => Math.abs(value - 1) > 0.001)) next.push(markFilter(new filters.Gamma({ gamma }), "gamma"))
     if (values.temperature) addBlend(next, "temperature", values.temperature >= 0 ? TEMP_WARM : TEMP_COOL, "tint", Math.abs(values.temperature) / 280)
     if (values.tint) addBlend(next, "tint", values.tint >= 0 ? "#e879f9" : "#46d68c", "tint", Math.abs(values.tint) / 320)
     if (values.saturation) next.push(markFilter(new filters.Saturation({ saturation: values.saturation / 100 }), "saturation"))
@@ -303,26 +525,33 @@ const buildFabricFilters = (values) => {
     return next
 }
 
-const removeVignetteLayers = (canvasEditor) => {
+const isVignetteLayer = (obj) =>
+    obj?.name === VIGNETTE_LAYER_NAME ||
+    obj?.pixxelAdjustmentOverlay === "vignette" ||
+    obj?._pixxelAdjustmentOverlay === "vignette"
+
+const removeVignetteLayers = (canvasEditor, targetId = null) => {
     const objects = canvasEditor?.getObjects?.() || []
-    const layers = objects.filter((obj) =>
-        obj?.name === VIGNETTE_LAYER_NAME ||
-        obj?.pixxelAdjustmentOverlay === "vignette" ||
-        obj?._pixxelAdjustmentOverlay === "vignette"
-    )
+    const layers = objects.filter((obj) => {
+        if (!isVignetteLayer(obj)) return false
+        if (!targetId) return true
+        const layerTarget = obj.pixxelAdjustmentTargetId || obj._pixxelAdjustmentTargetId
+        return layerTarget === targetId || !layerTarget
+    })
     layers.forEach((layer) => canvasEditor.remove(layer))
     return layers.length
 }
 
 const applyVignetteLayer = (canvasEditor, imageObject, values) => {
     if (!canvasEditor || !imageObject) return
+    const targetId = ensureAdjustmentObjectId(imageObject)
     const amount = Number(values.vignette || 0)
     if (!amount) {
-        removeVignetteLayers(canvasEditor)
+        removeVignetteLayers(canvasEditor, targetId)
         return
     }
 
-    removeVignetteLayers(canvasEditor)
+    removeVignetteLayers(canvasEditor, targetId)
 
     const bounds = imageObject.getBoundingRect()
     const width = Math.max(1, bounds.width)
@@ -365,6 +594,8 @@ const applyVignetteLayer = (canvasEditor, imageObject, values) => {
         name: VIGNETTE_LAYER_NAME,
         pixxelAdjustmentOverlay: "vignette",
         _pixxelAdjustmentOverlay: "vignette",
+        pixxelAdjustmentTargetId: targetId,
+        _pixxelAdjustmentTargetId: targetId,
     })
 
     canvasEditor.add(vignette)
@@ -372,29 +603,35 @@ const applyVignetteLayer = (canvasEditor, imageObject, values) => {
     if (imageIndex >= 0 && typeof canvasEditor.moveObjectTo === "function") {
         canvasEditor.moveObjectTo(vignette, imageIndex + 1)
     }
-    canvasEditor.setActiveObject(imageObject)
 }
 
 const applyAdjustmentFilters = (canvasEditor, values, sigRef, { commit = false } = {}) => {
     if (!canvasEditor) return
-    const img = getActiveImage(canvasEditor)
-    if (!img) return
+    const selectedImage = getSelectedImage(canvasEditor)
+    const targets = getAdjustmentTargets(canvasEditor)
+    if (!targets.length) return
     const normalized = normalizeStoredValues(values)
     const sig = getValuesSignature(normalized)
-    const currentFilters = img.filters ?? []
-    const preservedFilters = currentFilters.filter((filter) => !filterMatchesManagedKey(filter))
-    const managedFilters = buildFabricFilters(normalized)
+    const originalActiveObject = canvasEditor.getActiveObject()
 
     try {
-        img.filters = [...preservedFilters, ...managedFilters]
-        img.pixxelAdjustValues = normalized
-        img._pixxelAdjustValues = normalized
-        img.applyFilters()
-        img.set("dirty", true)
-        applyVignetteLayer(canvasEditor, img, normalized)
+        targets.forEach((img) => {
+            const currentFilters = img.filters ?? []
+            const preservedFilters = currentFilters.filter((filter) => !filterMatchesManagedKey(filter))
+            const managedFilters = buildFabricFilters(normalized)
+            img.filters = [...preservedFilters, ...managedFilters]
+            img.pixxelAdjustValues = normalized
+            img._pixxelAdjustValues = normalized
+            img.applyFilters()
+            img.set("dirty", true)
+            applyVignetteLayer(canvasEditor, img, normalized)
+            if (commit) canvasEditor.fire("object:modified", { target: img })
+        })
+        if (selectedImage) canvasEditor.setActiveObject(selectedImage)
+        else if (originalActiveObject) canvasEditor.setActiveObject(originalActiveObject)
+        else canvasEditor.discardActiveObject()
         canvasEditor.requestRenderAll()
         sigRef.current = sig
-        if (commit) canvasEditor.fire("object:modified", { target: img })
     } catch (e) {
         console.error(e)
     }
@@ -430,6 +667,60 @@ const FILTER_VISUAL = {
     vignetteFeather: { fill: "rgba(68, 58, 72, 0.5)", accent: "#d0b8da", trackBg: "rgba(16, 13, 18, 0.98)" },
 }
 
+const ColorWheelPicker = ({ color, onChange }) => {
+    const wheelRef = useRef(null)
+    const hsv = rgbToHsv(hexToRgb(color))
+    const pointerAngle = ((hsv.h - 90) * Math.PI) / 180
+    const pointerRadius = hsv.s * 43
+
+    const updateColorFromEvent = (event) => {
+        const rect = wheelRef.current?.getBoundingClientRect()
+        if (!rect) return
+        const cx = rect.left + rect.width / 2
+        const cy = rect.top + rect.height / 2
+        const dx = event.clientX - cx
+        const dy = event.clientY - cy
+        const radius = Math.max(1, Math.min(rect.width, rect.height) / 2)
+        const saturation = clamp(Math.sqrt(dx * dx + dy * dy) / radius, 0, 1)
+        const hue = (Math.atan2(dy, dx) * 180) / Math.PI + 90
+        const rgb = hsvToRgb((hue + 360) % 360, saturation, 1)
+        onChange(rgbToHex(rgb.r, rgb.g, rgb.b))
+    }
+
+    const handlePointerDown = (event) => {
+        event.preventDefault()
+        updateColorFromEvent(event)
+        const handleMove = (moveEvent) => updateColorFromEvent(moveEvent)
+        const handleUp = () => {
+            window.removeEventListener("pointermove", handleMove)
+            window.removeEventListener("pointerup", handleUp)
+            window.removeEventListener("pointercancel", handleUp)
+        }
+        window.addEventListener("pointermove", handleMove)
+        window.addEventListener("pointerup", handleUp)
+        window.addEventListener("pointercancel", handleUp)
+    }
+
+    return (
+        <div
+            ref={wheelRef}
+            className="adjust-wheel-picker"
+            role="button"
+            aria-label="Color wheel"
+            tabIndex={0}
+            onPointerDown={handlePointerDown}
+        >
+            <span
+                style={{
+                    left: `${50 + Math.cos(pointerAngle) * pointerRadius}%`,
+                    top: `${50 + Math.sin(pointerAngle) * pointerRadius}%`,
+                    background: color,
+                }}
+            />
+        </div>
+    )
+}
+
 const ColorWheelCard = ({ config, values, onColor, onAmount }) => (
     <div className="adjust-color-wheel-card">
         <div className="adjust-color-wheel-top">
@@ -439,6 +730,10 @@ const ColorWheelCard = ({ config, values, onColor, onAmount }) => (
             </div>
             <span className="adjust-color-chip" style={{ background: values[config.colorKey] }} />
         </div>
+        <ColorWheelPicker
+            color={values[config.colorKey]}
+            onChange={(nextColor) => onColor(config.colorKey, nextColor)}
+        />
         <Colorful
             color={values[config.colorKey]}
             disableAlpha
@@ -458,6 +753,147 @@ const ColorWheelCard = ({ config, values, onColor, onAmount }) => (
         />
     </div>
 )
+
+const HISTOGRAM_SERIES = {
+    red: { label: "Red", color: "#ff5d65" },
+    green: { label: "Green", color: "#64d989" },
+    blue: { label: "Blue", color: "#3aa7ff" },
+    luma: { label: "Luminance", color: "#d8dde7" },
+}
+
+const buildHistogramPaths = (series) => {
+    if (!Array.isArray(series) || series.length === 0) return null
+    const maxValue = Math.max(...series)
+    if (!maxValue) return null
+
+    const { left, right, top, bottom } = CURVE_GRAPH
+    const width = right - left
+    const height = bottom - top
+    const maxLog = Math.log1p(maxValue)
+    const points = series.map((value, index) => {
+        const x = left + (index / Math.max(1, series.length - 1)) * width
+        const strength = Math.log1p(value) / maxLog
+        const y = bottom - clamp(strength, 0, 1) * height
+        return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`
+    }).join(" ")
+
+    return {
+        line: points,
+        fill: `${points} L ${right} ${bottom} L ${left} ${bottom} Z`,
+    }
+}
+
+const CurveGraph = ({ channel, values, histogram }) => {
+    const shadows = Number(values[channel.keys.shadows] || 0)
+    const midtones = Number(values[channel.keys.midtones] || 0)
+    const highlights = Number(values[channel.keys.highlights] || 0)
+    const yFor = (base, lift) => clamp(CURVE_GRAPH.bottom - (base + lift * 0.36), CURVE_GRAPH.top, CURVE_GRAPH.bottom)
+    const p0 = { x: CURVE_GRAPH.left, y: yFor(CURVE_GRAPH.left, shadows) }
+    const p1 = { x: 50, y: yFor(50, midtones) }
+    const p2 = { x: CURVE_GRAPH.right, y: yFor(CURVE_GRAPH.right, highlights) }
+    const path = `M ${p0.x} ${p0.y} C 22 ${p0.y}, 34 ${p1.y}, ${p1.x} ${p1.y} S 76 ${p2.y}, ${p2.x} ${p2.y}`
+    const histogramSeries = (channel.histogramChannels || [])
+        .map((key) => ({
+            key,
+            ...HISTOGRAM_SERIES[key],
+            paths: buildHistogramPaths(histogram?.[key]),
+        }))
+        .filter((item) => item.paths)
+    const isRgb = channel.id === "rgb"
+
+    return (
+        <div className="adjust-curve-graph">
+            <svg viewBox="0 0 100 100" className="adjust-curve-svg" preserveAspectRatio="none">
+                {[20, 40, 60, 80].map((line) => (
+                    <React.Fragment key={line}>
+                        <line x1={line} y1="6" x2={line} y2="94" className="adjust-curve-grid" />
+                        <line x1="6" y1={line} x2="94" y2={line} className="adjust-curve-grid" />
+                    </React.Fragment>
+                ))}
+                {histogramSeries.map((item) => (
+                    <g
+                        key={item.key}
+                        className={`adjust-curve-histogram-series ${isRgb ? "is-rgb" : "is-single"}`}
+                        style={{ "--curve-color": item.color }}
+                    >
+                        <path d={item.paths.fill} className="adjust-curve-histogram-fill" />
+                        <path d={item.paths.line} className="adjust-curve-histogram-line" />
+                    </g>
+                ))}
+                <line
+                    x1={CURVE_GRAPH.left}
+                    y1={CURVE_GRAPH.bottom}
+                    x2={CURVE_GRAPH.right}
+                    y2={CURVE_GRAPH.top}
+                    className="adjust-curve-diagonal"
+                    style={{ "--curve-color": channel.color }}
+                />
+                <path d={path} className="adjust-curve-path" style={{ "--curve-color": channel.color }} />
+                {[p0, p1, p2].map((point, index) => (
+                    <circle
+                        key={index}
+                        cx={point.x}
+                        cy={point.y}
+                        r="2.4"
+                        className="adjust-curve-point"
+                        style={{ "--curve-color": channel.color }}
+                    />
+                ))}
+            </svg>
+        </div>
+    )
+}
+
+const CurveEditorPanel = ({ values, histogram, activeChannel, onChannelChange, onBegin, onPreview, onCommit }) => {
+    const channel = CURVE_CHANNELS.find((item) => item.id === activeChannel) || CURVE_CHANNELS[0]
+
+    return (
+        <div className="adjust-curve-card">
+            <div className="adjust-curve-toolbar">
+                <label className="adjust-curve-select-wrap">
+                    <select
+                        value={channel.id}
+                        onChange={(event) => onChannelChange(event.target.value)}
+                        className="adjust-curve-select"
+                        style={{ "--curve-color": channel.color }}
+                        aria-label="Curve channel"
+                    >
+                        {CURVE_CHANNELS.map((item) => (
+                            <option key={item.id} value={item.id}>
+                                {item.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+            </div>
+            <CurveGraph channel={channel} values={values} histogram={histogram} />
+            <div className="adjust-curve-controls">
+                {[
+                    ["shadows", "Shadows"],
+                    ["midtones", "Midtones"],
+                    ["highlights", "Highlights"],
+                ].map(([tone, label]) => {
+                    const key = channel.keys[tone]
+                    return (
+                        <ProRulerSlider
+                            key={key}
+                            variant="instrument"
+                            value={values[key]}
+                            onBegin={onBegin}
+                            onPreview={(v) => onPreview(key, v)}
+                            onCommit={(v) => onCommit(key, v)}
+                            min={-100}
+                            max={100}
+                            step={1}
+                            label={label}
+                            visual={{ fill: "rgba(60, 72, 86, 0.48)", accent: channel.color, trackBg: "rgba(14, 16, 20, 0.98)" }}
+                        />
+                    )
+                })}
+            </div>
+        </div>
+    )
+}
 
 // AI transforms that are model calls — must be chained as SEPARATE steps (colon-separated).
 const AI_TRANSFORM_PREFIXES = ['e-retouch', 'e-upscale']
@@ -574,22 +1010,39 @@ const ImageKitPanel = ({ imageKitValues, setImageKitValues, onApply, isApplying 
 const AdjustControls = () => {
     const { canvasEditor, setProcessingMessage } = useCanvas()
     const [activeTab, setActiveTab] = useState("Tone")
+    const [activeCurveChannel, setActiveCurveChannel] = useState("rgb")
     const [values, setValues] = useState(DEFAULT_VALUES)
+    const [curveHistogram, setCurveHistogram] = useState(null)
     const [imageKitValues, setImageKitValues] = useState(IMAGEKIT_DEFAULTS)
     const [isApplyingImageKit, setIsApplyingImageKit] = useState(false)
     const latestRef = useRef(DEFAULT_VALUES)
     const sigRef = useRef(getValuesSignature(DEFAULT_VALUES))
     const committedSigRef = useRef(getValuesSignature(DEFAULT_VALUES))
     const previewFrame = useRef(null)
+    const histogramFrameRef = useRef(null)
     const pendingPreviewRef = useRef(null)
     const isInteractingRef = useRef(false)
+
+    const queueCurveHistogramRefresh = useCallback((image) => {
+        if (histogramFrameRef.current) {
+            cancelAnimationFrame(histogramFrameRef.current)
+            histogramFrameRef.current = null
+        }
+
+        const targetImage = image || getAdjustmentSourceImage(canvasEditor)
+        histogramFrameRef.current = requestAnimationFrame(() => {
+            histogramFrameRef.current = null
+            setCurveHistogram(targetImage ? computeImageHistogram(targetImage) : null)
+        })
+    }, [canvasEditor])
 
     useEffect(() => {
         if (!canvasEditor) return
         const sync = () => {
             if (isInteractingRef.current) return
-            const img = getActiveImage(canvasEditor)
+            const img = getAdjustmentSourceImage(canvasEditor)
             const next = img ? getValuesFromImageFilters(img) : { ...DEFAULT_VALUES }
+            queueCurveHistogramRefresh(img)
             pendingPreviewRef.current = null
             if (previewFrame.current) {
                 cancelAnimationFrame(previewFrame.current)
@@ -608,12 +1061,16 @@ const AdjustControls = () => {
         return () => {
             pendingPreviewRef.current = null
             if (previewFrame.current) cancelAnimationFrame(previewFrame.current)
+            if (histogramFrameRef.current) {
+                cancelAnimationFrame(histogramFrameRef.current)
+                histogramFrameRef.current = null
+            }
             canvasEditor.off("selection:created", sync)
             canvasEditor.off("selection:updated", sync)
             canvasEditor.off("selection:cleared", sync)
             canvasEditor.off("object:added", sync)
         }
-    }, [canvasEditor])
+    }, [canvasEditor, queueCurveHistogramRefresh])
 
     const handleBeginChange = () => {
         isInteractingRef.current = true
@@ -624,6 +1081,7 @@ const AdjustControls = () => {
         if (updateState) setValues(next)
         const nextSig = getValuesSignature(next)
         applyAdjustmentFilters(canvasEditor, next, sigRef, { commit: commit && nextSig !== committedSigRef.current })
+        queueCurveHistogramRefresh()
         if (commit) {
             committedSigRef.current = nextSig
             isInteractingRef.current = false
@@ -694,8 +1152,17 @@ const AdjustControls = () => {
         return data.url || url
     }
 
-    const setLook = (look) => {
-        const next = { ...latestRef.current, look }
+    const setLook = (lookId) => {
+        const look = LOOKS.find((item) => item.id === lookId)
+        const next = normalizeStoredValues({
+            ...latestRef.current,
+            ...LOOK_PRESET_KEYS.reduce((acc, key) => {
+                acc[key] = DEFAULT_VALUES[key]
+                return acc
+            }, {}),
+            ...(look?.preset || {}),
+            look: lookId,
+        })
         applyNextValues(next, { commit: true, updateState: true })
     }
 
@@ -710,12 +1177,13 @@ const AdjustControls = () => {
         setValues(next)
         const nextSig = getValuesSignature(next)
         applyAdjustmentFilters(canvasEditor, next, sigRef, { commit: nextSig !== committedSigRef.current })
+        queueCurveHistogramRefresh()
         committedSigRef.current = nextSig
         isInteractingRef.current = false
     }
 
     const applyImageKitTransforms = async () => {
-        const img = getActiveImage(canvasEditor)
+        const img = getSelectedImage(canvasEditor)
         if (!img) {
             toast.error("Select an image first")
             return
@@ -806,6 +1274,7 @@ const AdjustControls = () => {
             img.setCoords()
             canvasEditor.requestRenderAll()
             canvasEditor.fire("object:modified", { target: img })
+            queueCurveHistogramRefresh(img)
             console.log("[Adjust ImageKit] apply complete", {
                 readyUrl,
                 width: img.width,
@@ -865,7 +1334,19 @@ const AdjustControls = () => {
                 ))}
             </div>
 
-            {activeTab === "Wheels" ? (
+            {activeTab === "Curves" ? (
+                <div className="adjust-control-list">
+                    <CurveEditorPanel
+                        values={values}
+                        histogram={curveHistogram}
+                        activeChannel={activeCurveChannel}
+                        onChannelChange={setActiveCurveChannel}
+                        onBegin={handleBeginChange}
+                        onPreview={handlePreviewChange}
+                        onCommit={handleCommitChange}
+                    />
+                </div>
+            ) : activeTab === "Wheels" ? (
                 <div className="adjust-control-list">
                     <div className="adjust-look-strip">
                         {LOOKS.map((look) => (

@@ -96,7 +96,7 @@ const HeroSection = () => {
                     />
                     <ScrambleText
                         as="span"
-                        text="WITH INTENT."
+                        text="WITH INTENT "
                         durationMs={900}
                         delay={250}
                         className="liquid-reactive-text-stroke"
