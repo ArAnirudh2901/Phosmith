@@ -255,7 +255,7 @@ const ImageManager = ({ project, dominantColor }) => {
                                 exit={{ opacity: 0, y: -6 }}
                                 className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left editor-interactive cursor-pointer"
                                 style={{
-                                    background: isSelected ? 'rgba(0,229,255,0.08)' : 'transparent',
+                                    background: isSelected ? 'rgba(6,184,212,0.08)' : 'transparent',
                                     border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                     opacity: isHidden ? 0.4 : 1,
                                 }}
@@ -380,7 +380,7 @@ const ImageManager = ({ project, dominantColor }) => {
                 </div>
             )}
 
-            <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+            <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(6, 184, 212, 0.1)' }}>
                 <p className="font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Tips</p>
                 <div className="space-y-1" style={{ color: 'var(--text-muted)' }}>
                     <p>• Paste images from clipboard with ⌘V</p>

@@ -91,7 +91,7 @@ const ContextualActionBar = ({ visible = false, position = { x: 0, y: 0 } }) => 
                 <div className="flex items-center gap-1 px-2 py-1.5 rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] glass-panel border-[var(--glass-border)]"
                     style={{ backdropFilter: 'blur(28px) saturate(1.6)', WebkitBackdropFilter: 'blur(28px) saturate(1.6)' }}>
                     <div className="px-2 py-0.5 rounded-lg text-[9px] font-semibold uppercase tracking-wider mr-1 pill-control"
-                        style={{ background: 'rgba(0,229,255,0.12)', border: '1px solid rgba(0,229,255,0.2)', color: 'var(--accent-ink)' }}>
+                        style={{ background: 'rgba(6,184,212,0.12)', border: '1px solid rgba(6,184,212,0.2)', color: 'var(--accent-ink)' }}>
                         {objectType}
                     </div>
                     <div className="w-px h-5 rounded-full" style={{ background: 'var(--border-subtle)' }} />

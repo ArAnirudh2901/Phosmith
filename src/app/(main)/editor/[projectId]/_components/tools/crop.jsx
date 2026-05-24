@@ -234,10 +234,10 @@ const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl }
                 onPointerDown={(e) => handlePointerDown(e, 'move', null)}
             >
                 {/* Rule-of-thirds grid lines */}
-                <div style={{ position: 'absolute', left: '33.33%', top: 0, bottom: 0, width: 1, background: 'rgba(0,229,255,0.25)' }} />
-                <div style={{ position: 'absolute', left: '66.66%', top: 0, bottom: 0, width: 1, background: 'rgba(0,229,255,0.25)' }} />
-                <div style={{ position: 'absolute', top: '33.33%', left: 0, right: 0, height: 1, background: 'rgba(0,229,255,0.25)' }} />
-                <div style={{ position: 'absolute', top: '66.66%', left: 0, right: 0, height: 1, background: 'rgba(0,229,255,0.25)' }} />
+                <div style={{ position: 'absolute', left: '33.33%', top: 0, bottom: 0, width: 1, background: 'rgba(6,184,212,0.25)' }} />
+                <div style={{ position: 'absolute', left: '66.66%', top: 0, bottom: 0, width: 1, background: 'rgba(6,184,212,0.25)' }} />
+                <div style={{ position: 'absolute', top: '33.33%', left: 0, right: 0, height: 1, background: 'rgba(6,184,212,0.25)' }} />
+                <div style={{ position: 'absolute', top: '66.66%', left: 0, right: 0, height: 1, background: 'rgba(6,184,212,0.25)' }} />
             </div>
 
             {/* Drag handles */}
@@ -517,7 +517,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         <>
             <div className='space-y-4'>
                 {isCropMode && (
-                    <div className='panel-card' style={{ borderColor: `${dominantColor || 'rgba(0, 229, 255, 0.3)'}` }}>
+                    <div className='panel-card' style={{ borderColor: `${dominantColor || 'rgba(6, 184, 212, 0.3)'}` }}>
                         <p className='text-xs font-medium' style={{ color: dominantColor || 'var(--accent-primary)' }}>
                             ✂️ Crop Mode Active
                         </p>
@@ -605,7 +605,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                     </div>
                 )}
 
-                <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+                <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(6, 184, 212, 0.1)' }}>
                     <p style={{ color: 'var(--text-muted)' }}>
                         <strong style={{ color: 'var(--text-secondary)' }}>How to crop:</strong>
                         <br />

@@ -291,7 +291,7 @@ const Editor = () => {
                                             style={{
                                                 width: p.width,
                                                 height: p.height,
-                                                background: `radial-gradient(circle, rgba(0,229,255,${p.opacityBase}), transparent)`,
+                                                background: `radial-gradient(circle, rgba(6,184,212,${p.opacityBase}), transparent)`,
                                                 left: `${p.left}%`,
                                                 top: `${p.top}%`,
                                             }}
@@ -375,7 +375,7 @@ const Editor = () => {
             {/* Mobile restriction */}
             <div className="lg:hidden min-h-screen flex items-center justify-center p-6" style={{ background: "var(--bg-void-darkest)" }}>
                 <motion.div className="text-center max-w-md" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style={{ background: "rgba(0,229,255,0.1)", border: "1px solid rgba(0,229,255,0.2)" }}>
+                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style={{ background: "rgba(6,184,212,0.1)", border: "1px solid rgba(6,184,212,0.2)" }}>
                         <Monitor className="h-7 w-7" style={{ color: "var(--accent-ink)" }} />
                     </div>
                     <h1 className="text-xl font-bold mb-3" style={{ color: "var(--text-primary)" }}>Desktop Required</h1>

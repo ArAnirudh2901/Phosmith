@@ -1,175 +1,185 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { ArrowRight, Sparkles, Droplet } from "lucide-react"
+import { ArrowRight, Bot, Maximize2, ImagePlus, Sparkles } from "lucide-react"
 import { useDashboardNavigation } from "@/hooks/useDashboardNavigation"
-import {
-  staggerContainer,
-  staggerItem,
-  useReducedMotion,
-  motionVariants,
-} from "@/lib/motion"
+import { staggerContainer, staggerItem, useReducedMotion, motionVariants } from "@/lib/motion"
+import NeoButton from "@/components/neo/NeoButton"
+import ScrambleText from "@/components/neo/ScrambleText"
+
+const TOOL_CHIPS = [
+    { icon: Maximize2, label: "AI Extend" },
+    { icon: Sparkles, label: "Upscale" },
+    { icon: Bot, label: "Chat Edits" },
+    { icon: ImagePlus, label: "Multi-Image" },
+]
 
 const HeroSection = () => {
-  const { navigateToDashboard, isNavigatingToDashboard } = useDashboardNavigation()
-  const reduced = useReducedMotion()
-  const container = motionVariants(staggerContainer, reduced)
-  const item = motionVariants(staggerItem, reduced)
+    const { navigateToDashboard, isNavigatingToDashboard } = useDashboardNavigation()
+    const reduced = useReducedMotion()
+    const container = motionVariants(staggerContainer, reduced)
+    const item = motionVariants(staggerItem, reduced)
 
-  return (
-    <section
-      className="relative min-h-[100svh] flex flex-col items-center px-6 pt-32 pb-16 text-center overflow-hidden sm:pt-36 lg:pt-36"
-      style={{
-        background:
-          "linear-gradient(180deg, rgba(7,9,14,0.34) 0%, rgba(7,9,14,0.18) 38%, rgba(7,9,14,0.62) 100%)",
-      }}
-    >
-      <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
-        <div
-          className="absolute rounded-full blur-3xl opacity-40"
-          style={{
-            width: 500,
-            height: 500,
-            left: "-10%",
-            top: "-10%",
-            background: "radial-gradient(circle, rgba(255,255,255,0.04), transparent 70%)",
-          }}
-        />
-        <div
-          className="absolute rounded-full blur-3xl opacity-30"
-          style={{
-            width: 400,
-            height: 400,
-            right: "-5%",
-            bottom: "10%",
-            background: "radial-gradient(circle, rgba(255,255,255,0.03), transparent 70%)",
-          }}
-        />
-      </div>
-
-      <motion.div
-        className="relative z-10 w-full max-w-5xl px-4 text-center"
-        variants={container}
-        initial="hidden"
-        animate="visible"
-      >
-        <motion.div
-          variants={item}
-          className="glass-chip px-4 py-1.5 text-xs font-medium mb-6 inline-flex items-center gap-2"
-          style={{ color: "var(--accent-ink)" }}
-        >
-          <Droplet className="h-3 w-3" />
-          AI-Powered Image Studio
-          <Sparkles className="h-3 w-3" />
-        </motion.div>
-
-        <motion.h1
-          variants={item}
-          className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-display font-bold leading-[1.04] tracking-tight mb-4"
-        >
-          <span className="text-text-primary block">Edit with</span>
-          <span
-            className="text-transparent bg-clip-text block mt-2"
+    return (
+        <section
+            className="relative min-h-[100svh] flex flex-col items-center px-6 pt-32 pb-20 text-center overflow-hidden sm:pt-36"
             style={{
-              backgroundImage:
-                "linear-gradient(90deg, #66B3FF 0%, #66E699 25%, #FF8080 50%, #FFE666 75%, #CC80FF 100%)",
+                background: "#07090E",
+                backgroundImage:
+                    "radial-gradient(rgba(244,244,245,0.06) 1px, transparent 1px)",
+                backgroundSize: "28px 28px",
             }}
-          >
-            Ink & Light
-          </span>
-        </motion.h1>
-
-        <motion.p
-          variants={item}
-          className="text-lg md:text-xl text-[var(--text-secondary)] max-w-2xl mx-auto mb-8 leading-relaxed"
         >
-          Where deep ink tones meet luminous gold. Transform your images with WebGL-powered
-          <span className="text-accent-ink"> fluid physics</span>, AI-driven editing, and
-          <span className="text-accent-warm-gold"> glass-morphic precision</span>.
-        </motion.p>
-
-        <motion.div
-          variants={item}
-          className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12"
-        >
-          <button
-            type="button"
-            onClick={navigateToDashboard}
-            disabled={isNavigatingToDashboard}
-            className="glass-action glass-action-primary group relative flex items-center gap-2 px-10 py-4 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-80"
-            style={{ color: "#EDE6DC" }}
-          >
-            <span className="relative z-10 flex items-center gap-2">
-              {isNavigatingToDashboard ? "Opening Studio..." : "Enter the Studio"}
-              <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </span>
-          </button>
-
-          <a
-            href="#features"
-            className="glass-action inline-flex items-center justify-center px-10 py-4 text-sm font-semibold"
-            style={{ color: "var(--text-primary)" }}
-          >
-            Explore Features
-          </a>
-        </motion.div>
-
-        <motion.div variants={item} className="max-w-3xl mx-auto">
-          <div className="transmission-glass glass-interactive relative p-2 rounded-2xl">
-            <div className="flex items-center gap-1.5 mb-3 px-2 pt-1">
-              <div className="w-2.5 h-2.5 rounded-full bg-white/35 border border-white/20" />
-              <div className="w-2.5 h-2.5 rounded-full bg-white/25 border border-white/15" />
-              <div className="w-2.5 h-2.5 rounded-full bg-white/15 border border-white/10" />
-              <span className="text-[9px] text-[var(--text-muted)] ml-2 uppercase tracking-wider">
-                Pixxel Studio — Editor Preview
-              </span>
-            </div>
-
-            <div className="relative h-44 rounded-xl overflow-hidden">
-              <div
-                className="absolute inset-0"
+            <div
+                className="pointer-events-none absolute inset-0"
+                aria-hidden="true"
                 style={{
-                  background: `
-                    radial-gradient(ellipse at 30% 40%, rgba(255,255,255,0.10) 0%, transparent 50%),
-                    radial-gradient(ellipse at 70% 60%, rgba(255,255,255,0.065) 0%, transparent 50%),
-                    #0A0E14
-                  `,
+                    background:
+                        "radial-gradient(ellipse 80% 60% at 50% 0%, rgba(6,184,212,0.08), transparent 60%)",
                 }}
-              >
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <p className="text-sm font-medium tracking-wider" style={{ color: "var(--text-muted)" }}>
-                    Your Canvas — Ready for Creation
-                  </p>
-                </div>
-              </div>
-            </div>
+            />
 
-            <div className="grid grid-cols-4 gap-2 mt-4">
-              {[
-                { icon: "✂️", label: "Crop" },
-                { icon: "📐", label: "Resize" },
-                { icon: "🎨", label: "Adjust" },
-                { icon: "✨", label: "AI Tools" },
-              ].map((tool) => (
-                <div
-                  key={tool.label}
-                  className="glass-icon-surface flex flex-col items-center gap-1.5 p-2.5 rounded-xl"
+            <motion.div
+                className="relative z-10 w-full max-w-6xl"
+                variants={container}
+                initial="hidden"
+                animate="visible"
+            >
+                <motion.div variants={item} className="mb-8 inline-flex">
+                    <div
+                        style={{
+                            background: "linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.02) 60%), rgba(14,17,24,0.55)",
+                            backdropFilter: "blur(16px) saturate(170%)",
+                            WebkitBackdropFilter: "blur(16px) saturate(170%)",
+                            border: "2px solid #F4F4F5",
+                            boxShadow: "4px 4px 0 0 #06B8D4, inset 0 1px 0 rgba(255,255,255,0.22), inset 0 0 0 1px rgba(255,255,255,0.06)",
+                            padding: "8px 16px",
+                            fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                            fontSize: 11,
+                            fontWeight: 700,
+                            letterSpacing: "0.16em",
+                            textTransform: "uppercase",
+                            color: "#F4F4F5",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 10,
+                        }}
+                    >
+                        <span
+                            style={{
+                                width: 8,
+                                height: 8,
+                                background: "#06B8D4",
+                                display: "inline-block",
+                                boxShadow: "0 0 10px rgba(6,184,212,0.65)",
+                            }}
+                        />
+                        v1 · AI Photo Studio
+                    </div>
+                </motion.div>
+
+                <motion.h1
+                    variants={item}
+                    className="font-bold leading-[0.95] tracking-tight mb-6"
+                    style={{
+                        fontSize: "clamp(48px, 10vw, 128px)",
+                        textTransform: "uppercase",
+                        letterSpacing: "-0.02em",
+                    }}
                 >
-                  <span className="text-lg">{tool.icon}</span>
-                  <span
-                    className="text-[9px] font-medium uppercase tracking-wider"
-                    style={{ color: "var(--text-secondary)" }}
-                  >
-                    {tool.label}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-      </motion.div>
-    </section>
-  )
+                    <ScrambleText
+                        as="span"
+                        text="EDIT PIXELS"
+                        durationMs={700}
+                        className="liquid-reactive-text"
+                        style={{ display: "block" }}
+                    />
+                    <ScrambleText
+                        as="span"
+                        text="WITH INTENT."
+                        durationMs={900}
+                        delay={250}
+                        className="liquid-reactive-text-stroke"
+                        style={{ display: "block" }}
+                    />
+                </motion.h1>
+
+                <motion.p
+                    variants={item}
+                    className="mx-auto mb-10 max-w-2xl text-lg md:text-xl leading-relaxed"
+                    style={{ color: "#A1A8B4" }}
+                >
+                    {(
+                        "Pixxel is a browser-native photo editor with a built-in AI agent. Upscale, extend, retouch, mask, and recompose images using a Photoshop-class canvas — or just describe the edit and let the agent do it."
+                    )
+                        .split(" ")
+                        .map((word, idx) => (
+                            <motion.span
+                                key={`${word}-${idx}`}
+                                initial={{ opacity: 0, y: 8 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: 0.45 + idx * 0.018, duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+                                style={{ display: "inline-block", marginRight: 6 }}
+                            >
+                                {word}
+                            </motion.span>
+                        ))}
+                </motion.p>
+
+                <motion.div variants={item} className="flex flex-col sm:flex-row items-center justify-center gap-5 mb-14">
+                    <NeoButton
+                        variant="primary"
+                        size="xl"
+                        onClick={navigateToDashboard}
+                        disabled={isNavigatingToDashboard}
+                    >
+                        {isNavigatingToDashboard ? "Opening Studio" : "Open Studio"}
+                        <ArrowRight className="h-4 w-4" strokeWidth={2.5} />
+                    </NeoButton>
+                    <NeoButton variant="secondary" size="xl" href="#features">
+                        See the tools
+                    </NeoButton>
+                </motion.div>
+
+                <motion.div variants={item} className="flex flex-wrap items-center justify-center gap-3">
+                    {TOOL_CHIPS.map(({ icon: Icon, label }) => (
+                        <motion.div
+                            key={label}
+                            whileHover={{
+                                y: -3,
+                                boxShadow:
+                                    "5px 8px 0 0 #06B8D4, inset 0 1px 0 rgba(255,255,255,0.22), inset 0 0 0 1px rgba(255,255,255,0.06)",
+                            }}
+                            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+                            style={{
+                                background:
+                                    "linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.015) 60%), rgba(14,17,24,0.55)",
+                                backdropFilter: "blur(14px) saturate(160%)",
+                                WebkitBackdropFilter: "blur(14px) saturate(160%)",
+                                border: "2px solid #F4F4F5",
+                                boxShadow:
+                                    "3px 3px 0 0 #06B8D4, inset 0 1px 0 rgba(255,255,255,0.18), inset 0 0 0 1px rgba(255,255,255,0.04)",
+                                padding: "10px 16px",
+                                fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                letterSpacing: "0.14em",
+                                textTransform: "uppercase",
+                                color: "#F4F4F5",
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 8,
+                                cursor: "default",
+                            }}
+                        >
+                            <Icon className="h-3.5 w-3.5" style={{ color: "#06B8D4" }} strokeWidth={2.5} />
+                            {label}
+                        </motion.div>
+                    ))}
+                </motion.div>
+            </motion.div>
+        </section>
+    )
 }
 
 export default HeroSection

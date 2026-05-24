@@ -246,7 +246,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor, lighterColor
             </div>
 
             {hasChanges && (
-                <div className='panel-card' style={{ borderColor: 'rgba(0, 229, 255, 0.2)' }}>
+                <div className='panel-card' style={{ borderColor: 'rgba(6, 184, 212, 0.2)' }}>
                     <label className='panel-label'>New Size</label>
                     <div className='text-xs mt-1.5' style={{ color: 'var(--text-secondary)' }}>
                         <div className="font-mono">{newWidth} × {newHeight} px</div>
@@ -278,7 +278,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor, lighterColor
                 Apply Resize
             </button>
 
-            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+            <div className='panel-card text-[11px]' style={{ borderColor: 'rgba(6, 184, 212, 0.1)' }}>
                 <p style={{ color: 'var(--text-muted)' }}>
                     <strong style={{ color: 'var(--text-secondary)' }}>Resize:</strong> Changes canvas dimensions
                     <br />

@@ -129,7 +129,7 @@ const FloatingToolbar = ({
                       onClick={() => handleDirectionToggle(dir.id)}
                       className="flex items-center justify-center w-8 h-8 rounded-full pill-control"
                       style={{
-                        background: isActive ? 'rgba(0, 229, 255, 0.15)' : 'rgba(255, 255, 255, 0.03)',
+                        background: isActive ? 'rgba(6, 184, 212, 0.15)' : 'rgba(255, 255, 255, 0.03)',
                         border: isActive ? '1px solid var(--accent-ink)' : '1px solid rgba(255, 255, 255, 0.06)',
                         color: isActive ? 'var(--accent-ink)' : 'var(--text-muted)',
                       }}
@@ -223,7 +223,7 @@ const FloatingToolbar = ({
                   background: isGenerating ? 'var(--glass-bg-heavy)' : 'linear-gradient(135deg, var(--accent-ink), var(--accent-ink-deep))',
                   color: isGenerating ? 'var(--text-muted)' : '#07090E',
                   border: 'none',
-                  boxShadow: !isGenerating && prompt.trim() && canUseTool ? '0 0 24px rgba(0,229,255,0.2)' : 'none',
+                  boxShadow: !isGenerating && prompt.trim() && canUseTool ? '0 0 24px rgba(6,184,212,0.2)' : 'none',
                   opacity: !canUseTool ? 0.5 : 1,
                 }}
                 whileTap={canUseTool ? { scale: 0.95 } : {}}

@@ -187,12 +187,12 @@ const RadialToolMenu = ({
                         let strokeW = 0.5
 
                         if (isHovered && canAccess) {
-                            fill = "rgba(0, 229, 255, 0.14)"
-                            stroke = "rgba(0, 229, 255, 0.5)"
+                            fill = "rgba(6, 184, 212, 0.14)"
+                            stroke = "rgba(6, 184, 212, 0.5)"
                             strokeW = 1.5
                         } else if (isActive) {
-                            fill = "rgba(0, 229, 255, 0.08)"
-                            stroke = "rgba(0, 229, 255, 0.25)"
+                            fill = "rgba(6, 184, 212, 0.08)"
+                            stroke = "rgba(6, 184, 212, 0.25)"
                             strokeW = 1
                         } else if (!canAccess) {
                             fill = "rgba(12, 14, 22, 0.85)"
@@ -277,7 +277,7 @@ const RadialToolMenu = ({
 
                     let color = "rgba(255, 255, 255, 0.45)"
                     if (isHovered && canAccess) color = "#00E5FF"
-                    else if (isActive) color = "rgba(0, 229, 255, 0.7)"
+                    else if (isActive) color = "rgba(6, 184, 212, 0.7)"
                     else if (!canAccess) color = "rgba(255, 255, 255, 0.15)"
 
                     return (
@@ -293,7 +293,7 @@ const RadialToolMenu = ({
                                 transition: "transform 0.15s ease, filter 0.15s ease",
                                 transform: isHovered ? "scale(1.25)" : "scale(1)",
                                 filter: isHovered && canAccess
-                                    ? "drop-shadow(0 0 8px rgba(0, 229, 255, 0.6))"
+                                    ? "drop-shadow(0 0 8px rgba(6, 184, 212, 0.6))"
                                     : "none",
                             }}
                         >
@@ -339,7 +339,7 @@ const RadialToolMenu = ({
                                     color: hoveredTool.pro && !hasAccess(hoveredTool.id)
                                         ? "rgba(251, 191, 36, 0.8)"
                                         : "#00E5FF",
-                                    textShadow: "0 0 12px rgba(0, 229, 255, 0.4)",
+                                    textShadow: "0 0 12px rgba(6, 184, 212, 0.4)",
                                     lineHeight: "1.2",
                                 }}
                             >
