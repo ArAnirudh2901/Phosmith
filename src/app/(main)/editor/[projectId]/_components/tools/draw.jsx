@@ -282,7 +282,7 @@ const DrawControls = ({ dominantColor }) => {
                                 whileTap={{ scale: 0.97 }}
                                 className="flex items-center gap-3 rounded-lg px-3 py-2 text-left editor-interactive"
                                 style={{
-                                    background: isActive ? 'rgba(0, 229, 255, 0.1)' : 'transparent',
+                                    background: isActive ? 'rgba(6, 184, 212, 0.1)' : 'transparent',
                                     border: `1px solid ${isActive ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                     color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)',
                                 }}
@@ -290,7 +290,7 @@ const DrawControls = ({ dominantColor }) => {
                                 <div
                                     className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0"
                                     style={{
-                                        background: isActive ? 'rgba(0,229,255,0.15)' : 'var(--bg-elevated)',
+                                        background: isActive ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
                                         border: `1px solid ${isActive ? 'var(--accent-primary)' : 'var(--border-default)'}`,
                                     }}
                                 >
@@ -412,7 +412,7 @@ const DrawControls = ({ dominantColor }) => {
                                 style={{
                                     backgroundColor: color,
                                     border: `2px solid ${brushColor.toLowerCase() === color ? 'var(--accent-primary)' : 'transparent'}`,
-                                    boxShadow: brushColor.toLowerCase() === color ? '0 0 0 1px rgba(0,229,255,0.3)' : 'none',
+                                    boxShadow: brushColor.toLowerCase() === color ? '0 0 0 1px rgba(6,184,212,0.3)' : 'none',
                                 }}
                             />
                         ))}
@@ -444,7 +444,7 @@ const DrawControls = ({ dominantColor }) => {
                 </button>
             </div>
 
-            <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(0, 229, 255, 0.1)' }}>
+            <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(6, 184, 212, 0.1)' }}>
                 <p className="font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>Tips</p>
                 <div className="space-y-1" style={{ color: 'var(--text-muted)' }}>
                     <p>• Draw directly on the canvas</p>

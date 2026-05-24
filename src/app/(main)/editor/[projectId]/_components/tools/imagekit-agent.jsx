@@ -32,6 +32,8 @@ import {
 import { restoreCanvasFromHistory } from "../../../../../../lib/canvas-history";
 import { serializeCanvasState } from "../../../../../../lib/canvas-state";
 import { applyProfessionalFilters } from "../../../../../../lib/professional-image-filters";
+import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
+import { ArrowLeftRight } from "lucide-react";
 
 const QUICK_PROMPTS = [
   { label: "Editorial", prompt: "Give it a premium editorial polish", hint: "Retouch, contrast, detail" },
@@ -414,6 +416,8 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [restoringRevisionId, setRestoringRevisionId] = useState(null);
   const [autoPreview, setAutoPreview] = useState(true);
   const [, setImageRevision] = useState(0);
+  const [upscaleComparison, setUpscaleComparison] = useState(null);
+  const [isCompareOpen, setIsCompareOpen] = useState(false);
   const liveSnapshotRef = useRef(null);
   const chatEndRef = useRef(null);
   const previewPromiseRef = useRef(null);
@@ -476,6 +480,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     const effectivePlan = buildEffectivePlan(plan, changeMap, baseUrl);
     let targetImage = image;
 
+    const isUpscalePlan = Array.isArray(effectivePlan?.imageKitTransforms)
+      && effectivePlan.imageKitTransforms.some((t) => typeof t === 'string' && t.includes('e-upscale'));
+    const beforeUrlForComparison = isUpscalePlan ? getSourceUrl(image, project) : null;
+
     if (effectivePlan?.url && effectivePlan.url !== getSourceUrl(image, project)) {
       let readyUrl = effectivePlan.url;
 
@@ -495,7 +503,19 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
 
       targetImage = await replaceCanvasImageFromUrl(canvasEditor, image, readyUrl, {
         preserveDisplayedBounds: true,
+        placement: 'fit',
       });
+
+      if (isUpscalePlan && targetImage) {
+        const upscaledWidth = Math.max(1, Math.round(targetImage.width || project?.width || 1));
+        const upscaledHeight = Math.max(1, Math.round(targetImage.height || project?.height || 1));
+        if (beforeUrlForComparison) {
+          setUpscaleComparison({ beforeUrl: beforeUrlForComparison, afterUrl: readyUrl, width: upscaledWidth, height: upscaledHeight });
+        }
+        toast.success(`Upscaled to ${upscaledWidth} × ${upscaledHeight}`, {
+          description: 'Same visual size, higher resolution. Click Compare to view before/after.',
+        });
+      }
     }
 
     applyProfessionalFilters(targetImage, effectivePlan?.fabricAdjustments);
@@ -987,6 +1007,38 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           {isThinking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </motion.button>
       </form>
+
+      {upscaleComparison && (
+        <button
+          type='button'
+          onClick={() => setIsCompareOpen(true)}
+          className='mt-2 flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-semibold'
+          style={{
+            background: '#0E1118',
+            border: '2px solid #F4F4F5',
+            color: '#F4F4F5',
+            boxShadow: '3px 3px 0 0 #06B8D4',
+            fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+          }}
+        >
+          <ArrowLeftRight className='h-3.5 w-3.5' style={{ color: '#06B8D4' }} strokeWidth={2.5} />
+          Compare Before / After
+          <span style={{ color: '#06B8D4', marginLeft: 4 }}>
+            {upscaleComparison.width} × {upscaleComparison.height}
+          </span>
+        </button>
+      )}
+
+      <BeforeAfterCompare
+        open={isCompareOpen}
+        beforeUrl={upscaleComparison?.beforeUrl}
+        afterUrl={upscaleComparison?.afterUrl}
+        beforeLabel='Original'
+        afterLabel='Upscaled'
+        onClose={() => setIsCompareOpen(false)}
+      />
     </div>
   );
 };
