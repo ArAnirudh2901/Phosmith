@@ -121,21 +121,31 @@ const ActionButton = ({ icon: Icon, title, onClick, isDestructive = false }) => 
     const [isHovered, setIsHovered] = useState(false)
     return (
         <motion.button
-            className="flex items-center justify-center w-7 h-7 rounded-full pill-control"
+            className="flex items-center justify-center w-7 h-7 rounded-full"
             style={{
+                // Intentionally NOT using .pill-control — that class injects 16px
+                // horizontal padding which exceeds the 28px button width, clipping
+                // the icon to invisibility via overflow:hidden. Plain inline styling
+                // here keeps the icon centered and visible.
+                padding: 0,
                 background: isHovered
                     ? isDestructive ? 'rgba(244,63,94,0.15)' : 'rgba(255,255,255,0.08)'
-                    : 'rgba(255,255,255,0)',
-                color: isHovered && isDestructive ? 'var(--accent-destructive)' : 'var(--text-secondary)',
-                border: isHovered ? '1px solid rgba(255,255,255,0.12)' : '1px solid rgba(255,255,255,0)',
+                    : 'transparent',
+                color: isHovered
+                    ? isDestructive ? 'var(--accent-destructive, #f43f5e)' : '#ffffff'
+                    : 'var(--text-secondary, #C7C3B5)',
+                border: isHovered ? '1px solid rgba(255,255,255,0.18)' : '1px solid transparent',
+                cursor: 'pointer',
+                flexShrink: 0,
             }}
             onClick={onClick}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
             whileTap={{ scale: 0.9 }}
             title={title}
+            aria-label={title}
         >
-            <Icon className="h-3.5 w-3.5" />
+            <Icon className="h-3.5 w-3.5" strokeWidth={2} />
         </motion.button>
     )
 }

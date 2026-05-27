@@ -43,7 +43,7 @@ export default function Home() {
                                 opacity: 0.7,
                             }}
                         >
-                            // open the studio
+                            {"// open the studio"}
                         </div>
                         <h2
                             className="font-bold tracking-tight"

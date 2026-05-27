@@ -175,6 +175,32 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             // Ignore remaining key combos with modifier
             if (metaOrCtrl || event.altKey) return
 
+            // ─── Arrow keys → nudge active object (Shift = larger step) ───
+            if (
+                (key === "ArrowLeft" || key === "ArrowRight" || key === "ArrowUp" || key === "ArrowDown") &&
+                activeObject &&
+                !isEditing
+            ) {
+                event.preventDefault()
+                const step = event.shiftKey ? 10 : 1
+                const dx = key === "ArrowLeft" ? -step : key === "ArrowRight" ? step : 0
+                const dy = key === "ArrowUp" ? -step : key === "ArrowDown" ? step : 0
+                activeObject.set({
+                    left: (activeObject.left || 0) + dx,
+                    top: (activeObject.top || 0) + dy,
+                })
+                activeObject.setCoords?.()
+                canvasEditor?.requestRenderAll()
+                // Throttle history snapshots so 100 arrow taps don't pollute undo stack.
+                if (canvasEditor && !canvasEditor.__nudgeRaf) {
+                    canvasEditor.__nudgeRaf = requestAnimationFrame(() => {
+                        canvasEditor.__nudgeRaf = null
+                        canvasEditor.fire?.("object:modified", { target: activeObject })
+                    })
+                }
+                return
+            }
+
             // ─── Delete / Backspace → Delete selected object ───
             if (key === "Delete" || key === "Backspace") {
                 if (activeObject && !isEditing && canvasEditor) {

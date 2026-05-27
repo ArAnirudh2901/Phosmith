@@ -3,6 +3,57 @@ import { toast } from 'sonner'
 
 const CASCADE_OFFSET = 32
 
+// Reads a File/Blob as a data URL. Kept as a last-resort fallback for the rare
+// case where the ImageKit upload fails — at least the image stays usable in the
+// current session. Data URLs balloon the saved canvas state, so we avoid them
+// when we can (Convex documents are capped at 1 MB).
+const readFileAsDataURL = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed'))
+    reader.readAsDataURL(file)
+  })
+
+// Uploads to our /api/imagekit/upload endpoint (auth-gated) and returns the CDN URL.
+// This is the path that keeps saved canvas state small enough for Convex's per-doc
+// size limit when users add several photos to one project.
+const uploadFileToImageKit = async (file) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('fileName', file.name || 'upload')
+  const response = await fetch('/api/imagekit/upload', {
+    method: 'POST',
+    body: formData,
+  })
+  if (!response.ok) {
+    throw new Error(`ImageKit upload failed: ${response.status}`)
+  }
+  const data = await response.json()
+  if (!data?.success || !data?.url) {
+    throw new Error(data?.error || 'ImageKit upload returned no URL')
+  }
+  return data.url
+}
+
+export const loadFabricImageFromFile = async (file, { silent = false } = {}) =>
+  loadFabricImage(file, { silent })
+
+const loadFabricImage = async (file, { silent }) => {
+  // Try ImageKit first — small URL, persistent, CDN-served.
+  try {
+    const url = await uploadFileToImageKit(file)
+    return await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
+  } catch (uploadError) {
+    console.warn('[canvas-images] ImageKit upload failed, falling back to data URL:', uploadError)
+    if (!silent) {
+      toast.warning('Upload service unavailable — image saved locally; refresh may not restore it.')
+    }
+    const dataUrl = await readFileAsDataURL(file)
+    return await FabricImage.fromURL(dataUrl, { crossOrigin: 'anonymous' })
+  }
+}
+
 const countExistingImages = (canvasEditor) => {
   if (!canvasEditor?.getObjects) return 0
   return canvasEditor
@@ -52,8 +103,7 @@ export async function addImageFileToCanvas(canvasEditor, file, project, options 
   const { silent = false, stackIndex } = options
   const toastId = silent ? null : toast.loading('Adding image...')
   try {
-    const url = URL.createObjectURL(file)
-    const img = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
+    const img = await loadFabricImage(file, { silent })
     const resolvedStackIndex =
       typeof stackIndex === 'number' ? stackIndex : countExistingImages(canvasEditor)
     fitNewImageToProject(img, project, { stackIndex: resolvedStackIndex })

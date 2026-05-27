@@ -5,11 +5,62 @@ import { useCanvas } from "../../../../../../context/context"
 import { useConvexMutation } from "../../../../../../hooks/useConvexQuery"
 import { api } from "../../../../../../convex/_generated/api"
 import { Hand, Maximize2, ZoomIn, ZoomOut } from "lucide-react"
-import { Canvas, FabricImage, Point } from "fabric"
+import {
+    Canvas,
+    FabricImage,
+    InteractiveFabricObject,
+    Point,
+    config as fabricConfig,
+} from "fabric"
+// Side-effect import: registers PixxelCurves filter in Fabric's classRegistry so
+// loadFromJSON can rehydrate saved canvas state that contains it.
+import "../../../../../lib/curves-filter"
+
+// Force the Canvas2D filter backend instead of WebGL. The custom curves LUT filter
+// has a WebGL fragment-shader path that worked in isolation but had subtle issues
+// in real filter chains (corrupted source texture state on some images, leading to
+// black canvases and other downstream filters not visibly applying). 2D is slower
+// for large images but correct in every chain shape.
+if (typeof window !== "undefined" && fabricConfig) {
+    fabricConfig.enableGLFiltering = false
+}
+
+// Neo-brutalist defaults for selected-object controls (corners, border, padding,
+// rotation handle). Fabric reads InteractiveFabricObject.ownDefaults at object
+// construction, so this needs to run before any FabricImage / Rect / etc. is
+// created — at module init, before Canvas mounts.
+if (typeof window !== "undefined" && InteractiveFabricObject?.ownDefaults) {
+    InteractiveFabricObject.ownDefaults = {
+        ...InteractiveFabricObject.ownDefaults,
+        // Square cyan corners with a hard cream stroke — same palette as the
+        // editor's Projects header, preview controls, and resolution HUD.
+        cornerStyle: "rect",
+        cornerColor: "#06B8D4",
+        cornerStrokeColor: "#F4F4F5",
+        cornerSize: 11,
+        touchCornerSize: 22,
+        transparentCorners: false,
+        cornerDashArray: null,
+        // Solid cream marquee border with a slight float-off-the-image padding.
+        // Thicker than default so it reads at any zoom.
+        borderColor: "#F4F4F5",
+        borderScaleFactor: 1.6,
+        borderDashArray: null,
+        borderOpacityWhenMoving: 0.9,
+        padding: 6,
+    }
+}
 import { normalizeCanvasState, serializeCanvasState } from "../../../../../lib/canvas-state"
 import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../lib/canvas-history"
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
 import { addImageFilesToCanvas } from "../../../../../lib/canvas-images"
+import {
+    createDebouncedFlusher,
+    fetchCachedSnapshot,
+    flushToConvex,
+    snapshotToCache,
+} from "../../../../../lib/canvas-cache"
+import AuroraLoader from "./AuroraLoader"
 
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 64
@@ -80,7 +131,11 @@ const CanvasEditor = ({ project }) => {
     const projectRef = useRef(project)
     projectRef.current = project
 
-    const { canvasEditor, setCanvasEditor, activeTool, expansionPreview } = useCanvas()
+    const { canvasEditor, setCanvasEditor, activeTool, expansionPreview, processingMessage } = useCanvas()
+    // Hide the floating canvas chrome (zoom bar, hand tool, resolution HUD) any
+    // time we're showing a full-screen processing overlay or the initial canvas
+    // loader. Otherwise those controls bleed through the blurred background.
+    const isBusy = Boolean(processingMessage) || isLoading
     const activeToolRef = useRef(activeTool)
     activeToolRef.current = activeTool
     const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
@@ -218,24 +273,108 @@ const CanvasEditor = ({ project }) => {
         return true
     }, [restoreCanvasState])
 
-    const saveCanvasState = useCallback(async () => {
+    // Write-behind cache flusher, lazily created per project. Holds its debounce
+    // timer in closure state. We never let two flushers exist for the same project
+    // simultaneously — see the useEffect below that recreates it when projectId
+    // changes.
+    const flusherRef = useRef(null)
+
+    const saveCanvasState = useCallback(async ({ rethrow = false, immediate = false } = {}) => {
         const canvas = canvasInstanceRef.current
         const proj = projectRef.current
         if (!canvas || !proj) return
-        try {
-            const canvasJSON = serializeCanvasState(canvas)
-            const currentImageUrl = getPrimaryRemoteImageUrl(canvas)
+
+        const canvasJSON = serializeCanvasState(canvas)
+        const currentImageUrl = getPrimaryRemoteImageUrl(canvas)
+        const fullState = {
+            ...canvasJSON,
+            history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
+            historyIndex: historyIndexRef.current,
+        }
+
+        // Strategy:
+        //   - Always write to the server cache first (fast in-memory store, no DB hit).
+        //   - For autosave (default): schedule a debounced flush to Convex. Lots of
+        //     edits coalesce into one DB write.
+        //   - For manual Save or `immediate: true` / `rethrow: true`: flush right
+        //     now so the user gets a hard guarantee the state is persisted.
+        //   - If the cache write fails for any reason, fall back to direct Convex
+        //     so no edit is ever lost.
+        const cached = await snapshotToCache(proj._id, fullState, currentImageUrl)
+
+        const writeDirect = async () => {
             await updateProject({
                 projectId: proj._id,
-                canvasState: {
-                    ...canvasJSON,
-                    history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
-                    historyIndex: historyIndexRef.current,
-                },
+                canvasState: fullState,
                 ...(currentImageUrl ? { currentImageUrl } : {}),
             })
-        } catch (error) { console.error("Error saving canvas state ", error) }
+        }
+
+        try {
+            if (!cached) {
+                // Cache unavailable — fall back to the legacy direct-write path.
+                await writeDirect()
+                return
+            }
+
+            if (immediate || rethrow) {
+                // Manual Save or explicit immediate request: flush the cached state
+                // through to Convex right now and wait for the result.
+                const flushed = await flushToConvex(proj._id)
+                if (!flushed && rethrow) {
+                    // Cache had nothing new to flush OR flush failed — write
+                    // directly so the user's Save-button click isn't a no-op.
+                    await writeDirect()
+                }
+                flusherRef.current?.cancel()
+            } else {
+                // Autosave: defer the DB write. Coalesces N rapid edits into 1
+                // mutation after ~8s of idle (or sooner on critical events).
+                flusherRef.current?.schedule()
+            }
+        } catch (error) {
+            console.error("Error saving canvas state ", error)
+            // Best-effort recovery: try direct write before bubbling up.
+            try { await writeDirect() } catch (fallbackError) {
+                if (rethrow) throw fallbackError
+                return
+            }
+            if (rethrow) throw error
+        }
     }, [updateProject])
+
+    // Manage one debounced flusher per project. On unmount or projectId change,
+    // flush any pending writes synchronously (best-effort) so the next editor
+    // session doesn't see stale data.
+    useEffect(() => {
+        const projectId = project?._id
+        if (!projectId) return
+        const flusher = createDebouncedFlusher(projectId, 8000)
+        flusherRef.current = flusher
+        return () => {
+            flusher.flushNow()
+            if (flusherRef.current === flusher) flusherRef.current = null
+        }
+    }, [project?._id])
+
+    // beforeunload + pagehide: force-flush the cache to Convex before the user
+    // navigates away. `keepalive` lets the fetch survive the page unloading.
+    useEffect(() => {
+        const projectId = project?._id
+        if (!projectId) return
+        const handler = () => {
+            try { flusherRef.current?.cancel() } catch { /* ignore */ }
+            // Fire and forget. The browser will let this request finish even
+            // though the page is going away thanks to keepalive.
+            flushToConvex(projectId, { keepalive: true })
+        }
+        window.addEventListener("beforeunload", handler)
+        window.addEventListener("pagehide", handler)
+        return () => {
+            window.removeEventListener("beforeunload", handler)
+            window.removeEventListener("pagehide", handler)
+        }
+    }, [project?._id])
 
     useEffect(() => {
         if (!canvasRef.current || !project) return
@@ -271,14 +410,35 @@ const CanvasEditor = ({ project }) => {
             canvasInstanceRef.current = canvas
             canvas.setDimensions({ width: width || project.width, height: height || project.height }, { backstoreOnly: false })
 
-            const rawCanvasState = project.canvasState
+            // Read-through: if the server cache has a newer snapshot than what's
+            // in Convex (because a previous session ended with pending debounced
+            // writes that haven't been flushed yet), prefer that. Otherwise the
+            // user would see an old version of their work after a reload.
+            let rawCanvasState = project.canvasState
+            let effectiveCurrentImageUrl = project.currentImageUrl
+            try {
+                const cachedSnapshot = await fetchCachedSnapshot(project._id)
+                if (cachedSnapshot?.canvasState) {
+                    const projectUpdatedAt = Number(project.updatedAt) || 0
+                    const cachedUpdatedAt = Number(cachedSnapshot.updatedAt) || 0
+                    if (cachedUpdatedAt > projectUpdatedAt) {
+                        rawCanvasState = cachedSnapshot.canvasState
+                        if (cachedSnapshot.currentImageUrl) {
+                            effectiveCurrentImageUrl = cachedSnapshot.currentImageUrl
+                        }
+                    }
+                }
+            } catch (cacheError) {
+                console.warn("[canvas] cached snapshot lookup failed:", cacheError?.message || cacheError)
+            }
+
             const canvasState = normalizeCanvasState(rawCanvasState)
             const persistedHistory = Array.isArray(rawCanvasState?.history) ? rawCanvasState.history : null
             let hasRestoredViewport = false
 
-            if (!canvasState && (project.currentImageUrl || project.originalImageUrl)) {
+            if (!canvasState && (effectiveCurrentImageUrl || project.originalImageUrl)) {
                 try {
-                    const imageUrl = project.currentImageUrl || project.originalImageUrl
+                    const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
                     const fabricImage = await FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" })
                     fitImageInsideProject(fabricImage, project)
                     canvas.add(fabricImage)
@@ -286,22 +446,46 @@ const CanvasEditor = ({ project }) => {
             }
 
             if (canvasState) {
+                let loadedFromState = false
                 try {
                     await canvas.loadFromJSON(canvasState.canvas || canvasState)
                     removeExpansionFramesFromCanvas(canvas)
                     if (canvasState.viewport) { setViewportState(canvas, canvasState.viewport, { x: project.width / 2, y: project.height / 2 }); hasRestoredViewport = true }
-                    const imageUrl = project.currentImageUrl || project.originalImageUrl
+                    const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
                     await hydrateCanvasImages(canvas, imageUrl, {
                         forcePrimaryImageUrl: true,
                         canvasSize: { width: project.width, height: project.height },
                     })
                     for (const obj of canvas.getObjects()) {
                         if (obj?.type?.toLowerCase() === 'image' && obj.filters?.length) {
-                            try { obj.applyFilters?.() } catch { /* ignore */ }
+                            try {
+                                obj.applyFilters?.()
+                            } catch (filterError) {
+                                // Silently swallowing here once hid a real curves regression
+                                // for hours. Keep going (don't break the load) but log so
+                                // the next failure is diagnosable.
+                                console.error('[canvas] applyFilters failed for image:', filterError)
+                            }
                         }
                     }
                     canvas.requestRenderAll()
+                    loadedFromState = canvas.getObjects().length > 0
                 } catch (error) { console.error("Error loading canvas state: ", error) }
+
+                // Fallback: if loadFromJSON threw or produced an empty canvas (e.g. a
+                // saved filter type Fabric can no longer enliven), still show the project
+                // image so the user doesn't stare at a blank canvas.
+                if (!loadedFromState) {
+                    const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
+                    if (imageUrl && canvas.getObjects().length === 0) {
+                        try {
+                            const fallbackImage = await FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" })
+                            fitImageInsideProject(fallbackImage, project)
+                            canvas.add(fallbackImage)
+                            canvas.requestRenderAll()
+                        } catch (error) { console.error("Fallback image load failed:", error) }
+                    }
+                }
             }
 
             if (!hasRestoredViewport) createInitialViewport(canvas)
@@ -471,7 +655,7 @@ const CanvasEditor = ({ project }) => {
             canvas.__undoCanvasState = () => undoCanvasState()
             canvas.__redoCanvasState = () => redoCanvasState()
             canvas.__pushHistoryState = () => pushHistoryState(canvas)
-            canvas.__saveCanvasState = () => saveCanvasState()
+            canvas.__saveCanvasState = (opts) => saveCanvasState(opts)
             canvas.__getHistoryState = () => ({
                 canUndo: historyIndexRef.current > 0,
                 canRedo: historyIndexRef.current < historyRef.current.length - 1,
@@ -804,7 +988,7 @@ const CanvasEditor = ({ project }) => {
             {/* Dot grid */}
             <div className='absolute inset-0 pointer-events-none editor-canvas-grid' />
 
-            {isProjectFrameVisible && (
+            {isProjectFrameVisible && !isBusy && (
                 <div
                     className="editor-canvas-project-texture pointer-events-none absolute"
                     style={{
@@ -820,26 +1004,28 @@ const CanvasEditor = ({ project }) => {
                 <canvas id='canvas' className='rounded-xl editor-canvas-surface' ref={canvasRef} />
             </div>
 
-            <button
-                type="button"
-                onClick={toggleHandTool}
-                className="editor-icon-button absolute z-10 flex items-center justify-center"
-                style={{
-                    bottom: 16,
-                    right: 16,
-                    width: 36,
-                    height: 36,
-                    background: isHandToolActive ? 'var(--accent-primary)' : 'var(--bg-elevated)',
-                    color: isHandToolActive ? '#03050A' : 'var(--text-primary)',
-                    borderColor: isHandToolActive ? 'var(--accent-primary)' : 'var(--border-default)',
-                }}
-                title={isHandToolActive ? 'Hand tool on — click to exit (H or Space)' : 'Hand tool — pan the canvas (H or hold Space)'}
-                aria-pressed={isHandToolActive}
-            >
-                <Hand className="h-4 w-4" />
-            </button>
+            {!isBusy && (
+                <button
+                    type="button"
+                    onClick={toggleHandTool}
+                    className="editor-icon-button absolute z-10 flex items-center justify-center"
+                    style={{
+                        bottom: 16,
+                        right: 16,
+                        width: 36,
+                        height: 36,
+                        background: isHandToolActive ? 'var(--accent-primary)' : 'var(--bg-elevated)',
+                        color: isHandToolActive ? '#03050A' : 'var(--text-primary)',
+                        borderColor: isHandToolActive ? 'var(--accent-primary)' : 'var(--border-default)',
+                    }}
+                    title={isHandToolActive ? 'Hand tool on — click to exit (H or Space)' : 'Hand tool — pan the canvas (H or hold Space)'}
+                    aria-pressed={isHandToolActive}
+                >
+                    <Hand className="h-4 w-4" />
+                </button>
+            )}
 
-            {isProjectFrameVisible && (
+            {isProjectFrameVisible && !isBusy && (
                 <div
                     className="editor-canvas-project-frame pointer-events-none absolute"
                     style={{
@@ -856,6 +1042,8 @@ const CanvasEditor = ({ project }) => {
                 aria-label="Preview size"
                 onPointerDown={stopPreviewControlPropagation}
                 onMouseDown={stopPreviewControlPropagation}
+                hidden={isBusy}
+                style={isBusy ? { display: 'none' } : undefined}
             >
                 <button
                     type="button"
@@ -903,7 +1091,7 @@ const CanvasEditor = ({ project }) => {
                 </output>
             </div>
 
-            {project?.width && project?.height && (
+            {!isBusy && project?.width && project?.height && (
                 <div className="editor-canvas-resolution-hud">
                     <span>{imageNativeSize ? "Image Resolution" : "Document"}</span>
                     <strong>
@@ -916,17 +1104,11 @@ const CanvasEditor = ({ project }) => {
                 </div>
             )}
 
-            {isLoading &&
-                <div className='absolute inset-0 flex items-center justify-center z-10' style={{ background: 'rgba(7,9,14,0.85)', backdropFilter: 'blur(8px)' }}>
-                    <div className='flex flex-col items-center gap-4'>
-                        <div className="w-10 h-10 rounded-xl flex items-center justify-center animate-pulse-glow"
-                            style={{ background: 'rgba(6, 184, 212, 0.15)' }}>
-                            <div className="w-5 h-5 rounded" style={{ background: 'var(--accent-primary)' }} />
-                        </div>
-                        <p className='text-xs' style={{ color: 'var(--text-muted)' }}>Loading canvas...</p>
-                    </div>
+            {isLoading && (
+                <div className='neo-loader-surface absolute inset-0 z-40 flex items-center justify-center'>
+                    <AuroraLoader message="Loading canvas" />
                 </div>
-            }
+            )}
         </div>
     )
 }

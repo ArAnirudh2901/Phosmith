@@ -17,22 +17,7 @@ import RadialToolMenu from "./_components/RadialToolMenu"
 import ContextualActionBar from "./_components/ContextualActionBar"
 import useEditorShortcuts from "../../../../../hooks/useEditorShortcuts"
 import { motion, AnimatePresence } from "framer-motion"
-import { duration, easeOut, useReducedMotion } from "@/lib/motion"
-
-const pseudoRandom = (seed, max = 1) => ((seed * 16807 + 0) % 2147483647) / 2147483647 * max
-
-const PARTICLE_COUNT = 8
-
-const PARTICLE_DATA = Array.from({ length: PARTICLE_COUNT }, (_, i) => ({
-    id: i,
-    width: 4 + pseudoRandom(i * 7, 4),
-    height: 4 + pseudoRandom(i * 13, 4),
-    opacityBase: 0.3 + pseudoRandom(i * 17, 0.3),
-    left: pseudoRandom(i * 23, 100),
-    top: pseudoRandom(i * 31, 100),
-    duration: 2 + pseudoRandom(i * 41, 2),
-    delay: i * 0.1,
-}))
+import { duration, easeOut } from "@/lib/motion"
 
 const SIDEBAR_WIDTH_KEY = "pixxel-editor-sidebar-width"
 const AGENT_SIDEBAR_WIDTH_KEY = "pixxel-editor-agent-sidebar-width"
@@ -54,7 +39,6 @@ const getStoredPanelWidth = (key, fallback, min, max) => {
 const Editor = () => {
     const params = useParams()
     const projectId = params.projectId
-    const reduced = useReducedMotion()
     const { isLoading: isAuthLoading, isAuthenticated } = useStoreUser()
 
     const [canvasEditor, setCanvasEditor] = useState(null)
@@ -77,6 +61,7 @@ const Editor = () => {
     const [contextualBarPosition, setContextualBarPosition] = useState({ x: 0, y: 120 })
     const radialHoldRef = useRef(false)
     const hoveredRadialToolRef = useRef(null)
+    const hoveredRadialSubRef = useRef(null)
 
     useEffect(() => {
         if (!canvasEditor?.getActiveObject?.()) return
@@ -86,10 +71,18 @@ const Editor = () => {
         return () => cancelAnimationFrame(frame)
     }, [canvasEditor])
 
-    const handleActiveToolChange = useCallback((toolId) => {
+    const handleActiveToolChange = useCallback((toolId, subId = null) => {
         setActiveTool(toolId)
         if (toolId !== "ai_extender") {
             setExpansionPreview(null)
+        }
+        if (subId) {
+            // Sub-action hint: broadcast on window so individual tools can react
+            // without prop-drilling. Tools listen for "pixxel:tool-sub" with
+            // { detail: { toolId, subId } } and apply their own preset.
+            try {
+                window.dispatchEvent(new CustomEvent("pixxel:tool-sub", { detail: { toolId, subId } }))
+            } catch { /* SSR safe */ }
         }
     }, [])
 
@@ -193,15 +186,18 @@ const Editor = () => {
 
         radialHoldRef.current = false
         const toolId = hoveredRadialToolRef.current
+        const subId = hoveredRadialSubRef.current
         hoveredRadialToolRef.current = null
+        hoveredRadialSubRef.current = null
         setShowRadialMenu(false)
 
-        if (toolId) handleActiveToolChange(toolId)
+        if (toolId) handleActiveToolChange(toolId, subId)
     }, [handleActiveToolChange])
 
-    const handleRadialHoverChange = useCallback((toolId) => {
+    const handleRadialHoverChange = useCallback((toolId, subId = null) => {
         if (radialHoldRef.current) {
             hoveredRadialToolRef.current = toolId
+            hoveredRadialSubRef.current = subId
         }
     }, [])
 
@@ -234,19 +230,8 @@ const Editor = () => {
     const dynamicAccent = useImageAccent(activeProject?.currentImageUrl || activeProject?.originalImageUrl)
 
     if (isLoading) return (
-        <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-void-darkest)" }}>
-            <motion.div
-                className="flex flex-col items-center gap-4"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: duration.normal, ease: easeOut }}
-            >
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center animate-pulse-glow"
-                    style={{ background: `rgba(${dynamicAccent.accentRgb}, 0.15)` }}>
-                    <div className="w-5 h-5 rounded-md" style={{ background: dynamicAccent.accent }} />
-                </div>
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Loading editor...</p>
-            </motion.div>
+        <div className="neo-loader-surface min-h-screen flex items-center justify-center">
+            <AuroraLoader message="Loading editor" />
         </div>
     )
 
@@ -281,31 +266,13 @@ const Editor = () => {
                 {/* Processing overlay */}
                 <AnimatePresence>
                     {processingMessage && (
-                        <motion.div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(7,9,14,0.88)", backdropFilter: "blur(16px)" }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
-                            {!reduced && (
-                                <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                                    {PARTICLE_DATA.map((p) => (
-                                        <motion.div
-                                            key={p.id}
-                                            className="absolute rounded-full"
-                                            style={{
-                                                width: p.width,
-                                                height: p.height,
-                                                background: `radial-gradient(circle, rgba(6,184,212,${p.opacityBase}), transparent)`,
-                                                left: `${p.left}%`,
-                                                top: `${p.top}%`,
-                                            }}
-                                            animate={{ y: [0, -80, 0], opacity: [0, 0.6, 0] }}
-                                            transition={{
-                                                duration: p.duration,
-                                                repeat: Infinity,
-                                                delay: p.delay,
-                                                ease: easeOut,
-                                            }}
-                                        />
-                                    ))}
-                                </div>
-                            )}
+                        <motion.div
+                            className="neo-loader-surface fixed inset-0 z-50 flex items-center justify-center"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                        >
                             <AuroraLoader message={processingMessage} phase={processingPhase} />
                         </motion.div>
                     )}
@@ -319,6 +286,7 @@ const Editor = () => {
                     onClose={() => {
                         radialHoldRef.current = false
                         hoveredRadialToolRef.current = null
+                        hoveredRadialSubRef.current = null
                         setShowRadialMenu(false)
                     }}
                     onHoverToolChange={handleRadialHoverChange}

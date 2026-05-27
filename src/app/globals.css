@@ -282,6 +282,236 @@ a:focus-visible,
   border-color: #F4F4F5;
 }
 
+/* Dashboard Projects header — pitch-black fill with a permanent cyan offset
+   shadow. The hover state is locked to the same look so moving the mouse over
+   it doesn't change anything (it's a static title bar, not a button). */
+.dashboard-projects-header,
+.dashboard-projects-header:hover {
+  background: #000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-color: rgba(244, 244, 245, 0.85);
+  box-shadow:
+    5px 5px 0 0 rgba(6, 184, 212, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+
+/* ── Neo-brutalist loader card ─────────────────────────────────────────────
+   Used in:
+     - Editor processing overlay (page.jsx ProcessingMessage)
+     - In-canvas isLoading overlay (canvas.jsx)
+     - Page-level "Loading editor" state
+   Design language: pitch-black surface, 1.5px cream border, hard cyan offset
+   shadow, JetBrains Mono uppercase + tabular numerics. No soft gradients or
+   pulsing glows — animation is restricted to the segmented progress strip.
+*/
+.neo-loader {
+  position: relative;
+  z-index: 10;
+  width: clamp(280px, 32vw, 360px);
+  border: 1.5px solid rgba(244, 244, 245, 0.92);
+  background: #000;
+  box-shadow:
+    6px 6px 0 0 rgba(6, 184, 212, 0.92),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: #F4F4F5;
+  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace);
+  overflow: hidden;
+}
+
+.neo-loader-header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: clamp(0.55rem, 0.85vw, 0.7rem) clamp(0.6rem, 0.9vw, 0.78rem);
+  border-bottom: 1.5px solid rgba(244, 244, 245, 0.55);
+  background: linear-gradient(180deg, rgba(244, 244, 245, 0.045), transparent);
+}
+
+.neo-loader-mark {
+  display: grid;
+  place-items: center;
+  width: clamp(1.8rem, 2.4vw, 2.1rem);
+  height: clamp(1.8rem, 2.4vw, 2.1rem);
+  border-radius: 4px;
+  border: 1.5px solid rgba(244, 244, 245, 0.85);
+  background: #06B8D4;
+  color: #03050A;
+  font-weight: 900;
+  font-size: clamp(0.95rem, 1.2vw, 1.05rem);
+  letter-spacing: -0.04em;
+  box-shadow:
+    2px 2px 0 0 rgba(244, 244, 245, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.neo-loader-kicker {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.neo-loader-kicker span {
+  color: #6B7280;
+  font-size: clamp(0.5rem, 0.62vw, 0.58rem);
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.neo-loader-kicker em {
+  font-style: normal;
+  color: #F4F4F5;
+  font-size: clamp(0.72rem, 0.92vw, 0.84rem);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.neo-loader-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  padding: 0.32rem 0.5rem;
+  border-radius: 4px;
+  border: 1.5px solid rgba(155, 249, 91, 0.6);
+  background: rgba(155, 249, 91, 0.10);
+  color: #9BF95B;
+  font-size: clamp(0.52rem, 0.66vw, 0.6rem);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.neo-loader-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 1px;
+  background: #9BF95B;
+  box-shadow: 0 0 8px rgba(155, 249, 91, 0.85);
+  animation: neo-loader-dot-blink 1.4s steps(2, end) infinite;
+}
+
+@keyframes neo-loader-dot-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.25; }
+}
+
+.neo-loader-body {
+  padding: clamp(0.85rem, 1.2vw, 1.1rem) clamp(0.7rem, 1vw, 0.92rem) clamp(0.7rem, 1vw, 0.92rem);
+}
+
+.neo-loader-headline {
+  margin: 0 0 clamp(0.7rem, 1vw, 0.9rem);
+  color: #F4F4F5;
+  font-size: clamp(0.92rem, 1.25vw, 1.12rem);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.15;
+  text-shadow: 2px 2px 0 rgba(6, 184, 212, 0.35);
+}
+
+.neo-loader-progress {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 0.32rem;
+  margin-bottom: clamp(0.7rem, 1vw, 0.9rem);
+}
+
+.neo-loader-block {
+  display: block;
+  height: clamp(0.55rem, 0.85vw, 0.7rem);
+  border: 1.5px solid rgba(244, 244, 245, 0.85);
+  background: #06B8D4;
+  box-shadow: 1.5px 1.5px 0 0 rgba(244, 244, 245, 0.35);
+}
+
+.neo-loader-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  border: 1.5px solid rgba(244, 244, 245, 0.55);
+  background: rgba(14, 17, 24, 0.85);
+  color: #A1A8B4;
+  font-size: clamp(0.52rem, 0.66vw, 0.6rem);
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.neo-loader-phase::before {
+  content: "→";
+  color: #06B8D4;
+  font-weight: 900;
+}
+
+.neo-loader-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: clamp(0.45rem, 0.7vw, 0.55rem) clamp(0.7rem, 1vw, 0.92rem);
+  border-top: 1.5px solid rgba(244, 244, 245, 0.35);
+  background: linear-gradient(180deg, transparent, rgba(244, 244, 245, 0.025));
+  color: #6B7280;
+  font-size: clamp(0.5rem, 0.62vw, 0.58rem);
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+.neo-loader-footer em {
+  font-style: normal;
+  color: #06B8D4;
+}
+
+.neo-loader-divider {
+  opacity: 0.5;
+}
+
+/* Backdrop pattern shared by all loader overlay surfaces — a sparse dot grid
+   that disappears toward the edges via a radial mask. Static, no animation. */
+.neo-loader-surface {
+  position: relative;
+  background: #03050A;
+  overflow: hidden;
+}
+
+.neo-loader-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(rgba(244, 244, 245, 0.18) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: 0 0;
+  mask-image: radial-gradient(circle at center, black 0%, transparent 70%);
+  -webkit-mask-image: radial-gradient(circle at center, black 0%, transparent 70%);
+  opacity: 0.45;
+}
+
+.neo-loader-surface::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Faint horizontal scanline texture for the brutalist feel */
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(244, 244, 245, 0.04) 0px,
+    rgba(244, 244, 245, 0.04) 1px,
+    transparent 1px,
+    transparent 6px
+  );
+  opacity: 0.5;
+}
+
 .project-pixel-overlay {
   position: fixed;
   z-index: 90;
@@ -452,14 +682,14 @@ a:focus-visible,
   position: relative;
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  min-height: 2rem;
-  padding: 0.375rem 0.65rem;
+  gap: 0.28rem;
+  min-height: 1.9rem;
+  padding: 0.3rem 0.5rem;
   border-radius: 4px;
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.68rem;
+  font-size: 0.64rem;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 140ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms ease;
   color: #F4F4F5;
@@ -470,10 +700,14 @@ a:focus-visible,
   box-shadow: 0 0 0 0 transparent;
 }
 
+/* Wider screens get a tiny bit more breathing room — but stay tight enough that
+   10 labeled tool buttons + the left title block + the right action group all
+   fit without overlapping on common 1700-2000px viewports. */
 @media (min-width: 1536px) {
   .tool-btn {
-    gap: 0.4rem;
-    padding: 0.4rem 0.95rem;
+    gap: 0.32rem;
+    padding: 0.32rem 0.6rem;
+    font-size: 0.66rem;
   }
 }
 
@@ -511,9 +745,9 @@ a:focus-visible,
   border-radius: 4px;
   border: 1.5px solid rgba(244, 244, 245, 0.75);
   background: #07090E;
-  padding: 0.55rem 0.8rem;
+  padding: clamp(0.42rem, 0.6vw, 0.55rem) clamp(0.62rem, 0.85vw, 0.8rem);
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.8125rem;
+  font-size: clamp(0.7rem, 0.85vw, 0.8125rem);
   color: #F4F4F5;
   outline: none;
   box-shadow: 2px 2px 0 0 rgba(6, 184, 212, 0.3);
@@ -536,7 +770,7 @@ a:focus-visible,
   background:
     linear-gradient(135deg, rgba(255,255,255,0.035), rgba(255,255,255,0.008) 60%),
     rgba(14, 17, 24, 0.85);
-  padding: 1rem;
+  padding: clamp(0.7rem, 1.05vw, 1rem);
   box-shadow:
     3px 3px 0 0 rgba(244, 244, 245, 0.45),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
@@ -551,7 +785,7 @@ a:focus-visible,
 
 .panel-label {
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.66rem;
+  font-size: clamp(0.58rem, 0.7vw, 0.66rem);
   font-weight: 700;
   color: #D8DEE8;
   text-transform: uppercase;
@@ -712,7 +946,8 @@ a:focus-visible,
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.5rem;
+  padding: clamp(0.55rem, 0.85vw, 0.75rem);
   overflow: hidden;
   color: var(--agent-ink);
   font-family: "JetBrains Mono", "SFMono-Regular", "Cascadia Code", ui-monospace, monospace;
@@ -745,11 +980,11 @@ a:focus-visible,
 .agent-command-header {
   display: flex;
   align-items: center;
-  gap: 0.7rem;
+  gap: clamp(0.45rem, 0.7vw, 0.55rem);
   flex-shrink: 0;
   overflow: hidden;
-  border-radius: 0.5rem;
-  padding: 0.72rem;
+  border-radius: 0.45rem;
+  padding: clamp(0.42rem, 0.65vw, 0.55rem) clamp(0.5rem, 0.75vw, 0.62rem);
 }
 
 .agent-command-header::after {
@@ -757,22 +992,21 @@ a:focus-visible,
   position: absolute;
   inset: auto 0 0;
   height: 1px;
-  background: linear-gradient(90deg, var(--agent-green), var(--agent-cyan), var(--agent-pink));
-  opacity: 0.75;
+  background: rgba(244, 242, 232, 0.12);
 }
 
 .agent-command-mark {
   display: grid;
-  width: 2.25rem;
-  height: 2.25rem;
+  width: clamp(1.55rem, 2.1vw, 1.85rem);
+  height: clamp(1.55rem, 2.1vw, 1.85rem);
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 0.375rem;
+  border-radius: 0.35rem;
   border: 1px solid rgba(244, 242, 232, 0.15);
   background:
     linear-gradient(135deg, rgba(244, 242, 232, 0.12), rgba(244, 242, 232, 0.02)),
     color-mix(in srgb, var(--agent-mark, #53d8ff) 32%, #070707);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.24), 0 12px 28px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.24), 0 6px 14px rgba(0, 0, 0, 0.28);
 }
 
 .agent-kicker {
@@ -783,13 +1017,58 @@ a:focus-visible,
   text-transform: uppercase;
 }
 
+.agent-command-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
 .agent-command-header h3 {
-  margin-top: 0.15rem;
+  margin: 0;
   color: var(--agent-ink);
-  font-size: 0.83rem;
+  font-size: clamp(0.68rem, 0.88vw, 0.78rem);
   font-weight: 780;
-  line-height: 1.18;
+  line-height: 1.15;
   letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-command-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  margin: 0;
+  color: var(--agent-muted);
+  font-size: clamp(0.54rem, 0.66vw, 0.6rem);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-command-dot {
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--agent-dim);
+  flex: 0 0 auto;
+}
+
+.agent-command-sub.is-ready {
+  color: var(--agent-green);
+}
+
+.agent-command-sub.is-ready .agent-command-dot {
+  background: var(--agent-green);
+  box-shadow: 0 0 8px rgba(155, 249, 91, 0.55);
 }
 
 .agent-status-row {
@@ -837,10 +1116,44 @@ a:focus-visible,
   color: var(--agent-cyan);
 }
 
+/* Header action cluster — keeps the Live toggle and the Clear-history button
+   on the same row without crowding the title block. */
+.agent-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  flex: 0 0 auto;
+}
+
+.agent-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(1.7rem, 2.3vw, 2rem);
+  height: clamp(1.7rem, 2.3vw, 2rem);
+  border-radius: 0.375rem;
+  border: 1px solid var(--agent-line);
+  background: rgba(244, 242, 232, 0.045);
+  color: var(--agent-muted);
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 120ms ease;
+  cursor: pointer;
+}
+
+.agent-icon-button:hover:not(:disabled) {
+  border-color: rgba(255, 78, 205, 0.32);
+  background: rgba(255, 78, 205, 0.08);
+  color: var(--agent-pink);
+}
+
+.agent-icon-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
 .agent-quick-rail {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.45rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.32rem;
   flex: 0 0 auto;
   position: relative;
 }
@@ -851,12 +1164,12 @@ a:focus-visible,
 }
 
 .agent-quick-card {
-  min-height: 3.5rem;
-  border-radius: 0.45rem;
+  min-height: clamp(2rem, 2.6vw, 2.4rem);
+  border-radius: 0.35rem;
   border: 1px solid var(--agent-line);
   background: rgba(244, 242, 232, 0.035);
-  padding: 0.58rem;
-  text-align: left;
+  padding: clamp(0.32rem, 0.5vw, 0.45rem) clamp(0.4rem, 0.6vw, 0.52rem);
+  text-align: center;
   transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
 }
 
@@ -868,16 +1181,16 @@ a:focus-visible,
 .agent-quick-card span {
   display: block;
   color: var(--agent-ink);
-  font-size: 0.68rem;
+  font-size: clamp(0.55rem, 0.68vw, 0.62rem);
   font-weight: 820;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .agent-quick-card small {
-  display: block;
-  margin-top: 0.28rem;
-  color: var(--agent-dim);
-  font-size: 0.58rem;
-  line-height: 1.25;
+  /* Hint text was forcing the tile to be two-line and large. Drop it on the
+     compact rail; the label alone is enough. */
+  display: none;
 }
 
 .agent-quick-card:disabled,
@@ -887,31 +1200,280 @@ a:focus-visible,
   opacity: 0.48;
 }
 
+/* Positioned ancestor for the chat log + the history overlay panel. The
+   history panel is absolutely positioned over the chat log when open, so the
+   composer below stays in place and the chat itself doesn't scroll-jump when
+   the user opens/closes history. */
+.agent-chat-area {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .agent-chat-log {
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
-  border-radius: 0.5rem;
+  overscroll-behavior: contain;
+  border-radius: 0.4rem;
   border: 1px solid var(--agent-line);
   background:
-    linear-gradient(rgba(244, 242, 232, 0.025) 1px, transparent 1px),
+    linear-gradient(rgba(244, 242, 232, 0.018) 1px, transparent 1px),
     #070706;
   background-size: 100% 2rem;
-  padding: 0.68rem;
+  padding: clamp(0.5rem, 0.7vw, 0.62rem);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(244, 242, 232, 0.18) transparent;
+}
+
+.agent-chat-log::-webkit-scrollbar {
+  width: 6px;
+}
+
+.agent-chat-log::-webkit-scrollbar-thumb {
+  background: rgba(244, 242, 232, 0.18);
+  border-radius: 3px;
+}
+
+.agent-chat-log::-webkit-scrollbar-thumb:hover {
+  background: rgba(244, 242, 232, 0.32);
+}
+
+/* ── Agent chat-history overlay ──────────────────────────────────────────── */
+
+.agent-history-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0.5rem;
+  border: 1px solid var(--agent-line-strong);
+  background:
+    linear-gradient(180deg, rgba(244, 242, 232, 0.035), rgba(244, 242, 232, 0.005) 30%),
+    #0a0a09;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.agent-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: clamp(0.55rem, 0.8vw, 0.7rem) clamp(0.6rem, 0.85vw, 0.78rem);
+  border-bottom: 1px solid var(--agent-line);
+  background: linear-gradient(180deg, rgba(244, 242, 232, 0.04), transparent);
+}
+
+.agent-history-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--agent-ink);
+  font-size: clamp(0.62rem, 0.78vw, 0.72rem);
+  font-weight: 820;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-history-title em {
+  font-style: normal;
+  color: var(--agent-muted);
+  font-size: clamp(0.52rem, 0.66vw, 0.6rem);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  margin-left: 0.25rem;
+}
+
+.agent-history-new {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: clamp(0.45rem, 0.7vw, 0.6rem);
+  padding: clamp(0.45rem, 0.7vw, 0.55rem) clamp(0.55rem, 0.85vw, 0.7rem);
+  border-radius: 0.4rem;
+  border: 1px dashed rgba(155, 249, 91, 0.35);
+  background: rgba(155, 249, 91, 0.06);
+  color: var(--agent-green);
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: clamp(0.6rem, 0.74vw, 0.66rem);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 120ms ease;
+}
+
+.agent-history-new:hover {
+  background: rgba(155, 249, 91, 0.12);
+  border-color: rgba(155, 249, 91, 0.55);
+}
+
+.agent-history-new:active {
+  transform: translateY(1px);
+}
+
+.agent-history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 clamp(0.45rem, 0.7vw, 0.6rem) clamp(0.5rem, 0.8vw, 0.65rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+}
+
+.agent-history-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--agent-line);
+  background: rgba(244, 242, 232, 0.025);
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.agent-history-row:hover {
+  border-color: rgba(83, 216, 255, 0.28);
+  background: rgba(83, 216, 255, 0.045);
+}
+
+.agent-history-row.is-active {
+  border-color: rgba(155, 249, 91, 0.4);
+  background:
+    linear-gradient(90deg, rgba(155, 249, 91, 0.085), rgba(155, 249, 91, 0.02)),
+    rgba(244, 242, 232, 0.035);
+}
+
+.agent-history-row-main {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.45rem;
+  padding: clamp(0.45rem, 0.7vw, 0.58rem) clamp(0.5rem, 0.75vw, 0.62rem);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.agent-history-row-main > svg {
+  color: var(--agent-muted);
+}
+
+.agent-history-row.is-active .agent-history-row-main > svg {
+  color: var(--agent-green);
+}
+
+.agent-history-row-title {
+  display: block;
+  color: var(--agent-ink);
+  font-size: clamp(0.64rem, 0.78vw, 0.72rem);
+  font-weight: 760;
+  letter-spacing: 0.005em;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-history-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.18rem;
+  grid-column: 2 / 3;
+  color: var(--agent-dim);
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: clamp(0.5rem, 0.62vw, 0.58rem);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-history-row-meta em {
+  font-style: normal;
+}
+
+.agent-history-dot {
+  color: var(--agent-line-strong);
+}
+
+.agent-history-row-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: clamp(1.55rem, 2.1vw, 1.85rem);
+  height: clamp(1.55rem, 2.1vw, 1.85rem);
+  margin-right: 0.32rem;
+  border-radius: 0.32rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--agent-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease, background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.agent-history-row:hover .agent-history-row-delete,
+.agent-history-row.is-active .agent-history-row-delete {
+  opacity: 1;
+}
+
+.agent-history-row-delete:hover {
+  color: var(--agent-pink);
+  background: rgba(255, 78, 205, 0.10);
+  border-color: rgba(255, 78, 205, 0.28);
+}
+
+.agent-history-clear-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  align-self: center;
+  margin-top: 0.45rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 0.32rem;
+  border: 1px solid var(--agent-line);
+  background: transparent;
+  color: var(--agent-dim);
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: clamp(0.5rem, 0.62vw, 0.58rem);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.agent-history-clear-all:hover {
+  color: var(--agent-pink);
+  border-color: rgba(255, 78, 205, 0.28);
+  background: rgba(255, 78, 205, 0.06);
+}
+
+.agent-icon-button--active {
+  border-color: rgba(83, 216, 255, 0.4);
+  background: rgba(83, 216, 255, 0.12);
+  color: var(--agent-cyan);
 }
 
 .agent-chat-stack {
   display: flex;
-  min-height: 100%;
   flex-direction: column;
-  gap: 0.54rem;
+  gap: 0.42rem;
 }
 
 .agent-message-line {
   display: grid;
-  grid-template-columns: 3.55rem minmax(0, 1fr);
+  grid-template-columns: 2.4rem minmax(0, 1fr);
   align-items: flex-start;
-  gap: 0.52rem;
+  gap: 0.42rem;
 }
 
 .agent-message-line--user {
@@ -919,9 +1481,9 @@ a:focus-visible,
 }
 
 .agent-message-meta {
-  padding-top: 0.48rem;
+  padding-top: 0.32rem;
   color: var(--agent-dim);
-  font-size: 0.56rem;
+  font-size: clamp(0.48rem, 0.6vw, 0.54rem);
   font-weight: 850;
   letter-spacing: 0.12em;
   text-align: right;
@@ -929,15 +1491,15 @@ a:focus-visible,
 
 .agent-message-card {
   max-width: 100%;
-  border-radius: 0.45rem;
+  border-radius: 0.35rem;
   border-left: 2px solid rgba(83, 216, 255, 0.42);
-  padding: 0.62rem 0.68rem;
+  padding: clamp(0.42rem, 0.6vw, 0.55rem) clamp(0.5rem, 0.7vw, 0.62rem);
 }
 
 .agent-message-card p {
   color: var(--agent-ink);
-  font-size: 0.72rem;
-  line-height: 1.52;
+  font-size: clamp(0.62rem, 0.74vw, 0.7rem);
+  line-height: 1.45;
 }
 
 .agent-message-card--user {
@@ -1055,15 +1617,194 @@ a:focus-visible,
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), background 180ms ease, box-shadow 180ms ease;
 }
 
-.agent-change-row--enabled .agent-change-switch {
+.agent-change-row--enabled .agent-change-switch,
+.agent-effect-row.is-on .agent-change-switch {
   border-color: rgba(155, 249, 91, 0.34);
   background: rgba(155, 249, 91, 0.13);
 }
 
-.agent-change-row--enabled .agent-change-switch span {
+.agent-change-row--enabled .agent-change-switch span,
+.agent-effect-row.is-on .agent-change-switch span {
   background: var(--agent-green);
   box-shadow: 0 0 12px rgba(155, 249, 91, 0.42);
   transform: translate(0.78rem, -50%);
+}
+
+/* ── AI Agent v2: per-effect slider rows ───────────────────────────────────
+   Sizes use clamp() so the row scales smoothly between tablet-class screens
+   and large desktops without per-breakpoint media queries. The row already
+   shows the effect name + value in its own header, so we explicitly suppress
+   the slider's built-in label/value to avoid duplication and reclaim height.
+*/
+
+.agent-effect-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: clamp(0.32rem, 0.55vw, 0.5rem);
+  align-items: center;
+  padding: clamp(0.32rem, 0.5vw, 0.46rem) clamp(0.4rem, 0.6vw, 0.55rem);
+  border-radius: 5px;
+  border: 1px solid rgba(244, 244, 245, 0.05);
+  background: rgba(8, 10, 14, 0.55);
+  transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+
+.agent-effect-row.is-off {
+  opacity: 0.55;
+}
+
+.agent-effect-row.is-on {
+  border-color: color-mix(in srgb, var(--agent-effect-accent, #5eb8ff) 25%, rgba(244, 244, 245, 0.08));
+}
+
+.agent-effect-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.agent-effect-toggle:disabled {
+  cursor: not-allowed;
+}
+
+.agent-effect-body {
+  min-width: 0;
+}
+
+.agent-effect-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.16rem;
+}
+
+.agent-effect-name {
+  font-size: clamp(0.56rem, 0.66vw, 0.62rem);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: rgba(244, 244, 245, 0.92);
+}
+
+.agent-effect-value {
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: clamp(0.54rem, 0.64vw, 0.6rem);
+  font-weight: 700;
+  color: color-mix(in srgb, var(--agent-effect-accent, #5eb8ff) 80%, white 10%);
+}
+
+.agent-effect-slider {
+  width: 100%;
+}
+
+.agent-effect-slider--muted {
+  pointer-events: none;
+  opacity: 0.45;
+}
+
+/* The row already shows the label + value above the slider, so the slider
+   itself should be just a control. Hide its built-in label/value and shrink
+   the track height aggressively — a 14-22px thin track reads as a control
+   strip, not a section. */
+.agent-effect-slider .pro-ruler-bar--instrument {
+  height: clamp(0.95rem, 1.6vw, 1.25rem);
+  border-radius: 4px;
+}
+.agent-effect-slider .pro-ruler-label,
+.agent-effect-slider .pro-ruler-value {
+  display: none;
+}
+.agent-effect-slider .pro-ruler-tick-band {
+  /* Hide tick marks in the agent panel — they add visual noise without
+     informational value at this size. */
+  display: none;
+}
+.agent-effect-slider .pro-ruler-thumb {
+  width: 2.5px;
+  margin-left: -1.25px;
+}
+
+.agent-effect-detail {
+  /* The detail/help text is the worst offender for vertical bloat. Hide it
+     in the panel; if the user wants the explanation, the row's title attr
+     still surfaces it on hover. */
+  display: none;
+}
+
+.agent-already-great {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  padding: 0.65rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  background: rgba(94, 184, 255, 0.08);
+  border: 1px solid rgba(94, 184, 255, 0.24);
+}
+
+.agent-already-great svg {
+  color: var(--accent-primary, #5eb8ff);
+  margin-top: 0.18rem;
+  flex-shrink: 0;
+}
+
+.agent-already-great strong {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: rgba(244, 244, 245, 0.96);
+  margin-bottom: 0.15rem;
+}
+
+.agent-already-great p {
+  margin: 0;
+  font-size: 0.6rem;
+  line-height: 1.5;
+  color: var(--agent-dim, rgba(226, 232, 240, 0.65));
+}
+
+/* Multi-layer confirmation list — agent asks "which layers?" */
+.agent-layer-confirm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.3rem 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.agent-layer-confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  background: rgba(8, 10, 14, 0.55);
+  border: 1px solid rgba(244, 244, 245, 0.06);
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.agent-layer-confirm-row:hover {
+  background: rgba(8, 10, 14, 0.75);
+  border-color: rgba(244, 244, 245, 0.16);
+}
+
+.agent-layer-confirm-row input[type="checkbox"] {
+  width: 0.85rem;
+  height: 0.85rem;
+  accent-color: var(--accent-primary, #5eb8ff);
+}
+
+.agent-layer-confirm-row span {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: rgba(244, 244, 245, 0.92);
 }
 
 .agent-change-copy {
@@ -1315,35 +2056,35 @@ a:focus-visible,
 .agent-composer {
   display: flex;
   align-items: flex-end;
-  gap: 0.5rem;
+  gap: 0.4rem;
   flex: 0 0 auto;
   overflow: hidden;
-  border-radius: 0.5rem;
-  padding: 0.48rem;
+  border-radius: 0.4rem;
+  padding: clamp(0.32rem, 0.5vw, 0.42rem);
 }
 
 .agent-command-prefix {
   display: grid;
-  width: 2.45rem;
-  height: 2.45rem;
+  width: clamp(1.85rem, 2.4vw, 2.15rem);
+  height: clamp(1.85rem, 2.4vw, 2.15rem);
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 0.4rem;
+  border-radius: 0.35rem;
   border: 1px solid rgba(155, 249, 91, 0.18);
   background: rgba(155, 249, 91, 0.07);
   color: var(--agent-green);
 }
 
 .agent-composer textarea {
-  min-height: 2.45rem;
-  max-height: 7.5rem;
+  min-height: clamp(1.85rem, 2.4vw, 2.15rem);
+  max-height: 6.5rem;
   flex: 1;
   resize: none;
   border: 0;
   background: transparent;
   color: var(--agent-ink);
-  font-size: 0.74rem;
-  line-height: 1.45;
+  font-size: clamp(0.66rem, 0.8vw, 0.74rem);
+  line-height: 1.4;
   outline: none;
 }
 
@@ -1352,14 +2093,14 @@ a:focus-visible,
 }
 
 .agent-send-button {
-  width: 2.45rem;
-  height: 2.45rem;
+  width: clamp(1.85rem, 2.4vw, 2.15rem);
+  height: clamp(1.85rem, 2.4vw, 2.15rem);
   flex: 0 0 auto;
-  border-radius: 0.42rem;
+  border-radius: 0.35rem;
   border-color: rgba(83, 216, 255, 0.34);
   background: rgba(83, 216, 255, 0.14);
   color: var(--agent-cyan);
-  box-shadow: 0 14px 30px rgba(18, 135, 177, 0.18);
+  box-shadow: 0 8px 18px rgba(18, 135, 177, 0.18);
 }
 
 .editor-sidebar-header {
@@ -1870,17 +2611,16 @@ a:focus-visible,
   min-height: 8.5rem;
 }
 
+/* ── Curves panel: thin, professional, theme-matched ───────────────────── */
+
 .adjust-curve-card {
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
-  border-radius: 10px;
-  border: 1px solid rgba(210, 220, 235, 0.12);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)),
-    rgba(9, 12, 18, 0.9);
-  padding: 0.75rem;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  gap: 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 244, 245, 0.06);
+  background: rgba(9, 11, 16, 0.72);
+  padding: 0.65rem;
 }
 
 .adjust-curve-card-header {
@@ -1888,66 +2628,72 @@ a:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding-bottom: 0.55rem;
-  border-bottom: 1px solid rgba(244, 244, 245, 0.08);
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid rgba(244, 244, 245, 0.05);
 }
 
 .adjust-curve-card-title {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  font-size: 0.74rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
+  gap: 0.4rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(244, 244, 245, 0.92);
+  color: rgba(244, 244, 245, 0.78);
 }
 
 .adjust-curve-card-title svg {
+  width: 0.78rem;
+  height: 0.78rem;
   color: var(--curve-color, #e5e7eb);
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--curve-color, #e5e7eb) 45%, transparent));
 }
 
 .adjust-curve-reset {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.3rem 0.55rem;
-  border-radius: 6px;
-  border: 1px solid rgba(244, 244, 245, 0.12);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(226, 232, 240, 0.82);
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  gap: 0.28rem;
+  padding: 0.22rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.55);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.adjust-curve-reset svg {
+  width: 0.7rem;
+  height: 0.7rem;
 }
 
 .adjust-curve-reset:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(244, 244, 245, 0.22);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(244, 244, 245, 0.1);
+  color: rgba(244, 244, 245, 0.95);
 }
 
 .adjust-curve-reset:disabled {
-  opacity: 0.4;
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
 .adjust-curve-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.5rem;
 }
 
 .adjust-curve-toolbar-label {
   flex: 0 0 auto;
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(226, 232, 240, 0.7);
+  color: rgba(226, 232, 240, 0.5);
 }
 
 .adjust-curve-select-wrap {
@@ -1960,118 +2706,119 @@ a:focus-visible,
   content: "";
   position: absolute;
   top: 50%;
-  right: 1rem;
-  width: 0.48rem;
-  height: 0.48rem;
-  border-right: 2px solid rgba(244, 244, 245, 0.92);
-  border-bottom: 2px solid rgba(244, 244, 245, 0.92);
-  transform: translateY(-64%) rotate(45deg);
+  right: 0.75rem;
+  width: 0.36rem;
+  height: 0.36rem;
+  border-right: 1.25px solid rgba(244, 244, 245, 0.6);
+  border-bottom: 1.25px solid rgba(244, 244, 245, 0.6);
+  transform: translateY(-65%) rotate(45deg);
   pointer-events: none;
 }
 
 .adjust-curve-select {
   width: 100%;
-  min-height: 2.85rem;
+  min-height: 2rem;
   appearance: none;
   -webkit-appearance: none;
-  border: 1px solid rgba(244, 244, 245, 0.18);
-  border-left: 3px solid color-mix(in srgb, var(--curve-color) 78%, white 10%);
-  border-radius: 8px;
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--curve-color) 18%, transparent), transparent 42%),
-    rgba(255, 255, 255, 0.095);
-  color: rgba(244, 244, 245, 0.96);
+  border: 1px solid rgba(244, 244, 245, 0.08);
+  border-left: 2px solid color-mix(in srgb, var(--curve-color) 72%, white 6%);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(244, 244, 245, 0.92);
   font: inherit;
-  font-size: 0.95rem;
-  font-weight: 800;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   line-height: 1;
-  padding: 0 2.75rem 0 1rem;
+  padding: 0 2rem 0 0.7rem;
   outline: none;
   cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease;
 }
 
 .adjust-curve-select:hover {
-  border-color: color-mix(in srgb, var(--curve-color) 48%, white 12%);
+  border-color: color-mix(in srgb, var(--curve-color) 35%, white 6%);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .adjust-curve-select:focus-visible {
-  border-color: color-mix(in srgb, var(--curve-color) 72%, white 16%);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--curve-color) 18%, transparent);
+  border-color: color-mix(in srgb, var(--curve-color) 55%, white 12%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--curve-color) 14%, transparent);
 }
 
 .adjust-curve-graph {
   overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid rgba(210, 220, 235, 0.12);
+  border-radius: 6px;
+  border: 1px solid rgba(244, 244, 245, 0.06);
   aspect-ratio: 1 / 1;
-  min-height: 13.5rem;
+  min-height: 13rem;
   background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)),
-    #242424;
-  background-size: 25% 25%, 25% 25%, auto, auto;
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    #131418;
+  background-size: 25% 25%, 25% 25%, auto;
 }
 
 .adjust-curve-svg {
   display: block;
   width: 100%;
   height: 100%;
-  min-height: 13.5rem;
+  min-height: 13rem;
+  cursor: crosshair;
 }
 
 .adjust-curve-grid {
-  stroke: rgba(10, 12, 16, 0.22);
-  stroke-width: 0.7;
+  stroke: rgba(255, 255, 255, 0.035);
+  stroke-width: 0.4;
 }
 
 .adjust-curve-histogram-fill {
   fill: var(--curve-color);
-  opacity: 0.42;
+  opacity: 0.32;
 }
 
 .adjust-curve-histogram-line {
   fill: none;
   stroke: var(--curve-color);
   stroke-linejoin: round;
-  stroke-width: 1.08;
-  opacity: 0.95;
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--curve-color) 55%, transparent));
+  stroke-width: 0.7;
+  opacity: 0.78;
 }
 
 .adjust-curve-histogram-series.is-rgb .adjust-curve-histogram-fill {
-  opacity: 0.30;
+  opacity: 0.22;
   mix-blend-mode: screen;
 }
 
 .adjust-curve-histogram-series.is-rgb .adjust-curve-histogram-line {
-  opacity: 0.92;
+  opacity: 0.72;
   mix-blend-mode: screen;
 }
 
 .adjust-curve-histogram-series.is-single .adjust-curve-histogram-fill {
-  opacity: 0.48;
+  opacity: 0.36;
 }
 
 .adjust-curve-diagonal {
-  stroke: color-mix(in srgb, var(--curve-color, #e5e7eb) 45%, white 18%);
-  stroke-width: 0.75;
-  opacity: 0.68;
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-width: 0.35;
+  stroke-dasharray: 1 1.5;
+  opacity: 0.7;
 }
 
 .adjust-curve-path {
   fill: none;
   stroke: var(--curve-color);
-  stroke-width: 2.2;
-  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--curve-color) 52%, transparent));
+  stroke-width: 1.05;
+  stroke-linejoin: round;
+  stroke-linecap: round;
 }
 
 .adjust-curve-point {
-  fill: rgba(245, 247, 250, 0.96);
-  stroke: var(--curve-color);
-  stroke-width: 0.7;
-  transition: r 120ms ease;
+  fill: var(--curve-color);
+  stroke: rgba(11, 13, 18, 0.95);
+  stroke-width: 0.6;
+  transition: r 120ms ease, fill 120ms ease;
 }
 
 .adjust-curve-point-hit {
@@ -2081,23 +2828,34 @@ a:focus-visible,
   touch-action: none;
 }
 
+.adjust-curve-point-group.is-hover .adjust-curve-point,
+.adjust-curve-point-group.is-active .adjust-curve-point {
+  r: 2.2;
+  fill: #ffffff;
+  stroke: var(--curve-color);
+  stroke-width: 0.9;
+}
+
 .adjust-curve-point-group.is-active .adjust-curve-point-hit {
   cursor: grabbing;
 }
 
-.adjust-curve-point-group:hover .adjust-curve-point,
-.adjust-curve-point-group.is-active .adjust-curve-point {
-  r: 2.4;
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--curve-color) 70%, transparent));
+.adjust-curve-hint {
+  margin: 0;
+  font-size: 0.58rem;
+  letter-spacing: 0.03em;
+  color: rgba(226, 232, 240, 0.38);
+  text-align: center;
+  line-height: 1.55;
 }
 
-.adjust-curve-point-group.is-hidden .adjust-curve-point {
-  opacity: 0;
-  pointer-events: none;
+.adjust-curve-point-group .adjust-curve-point-hit {
+  cursor: grab;
 }
 
-.adjust-curve-point-group.is-hidden:hover .adjust-curve-point {
-  opacity: 0.5;
+.adjust-curve-point-group.is-active .adjust-curve-point-hit,
+.adjust-curve-point-group.is-active {
+  cursor: grabbing;
 }
 
 .adjust-curve-controls {
@@ -2278,7 +3036,10 @@ a:focus-visible,
 }
 
 .pro-ruler-bar--instrument {
-  height: 3.25rem;
+  /* Scales from ~42px on tablet/small-laptop widths up to 52px on big desktops.
+     Keeps embedded label/value legible on every target without dominating
+     the panel on tighter viewports. */
+  height: clamp(2.6rem, 3.5vw, 3.25rem);
   border-radius: 10px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01)),
@@ -2287,7 +3048,7 @@ a:focus-visible,
 
 .pro-ruler-bar--studio {
   display: flex;
-  height: 4rem;
+  height: clamp(3.2rem, 4.4vw, 4rem);
   border-radius: 10px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01)),
@@ -2370,11 +3131,11 @@ a:focus-visible,
 
 .pro-ruler-label {
   position: absolute;
-  left: 0.875rem;
+  left: clamp(0.65rem, 0.9vw, 0.875rem);
   top: 50%;
   transform: translateY(-50%);
   z-index: 7;
-  font-size: 0.9375rem;
+  font-size: clamp(0.78rem, 1vw, 0.9375rem);
   font-weight: 650;
   color: rgba(248, 250, 252, 0.96);
   pointer-events: none;
@@ -2396,11 +3157,11 @@ a:focus-visible,
 
 .pro-ruler-value {
   position: absolute;
-  right: 0.875rem;
+  right: clamp(0.65rem, 0.9vw, 0.875rem);
   top: 50%;
   transform: translateY(-50%);
   z-index: 7;
-  font-size: 0.9375rem;
+  font-size: clamp(0.78rem, 1vw, 0.9375rem);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: rgba(248, 250, 252, 0.92);
@@ -2413,8 +3174,8 @@ a:focus-visible,
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 72px;
-  min-width: 72px;
+  width: clamp(56px, 5.5vw, 72px);
+  min-width: clamp(56px, 5.5vw, 72px);
   height: 100%;
   pointer-events: none;
   background:
@@ -2422,7 +3183,7 @@ a:focus-visible,
     rgba(16, 16, 21, 0.9);
   border-left: 1px solid rgba(210, 220, 235, 0.1);
   color: #f7faff;
-  font-size: 1.35rem;
+  font-size: clamp(1.05rem, 1.4vw, 1.35rem);
   font-weight: 750;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.72);
