@@ -296,6 +296,75 @@ a:focus-visible,
     inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
+/* ── Neo-brutalist toast (sonner) ──────────────────────────────────────────
+   Variant accent is carried purely by the hard offset shadow + icon tile
+   color so the toast body stays consistent. Sonner adds the variant class
+   alongside `.neo-toast` on the same element. */
+.neo-toast.neo-toast--success {
+  box-shadow:
+    4px 4px 0 0 rgba(155, 249, 91, 0.85),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.neo-toast.neo-toast--success .neo-toast-icon {
+  background: #9BF95B;
+}
+
+.neo-toast.neo-toast--error {
+  box-shadow:
+    4px 4px 0 0 rgba(244, 63, 94, 0.85),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.neo-toast.neo-toast--error .neo-toast-icon {
+  background: #F43F5E;
+  color: #FFF;
+}
+
+.neo-toast.neo-toast--warning {
+  box-shadow:
+    4px 4px 0 0 rgba(245, 158, 11, 0.85),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.neo-toast.neo-toast--warning .neo-toast-icon {
+  background: #F59E0B;
+}
+
+.neo-toast.neo-toast--info,
+.neo-toast.neo-toast--default {
+  box-shadow:
+    4px 4px 0 0 rgba(6, 184, 212, 0.85),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.neo-toast.neo-toast--loading {
+  box-shadow:
+    4px 4px 0 0 rgba(244, 244, 245, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.neo-toast.neo-toast--loading .neo-toast-icon {
+  background: rgba(14, 17, 24, 0.95);
+  color: #F4F4F5;
+}
+
+/* Belt-and-braces overlay enforcement. Sonner's container is already
+   position:fixed by default, but a misconfigured `unstyled` toastOptions
+   or a future bundler quirk could let it fall into normal flow and push
+   page content down. Pin it explicitly and zero out any inherited flow
+   from <main>. */
+[data-sonner-toaster] {
+  position: fixed !important;
+  pointer-events: none;
+  z-index: 9999;
+  --gap: 10px;
+}
+
+[data-sonner-toaster] > * {
+  pointer-events: auto;
+}
+
+[data-sonner-toaster] [data-sonner-toast] {
+  position: relative;
+}
+
 /* ── Neo-brutalist loader card ─────────────────────────────────────────────
    Used in:
      - Editor processing overlay (page.jsx ProcessingMessage)
@@ -475,9 +544,15 @@ a:focus-visible,
 }
 
 /* Backdrop pattern shared by all loader overlay surfaces — a sparse dot grid
-   that disappears toward the edges via a radial mask. Static, no animation. */
+   that disappears toward the edges via a radial mask. Static, no animation.
+   IMPORTANT: do NOT set `position` here. Callers carry their own positioning
+   (Tailwind `fixed inset-0` on overlays, `relative` on standalone pages). An
+   earlier version forced `position: relative`, which silently overrode the
+   `fixed` class on the editor's processing overlay and made the loader render
+   inline at the top of the page, pushing every other layout element down.
+   The pseudo-elements below use `position: absolute` and rely on the caller
+   establishing a positioning context. */
 .neo-loader-surface {
-  position: relative;
   background: #03050A;
   overflow: hidden;
 }

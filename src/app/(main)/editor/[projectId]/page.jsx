@@ -230,7 +230,7 @@ const Editor = () => {
     const dynamicAccent = useImageAccent(activeProject?.currentImageUrl || activeProject?.originalImageUrl)
 
     if (isLoading) return (
-        <div className="neo-loader-surface min-h-screen flex items-center justify-center">
+        <div className="neo-loader-surface relative min-h-screen flex items-center justify-center">
             <AuroraLoader message="Loading editor" />
         </div>
     )
