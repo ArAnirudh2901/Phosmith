@@ -1,68 +1,70 @@
 "use client"
 
-import { Toaster as Sonner } from "sonner";
+import { Toaster as Sonner } from "sonner"
 import { CheckCircleIcon, InfoIcon, WarningIcon, XCircleIcon, SpinnerIcon } from "@phosphor-icons/react"
 import { cn } from "@/lib/utils"
 
+// Neo-brutalist toast — matches the rest of the editor (Projects header,
+// preview controls, resolution HUD, AuroraLoader): pitch-black fill, 1.5px
+// cream border, hard offset shadow, mono uppercase kicker, sharp 4px corners.
+// No soft gradients, no backdrop blur, no rounded pill chrome.
+
 const defaultIcons = {
-  success: (
-    <CheckCircleIcon className="size-[18px]" weight="fill" />
-  ),
-  info: (
-    <InfoIcon className="size-[18px]" weight="fill" />
-  ),
-  warning: (
-    <WarningIcon className="size-[18px]" weight="fill" />
-  ),
-  error: (
-    <XCircleIcon className="size-[18px]" weight="fill" />
-  ),
-  loading: (
-    <SpinnerIcon className="size-[18px] animate-spin" weight="bold" />
-  ),
+  success: <CheckCircleIcon className="size-[14px]" weight="fill" />,
+  info: <InfoIcon className="size-[14px]" weight="fill" />,
+  warning: <WarningIcon className="size-[14px]" weight="fill" />,
+  error: <XCircleIcon className="size-[14px]" weight="fill" />,
+  loading: <SpinnerIcon className="size-[14px] animate-spin" weight="bold" />,
 }
 
+// Single base style. Variant colors come purely from the offset-shadow color
+// (cyan/green/coral/amber) so the toast itself stays consistent.
+const baseToast = cn(
+  "neo-toast",
+  "relative isolate flex items-start gap-2.5 overflow-hidden",
+  "px-3.5 py-3 text-[#F4F4F5]",
+  "border-[1.5px] border-[rgba(244,244,245,0.85)] bg-[#000]",
+  "rounded-[4px]",
+  // Default hard cyan offset shadow — variants override.
+  "shadow-[4px_4px_0_0_rgba(6,184,212,0.85),inset_0_1px_0_rgba(255,255,255,0.06)]",
+  "transition-shadow duration-200"
+)
+
 const defaultToastClassNames = {
-  toast: cn(
-    "cn-toast",
-    "relative isolate flex items-center gap-3 overflow-hidden rounded-[24px] border border-white/12",
-    "bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(15,23,42,0.82))] px-4 py-4 text-white",
-    "shadow-[0_24px_70px_rgba(2,6,23,0.42)] backdrop-blur-2xl supports-[backdrop-filter]:bg-slate-950/72",
-    "transition-[border-color,box-shadow,background] duration-300 ease-out"
+  toast: baseToast,
+  content: "neo-toast-content min-w-0 flex-1",
+  title: cn(
+    "neo-toast-title text-[12px] font-bold uppercase tracking-[0.06em] leading-[1.25] text-[#F4F4F5]"
   ),
-  content: "cn-toast-content min-w-0 flex-1",
-  title: "cn-toast-title text-[15px] font-semibold tracking-[-0.02em] text-white",
-  description: "cn-toast-description mt-1 text-[13px] leading-5 text-slate-300",
+  description: cn(
+    "neo-toast-description mt-1 text-[11.5px] leading-[1.45] text-[#A1A8B4] font-normal"
+  ),
   icon: cn(
-    "cn-toast-icon flex size-10 shrink-0 items-center justify-center rounded-[16px] border border-white/10",
-    "bg-white/[0.07] text-cyan-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
-    "transition-[transform,border-color,background-color,box-shadow] duration-300 ease-out"
+    "neo-toast-icon mt-[2px] flex size-7 shrink-0 items-center justify-center",
+    "rounded-[3px] border-[1.5px] border-[rgba(244,244,245,0.7)] bg-[#06B8D4] text-[#03050A]",
+    "shadow-[2px_2px_0_0_rgba(244,244,245,0.4)]"
   ),
   actionButton: cn(
-    "cn-toast-action inline-flex h-10 shrink-0 items-center justify-center rounded-full border border-white/14",
-    "bg-white/[0.08] px-4 text-sm font-semibold tracking-[-0.01em] text-white",
-    "shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] transition-all duration-200 ease-out",
-    "hover:border-white/24 hover:bg-white/[0.14] hover:shadow-[0_12px_28px_rgba(2,6,23,0.24),inset_0_1px_0_rgba(255,255,255,0.16)]",
-    "active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/25"
+    "neo-toast-action inline-flex h-7 shrink-0 items-center justify-center",
+    "rounded-[3px] border-[1.5px] border-[rgba(244,244,245,0.7)] bg-[#06B8D4] px-2.5",
+    "text-[10.5px] font-extrabold uppercase tracking-[0.08em] text-[#03050A]",
+    "shadow-[2px_2px_0_0_rgba(244,244,245,0.55)]",
+    "transition-transform duration-100",
+    "hover:shadow-[3px_3px_0_0_rgba(244,244,245,0.7)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
   ),
   cancelButton: cn(
-    "cn-toast-cancel inline-flex h-10 shrink-0 items-center justify-center rounded-full border border-white/10",
-    "bg-white/[0.04] px-4 text-sm font-medium tracking-[-0.01em] text-slate-200",
-    "shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200 ease-out",
-    "hover:border-white/18 hover:bg-white/[0.08] hover:text-white",
-    "active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/15"
+    "neo-toast-cancel inline-flex h-7 shrink-0 items-center justify-center",
+    "rounded-[3px] border-[1.5px] border-[rgba(244,244,245,0.45)] bg-transparent px-2.5",
+    "text-[10.5px] font-bold uppercase tracking-[0.08em] text-[#A1A8B4]",
+    "transition-colors hover:text-[#F4F4F5] hover:border-[rgba(244,244,245,0.75)]"
   ),
-  closeButton: cn(
-    "cn-toast-close absolute right-3 top-3 inline-flex size-7 items-center justify-center rounded-full border border-white/10",
-    "bg-slate-950/70 text-slate-200 backdrop-blur-xl transition-all duration-200",
-    "hover:border-white/18 hover:bg-slate-900/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/15"
-  ),
-  success: "cn-toast-success",
-  error: "cn-toast-error",
-  info: "cn-toast-info",
-  warning: "cn-toast-warning",
-  loading: "cn-toast-loading",
-  default: "cn-toast-default",
+  // Variant flags — applied via attribute on the data-type element by sonner.
+  success: "neo-toast--success",
+  error: "neo-toast--error",
+  info: "neo-toast--info",
+  warning: "neo-toast--warning",
+  loading: "neo-toast--loading",
+  default: "neo-toast--default",
 }
 
 const Toaster = ({
@@ -78,7 +80,7 @@ const Toaster = ({
   }
 
   const mergedToastOptions = {
-    duration: 5000,
+    duration: 4500,
     closeButton: false,
     unstyled: true,
     ...toastOptions,
@@ -91,27 +93,29 @@ const Toaster = ({
   return (
     <Sonner
       theme="dark"
+      // Top-center: matches the prior placement that sat cleanly below the
+      // editor topbar. The toast container is position:fixed, so it overlays
+      // the page rather than pushing content down. Offset top: 76 keeps it
+      // clear of the editor's 54px topbar with a small margin.
       position="top-center"
-      expand
-      visibleToasts={4}
+      expand={false}
+      visibleToasts={3}
       closeButton={false}
-      offset={{ top: 92, right: 24, bottom: 24, left: 24 }}
-      mobileOffset={{ top: 82, right: 16, bottom: 16, left: 16 }}
+      offset={{ top: 76, right: 20, bottom: 24, left: 20 }}
+      mobileOffset={{ top: 68, right: 12, bottom: 16, left: 12 }}
+      gap={10}
       className={cn("toaster", className)}
       icons={mergedIcons}
       style={
         {
-          "--width": "min(420px, calc(100vw - 1.5rem))",
-          "--normal-bg": "rgba(15,23,42,0.86)",
-          "--normal-text": "rgba(248,250,252,0.98)",
-          "--normal-border": "rgba(255,255,255,0.12)",
-          "--border-radius": "24px",
+          "--width": "min(360px, calc(100vw - 2rem))",
           ...style,
         }
       }
       toastOptions={mergedToastOptions}
-      {...props} />
-  );
+      {...props}
+    />
+  )
 }
 
 export { Toaster }
