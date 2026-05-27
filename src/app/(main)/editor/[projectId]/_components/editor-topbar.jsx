@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
+import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
@@ -44,6 +44,8 @@ const EditorTopbar = ({ project }) => {
     const [canUndo, setCanUndo] = useState(false)
     const [canRedo, setCanRedo] = useState(false)
     const [showShortcuts, setShowShortcuts] = useState(false)
+    const [isSaving, setIsSaving] = useState(false)
+    const [isExporting, setIsExporting] = useState(false)
 
     const triggerAddImage = useCallback(() => {
         addImageInputRef.current?.click()
@@ -134,6 +136,31 @@ const EditorTopbar = ({ project }) => {
         router.push("/dashboard")
     }
 
+    const handleSave = async () => {
+        if (!canvasEditor?.__saveCanvasState || isSaving) return
+        setIsSaving(true)
+        const toastId = toast.loading('Saving project...')
+        try {
+            await canvasEditor.__saveCanvasState({ rethrow: true })
+            toast.success('Project saved', { id: toastId })
+        } catch (error) {
+            console.error('[Save] Failed:', error)
+            const msg = error?.message || String(error) || 'Unknown error'
+            // Convex's per-document size limit is 1 MB. If saved state exceeds that
+            // (large data URLs from uploaded images), the user needs to know — that's
+            // the root cause of "my changes are suddenly gone".
+            const isSizeError = /too large|maximum.*size|1MB|1 MB/i.test(msg)
+            toast.error(
+                isSizeError
+                    ? 'Save failed: project too large. Re-upload any embedded images so they go through ImageKit.'
+                    : `Save failed: ${msg}`,
+                { id: toastId, duration: 8000 }
+            )
+        } finally {
+            setIsSaving(false)
+        }
+    }
+
     const handleToolChange = (toolId) => {
         if (!hasAccess(toolId)) {
             setRestrictedTool(toolId)
@@ -144,15 +171,28 @@ const EditorTopbar = ({ project }) => {
     }
 
     const handleExport = async ({ format, quality }) => {
-        if (!canvasEditor || !project) return
+        if (!canvasEditor || !project || isExporting) return
+        setIsExporting(true)
+        const toastId = toast.loading(`Exporting as ${format.toUpperCase()}…`)
+
+        // Multi-image edge case: if the user has multiple images selected (ActiveSelection)
+        // when they click Export, Fabric's render path treats those objects as children of
+        // the active selection group — they end up double-transformed and render at wrong
+        // positions or get clipped. Discard the selection before snapshotting and restore
+        // it after so the export captures pixels at their real positions.
+        const previousActive = canvasEditor.getActiveObject?.()
+        if (previousActive) canvasEditor.discardActiveObject()
 
         try {
-            // Use project dimensions for full-resolution export
-            const projectW = project.width || canvasEditor.getWidth()
-            const projectH = project.height || canvasEditor.getHeight()
+            // Use project dimensions for full-resolution export.
+            const projectW = Number(project.width) || canvasEditor.getWidth()
+            const projectH = Number(project.height) || canvasEditor.getHeight()
+            if (!projectW || !projectH) {
+                throw new Error('Project dimensions are not set')
+            }
 
-            // toCanvasElement renders the canvas objects onto a fresh HTML canvas
-            // at the specified dimensions, bypassing the viewport zoom/pan
+            // toCanvasElement renders all visible (visible:true) Fabric objects at their
+            // canvas-coordinate positions, bypassing the viewport pan/zoom.
             const exportCanvas = canvasEditor.toCanvasElement(1, {
                 width: projectW,
                 height: projectH,
@@ -160,30 +200,57 @@ const EditorTopbar = ({ project }) => {
                 top: 0,
             })
 
-            // For JPEG/WebP, composite onto a white background (they don't support transparency)
+            // For JPEG/WebP we need a solid background — those formats don't support alpha.
+            // Note: canvas.backgroundColor defaults to "transparent" in this app, which the
+            // 2d context treats as transparent (filling has no effect) and the JPEG encoder
+            // then bakes in BLACK. Use white explicitly unless a real color is set.
             let finalCanvas = exportCanvas
             if (format !== 'png') {
                 finalCanvas = document.createElement('canvas')
                 finalCanvas.width = exportCanvas.width
                 finalCanvas.height = exportCanvas.height
                 const ctx = finalCanvas.getContext('2d')
-                ctx.fillStyle = canvasEditor.backgroundColor || '#ffffff'
+                const bg = canvasEditor.backgroundColor
+                const isRealColor = typeof bg === 'string' && bg !== 'transparent' && bg !== ''
+                ctx.fillStyle = isRealColor ? bg : '#ffffff'
                 ctx.fillRect(0, 0, finalCanvas.width, finalCanvas.height)
                 ctx.drawImage(exportCanvas, 0, 0)
             }
 
             const mimeType = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png'
-            const dataUrl = finalCanvas.toDataURL(mimeType, quality)
 
+            // toBlob with a Blob URL avoids materializing the full base64 string into JS
+            // memory — important for full-resolution exports of 4K+ images, where the
+            // toDataURL string can be tens of MB and crash mobile browsers.
+            const blob = await new Promise((resolve, reject) => {
+                finalCanvas.toBlob(
+                    (b) => (b ? resolve(b) : reject(new Error('Canvas encoding failed'))),
+                    mimeType,
+                    quality,
+                )
+            })
+            const blobUrl = URL.createObjectURL(blob)
             const link = document.createElement('a')
-            link.href = dataUrl
+            link.href = blobUrl
             link.download = `${project.title || 'export'}.${format === 'jpeg' ? 'jpg' : format}`
+            document.body.appendChild(link)
             link.click()
+            link.remove()
+            // Release the blob URL on the next tick — Safari needs the link click first.
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
+
             setShowExportMenu(false)
-            toast.success(`Exported as ${format.toUpperCase()}`)
+            toast.success(`Exported as ${format.toUpperCase()}`, { id: toastId })
         } catch (error) {
             console.error('[Export] Failed:', error)
-            toast.error('Export failed: ' + (error?.message || 'Unknown error'))
+            toast.error(`Export failed: ${error?.message || 'Unknown error'}`, { id: toastId })
+        } finally {
+            // Always restore the selection the user had before they clicked Export.
+            if (previousActive && canvasEditor.contextContainer) {
+                try { canvasEditor.setActiveObject(previousActive) } catch { /* selection may have been removed */ }
+                canvasEditor.requestRenderAll()
+            }
+            setIsExporting(false)
         }
     }
 
@@ -221,7 +288,9 @@ const EditorTopbar = ({ project }) => {
                 </div>
 
                 {/* Center: Tool buttons */}
-                <div className="flex flex-none items-center justify-center gap-1 xl:gap-1.5 px-4">
+                {/* Explicit horizontal margin so the center group can never overlap
+                    the left title block or the right action group at any width. */}
+                <div className="flex flex-none items-center justify-center gap-1 px-2 mx-3">
                     {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
@@ -234,7 +303,7 @@ const EditorTopbar = ({ project }) => {
                                 className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
                             >
                                 <Icon className="h-3.5 w-3.5 flex-none" />
-                                <span className="hidden xl:inline">{tool.label}</span>
+                                <span className="hidden 2xl:inline">{tool.label}</span>
                                 {tool.proOnly && !hasToolAccess && (
                                     <Lock className="h-2.5 w-2.5 ml-0.5 flex-none" style={{ color: 'var(--accent-warning)' }} />
                                 )}
@@ -302,11 +371,14 @@ const EditorTopbar = ({ project }) => {
 
                     {/* Save */}
                     <motion.button
-                        onClick={() => canvasEditor?.__saveCanvasState?.()}
-                        className="editor-icon-button flex items-center justify-center flex-none"
-                        title="Save"
+                        onClick={handleSave}
+                        disabled={isSaving}
+                        className="editor-icon-button flex items-center justify-center flex-none disabled:opacity-50 disabled:cursor-wait"
+                        title={isSaving ? 'Saving…' : 'Save (⌘S)'}
                     >
-                        <Save className="h-3.5 w-3.5" />
+                        {isSaving
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Save className="h-3.5 w-3.5" />}
                     </motion.button>
 
                     {/* Keyboard shortcuts */}
@@ -325,7 +397,7 @@ const EditorTopbar = ({ project }) => {
                     <div className="relative flex-none" ref={exportMenuRef}>
                         <motion.button
                             onClick={() => setShowExportMenu(prev => !prev)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium editor-interactive pill-control"
+                            className="flex items-center gap-1.5 editor-interactive pill-control"
                             style={{
                                 background: '#A8794E',
                                 border: '2px solid #F4F4F5',
@@ -339,7 +411,6 @@ const EditorTopbar = ({ project }) => {
                                 padding: '0.5rem 0.85rem',
                                 borderRadius: 0,
                             }}
-                            className="flex items-center gap-1.5"
                         >
                             <Download className="h-3.5 w-3.5" strokeWidth={2.5} />
                             Export

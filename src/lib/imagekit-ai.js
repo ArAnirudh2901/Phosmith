@@ -638,27 +638,41 @@ export const replaceCanvasImageFromUrl = async (
         },
     })
 
+    // ImageKit AI transforms (e-upscale, e-retouch, e-bgremove, e-genfill,
+    // etc.) cache the result against the *exact URL*. Appending a fresh
+    // cache-bust on each retry would defeat that cache and trigger a brand-new
+    // 20–60s server-side run every time — which is exactly the bug we shipped
+    // earlier (every retry waited ~30s and failed because Fabric got back the
+    // intermediate HTML response). For these URLs the canonical form MUST be
+    // used unchanged so we hit the cached processed image.
+    //
+    // For plain CDN URLs (no `?tr=`) we still want a cache-bust to avoid stale
+    // intermediate responses from prior failures.
+    const hasImageKitTransform = /[?&]tr=/.test(nextUrl)
+    const isImageKitAiUrl = hasImageKitTransform && /\be-(upscale|retouch|bgremove|genfill|removedotbg|changebg|dropshadow)/.test(nextUrl)
+
     for (let attempt = 1; attempt <= totalRetries; attempt++) {
         try {
-            // Add a cache-bust parameter to avoid CDN edge caching of
-            // intermediate HTML responses from prior failed attempts.
-            const cacheBustUrl = nextUrl.includes('?')
-                ? `${nextUrl}&_t=${Date.now()}`
-                : `${nextUrl}?_t=${Date.now()}`
+            const requestUrl = isImageKitAiUrl
+                ? nextUrl
+                : nextUrl.includes('?')
+                    ? `${nextUrl}&_t=${Date.now()}`
+                    : `${nextUrl}?_t=${Date.now()}`
 
             console.log('[ImageKit] canvas load attempt', {
                 attempt,
                 totalRetries,
-                cacheBustUrl,
+                requestUrl,
+                cacheBusted: !isImageKitAiUrl,
             })
-            nextImage = await FabricImage.fromURL(cacheBustUrl, {
+            nextImage = await FabricImage.fromURL(requestUrl, {
                 crossOrigin: nextUrl.startsWith('data:') || nextUrl.startsWith('blob:') ? undefined : 'anonymous',
             })
             console.log('[ImageKit] canvas load success', {
                 attempt,
                 width: nextImage.width,
                 height: nextImage.height,
-                cacheBustUrl,
+                requestUrl,
             })
             break // Success
         } catch (err) {
@@ -666,7 +680,10 @@ export const replaceCanvasImageFromUrl = async (
             console.warn(`[ImageKit] Load attempt ${attempt}/${totalRetries} failed:`, err?.message || err)
 
             if (attempt < totalRetries) {
-                const delay = 4000
+                // AI transforms genuinely need 10–30s per run; back off longer
+                // so the upstream processing has a chance to finish populating
+                // the canonical cache key.
+                const delay = isImageKitAiUrl ? 6000 : 4000
                 console.log(`[ImageKit] Retrying in ${delay / 1000}s...`)
                 await new Promise(resolve => setTimeout(resolve, delay))
             }

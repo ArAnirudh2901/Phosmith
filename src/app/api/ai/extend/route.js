@@ -2,6 +2,7 @@ import { auth } from '@clerk/nextjs/server'
 import ImageKit from 'imagekit'
 import { NextResponse } from 'next/server'
 import sharp from 'sharp'
+import { enforceRateLimit, rateLimitResponse } from '@/lib/rate-limit'
 import {
   buildExtensionPrompt,
   validateExpansion,
@@ -307,6 +308,13 @@ export async function POST(request) {
   if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
+
+  // Tighter limit than edit-plan — extend hits ImageKit AI quota AND can take
+  // 30+ seconds per request, so we cap at 5/min to protect both the user
+  // budget and our server's open-connection pool.
+  const limitResult = await enforceRateLimit('ai-extend', userId)
+  const limited = rateLimitResponse(limitResult)
+  if (limited) return limited
 
   const body = await parseRequestBody(request)
   if (body.error) {

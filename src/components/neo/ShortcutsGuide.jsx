@@ -7,7 +7,7 @@ import { X } from "lucide-react"
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
 const MOD = isMac ? "⌘" : "Ctrl"
 
-const SECTIONS = [
+const EDITOR_SECTIONS = [
     {
         title: "View",
         items: [
@@ -15,7 +15,23 @@ const SECTIONS = [
             { keys: ["H"], desc: "Toggle hand tool (persistent pan)" },
             { keys: [MOD, "drag"], desc: "Pan canvas" },
             { keys: [MOD, "scroll"], desc: "Zoom to cursor" },
+            { keys: [MOD, "+"], desc: "Zoom in" },
+            { keys: [MOD, "-"], desc: "Zoom out" },
+            { keys: [MOD, "0"], desc: "Reset view" },
             { keys: ["Right-click hold"], desc: "Open radial tool menu" },
+        ],
+    },
+    {
+        title: "Selection & layers",
+        items: [
+            { keys: ["Click"], desc: "Select an object" },
+            { keys: ["Shift", "click"], desc: "Add to selection" },
+            { keys: [MOD, "A"], desc: "Select all" },
+            { keys: ["↑", "↓", "←", "→"], desc: "Nudge selected by 1 px" },
+            { keys: ["Shift", "↑/↓/←/→"], desc: "Nudge by 10 px" },
+            { keys: [MOD, "D"], desc: "Duplicate" },
+            { keys: ["Delete"], desc: "Delete selected" },
+            { keys: ["Esc"], desc: "Deselect / exit editing" },
         ],
     },
     {
@@ -23,18 +39,55 @@ const SECTIONS = [
         items: [
             { keys: [MOD, "Z"], desc: "Undo" },
             { keys: [MOD, "Shift", "Z"], desc: "Redo" },
-            { keys: ["Shift", "I"], desc: "Add image" },
             { keys: [MOD, "S"], desc: "Save canvas state" },
-            { keys: ["Esc"], desc: "Close menus / dismiss overlays" },
+            { keys: ["Shift", "I"], desc: "Add image" },
+            { keys: [MOD, "K"], desc: "Open command palette" },
+            { keys: ["[", "]"], desc: "Brush size − / +" },
+        ],
+    },
+    {
+        title: "Tools",
+        items: [
+            { keys: ["V"], desc: "Select / Resize" },
+            { keys: ["C"], desc: "Crop" },
+            { keys: ["I"], desc: "Images" },
+            { keys: ["A"], desc: "Adjust" },
+            { keys: ["D"], desc: "Draw" },
+            { keys: ["T"], desc: "Text" },
+            { keys: ["B"], desc: "AI background" },
+            { keys: ["G"], desc: "Generative extend" },
+            { keys: ["E"], desc: "AI edit" },
+            { keys: ["Q"], desc: "AI agent" },
         ],
     },
     {
         title: "Help",
-        items: [
-            { keys: ["?"], desc: "Toggle this guide" },
-        ],
+        items: [{ keys: ["?"], desc: "Toggle this guide" }],
     },
 ]
+
+const DASHBOARD_SECTIONS = [
+    {
+        title: "Projects",
+        items: [
+            { keys: ["N"], desc: "New project" },
+            { keys: ["/"], desc: "Focus search (when available)" },
+            { keys: ["S"], desc: "Toggle multi-select mode" },
+            { keys: [MOD, "A"], desc: "Select all (in select mode)" },
+            { keys: ["Delete"], desc: "Delete selected (in select mode)" },
+            { keys: ["Esc"], desc: "Exit select mode / close dialogs" },
+        ],
+    },
+    {
+        title: "Help",
+        items: [{ keys: ["?"], desc: "Toggle this guide" }],
+    },
+]
+
+const VARIANT_SECTIONS = {
+    editor: EDITOR_SECTIONS,
+    dashboard: DASHBOARD_SECTIONS,
+}
 
 const Key = ({ children }) => (
     <span
@@ -58,7 +111,8 @@ const Key = ({ children }) => (
     </span>
 )
 
-const ShortcutsGuide = ({ open, onClose }) => {
+const ShortcutsGuide = ({ open, onClose, variant = "editor" }) => {
+    const sections = VARIANT_SECTIONS[variant] || VARIANT_SECTIONS.editor
     useEffect(() => {
         if (!open) return
         const onKey = (event) => {
@@ -162,7 +216,7 @@ const ShortcutsGuide = ({ open, onClose }) => {
                         </div>
 
                         <div style={{ display: "grid", gap: 20 }}>
-                            {SECTIONS.map((section) => (
+                            {sections.map((section) => (
                                 <div key={section.title}>
                                     <div
                                         style={{

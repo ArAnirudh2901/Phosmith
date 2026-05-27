@@ -10,16 +10,18 @@ import {
     FlipVertical,
     GripVertical,
     ImagePlus,
+    Layers,
     Lock,
     MoveDown,
     MoveUp,
+    Pencil,
     Replace,
     Trash2,
     Unlock,
 } from 'lucide-react'
 import { FabricImage } from 'fabric'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
-import { addImageFileToCanvas } from '@/lib/canvas-images'
+import { addImageFileToCanvas, loadFabricImageFromFile } from '@/lib/canvas-images'
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -41,10 +43,19 @@ const ImageManager = ({ project, dominantColor }) => {
     const replaceInputRef = useRef(null)
     const [images, setImages] = useState([])
     const [selectedImage, setSelectedImage] = useState(null)
+    const [multiSelectionCount, setMultiSelectionCount] = useState(0)
     const [opacity, setOpacity] = useState(100)
     const [draggingImage, setDraggingImage] = useState(null)
     const [dragOverImage, setDragOverImage] = useState(null)
+    const [renamingId, setRenamingId] = useState(null)
+    const [renameDraft, setRenameDraft] = useState("")
+    const renameInputRef = useRef(null)
     const [, setRevision] = useState(0)
+
+    const getLayerName = (img, fallbackIndex) =>
+        (typeof img?.pixxelLayerName === "string" && img.pixxelLayerName.trim()) ||
+        (typeof img?.name === "string" && img.name.trim()) ||
+        `Image ${fallbackIndex}`
 
     const bump = useCallback(() => setRevision(v => v + 1), [])
 
@@ -57,8 +68,14 @@ const ImageManager = ({ project, dominantColor }) => {
         if (active && isImageObject(active)) {
             setSelectedImage(active)
             setOpacity(Math.round((active.opacity ?? 1) * 100))
+            setMultiSelectionCount(0)
+        } else if (active?.type === "activeSelection") {
+            const selectedImages = active.getObjects?.().filter(isImageObject) || []
+            setMultiSelectionCount(selectedImages.length)
+            setSelectedImage(null)
         } else {
             setSelectedImage(null)
+            setMultiSelectionCount(0)
         }
     }, [canvasEditor])
 
@@ -150,8 +167,9 @@ const ImageManager = ({ project, dominantColor }) => {
     const replaceImage = async (file) => {
         if (!canvasEditor || !selectedImage || !file) return
         try {
-            const url = URL.createObjectURL(file)
-            const newImg = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
+            // Uploads to ImageKit (auth-gated) for a persistent URL; falls back to
+            // a data URL if the upload fails. Both keep the canvas state portable.
+            const newImg = await loadFabricImageFromFile(file)
             newImg.set({
                 left: selectedImage.left,
                 top: selectedImage.top,
@@ -259,6 +277,119 @@ const ImageManager = ({ project, dominantColor }) => {
         setDragOverImage(null)
     }
 
+    const beginRename = (img) => {
+        const idx = images.length - images.indexOf(img)
+        setRenamingId(img.__uid || `img-${images.indexOf(img)}`)
+        setRenameDraft(getLayerName(img, idx))
+        requestAnimationFrame(() => {
+            renameInputRef.current?.focus()
+            renameInputRef.current?.select()
+        })
+    }
+
+    const commitRename = (img) => {
+        if (!img) {
+            setRenamingId(null)
+            return
+        }
+        const trimmed = (renameDraft || "").trim()
+        if (trimmed) {
+            img.pixxelLayerName = trimmed
+            // Mirror to Fabric's built-in `name` so saved/serialized canvas state keeps the rename.
+            img.set?.("name", trimmed)
+            commitLayerState(img)
+        }
+        setRenamingId(null)
+        setRenameDraft("")
+    }
+
+    const cancelRename = () => {
+        setRenamingId(null)
+        setRenameDraft("")
+    }
+
+    const mergeSelectedImages = async () => {
+        if (!canvasEditor) return
+        const active = canvasEditor.getActiveObject()
+        const sources = active?.type === "activeSelection"
+            ? active.getObjects().filter(isImageObject)
+            : []
+        if (sources.length < 2) {
+            toast.error("Select at least two images to merge")
+            return
+        }
+
+        // Compute combined bounding box from the visible bounds of each image.
+        const rects = sources.map((img) => img.getBoundingRect(true, true))
+        const minLeft = Math.min(...rects.map((r) => r.left))
+        const minTop = Math.min(...rects.map((r) => r.top))
+        const maxRight = Math.max(...rects.map((r) => r.left + r.width))
+        const maxBottom = Math.max(...rects.map((r) => r.top + r.height))
+        const mergedWidth = Math.max(1, Math.round(maxRight - minLeft))
+        const mergedHeight = Math.max(1, Math.round(maxBottom - minTop))
+
+        // Render the selected images (with their filters applied) onto an offscreen canvas.
+        // Use a StaticCanvas snapshot via toCanvasElement, scoped to the bounding box.
+        try {
+            const tempCanvas = document.createElement("canvas")
+            tempCanvas.width = mergedWidth
+            tempCanvas.height = mergedHeight
+            const ctx = tempCanvas.getContext("2d")
+            if (!ctx) throw new Error("2D context unavailable")
+
+            // Each source image is already rendered at its position on the canvas.
+            // To preserve filters/opacity exactly, copy the relevant area of the
+            // main canvas's HTML element instead of re-rendering Fabric objects.
+            const mainEl = canvasEditor.lowerCanvasEl
+            const vt = canvasEditor.viewportTransform || [1, 0, 0, 1, 0, 0]
+            const zoom = vt[0]
+            // Hide non-merged objects temporarily so the snapshot only captures the merge set.
+            const allObjects = canvasEditor.getObjects()
+            const hidden = []
+            for (const obj of allObjects) {
+                if (!sources.includes(obj) && obj.visible !== false) {
+                    obj.visible = false
+                    hidden.push(obj)
+                }
+            }
+            canvasEditor.renderAll()
+            // Compute source-rect on the main canvas (viewport coords).
+            const srcX = minLeft * zoom + vt[4]
+            const srcY = minTop * zoom + vt[5]
+            const srcW = mergedWidth * zoom
+            const srcH = mergedHeight * zoom
+            ctx.drawImage(mainEl, srcX, srcY, srcW, srcH, 0, 0, mergedWidth, mergedHeight)
+            // Restore visibility.
+            for (const obj of hidden) obj.visible = true
+            canvasEditor.renderAll()
+
+            const mergedDataUrl = tempCanvas.toDataURL("image/png")
+            const mergedImage = await FabricImage.fromURL(mergedDataUrl, { crossOrigin: "anonymous" })
+            mergedImage.set({
+                left: minLeft,
+                top: minTop,
+                originX: "left",
+                originY: "top",
+                pixxelLayerName: `Merged (${sources.length})`,
+                name: `Merged (${sources.length})`,
+            })
+
+            const topMostIndex = Math.max(...sources.map((s) => allObjects.indexOf(s)))
+            canvasEditor.discardActiveObject()
+            sources.forEach((img) => canvasEditor.remove(img))
+            canvasEditor.insertAt(topMostIndex, mergedImage)
+            canvasEditor.setActiveObject(mergedImage)
+            canvasEditor.requestRenderAll()
+            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__saveCanvasState?.()
+            toast.success(`Merged ${sources.length} layers`)
+            syncImages()
+        } catch (error) {
+            console.error("[Layers] merge failed:", error)
+            toast.error("Failed to merge layers")
+        }
+    }
+
     const bringForward = () => moveImageLayer(selectedImage, 1)
 
     const sendBackward = () => moveImageLayer(selectedImage, -1)
@@ -341,26 +472,24 @@ const ImageManager = ({ project, dominantColor }) => {
                         const canMoveDown = imageLayerIndex > 0
                         const thumb = getImageThumbSrc(img)
 
+                        const rowKey = img.__uid || `img-${idx}`
+                        const isRenaming = renamingId === rowKey
+                        const displayName = getLayerName(img, images.length - idx)
                         return (
-                            <motion.div
-                                key={img.__uid || `img-${idx}`}
+                            <div
+                                key={rowKey}
                                 role="button"
                                 tabIndex={0}
-                                draggable
-                                onDragStart={(e) => handleLayerDragStart(e, img)}
                                 onDragOver={(e) => handleLayerDragOver(e, img)}
                                 onDrop={(e) => handleLayerDrop(e, img)}
-                                onDragEnd={handleLayerDragEnd}
-                                onClick={() => selectImage(img)}
+                                onClick={() => { if (!isRenaming) selectImage(img) }}
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter' || e.key === ' ') {
+                                        if (isRenaming) return
                                         e.preventDefault()
                                         selectImage(img)
                                     }
                                 }}
-                                initial={{ opacity: 0, y: 6 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -6 }}
                                 className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left editor-interactive cursor-pointer"
                                 style={{
                                     background: isDragTarget ? 'rgba(168,121,78,0.16)' : isSelected ? 'rgba(6,184,212,0.08)' : 'transparent',
@@ -368,7 +497,16 @@ const ImageManager = ({ project, dominantColor }) => {
                                     opacity: isDragging ? 0.55 : isHidden ? 0.4 : 1,
                                 }}
                             >
-                                <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab active:cursor-grabbing" style={{ color: 'var(--text-muted)' }} />
+                                <span
+                                    draggable
+                                    onDragStart={(e) => handleLayerDragStart(e, img)}
+                                    onDragEnd={handleLayerDragEnd}
+                                    className="flex h-6 w-4 items-center justify-center shrink-0 cursor-grab active:cursor-grabbing"
+                                    title="Drag to reorder"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <GripVertical className="h-3.5 w-3.5" style={{ color: 'var(--text-muted)' }} />
+                                </span>
                                 {thumb ? (
                                     <img
                                         src={thumb}
@@ -382,9 +520,43 @@ const ImageManager = ({ project, dominantColor }) => {
                                         <ImagePlus className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
                                     </div>
                                 )}
-                                <span className="text-[11px] font-medium flex-1 truncate" style={{ color: 'var(--text-primary)' }}>
-                                    Image {images.length - idx}
-                                </span>
+                                {isRenaming ? (
+                                    <input
+                                        ref={renameInputRef}
+                                        type="text"
+                                        value={renameDraft}
+                                        onChange={(e) => setRenameDraft(e.target.value)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        onKeyDown={(e) => {
+                                            e.stopPropagation()
+                                            if (e.key === 'Enter') commitRename(img)
+                                            else if (e.key === 'Escape') cancelRename()
+                                        }}
+                                        onBlur={() => commitRename(img)}
+                                        className="text-[11px] font-medium flex-1 min-w-0 bg-transparent outline-none rounded px-1 py-0.5"
+                                        style={{
+                                            color: 'var(--text-primary)',
+                                            border: '1px solid var(--accent-primary)',
+                                        }}
+                                    />
+                                ) : (
+                                    <span
+                                        className="text-[11px] font-medium flex-1 truncate"
+                                        style={{ color: 'var(--text-primary)' }}
+                                        onDoubleClick={(e) => { e.stopPropagation(); beginRename(img) }}
+                                        title="Double-click to rename"
+                                    >
+                                        {displayName}
+                                    </span>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); beginRename(img) }}
+                                    className="p-1 rounded editor-interactive shrink-0"
+                                    title="Rename layer"
+                                >
+                                    <Pencil className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
+                                </button>
                                 <button
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); moveImageLayer(img, 1) }}
@@ -425,11 +597,37 @@ const ImageManager = ({ project, dominantColor }) => {
                                         : <Unlock className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
                                     }
                                 </button>
-                            </motion.div>
+                            </div>
                         )
                     })}
                 </AnimatePresence>
             </div>
+
+            {/* Merge selection action — appears when 2+ images are selected on the canvas */}
+            {multiSelectionCount >= 2 && (
+                <div className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-2"
+                     style={{ background: 'rgba(94, 184, 255, 0.08)', border: '1px solid rgba(94, 184, 255, 0.28)' }}>
+                    <div className="flex items-center gap-2 min-w-0">
+                        <Layers className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary, #5eb8ff)' }} />
+                        <span className="text-[11px] truncate" style={{ color: 'var(--text-primary)' }}>
+                            {multiSelectionCount} layers selected
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={mergeSelectedImages}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wider editor-interactive shrink-0"
+                        style={{
+                            background: 'var(--accent-primary, #5eb8ff)',
+                            color: '#0a0d14',
+                        }}
+                        title="Flatten selected layers into a single image"
+                    >
+                        <Layers className="h-3 w-3" />
+                        Merge
+                    </button>
+                </div>
+            )}
 
             {/* Selected Image Properties */}
             {selectedImage && (
