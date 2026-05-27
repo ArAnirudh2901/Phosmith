@@ -288,7 +288,9 @@ const EditorTopbar = ({ project }) => {
                 </div>
 
                 {/* Center: Tool buttons */}
-                <div className="flex flex-none items-center justify-center gap-1 xl:gap-1.5 px-4">
+                {/* Explicit horizontal margin so the center group can never overlap
+                    the left title block or the right action group at any width. */}
+                <div className="flex flex-none items-center justify-center gap-1 px-2 mx-3">
                     {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id

@@ -9,15 +9,56 @@ import { useCanvas } from "../../../../../../context/context"
 import usePlanAccess from "../../../../../../hooks/usePlanAccess"
 
 const TOOLS = [
-    { id: "crop", label: "Crop", icon: Crop, shortcut: "C" },
+    {
+        id: "crop", label: "Crop", icon: Crop, shortcut: "C",
+        subs: [
+            { id: "1:1",   label: "1:1" },
+            { id: "4:5",   label: "4:5" },
+            { id: "16:9",  label: "16:9" },
+            { id: "3:2",   label: "3:2" },
+            { id: "free",  label: "Free" },
+        ],
+    },
     { id: "images", label: "Images", icon: ImagePlus, shortcut: "I", pro: true },
-    { id: "adjust", label: "Adjust", icon: Sliders, shortcut: "A" },
+    {
+        id: "adjust", label: "Adjust", icon: Sliders, shortcut: "A",
+        subs: [
+            { id: "brighten", label: "Brighten" },
+            { id: "punch",    label: "Punch" },
+            { id: "warm",     label: "Warm" },
+            { id: "bw",       label: "B&W" },
+        ],
+    },
     { id: "draw", label: "Draw", icon: Pen, shortcut: "D", pro: true },
     { id: "text", label: "Text", icon: Type, shortcut: "T", pro: true },
-    { id: "ai_background", label: "AI BG", icon: Palette, pro: true },
-    { id: "ai_extender", label: "Extend", icon: Maximize2, pro: true },
+    {
+        id: "ai_background", label: "AI BG", icon: Palette, pro: true,
+        subs: [
+            { id: "remove",   label: "Remove" },
+            { id: "blur",     label: "Blur" },
+            { id: "replace",  label: "Replace" },
+        ],
+    },
+    {
+        id: "ai_extender", label: "Extend", icon: Maximize2, pro: true,
+        subs: [
+            { id: "top",    label: "Top" },
+            { id: "right",  label: "Right" },
+            { id: "bottom", label: "Bottom" },
+            { id: "left",   label: "Left" },
+            { id: "all",    label: "All sides" },
+        ],
+    },
     { id: "ai_edit", label: "AI Edit", icon: Sparkles, pro: true },
-    { id: "ai_agent", label: "Agent", icon: Bot },
+    {
+        id: "ai_agent", label: "Agent", icon: Bot,
+        subs: [
+            { id: "cinematic", label: "Cinematic" },
+            { id: "editorial", label: "Editorial" },
+            { id: "vibrant",   label: "Vibrant" },
+            { id: "studio",    label: "Studio" },
+        ],
+    },
 ]
 
 // Radius constants
@@ -26,6 +67,12 @@ const INNER_R = 52
 const ICON_R = 98
 const CENTER_R = 44
 const DEADZONE_R = 30
+// Sub-ring lives just outside the main wedges. Hovering a wedge with subs
+// makes a fan of small chips appear at this radius; dragging into one selects
+// it and fires onToolSelect(toolId, subId).
+const SUB_RING_R = 178
+const SUB_ICON_R = 178
+const SUB_RING_DEPTH = 60
 
 // Build a wedge SVG path (annular sector)
 function wedgePath(startAngle, endAngle, innerR, outerR) {
@@ -59,6 +106,7 @@ const RadialToolMenu = ({
     onToolSelect,
 }) => {
     const [hoveredIndex, setHoveredIndex] = useState(-1)
+    const [hoveredSubIndex, setHoveredSubIndex] = useState(-1)
     const containerRef = useRef(null)
     const { activeTool } = useCanvas()
     const { hasAccess } = usePlanAccess()
@@ -66,13 +114,15 @@ const RadialToolMenu = ({
     const count = TOOLS.length
     const sliceAngle = 360 / count
 
-    const handleToolClick = (tool) => {
+    const handleToolClick = (tool, subId = null) => {
         if (tool.pro && !hasAccess(tool.id)) return
-        onToolSelect?.(tool.id)
+        // Pass subId as a second arg so the parent route can switch tool and react
+        // to the sub-selection (e.g. set crop aspect, pre-fill agent prompt).
+        onToolSelect?.(tool.id, subId)
         onClose?.()
     }
 
-    // Track mouse angle to determine hovered wedge
+    // Track mouse position → which wedge (main ring) + which sub (outer ring).
     const handlePointerMove = useCallback(
         (e) => {
             if (!visible) return
@@ -82,32 +132,51 @@ const RadialToolMenu = ({
 
             if (dist < DEADZONE_R) {
                 setHoveredIndex(-1)
+                setHoveredSubIndex(-1)
                 return
             }
 
-            // Angle in degrees, 0 = right, clockwise
             let angle = (Math.atan2(dy, dx) * 180) / Math.PI
-            // Offset so that wedge 0 starts centered at top (-90°)
             angle = (angle + 90 + 360) % 360
-            // Shift by half a slice so the wedge centers align
             angle = (angle + sliceAngle / 2) % 360
 
-            const idx = Math.floor(angle / sliceAngle)
-            setHoveredIndex(idx >= 0 && idx < count ? idx : -1)
+            const wedgeIdx = Math.floor(angle / sliceAngle)
+            const tool = TOOLS[wedgeIdx]
+            setHoveredIndex(wedgeIdx >= 0 && wedgeIdx < count ? wedgeIdx : -1)
+
+            // Sub-ring detection: only when we're past OUTER_R, the hovered wedge has
+            // subs, and we're still within the sub-ring annulus. Otherwise reset.
+            if (
+                dist > OUTER_R &&
+                dist < OUTER_R + SUB_RING_DEPTH &&
+                tool?.subs?.length
+            ) {
+                // Each sub spans sliceAngle / subCount within the parent wedge.
+                // Compute the sub-relative angle within the wedge.
+                const wedgeStart = wedgeIdx * sliceAngle
+                const within = angle - wedgeStart // 0..sliceAngle
+                const subSpan = sliceAngle / tool.subs.length
+                const subIdx = Math.floor(within / subSpan)
+                setHoveredSubIndex(subIdx >= 0 && subIdx < tool.subs.length ? subIdx : -1)
+            } else {
+                setHoveredSubIndex(-1)
+            }
         },
         [visible, position.x, position.y, sliceAngle, count]
     )
 
-    // Propagate hovered tool
+    // Propagate hovered tool + hovered sub
     useEffect(() => {
-        const toolId = hoveredIndex >= 0 ? TOOLS[hoveredIndex].id : null
-        onHoverToolChange?.(toolId)
-    }, [hoveredIndex, onHoverToolChange])
+        const tool = hoveredIndex >= 0 ? TOOLS[hoveredIndex] : null
+        const sub = tool && hoveredSubIndex >= 0 ? tool.subs?.[hoveredSubIndex] : null
+        onHoverToolChange?.(tool?.id || null, sub?.id || null)
+    }, [hoveredIndex, hoveredSubIndex, onHoverToolChange])
 
     // Reset on visibility change + attach Escape
     useEffect(() => {
         if (!visible) {
             setHoveredIndex(-1)
+            setHoveredSubIndex(-1)
             return undefined
         }
         const handleKeyDown = (e) => {
@@ -363,6 +432,62 @@ const RadialToolMenu = ({
                         </span>
                     )}
                 </div>
+
+                {/* Sub-ring: render fan of small chips around the hovered wedge's outer arc.
+                    Each chip is laid out by angular position within the parent wedge. */}
+                {hoveredTool?.subs?.length > 0 && (() => {
+                    const subs = hoveredTool.subs
+                    const wedgeStart = hoveredIndex * sliceAngle
+                    const subSpan = sliceAngle / subs.length
+                    return subs.map((sub, sIdx) => {
+                        // Center angle for each sub-chip, converted to math radians:
+                        //   wedge starts at top (we offset by -90° to align with main ring).
+                        const subCenter = wedgeStart + subSpan * (sIdx + 0.5)
+                        const angleRad = ((subCenter - 90) * Math.PI) / 180
+                        const cx = OUTER_R + SUB_ICON_R * Math.cos(angleRad)
+                        const cy = OUTER_R + SUB_ICON_R * Math.sin(angleRad)
+                        const isSubHovered = hoveredSubIndex === sIdx
+                        return (
+                            <motion.div
+                                key={`sub-${hoveredTool.id}-${sub.id}`}
+                                className="absolute"
+                                style={{
+                                    left: cx - 28,
+                                    top: cy - 12,
+                                    width: 56,
+                                    height: 24,
+                                    pointerEvents: "none",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    borderRadius: 12,
+                                    background: isSubHovered
+                                        ? "rgba(6, 184, 212, 0.22)"
+                                        : "rgba(10, 14, 22, 0.85)",
+                                    border: isSubHovered
+                                        ? "1px solid rgba(6, 184, 212, 0.65)"
+                                        : "1px solid rgba(255, 255, 255, 0.10)",
+                                    color: isSubHovered ? "#00E5FF" : "rgba(255, 255, 255, 0.78)",
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    letterSpacing: "0.04em",
+                                    textTransform: "uppercase",
+                                    boxShadow: isSubHovered
+                                        ? "0 4px 16px rgba(6, 184, 212, 0.32)"
+                                        : "0 2px 8px rgba(0,0,0,0.35)",
+                                }}
+                                initial={{ opacity: 0, scale: 0.6 }}
+                                animate={{
+                                    opacity: 1,
+                                    scale: isSubHovered ? 1.1 : 1,
+                                }}
+                                transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
+                            >
+                                {sub.label}
+                            </motion.div>
+                        )
+                    })
+                })()}
 
                 {/* Hovered tool label (outside the ring) */}
                 {hoveredTool && (

@@ -46,9 +46,11 @@ const stripDuplicateProjectIds = (clone) => {
 }
 
 const buildGrid = (rect, reduced) => {
-    const tileSize = reduced ? 22 : 14
-    const columns = clamp(Math.ceil(rect.width / tileSize), reduced ? 8 : 12, reduced ? 16 : 30)
-    const rows = clamp(Math.ceil(rect.height / tileSize), reduced ? 6 : 8, reduced ? 12 : 22)
+    // Finer grid → more particles → reads as fine dust, not chunks. Tile size
+    // and clamp caps both shrink so smaller cards still get a dense field.
+    const tileSize = reduced ? 14 : 6
+    const columns = clamp(Math.ceil(rect.width / tileSize), reduced ? 12 : 24, reduced ? 26 : 64)
+    const rows = clamp(Math.ceil(rect.height / tileSize), reduced ? 9 : 18, reduced ? 18 : 48)
 
     return {
         columns,
@@ -90,23 +92,46 @@ const createTile = ({ target, rect, column, row, columns, rows, tileWidth, tileH
 }
 
 const createMotion = ({ rect, column, row, columns, rows, reduced }) => {
+    // Diagonal wave: tiles dust off in a sweep from top-left → bottom-right,
+    // matching the Thanos-snap wave that crosses the body before the whole thing
+    // is gone. Higher coefficient on column than row → slight up-right tilt.
+    const waveProgress = (column / Math.max(1, columns - 1)) * 0.65
+        + (row / Math.max(1, rows - 1)) * 0.35
     const xNorm = columns <= 1 ? 0 : column / (columns - 1) - 0.5
     const yNorm = rows <= 1 ? 0 : row / (rows - 1) - 0.5
-    const distance = Math.hypot(xNorm, yNorm)
-    const randomX = (Math.random() - 0.5) * (reduced ? 32 : 72)
-    const randomY = (Math.random() - 0.5) * (reduced ? 22 : 48)
-    const driftX = xNorm * (rect.width * 0.38 + 52) + randomX
-    const driftY = yNorm * (rect.height * 0.28) - (reduced ? 22 : 56) + randomY
-    const rotation = (Math.random() - 0.5) * (reduced ? 10 : 28)
-    const scale = 0.82 + Math.random() * 0.24
-    const wave = row * (reduced ? 10 : 18) + column * (reduced ? 2 : 4)
-    const delay = Math.max(0, wave + distance * (reduced ? 12 : 28) + Math.random() * (reduced ? 8 : 28))
-    const reverseDelay = Math.max(0, (rows - row - 1) * (reduced ? 6 : 10) + Math.random() * (reduced ? 8 : 18))
+
+    // Directional wind, not radial scatter. Everything drifts up-and-right with
+    // small per-tile randomness so the field looks like ash blown off a body
+    // rather than a firework exploding outward.
+    const windX = reduced ? 26 : 48
+    const windY = reduced ? -34 : -72
+    const jitterX = (Math.random() - 0.5) * (reduced ? 28 : 56) + xNorm * (reduced ? 18 : 36)
+    const jitterY = (Math.random() - 0.5) * (reduced ? 22 : 42) + yNorm * (reduced ? 10 : 24)
+    const driftX = windX + jitterX
+    const driftY = windY + jitterY
+
+    // Slight rotation and aggressive shrink — tiles become particles, not chunks.
+    const rotation = (Math.random() - 0.5) * (reduced ? 12 : 30)
+    const scale = (reduced ? 0.55 : 0.32) + Math.random() * (reduced ? 0.18 : 0.22)
+
+    // Per-tile delay along the diagonal wave, plus a small random jitter so the
+    // wave looks organic rather than mechanical.
+    const waveSpan = reduced ? 220 : 460
+    const delay = Math.max(
+        0,
+        waveProgress * waveSpan + Math.random() * (reduced ? 24 : 60)
+    )
+    // Vary per-tile duration so some particles vanish fast and others trail.
+    const duration = (reduced ? 420 : 720) + Math.random() * (reduced ? 180 : 360)
+    const reverseDelay = Math.max(
+        0,
+        (1 - waveProgress) * (reduced ? 80 : 160) + Math.random() * (reduced ? 12 : 26)
+    )
 
     return {
         delay,
         reverseDelay,
-        duration: (reduced ? 360 : 560) + distance * (reduced ? 60 : 180),
+        duration,
         end: `translate3d(${driftX}px, ${driftY}px, 0) rotate(${rotation}deg) scale(${scale})`,
     }
 }
@@ -165,14 +190,29 @@ export const createProjectPixelDissolver = async (target, options = {}) => {
         const isDisintegrating = mode === "disintegrate"
         const animations = pieces.map((piece) => {
             const from = getCurrentKeyframe(piece.element, isDisintegrating ? piece.start : piece.end)
-            const to = isDisintegrating
-                ? { transform: piece.end, opacity: 0, filter: "blur(1.8px) saturate(0.8)" }
-                : { transform: piece.start, opacity: 1, filter: "blur(0px) saturate(1)" }
+            // 3-keyframe disintegrate gives the "still solid → flaking → gone" arc.
+            // Saturation drops, brightness lifts (ash glow), blur opens up.
+            const keyframes = isDisintegrating
+                ? [
+                      from,
+                      {
+                          transform: piece.start,
+                          opacity: 0.78,
+                          filter: "blur(0.6px) saturate(0.55) brightness(1.05)",
+                          offset: 0.35,
+                      },
+                      {
+                          transform: piece.end,
+                          opacity: 0,
+                          filter: "blur(3.2px) saturate(0.18) brightness(1.18)",
+                      },
+                  ]
+                : [from, { transform: piece.start, opacity: 1, filter: "blur(0px) saturate(1) brightness(1)" }]
 
-            return piece.element.animate([from, to], {
+            return piece.element.animate(keyframes, {
                 delay: isDisintegrating ? piece.delay : piece.reverseDelay,
                 duration: isDisintegrating ? piece.duration : Math.max(260, piece.duration * 0.72),
-                easing: isDisintegrating ? "cubic-bezier(0.22, 1, 0.36, 1)" : "cubic-bezier(0.16, 1, 0.3, 1)",
+                easing: isDisintegrating ? "cubic-bezier(0.32, 0.04, 0.46, 1)" : "cubic-bezier(0.16, 1, 0.3, 1)",
                 fill: "forwards",
             })
         })

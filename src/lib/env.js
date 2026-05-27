@@ -25,6 +25,10 @@ const OPTIONAL_HINTS = [
   // Without it, the agent falls back to a deterministic keyword planner — still
   // works, just can't make image-aware judgments ("is this already cinematic?").
   "GEMINI_API_KEY",
+  // Optional model override. Defaults to "gemini-2.5-flash". Set this when
+  // pinning to a specific snapshot (e.g. "gemini-2.5-flash-002") to guard
+  // against silent upstream model updates in production.
+  "GEMINI_MODEL",
 ]
 
 const collect = (names) => {

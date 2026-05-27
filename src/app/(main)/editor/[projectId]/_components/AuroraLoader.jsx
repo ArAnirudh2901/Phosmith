@@ -2,53 +2,71 @@
 
 import { motion } from "framer-motion"
 
-/*
- * ─── Page Loading Overlay ───
- * Shimmer + ink dissolve on initial load
- */
+// Phase-specific subtitles. Adding a new phase only needs one line here.
+const PHASE_LABELS = {
+  generating: "Computing pixels",
+  blending: "Blending edges",
+  applying: "Applying to canvas",
+  uploading: "Uploading",
+  analyzing: "Analyzing image",
+}
+
+const PROGRESS_BLOCK_COUNT = 8
 
 const AuroraLoader = ({ message, phase }) => {
-  return (
-    <div className="relative z-10 flex flex-col items-center gap-6">
-      {/* Ink drop Lottie-style animated ring */}
-      <motion.div
-        className="relative w-24 h-24"
-        animate={{ rotate: 360, scale: [1, 1.05, 1] }}
-        transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-      >
-        <div className="absolute inset-0 rounded-full border-2 border-[#00E5FF]/30" />
-        <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#D946EF]/50" />
-        <div className="absolute inset-2 rounded-full border border-[#C8956C]/20" />
-        <div className="absolute inset-3 rounded-full bg-[#0A0E14]" />
-        <motion.div
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 rounded-full"
-          style={{ background: "#00E5FF", boxShadow: "0 0 12px #00E5FF, 0 0 24px #00E5FF/0.5" }}
-          animate={{ scale: [1, 1.5, 1], opacity: [0.6, 1, 0.6] }}
-          transition={{ duration: 1.5, repeat: Infinity }}
-        />
-      </motion.div>
+  const phaseLabel = phase && phase !== "initial" ? PHASE_LABELS[phase] : null
+  const headline = (message || "Processing").toString()
 
-      {/* Processing text */}
-      <div className="text-center">
-        <motion.p
-          className="text-sm font-medium text-white"
-          animate={{ opacity: [0.6, 1, 0.6] }}
-          transition={{ duration: 1.5, repeat: Infinity }}
-        >
-          {message || "Processing..."}
-        </motion.p>
-        {phase && phase !== "initial" && (
-          <motion.p
-            className="text-[11px] text-[var(--text-muted)] mt-1"
-            initial={{ opacity: 0, y: 5 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
-          >
-            {phase === "generating" && "AI models computing..."}
-            {phase === "blending" && "Blending edges seamlessly..."}
-            {phase === "applying" && "Applying to canvas..."}
-          </motion.p>
-        )}
+  return (
+    <div className="neo-loader" role="status" aria-live="polite">
+      {/* ── Header row: brand mark + kicker + status pill ────────────── */}
+      <div className="neo-loader-header">
+        <div className="neo-loader-mark" aria-hidden="true">
+          N
+        </div>
+        <div className="neo-loader-kicker">
+          <span>System</span>
+          <em>Status</em>
+        </div>
+        <div className="neo-loader-pill">
+          <span className="neo-loader-dot" aria-hidden="true" />
+          LIVE
+        </div>
+      </div>
+
+      {/* ── Body: headline + segmented progress + phase ──────────────── */}
+      <div className="neo-loader-body">
+        <h2 className="neo-loader-headline">{headline}</h2>
+
+        <div className="neo-loader-progress" aria-hidden="true">
+          {Array.from({ length: PROGRESS_BLOCK_COUNT }).map((_, index) => (
+            <motion.span
+              key={index}
+              className="neo-loader-block"
+              animate={{ opacity: [0.15, 1, 0.15] }}
+              transition={{
+                duration: 1.4,
+                repeat: Infinity,
+                ease: "easeInOut",
+                delay: index * 0.12,
+              }}
+            />
+          ))}
+        </div>
+
+        <div className="neo-loader-phase">
+          <span>{phaseLabel || "Standby"}</span>
+        </div>
+      </div>
+
+      {/* ── Footer: tabular telemetry strip ──────────────────────────── */}
+      <div className="neo-loader-footer">
+        <span>READ</span>
+        <em>STDIN</em>
+        <span className="neo-loader-divider" aria-hidden="true">
+          ·
+        </span>
+        <em>WAIT</em>
       </div>
     </div>
   )
