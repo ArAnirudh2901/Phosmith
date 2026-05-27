@@ -5,7 +5,19 @@ import { useCanvas } from "../../../../../../context/context"
 import { useConvexMutation } from "../../../../../../hooks/useConvexQuery"
 import { api } from "../../../../../../convex/_generated/api"
 import { Hand, Maximize2, ZoomIn, ZoomOut } from "lucide-react"
-import { Canvas, FabricImage, Point } from "fabric"
+import { Canvas, FabricImage, Point, config as fabricConfig } from "fabric"
+// Side-effect import: registers PixxelCurves filter in Fabric's classRegistry so
+// loadFromJSON can rehydrate saved canvas state that contains it.
+import "../../../../../lib/curves-filter"
+
+// Force the Canvas2D filter backend instead of WebGL. The custom curves LUT filter
+// has a WebGL fragment-shader path that worked in isolation but had subtle issues
+// in real filter chains (corrupted source texture state on some images, leading to
+// black canvases and other downstream filters not visibly applying). 2D is slower
+// for large images but correct in every chain shape.
+if (typeof window !== "undefined" && fabricConfig) {
+    fabricConfig.enableGLFiltering = false
+}
 import { normalizeCanvasState, serializeCanvasState } from "../../../../../lib/canvas-state"
 import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../lib/canvas-history"
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
@@ -218,7 +230,7 @@ const CanvasEditor = ({ project }) => {
         return true
     }, [restoreCanvasState])
 
-    const saveCanvasState = useCallback(async () => {
+    const saveCanvasState = useCallback(async ({ rethrow = false } = {}) => {
         const canvas = canvasInstanceRef.current
         const proj = projectRef.current
         if (!canvas || !proj) return
@@ -234,7 +246,13 @@ const CanvasEditor = ({ project }) => {
                 },
                 ...(currentImageUrl ? { currentImageUrl } : {}),
             })
-        } catch (error) { console.error("Error saving canvas state ", error) }
+        } catch (error) {
+            console.error("Error saving canvas state ", error)
+            // Manual Save (and any explicit caller passing { rethrow: true }) needs to
+            // know if the save failed so it can surface a toast. Autosave callers leave
+            // rethrow at default false and behave as before (log + swallow).
+            if (rethrow) throw error
+        }
     }, [updateProject])
 
     useEffect(() => {
@@ -286,6 +304,7 @@ const CanvasEditor = ({ project }) => {
             }
 
             if (canvasState) {
+                let loadedFromState = false
                 try {
                     await canvas.loadFromJSON(canvasState.canvas || canvasState)
                     removeExpansionFramesFromCanvas(canvas)
@@ -297,11 +316,34 @@ const CanvasEditor = ({ project }) => {
                     })
                     for (const obj of canvas.getObjects()) {
                         if (obj?.type?.toLowerCase() === 'image' && obj.filters?.length) {
-                            try { obj.applyFilters?.() } catch { /* ignore */ }
+                            try {
+                                obj.applyFilters?.()
+                            } catch (filterError) {
+                                // Silently swallowing here once hid a real curves regression
+                                // for hours. Keep going (don't break the load) but log so
+                                // the next failure is diagnosable.
+                                console.error('[canvas] applyFilters failed for image:', filterError)
+                            }
                         }
                     }
                     canvas.requestRenderAll()
+                    loadedFromState = canvas.getObjects().length > 0
                 } catch (error) { console.error("Error loading canvas state: ", error) }
+
+                // Fallback: if loadFromJSON threw or produced an empty canvas (e.g. a
+                // saved filter type Fabric can no longer enliven), still show the project
+                // image so the user doesn't stare at a blank canvas.
+                if (!loadedFromState) {
+                    const imageUrl = project.currentImageUrl || project.originalImageUrl
+                    if (imageUrl && canvas.getObjects().length === 0) {
+                        try {
+                            const fallbackImage = await FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" })
+                            fitImageInsideProject(fallbackImage, project)
+                            canvas.add(fallbackImage)
+                            canvas.requestRenderAll()
+                        } catch (error) { console.error("Fallback image load failed:", error) }
+                    }
+                }
             }
 
             if (!hasRestoredViewport) createInitialViewport(canvas)
@@ -471,7 +513,7 @@ const CanvasEditor = ({ project }) => {
             canvas.__undoCanvasState = () => undoCanvasState()
             canvas.__redoCanvasState = () => redoCanvasState()
             canvas.__pushHistoryState = () => pushHistoryState(canvas)
-            canvas.__saveCanvasState = () => saveCanvasState()
+            canvas.__saveCanvasState = (opts) => saveCanvasState(opts)
             canvas.__getHistoryState = () => ({
                 canUndo: historyIndexRef.current > 0,
                 canRedo: historyIndexRef.current < historyRef.current.length - 1,

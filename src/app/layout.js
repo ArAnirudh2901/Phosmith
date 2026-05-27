@@ -1,5 +1,6 @@
 import { JetBrains_Mono } from "next/font/google";
 import { Suspense } from "react";
+import "@/lib/env";
 import "./globals.css";
 import "../styles/animations.css";
 import { ThemeProvider } from "@/components/theme-provider";

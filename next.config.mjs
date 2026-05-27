@@ -11,6 +11,12 @@ const nextConfig = {
   experimental: {
     proxyClientMaxBodySize: '32mb',
   },
+  // Strip debug logs in production but keep error/warn for ops visibility.
+  compiler: {
+    removeConsole: process.env.NODE_ENV === 'production'
+      ? { exclude: ['error', 'warn'] }
+      : false,
+  },
   turbopack: {
     root: projectRoot,
   },

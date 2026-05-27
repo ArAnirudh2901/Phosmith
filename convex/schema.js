@@ -72,10 +72,25 @@ export default defineSchema({
 
     folders: defineTable({
         name: v.string(),              // Folder name
-        userId: v.id("users"),         // Owner 
+        userId: v.id("users"),         // Owner
         createdAt: v.number(),
     })
         .index("by_user", ["userId"]),  // User's folders
+
+    // AI Edit-Plan cache. Same (image content + normalized prompt + planner version)
+    // always returns the same plan, so "edit the same image multiple times using the
+    // same instructions" is byte-exact repeatable across sessions.
+    editPlanCache: defineTable({
+        projectId: v.id("projects"),
+        imageHash: v.string(),          // 32×32 pixel fingerprint of the source image
+        promptKey: v.string(),          // normalized prompt (lowercase, collapsed whitespace)
+        plannerVersion: v.number(),     // bump to invalidate cache when planner changes
+        plan: v.any(),
+        features: v.any(),
+        source: v.string(),             // "gemini" | "fallback" | "ollama"
+        createdAt: v.number(),
+    })
+        .index("by_lookup", ["projectId", "imageHash", "promptKey", "plannerVersion"]),
 })
 
 // PLAN LIMITS EXAMPLE:

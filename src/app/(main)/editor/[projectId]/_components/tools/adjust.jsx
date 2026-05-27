@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import { filters, Gradient, Rect } from "fabric"
 import { LineChart, RotateCcw, SlidersHorizontal, Sparkles, WandSparkles } from "lucide-react"
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider"
+import { PixxelCurvesFilter, buildLut, buildCurveSvgPath, arePointsIdentity } from "@/lib/curves-filter"
 import { useCanvas } from "../../../../../../../context/context"
 import {
     buildImageKitChainedTransformUrl,
@@ -140,53 +141,14 @@ const WHEEL_CONFIGS = [
 ]
 
 const CURVE_CHANNELS = [
-    {
-        id: "rgb",
-        label: "RGB",
-        shortLabel: "RGB",
-        color: "#e5e7eb",
-        histogramChannels: ["red", "green", "blue"],
-        keys: { shadows: "curveLumaShadows", midtones: "curveLumaMidtones", highlights: "curveLumaHighlights" },
-    },
-    {
-        id: "red",
-        label: "Red",
-        shortLabel: "Red",
-        color: "#ff5d65",
-        histogramChannels: ["red"],
-        keys: { shadows: "curveRedShadows", midtones: "curveRedMidtones", highlights: "curveRedHighlights" },
-    },
-    {
-        id: "green",
-        label: "Green",
-        shortLabel: "Green",
-        color: "#64d989",
-        histogramChannels: ["green"],
-        keys: { shadows: "curveGreenShadows", midtones: "curveGreenMidtones", highlights: "curveGreenHighlights" },
-    },
-    {
-        id: "blue",
-        label: "Blue",
-        shortLabel: "Blue",
-        color: "#69a7ff",
-        histogramChannels: ["blue"],
-        keys: { shadows: "curveBlueShadows", midtones: "curveBlueMidtones", highlights: "curveBlueHighlights" },
-    },
-    {
-        id: "luma",
-        label: "Luminance",
-        shortLabel: "Luma",
-        color: "#d8dde7",
-        histogramChannels: ["luma"],
-        keys: { shadows: "curveLumaShadows", midtones: "curveLumaMidtones", highlights: "curveLumaHighlights" },
-    },
+    { id: "rgb", label: "RGB", shortLabel: "RGB", color: "#e5e7eb", histogramChannels: ["red", "green", "blue"], pointsKey: "curvePointsMaster" },
+    { id: "red", label: "Red", shortLabel: "Red", color: "#ff5d65", histogramChannels: ["red"], pointsKey: "curvePointsRed" },
+    { id: "green", label: "Green", shortLabel: "Green", color: "#64d989", histogramChannels: ["green"], pointsKey: "curvePointsGreen" },
+    { id: "blue", label: "Blue", shortLabel: "Blue", color: "#69a7ff", histogramChannels: ["blue"], pointsKey: "curvePointsBlue" },
+    { id: "luma", label: "Luminance", shortLabel: "Luma", color: "#d8dde7", histogramChannels: ["luma"], pointsKey: "curvePointsMaster" },
 ]
 
-const CURVE_VALUE_CONFIGS = CURVE_CHANNELS.flatMap((channel) => ([
-    { key: channel.keys.shadows, label: `${channel.shortLabel} Shadows`, min: -100, max: 100, defaultValue: 0, color: channel.color },
-    { key: channel.keys.midtones, label: `${channel.shortLabel} Midtones`, min: -100, max: 100, defaultValue: 0, color: channel.color },
-    { key: channel.keys.highlights, label: `${channel.shortLabel} Highlights`, min: -100, max: 100, defaultValue: 0, color: channel.color },
-]))
+const CURVE_POINTS_KEYS = ["curvePointsMaster", "curvePointsRed", "curvePointsGreen", "curvePointsBlue"]
 
 const LOOKS = [
     { id: "none", label: "Clean", filterClass: null },
@@ -206,6 +168,8 @@ const LOOKS = [
     { id: "blackwhite", label: "B&W", filterClass: filters.BlackWhite },
 ]
 
+const cloneIdentityPoints = () => [{ x: 0, y: 0 }, { x: 1, y: 1 }]
+
 const DEFAULT_VALUES = {
     ...SLIDER_CONFIGS.reduce((acc, c) => {
         acc[c.key] = c.defaultValue
@@ -216,8 +180,8 @@ const DEFAULT_VALUES = {
         acc[c.colorKey] = c.defaultColor
         return acc
     }, {}),
-    ...CURVE_VALUE_CONFIGS.reduce((acc, c) => {
-        acc[c.key] = c.defaultValue
+    ...CURVE_POINTS_KEYS.reduce((acc, key) => {
+        acc[key] = cloneIdentityPoints()
         return acc
     }, {}),
     look: "none",
@@ -292,12 +256,18 @@ const getImageSrc = (image) =>
     image?.src ||
     ""
 
+// The curves-panel histogram is a SOURCE reference — it shows the tonal distribution
+// of the input pixels so the user can see where their data lives while shaping the
+// curve. Reading from `_filteredEl` (the post-filter canvas) would make the bars
+// shift around as the user drags the curve, which is confusing and non-standard.
+// Apple Photos / Lightroom / Photoshop all show the original histogram with the
+// curve overlaid on top. Prefer the original element here for the same behavior.
 const getHistogramSourceElement = (image) =>
-    image?._filteredEl ||
-    image?._cacheCanvas ||
+    image?._originalElement ||
     image?.getElement?.() ||
     image?._element ||
-    image?._originalElement ||
+    image?._filteredEl ||
+    image?._cacheCanvas ||
     null
 
 const emptyHistogram = () => ({
@@ -350,6 +320,18 @@ const computeImageHistogram = (image) => {
     }
 }
 
+const sanitizeCurvePoints = (raw) => {
+    const arr = Array.isArray(raw) ? raw : []
+    const cleaned = arr
+        .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+        .map((p) => ({ x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1) }))
+        .sort((a, b) => a.x - b.x)
+    if (cleaned.length < 2) return cloneIdentityPoints()
+    cleaned[0] = { x: 0, y: cleaned[0].y }
+    cleaned[cleaned.length - 1] = { x: 1, y: cleaned[cleaned.length - 1].y }
+    return cleaned
+}
+
 const normalizeStoredValues = (values) => {
     const next = { ...DEFAULT_VALUES, ...(values || {}) }
     for (const config of SLIDER_CONFIGS) {
@@ -359,8 +341,8 @@ const normalizeStoredValues = (values) => {
         next[config.key] = clamp(Number(next[config.key] ?? 0), 0, 100)
         next[config.colorKey] = String(next[config.colorKey] || config.defaultColor)
     }
-    for (const config of CURVE_VALUE_CONFIGS) {
-        next[config.key] = clamp(Number(next[config.key] ?? config.defaultValue), config.min, config.max)
+    for (const key of CURVE_POINTS_KEYS) {
+        next[key] = sanitizeCurvePoints(next[key])
     }
     next.look = LOOKS.some((look) => look.id === next.look) ? next.look : "none"
     return next
@@ -419,45 +401,53 @@ const markFilter = (filter, key) => {
 }
 
 const buildChannelMatrix = (values) => {
-    const curveShadow = (channel) => Number(values.curveLumaShadows || 0) + Number(values[`curve${channel}Shadows`] || 0)
-    const curveHighlight = (channel) => Number(values.curveLumaHighlights || 0) + Number(values[`curve${channel}Highlights`] || 0)
-    const curveScale = (channel) => 1 + curveHighlight(channel) / 220 - Math.min(0, curveShadow(channel)) / 360
-    const curveOffset = (channel) => curveShadow(channel) / 360
-
-    const r = (1 + Number(values.red || 0) / 115) * curveScale("Red")
-    const g = (1 + Number(values.green || 0) / 115) * curveScale("Green")
-    const b = (1 + Number(values.blue || 0) / 115) * curveScale("Blue")
+    const r = 1 + Number(values.red || 0) / 115
+    const g = 1 + Number(values.green || 0) / 115
+    const b = 1 + Number(values.blue || 0) / 115
     const exposure = Number(values.exposure || 0) / 260
     const whites = Number(values.whites || 0) / 420
     const blacks = -Number(values.blacks || 0) / 520
     const fade = Number(values.fade || 0) / 520
     const offset = exposure + whites + blacks + fade
-    const rOffset = offset + curveOffset("Red")
-    const gOffset = offset + curveOffset("Green")
-    const bOffset = offset + curveOffset("Blue")
     const active =
         Math.abs(r - 1) > 0.001 ||
         Math.abs(g - 1) > 0.001 ||
         Math.abs(b - 1) > 0.001 ||
-        Math.abs(rOffset) > 0.001 ||
-        Math.abs(gOffset) > 0.001 ||
-        Math.abs(bOffset) > 0.001
+        Math.abs(offset) > 0.001
 
     if (!active) return null
     return [
-        r, 0, 0, 0, rOffset,
-        0, g, 0, 0, gOffset,
-        0, 0, b, 0, bOffset,
+        r, 0, 0, 0, offset,
+        0, g, 0, 0, offset,
+        0, 0, b, 0, offset,
         0, 0, 0, 1, 0,
     ]
 }
 
 const buildGammaValues = (values) => {
     const base = Number(values.gamma || 100) / 100
-    const lumaMid = Number(values.curveLumaMidtones || 0)
-    return ["Red", "Green", "Blue"].map((channel) =>
-        clamp(base - (lumaMid + Number(values[`curve${channel}Midtones`] || 0)) / 220, 0.2, 2.2)
-    )
+    return [base, base, base]
+}
+
+const buildCurvesFilter = (values) => {
+    const masterPts = sanitizeCurvePoints(values.curvePointsMaster)
+    const redPts = sanitizeCurvePoints(values.curvePointsRed)
+    const greenPts = sanitizeCurvePoints(values.curvePointsGreen)
+    const bluePts = sanitizeCurvePoints(values.curvePointsBlue)
+    if (
+        arePointsIdentity(masterPts) &&
+        arePointsIdentity(redPts) &&
+        arePointsIdentity(greenPts) &&
+        arePointsIdentity(bluePts)
+    ) {
+        return null
+    }
+    return new PixxelCurvesFilter({
+        lutR: buildLut(redPts),
+        lutG: buildLut(greenPts),
+        lutB: buildLut(bluePts),
+        lutMaster: buildLut(masterPts),
+    })
 }
 
 const grayscaleMatrix = (amount) => {
@@ -502,6 +492,9 @@ const buildFabricFilters = (values) => {
 
     const channelMatrix = buildChannelMatrix(values)
     if (channelMatrix) next.push(markFilter(new filters.ColorMatrix({ matrix: channelMatrix }), "rgb-mixer"))
+
+    const curvesFilter = buildCurvesFilter(values)
+    if (curvesFilter) next.push(markFilter(curvesFilter, "curves"))
 
     if (values.highlights > 0) addBlend(next, "highlights", "#ffffff", "screen", values.highlights / 260)
     if (values.highlights < 0) addBlend(next, "highlights", "#1b1b1b", "multiply", Math.abs(values.highlights) / 320)
@@ -788,49 +781,84 @@ const buildHistogramPaths = (series) => {
     }
 }
 
-const CURVE_LIFT_FACTOR = 0.36
+const CURVE_HIT_RADIUS_VB = 4.5
+const CURVE_POINT_MIN_GAP = 0.015
+
+const clientToCurvePoint = (svgEl, clientX, clientY) => {
+    if (!svgEl) return null
+    const rect = svgEl.getBoundingClientRect()
+    if (!rect.width || !rect.height) return null
+    const vbX = ((clientX - rect.left) / rect.width) * 100
+    const vbY = ((clientY - rect.top) / rect.height) * 100
+    const x = (vbX - CURVE_GRAPH.left) / (CURVE_GRAPH.right - CURVE_GRAPH.left)
+    const y = 1 - (vbY - CURVE_GRAPH.top) / (CURVE_GRAPH.bottom - CURVE_GRAPH.top)
+    return { x: clamp(x, 0, 1), y: clamp(y, 0, 1), vbX, vbY }
+}
+
+const findNearestPointIndex = (points, vbX, vbY) => {
+    if (!Array.isArray(points)) return -1
+    let best = -1
+    let bestDist = CURVE_HIT_RADIUS_VB
+    for (let i = 0; i < points.length; i++) {
+        const p = points[i]
+        const px = CURVE_GRAPH.left + p.x * (CURVE_GRAPH.right - CURVE_GRAPH.left)
+        const py = CURVE_GRAPH.bottom - p.y * (CURVE_GRAPH.bottom - CURVE_GRAPH.top)
+        const dx = vbX - px
+        const dy = vbY - py
+        const dist = Math.sqrt(dx * dx + dy * dy)
+        if (dist < bestDist) {
+            bestDist = dist
+            best = i
+        }
+    }
+    return best
+}
 
 const CurveGraph = ({ channel, values, histogram, onBegin, onPreview, onCommit }) => {
     const svgRef = useRef(null)
     const dragRef = useRef(null)
-    const [activeTone, setActiveTone] = useState(null)
+    const [activeIndex, setActiveIndex] = useState(null)
+    const [hoverIndex, setHoverIndex] = useState(null)
 
-    const shadows = Number(values[channel.keys.shadows] || 0)
-    const midtones = Number(values[channel.keys.midtones] || 0)
-    const highlights = Number(values[channel.keys.highlights] || 0)
-    const yFor = (base, lift) => clamp(CURVE_GRAPH.bottom - (base + lift * CURVE_LIFT_FACTOR), CURVE_GRAPH.top, CURVE_GRAPH.bottom)
-    const p0 = { x: CURVE_GRAPH.left, y: yFor(CURVE_GRAPH.left, shadows) }
-    const p1 = { x: 50, y: yFor(50, midtones) }
-    const p2 = { x: CURVE_GRAPH.right, y: yFor(CURVE_GRAPH.right, highlights) }
-    const path = `M ${p0.x} ${p0.y} C 22 ${p0.y}, 34 ${p1.y}, ${p1.x} ${p1.y} S 76 ${p2.y}, ${p2.x} ${p2.y}`
+    const points = sanitizeCurvePoints(values[channel.pointsKey])
     const isRgb = channel.id === "rgb"
+    const path = buildCurveSvgPath(points, CURVE_GRAPH)
+
+    const commitPoints = (next, { commit }) => {
+        const sanitized = sanitizeCurvePoints(next)
+        if (commit) onCommit(channel.pointsKey, sanitized)
+        else onPreview(channel.pointsKey, sanitized)
+    }
 
     useEffect(() => {
-        if (!activeTone) return undefined
+        if (activeIndex === null) return undefined
 
         const handleMove = (event) => {
             const drag = dragRef.current
             if (!drag) return
             const svg = svgRef.current
             if (!svg) return
-            const rect = svg.getBoundingClientRect()
-            if (!rect.height) return
-            const pxToVB = 100 / rect.height
-            const deltaVB = (event.clientY - drag.startClientY) * pxToVB
-            const valueDelta = -deltaVB / CURVE_LIFT_FACTOR
-            const next = clamp(Math.round(drag.startValue + valueDelta), -100, 100)
-            if (next === drag.lastValue) return
-            drag.lastValue = next
-            onPreview(channel.keys[drag.tone], next)
+            const loc = clientToCurvePoint(svg, event.clientX, event.clientY)
+            if (!loc) return
+            const next = drag.points.map((p, i) => ({ ...p }))
+            const isFirst = drag.index === 0
+            const isLast = drag.index === next.length - 1
+            const prev = next[drag.index - 1]
+            const succ = next[drag.index + 1]
+            const minX = isFirst ? 0 : (prev ? prev.x + CURVE_POINT_MIN_GAP : 0)
+            const maxX = isLast ? 1 : (succ ? succ.x - CURVE_POINT_MIN_GAP : 1)
+            const newX = isFirst ? 0 : isLast ? 1 : clamp(loc.x, minX, maxX)
+            const newY = clamp(loc.y, 0, 1)
+            next[drag.index] = { x: newX, y: newY }
+            dragRef.current = { ...drag, points: next }
+            commitPoints(next, { commit: false })
         }
 
         const handleUp = () => {
             const drag = dragRef.current
-            if (drag) {
-                onCommit(channel.keys[drag.tone], drag.lastValue)
-            }
+            if (drag) commitPoints(drag.points, { commit: true })
             dragRef.current = null
-            setActiveTone(null)
+            setActiveIndex(null)
         }
 
         window.addEventListener("pointermove", handleMove)
@@ -841,52 +869,54 @@ const CurveGraph = ({ channel, values, histogram, onBegin, onPreview, onCommit }
             window.removeEventListener("pointerup", handleUp)
             window.removeEventListener("pointercancel", handleUp)
         }
-    }, [activeTone, channel, onPreview, onCommit])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeIndex, channel.pointsKey])
 
-    const handlePointerDown = (tone) => (event) => {
+    const beginDrag = (index, event) => {
         if (event.button !== 0 && event.button !== undefined) return
         event.preventDefault()
         event.stopPropagation()
-        const startValue = Number(values[channel.keys[tone]] || 0)
-        dragRef.current = {
-            tone,
-            startClientY: event.clientY,
-            startValue,
-            lastValue: startValue,
-        }
         onBegin?.()
-        setActiveTone(tone)
+        dragRef.current = { index, points: points.map((p) => ({ ...p })) }
+        setActiveIndex(index)
     }
 
-    const renderPoint = (tone, point, isMidtone = false) => {
-        const isHidden = isMidtone && midtones === 0 && activeTone !== "midtones"
-        return (
-            <g
-                key={tone}
-                className={`adjust-curve-point-group ${activeTone === tone ? "is-active" : ""} ${isHidden ? "is-hidden" : ""}`}
-                style={{ "--curve-color": channel.color }}
-            >
-                <circle
-                    cx={point.x}
-                    cy={point.y}
-                    r="7"
-                    className="adjust-curve-point-hit"
-                    onPointerDown={handlePointerDown(tone)}
-                />
-                <circle
-                    cx={point.x}
-                    cy={point.y}
-                    r="1.7"
-                    className="adjust-curve-point"
-                    pointerEvents="none"
-                />
-            </g>
-        )
+    const handlePointerDownGraph = (event) => {
+        if (event.button !== 0 && event.button !== undefined) return
+        const svg = svgRef.current
+        if (!svg) return
+        const loc = clientToCurvePoint(svg, event.clientX, event.clientY)
+        if (!loc) return
+        const existing = findNearestPointIndex(points, loc.vbX, loc.vbY)
+        if (existing >= 0) {
+            beginDrag(existing, event)
+            return
+        }
+        // Add a new point at this location
+        event.preventDefault()
+        event.stopPropagation()
+        onBegin?.()
+        const next = [...points, { x: loc.x, y: loc.y }].sort((a, b) => a.x - b.x)
+        const sanitized = sanitizeCurvePoints(next)
+        let insertedIndex = sanitized.findIndex((p) => Math.abs(p.x - loc.x) < 0.0001 && Math.abs(p.y - loc.y) < 0.0001)
+        if (insertedIndex < 0) insertedIndex = Math.max(1, Math.min(sanitized.length - 2, sanitized.length - 1))
+        dragRef.current = { index: insertedIndex, points: sanitized }
+        commitPoints(sanitized, { commit: false })
+        setActiveIndex(insertedIndex)
+    }
+
+    const handleDoubleClickPoint = (index) => (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        if (index === 0 || index === points.length - 1) return
+        onBegin?.()
+        const next = points.filter((_, i) => i !== index)
+        commitPoints(next, { commit: true })
     }
 
     return (
         <div className="adjust-curve-graph">
-            <svg ref={svgRef} viewBox="0 0 100 100" className="adjust-curve-svg" preserveAspectRatio="none">
+            <svg ref={svgRef} viewBox="0 0 100 100" className="adjust-curve-svg" preserveAspectRatio="none" onPointerDown={handlePointerDownGraph}>
                 {[20, 40, 60, 80].map((line) => (
                     <React.Fragment key={line}>
                         <line x1={line} y1="6" x2={line} y2="94" className="adjust-curve-grid" />
@@ -902,6 +932,7 @@ const CurveGraph = ({ channel, values, histogram, onBegin, onPreview, onCommit }
                             key={key}
                             className={`adjust-curve-histogram-series ${isRgb ? "is-rgb" : "is-single"}`}
                             style={{ "--curve-color": series.color }}
+                            pointerEvents="none"
                         >
                             <path d={paths.fill} className="adjust-curve-histogram-fill" />
                             <path d={paths.line} className="adjust-curve-histogram-line" />
@@ -915,11 +946,40 @@ const CurveGraph = ({ channel, values, histogram, onBegin, onPreview, onCommit }
                     y2={CURVE_GRAPH.top}
                     className="adjust-curve-diagonal"
                     style={{ "--curve-color": channel.color }}
+                    pointerEvents="none"
                 />
                 <path d={path} className="adjust-curve-path" style={{ "--curve-color": channel.color }} pointerEvents="none" />
-                {renderPoint("shadows", p0)}
-                {renderPoint("midtones", p1, true)}
-                {renderPoint("highlights", p2)}
+                {points.map((p, index) => {
+                    const cx = CURVE_GRAPH.left + p.x * (CURVE_GRAPH.right - CURVE_GRAPH.left)
+                    const cy = CURVE_GRAPH.bottom - p.y * (CURVE_GRAPH.bottom - CURVE_GRAPH.top)
+                    const isActive = activeIndex === index
+                    const isHovered = hoverIndex === index
+                    return (
+                        <g
+                            key={index}
+                            className={`adjust-curve-point-group ${isActive ? "is-active" : ""} ${isHovered ? "is-hover" : ""}`}
+                            style={{ "--curve-color": channel.color }}
+                        >
+                            <circle
+                                cx={cx}
+                                cy={cy}
+                                r="4.5"
+                                className="adjust-curve-point-hit"
+                                onPointerDown={(event) => beginDrag(index, event)}
+                                onDoubleClick={handleDoubleClickPoint(index)}
+                                onPointerEnter={() => setHoverIndex(index)}
+                                onPointerLeave={() => setHoverIndex((cur) => (cur === index ? null : cur))}
+                            />
+                            <circle
+                                cx={cx}
+                                cy={cy}
+                                r="1.7"
+                                className="adjust-curve-point"
+                                pointerEvents="none"
+                            />
+                        </g>
+                    )
+                })}
             </svg>
         </div>
     )
@@ -927,23 +987,19 @@ const CurveGraph = ({ channel, values, histogram, onBegin, onPreview, onCommit }
 
 const CurveEditorPanel = ({ values, histogram, activeChannel, onChannelChange, onBegin, onPreview, onCommit }) => {
     const channel = CURVE_CHANNELS.find((item) => item.id === activeChannel) || CURVE_CHANNELS[0]
+    const channelPoints = sanitizeCurvePoints(values[channel.pointsKey])
+    const isChannelDirty = !arePointsIdentity(channelPoints)
 
     const handleResetChannel = () => {
         onBegin?.()
-        const keys = [channel.keys.shadows, channel.keys.midtones, channel.keys.highlights]
-        keys.forEach((key) => onCommit(key, 0))
+        onCommit(channel.pointsKey, cloneIdentityPoints())
     }
-
-    const isChannelDirty =
-        Number(values[channel.keys.shadows] || 0) !== 0 ||
-        Number(values[channel.keys.midtones] || 0) !== 0 ||
-        Number(values[channel.keys.highlights] || 0) !== 0
 
     return (
         <div className="adjust-curve-card" style={{ "--curve-color": channel.color }}>
             <div className="adjust-curve-card-header">
                 <div className="adjust-curve-card-title">
-                    <LineChart className="h-3.5 w-3.5" />
+                    <LineChart aria-hidden="true" />
                     <span>Curves</span>
                 </div>
                 <button
@@ -953,7 +1009,7 @@ const CurveEditorPanel = ({ values, histogram, activeChannel, onChannelChange, o
                     className="adjust-curve-reset"
                     title={`Reset ${channel.label} channel`}
                 >
-                    <RotateCcw className="h-3 w-3" />
+                    <RotateCcw aria-hidden="true" />
                     Reset
                 </button>
             </div>
@@ -983,30 +1039,9 @@ const CurveEditorPanel = ({ values, histogram, activeChannel, onChannelChange, o
                 onPreview={onPreview}
                 onCommit={onCommit}
             />
-            <div className="adjust-curve-controls">
-                {[
-                    ["shadows", "Shadows"],
-                    ["midtones", "Midtones"],
-                    ["highlights", "Highlights"],
-                ].map(([tone, label]) => {
-                    const key = channel.keys[tone]
-                    return (
-                        <ProRulerSlider
-                            key={key}
-                            variant="instrument"
-                            value={values[key]}
-                            onBegin={onBegin}
-                            onPreview={(v) => onPreview(key, v)}
-                            onCommit={(v) => onCommit(key, v)}
-                            min={-100}
-                            max={100}
-                            step={1}
-                            label={label}
-                            visual={{ fill: "rgba(60, 72, 86, 0.48)", accent: channel.color, trackBg: "rgba(14, 16, 20, 0.98)" }}
-                        />
-                    )
-                })}
-            </div>
+            <p className="adjust-curve-hint">
+                Click the curve to add a point · drag to shape · double-click a point to remove
+            </p>
         </div>
     )
 }
@@ -1197,7 +1232,8 @@ const AdjustControls = () => {
         if (updateState) setValues(next)
         const nextSig = getValuesSignature(next)
         applyAdjustmentFilters(canvasEditor, next, sigRef, { commit: commit && nextSig !== committedSigRef.current })
-        queueCurveHistogramRefresh()
+        // Histogram is computed from the source image (see getHistogramSourceElement)
+        // so it doesn't change during a drag — no refresh needed on every preview frame.
         if (commit) {
             committedSigRef.current = nextSig
             isInteractingRef.current = false
@@ -1205,14 +1241,16 @@ const AdjustControls = () => {
     }
 
     const handlePreviewChange = (key, v) => {
-        const val = Array.isArray(v) ? v[0] : v
+        const isPointsKey = CURVE_POINTS_KEYS.includes(key)
+        const val = isPointsKey ? v : (Array.isArray(v) ? v[0] : v)
         const prev = latestRef.current
-        if (prev[key] === val) return
+        if (!isPointsKey && prev[key] === val) return
         applyNextValues({ ...prev, [key]: val })
     }
 
     const handleCommitChange = (key, v) => {
-        const val = Array.isArray(v) ? v[0] : v
+        const isPointsKey = CURVE_POINTS_KEYS.includes(key)
+        const val = isPointsKey ? v : (Array.isArray(v) ? v[0] : v)
         if (previewFrame.current) {
             cancelAnimationFrame(previewFrame.current)
             previewFrame.current = null
