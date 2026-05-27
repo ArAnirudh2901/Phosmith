@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { Calendar, Check, ImageIcon, Loader2, Plus, Trash2, X } from "lucide-react"
 import NewProjectModel from "./_components/newProjectModel"
+import ShortcutsGuide from "@/components/neo/ShortcutsGuide"
+import useDashboardShortcuts from "../../../../hooks/useDashboardShortcuts"
 import { motion, AnimatePresence } from "framer-motion"
 import { duration, easeOut, staggerDelay } from "@/lib/motion"
 import { createProjectPixelDissolver } from "@/lib/project-pixel-effect"
@@ -201,6 +203,7 @@ const Dashboard = () => {
     const [isBulkDeleting, setIsBulkDeleting] = useState(false)
     const [pendingDeleteIds, setPendingDeleteIds] = useState([])
     const [deleteConfirm, setDeleteConfirm] = useState(emptyDeleteConfirm)
+    const [showShortcuts, setShowShortcuts] = useState(false)
 
     const { data: projects = [], isLoading: isProjectsLoading } = useConvexQuery(
         api.projects.getUserProjects,
@@ -427,11 +430,34 @@ const Dashboard = () => {
         stageProjectDisintegration,
     ])
 
+    useDashboardShortcuts({
+        onNewProject: () => setShowNewProjectModal(true),
+        onToggleShortcuts: () => setShowShortcuts((value) => !value),
+        onToggleSelectMode: handleSelectionModeToggle,
+        onSelectAll: () => {
+            if (!projects?.length) return
+            setSelectedProjectIds(projects.map((p) => p._id))
+        },
+        onDeleteSelected: handleDeleteSelectedProjects,
+        onEscape: () => {
+            // Cascade: close shortcuts → close new-project modal → exit select mode → close delete dialog
+            if (showShortcuts) { setShowShortcuts(false); return }
+            if (showNewProjectModal) { setShowNewProjectModal(false); return }
+            if (deleteConfirm.open) { setDeleteConfirm(emptyDeleteConfirm); return }
+            if (isSelectionMode) {
+                setIsSelectionMode(false)
+                setSelectedProjectIds([])
+            }
+        },
+        isSelectionMode,
+        selectedCount: selectedProjectIds.length,
+    })
+
     return (
         <div className="min-h-[calc(100svh-3rem)] pt-28 pb-12 relative">
             <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-4 sm:px-6 lg:px-8 relative z-10">
                 {/* Header bar */}
-                <GlassPanel className="!px-6 !py-5">
+                <GlassPanel className="!px-6 !py-5 dashboard-projects-header">
                     <div className="flex items-center justify-between">
                         <div className="select-none">
                             <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">
@@ -572,6 +598,12 @@ const Dashboard = () => {
                     isOpen={showNewProjectModal}
                     onClose={() => setShowNewProjectModal(false)}
                     currentProjectCount={projectCount}
+                />
+
+                <ShortcutsGuide
+                    open={showShortcuts}
+                    onClose={() => setShowShortcuts(false)}
+                    variant="dashboard"
                 />
 
                 <AlertDialog

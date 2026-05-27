@@ -80,28 +80,42 @@ export default function EditorSidebar({ project: projectProp, width }) {
         }
     }
 
+    // The AI Agent panel owns its own header (brand mark + status + actions),
+    // so showing the sidebar's generic "<Tool> · Properties" header on top of
+    // it makes the panel look stacked and cluttered. Hide the sidebar header
+    // for that one tool; all other tools keep it. The agent also handles its
+    // own internal scrolling (chat log scrolls independently of the composer),
+    // so the wrapper must NOT scroll/overflow — otherwise its height becomes
+    // unbounded and the composer gets pushed off-screen.
+    const showSidebarHeader = activeTool !== "ai_agent"
+    const contentClass = activeTool === "ai_agent"
+        ? "flex-1 min-h-0 flex flex-col overflow-hidden"
+        : "panel-scroll flex-1 overflow-y-auto p-4 min-h-0"
+
     return (
         <aside
             className="editor-sidebar h-full flex flex-col"
             style={width ? { "--editor-sidebar-width": `${width}px` } : undefined}
         >
-            <div className="editor-sidebar-header flex items-center gap-3">
-                <div 
-                    className="editor-tool-emblem flex items-center justify-center"
-                    style={{
-                        background: `linear-gradient(180deg, ${lighterColor}, ${dominantColor})`,
-                        borderColor: dominantColor,
-                        color: contrastingColor,
-                    }}
-                >
-                    <Icon className="h-4 w-4" />
+            {showSidebarHeader && (
+                <div className="editor-sidebar-header flex items-center gap-3">
+                    <div
+                        className="editor-tool-emblem flex items-center justify-center"
+                        style={{
+                            background: `linear-gradient(180deg, ${lighterColor}, ${dominantColor})`,
+                            borderColor: dominantColor,
+                            color: contrastingColor,
+                        }}
+                    >
+                        <Icon className="h-4 w-4" />
+                    </div>
+                    <div>
+                        <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{config.title}</h3>
+                        <p className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>Properties</p>
+                    </div>
                 </div>
-                <div>
-                    <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>{config.title}</h3>
-                    <p className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>Properties</p>
-                </div>
-            </div>
-            <div className="panel-scroll flex-1 overflow-y-auto p-4">
+            )}
+            <div className={contentClass}>
                 {renderContent()}
             </div>
         </aside>

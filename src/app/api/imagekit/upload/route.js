@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import ImageKit from "imagekit";
 import { NextResponse } from "next/server";
+import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
 let imagekit = null
 
@@ -37,6 +38,13 @@ export async function POST(request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorised" }, { status: 401 })
         }
+
+        // 30 uploads / minute / user — high enough that a multi-image add
+        // batch won't trip; low enough that an abusive script can't drain
+        // the org's ImageKit storage credits.
+        const limitResult = await enforceRateLimit("imagekit-upload", userId)
+        const limited = rateLimitResponse(limitResult)
+        if (limited) return limited
 
         const formData = await request.formData()
         const file = formData.get("file")

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Bot,
@@ -10,11 +10,15 @@ import {
   History,
   Image as ImageIcon,
   Loader2,
+  MessageSquare,
+  Plus,
   RotateCcw,
   Send,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   WandSparkles,
+  X,
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -32,7 +36,11 @@ import {
 import { restoreCanvasFromHistory } from "../../../../../../lib/canvas-history";
 import { serializeCanvasState } from "../../../../../../lib/canvas-state";
 import { applyProfessionalFilters } from "../../../../../../lib/professional-image-filters";
-import { computeImageFingerprint } from "@/lib/image-fingerprint";
+import {
+  computeImageFingerprint,
+  computeLayerThumbnail,
+  computePerceptualHash,
+} from "@/lib/image-fingerprint";
 import { extractImageFeatures } from "@/lib/image-features";
 import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
 import { STYLE_LABELS } from "@/lib/style-profiles";
@@ -48,13 +56,9 @@ const QUICK_PROMPTS = [
 ];
 
 const SAMPLE_SIZE = 48;
-const INITIAL_MESSAGES = [
-  {
-    id: "assistant-initial",
-    role: "assistant",
-    content: "Select an image, describe the edit, and I will build a preview with the changes visible below.",
-  },
-];
+// Initial messages constant referenced through the file. Defined after
+// INITIAL_WELCOME_MESSAGE below to avoid the TDZ; the variable that ends up
+// here is hoisted via the export below.
 
 const ADJUSTMENT_LABELS = {
   brightness: "Brightness",
@@ -107,6 +111,183 @@ const newMessage = (role, content, extra = {}) => ({
   ...extra,
 });
 
+// ── Chat history persistence ────────────────────────────────────────────────
+// Multi-thread session model. Each project has its own bag of threads (think
+// Cursor/Windsurf "past chats"). Active thread id is persisted too so the user
+// returns to whichever conversation they were in.
+//
+// Storage shape (v2):
+//   {
+//     activeThreadId: string,
+//     threads: [
+//       { id, title, createdAt, updatedAt, messages: Message[] },
+//       ...
+//     ]
+//   }
+//
+// Plan/preview blobs can be large, so per-thread we cap message count and
+// strip heavy fields from older messages.
+const CHAT_STORAGE_VERSION = 2;
+const CHAT_STORAGE_PREFIX = `pixxel-agent-chat-v${CHAT_STORAGE_VERSION}`;
+const CHAT_LEGACY_V1_PREFIX = "pixxel-agent-chat-v1";
+const CHAT_MAX_PERSISTED_MESSAGES = 60;
+const CHAT_KEEP_PLANS_ON_RECENT = 6;
+const CHAT_MAX_THREADS = 24;
+
+const chatStorageKey = (projectId) =>
+  projectId ? `${CHAT_STORAGE_PREFIX}:${projectId}` : null;
+const chatLegacyKey = (projectId) =>
+  projectId ? `${CHAT_LEGACY_V1_PREFIX}:${projectId}` : null;
+
+const newThreadId = () =>
+  `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const INITIAL_WELCOME_MESSAGE = {
+  id: "assistant-initial",
+  role: "assistant",
+  content:
+    "Select an image, describe the edit, and I will build a preview with the changes visible below.",
+};
+
+const makeEmptyThread = () => {
+  const now = Date.now();
+  return {
+    id: newThreadId(),
+    title: "New chat",
+    createdAt: now,
+    updatedAt: now,
+    messages: [INITIAL_WELCOME_MESSAGE],
+  };
+};
+
+// Auto-title a thread from its first user message (the way Cursor / Claude do
+// it). Falls back to "New chat" until the user actually sends something.
+const inferThreadTitle = (messages) => {
+  const firstUser = messages?.find?.((m) => m?.role === "user" && m?.content?.trim?.());
+  if (!firstUser) return "New chat";
+  const raw = firstUser.content.trim().replace(/\s+/g, " ");
+  return raw.length > 48 ? `${raw.slice(0, 46)}…` : raw;
+};
+
+const trimMessagesForStorage = (messages) => {
+  if (!Array.isArray(messages)) return [];
+  const capped = messages.slice(-CHAT_MAX_PERSISTED_MESSAGES);
+  const keepFrom = Math.max(0, capped.length - CHAT_KEEP_PLANS_ON_RECENT);
+  return capped.map((message, index) => {
+    if (index >= keepFrom) return message;
+    if (!message || (!message.plan && !message.multiLayerPlans && !message.upscaleComparison)) {
+      return message;
+    }
+    const { plan: _plan, multiLayerPlans: _mlp, upscaleComparison: _uc, ...lite } = message;
+    return lite;
+  });
+};
+
+const trimThreadsForStorage = (threads) => {
+  if (!Array.isArray(threads)) return [];
+  return threads
+    .slice(-CHAT_MAX_THREADS)
+    .map((thread) => ({
+      ...thread,
+      messages: trimMessagesForStorage(thread.messages),
+    }));
+};
+
+const migrateLegacyV1 = (projectId) => {
+  if (typeof window === "undefined") return null;
+  const legacyKey = chatLegacyKey(projectId);
+  if (!legacyKey) return null;
+  try {
+    const raw = window.localStorage.getItem(legacyKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    const now = Date.now();
+    const thread = {
+      id: newThreadId(),
+      title: inferThreadTitle(parsed),
+      createdAt: now - 1,
+      updatedAt: now,
+      messages: parsed,
+    };
+    // Best-effort cleanup; if it fails the next save will overwrite the v2 key
+    // anyway and the legacy entry just sits unused.
+    try { window.localStorage.removeItem(legacyKey); } catch { /* ignore */ }
+    return { activeThreadId: thread.id, threads: [thread] };
+  } catch (error) {
+    console.warn("[agent] failed to migrate legacy chat:", error?.message || error);
+    return null;
+  }
+};
+
+const loadStoredState = (projectId) => {
+  if (typeof window === "undefined") return null;
+  const key = chatStorageKey(projectId);
+  if (!key) return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.threads) && parsed.threads.length) {
+        // Repair: make sure activeThreadId points at something real.
+        const hasActive = parsed.threads.some((t) => t.id === parsed.activeThreadId);
+        return {
+          activeThreadId: hasActive ? parsed.activeThreadId : parsed.threads[parsed.threads.length - 1].id,
+          threads: parsed.threads,
+        };
+      }
+    }
+  } catch (error) {
+    console.warn("[agent] failed to read chat history:", error?.message || error);
+  }
+  // No v2 entry — try migrating a v1 flat array.
+  return migrateLegacyV1(projectId);
+};
+
+const saveStoredState = (projectId, state) => {
+  if (typeof window === "undefined") return;
+  const key = chatStorageKey(projectId);
+  if (!key) return;
+  try {
+    const trimmed = {
+      activeThreadId: state.activeThreadId,
+      threads: trimThreadsForStorage(state.threads),
+    };
+    window.localStorage.setItem(key, JSON.stringify(trimmed));
+  } catch (error) {
+    console.warn("[agent] failed to write chat history:", error?.message || error);
+    try { window.localStorage.removeItem(key); } catch { /* ignore */ }
+  }
+};
+
+const clearAllThreads = (projectId) => {
+  if (typeof window === "undefined") return;
+  const key = chatStorageKey(projectId);
+  if (!key) return;
+  try { window.localStorage.removeItem(key); } catch { /* ignore */ }
+};
+
+// Initial messages array (used as a default for new threads or when no stored
+// state exists yet). Lives below the storage block so INITIAL_WELCOME_MESSAGE
+// is already initialized.
+const INITIAL_MESSAGES = [INITIAL_WELCOME_MESSAGE];
+
+// Format a unix ms timestamp as a relative label ("now", "5m", "2h", "3d",
+// "Jan 12"). Matches the compact style of the rest of the editor's UI.
+const formatRelativeTime = (ms) => {
+  if (!ms || !Number.isFinite(ms)) return "";
+  const delta = Math.max(0, Date.now() - ms);
+  const sec = Math.floor(delta / 1000);
+  if (sec < 45) return "now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+
 const getSourceUrl = (image, project) =>
   image?.getSrc?.() ||
   image?._originalElement?.src ||
@@ -114,6 +295,39 @@ const getSourceUrl = (image, project) =>
   project?.currentImageUrl ||
   project?.originalImageUrl ||
   "";
+
+const isVisibleImageOnCanvas = (obj) =>
+  obj && obj.type?.toLowerCase?.() === "image" && obj.visible !== false;
+
+// Collect every visible image on the canvas as a layer payload for the
+// multi-image targeting endpoint. Each entry carries enough data for the
+// server to: (a) ask Gemini which layers the user is talking about
+// (thumbnail + name) and (b) compute a per-image plan (sourceUrl + hash).
+const collectLayersForTargeting = (canvasEditor, project) => {
+  const objects = canvasEditor?.getObjects?.() || [];
+  const visibleImages = objects.filter(isVisibleImageOnCanvas);
+  return visibleImages.map((img, idx) => {
+    const fingerprint = computeImageFingerprint(img);
+    const pHash = computePerceptualHash(img);
+    const thumb = computeLayerThumbnail(img, 256);
+    const layerName =
+      (typeof img.pixxelLayerName === "string" && img.pixxelLayerName.trim()) ||
+      (typeof img.name === "string" && img.name.trim()) ||
+      `Image ${idx + 1}`;
+    return {
+      index: idx,
+      name: layerName,
+      sourceUrl: getSourceUrl(img, project),
+      imageHash: fingerprint?.hash || `nohash-${idx}`,
+      pHash: pHash || null,
+      features: extractImageFeatures(img),
+      thumbBase64: thumb?.base64 || null,
+      thumbMime: thumb?.mime || null,
+      // Reference to the canvas object so we can apply per-layer filters later.
+      __canvasObject: img,
+    };
+  });
+};
 
 const getImageElement = (image) =>
   image?._element || image?._originalElement || image?.getElement?.() || null;
@@ -187,13 +401,16 @@ const getChangeItems = (plan) => {
 
 // Adapts the v2 plan response from /api/ai/edit-plan into the shape the rest of the
 // UI expects (sourceUrl, fabricAdjustments, imageKitTransforms, etc.).
-// New fields: entries (per-effect slider metadata), targetStyle, gain, alreadyMatchesTarget.
+//
+// Only truly server-only AI operations route through ImageKit URL transforms.
+// Contrast and sharpness are deliberately omitted — those are basic adjustments
+// Fabric.js handles natively, instantly, and without a round-trip. Otherwise
+// the plan would double-apply them (once via URL, once via Fabric filter) and
+// also force an extra ImageKit fetch per slider drag.
 const IMAGEKIT_AI_TOKENS = {
   bgRemove: "e-bgremove",
   upscale: "e-upscale",
   retouch: "e-retouch",
-  sharpen: "e-sharpen-10",
-  contrast: "e-contrast",
 };
 
 const adaptPlanV2 = (planV2, sourceUrl, userPrompt) => {
@@ -585,8 +802,99 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     api.projects.getProjectRevisions,
     project?._id ? { projectId: project._id, limit: 12 } : "skip"
   );
-  const [input, setInput] = useState("Give it a premium editorial polish");
-  const [messages, setMessages] = useState(INITIAL_MESSAGES);
+  // Default prompt is shown as a placeholder (not a pre-filled value). When the
+  // user presses Enter on an empty input, this text is sent to the agent — so
+  // first-time users can just hit Enter to get a sensible default edit.
+  const DEFAULT_PROMPT = "Give it a premium editorial polish";
+  const [input, setInput] = useState("");
+  const inputRef = useRef(null);
+  // Multi-thread chat state. The component's existing code path treats messages
+  // as a single flat list; we keep that contract by deriving `messages` from
+  // the active thread and routing `setMessages` updates back into the threads
+  // object. That way history features (new chat, switch thread, delete thread)
+  // can live alongside the rest of the agent without rewriting message flow.
+  const [chatState, setChatState] = useState(() => {
+    const restored = loadStoredState(project?._id);
+    if (restored) return restored;
+    const fresh = makeEmptyThread();
+    return { activeThreadId: fresh.id, threads: [fresh] };
+  });
+  const lastLoadedProjectIdRef = useRef(project?._id);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+
+  const activeThread = useMemo(
+    () =>
+      chatState.threads.find((t) => t.id === chatState.activeThreadId) ||
+      chatState.threads[chatState.threads.length - 1] ||
+      null,
+    [chatState]
+  );
+  const messages = activeThread?.messages || INITIAL_MESSAGES;
+
+  // Drop-in replacement for the previous `setMessages`. Accepts either a new
+  // array or an updater fn; routes the result into the active thread and
+  // refreshes the thread's updatedAt + auto-title.
+  const setMessages = useCallback(
+    (updater) => {
+      setChatState((current) => {
+        const activeId = current.activeThreadId;
+        const threads = current.threads.map((thread) => {
+          if (thread.id !== activeId) return thread;
+          const next =
+            typeof updater === "function" ? updater(thread.messages) : updater;
+          const isOnlyInitial =
+            next.length === 1 && next[0]?.id === INITIAL_WELCOME_MESSAGE.id;
+          return {
+            ...thread,
+            messages: next,
+            updatedAt: Date.now(),
+            title: isOnlyInitial ? "New chat" : inferThreadTitle(next),
+          };
+        });
+        return { ...current, threads };
+      });
+    },
+    []
+  );
+
+  const startNewThread = useCallback(() => {
+    setChatState((current) => {
+      const fresh = makeEmptyThread();
+      return {
+        activeThreadId: fresh.id,
+        threads: [...current.threads, fresh],
+      };
+    });
+    setIsHistoryOpen(false);
+    // Focus the composer so the user can type immediately.
+    requestAnimationFrame(() => inputRef.current?.focus?.());
+  }, []);
+
+  const switchToThread = useCallback((threadId) => {
+    setChatState((current) =>
+      current.threads.some((t) => t.id === threadId)
+        ? { ...current, activeThreadId: threadId }
+        : current
+    );
+    setIsHistoryOpen(false);
+  }, []);
+
+  const deleteThread = useCallback((threadId) => {
+    setChatState((current) => {
+      const remaining = current.threads.filter((t) => t.id !== threadId);
+      if (remaining.length === 0) {
+        const fresh = makeEmptyThread();
+        return { activeThreadId: fresh.id, threads: [fresh] };
+      }
+      const stillActive = remaining.some((t) => t.id === current.activeThreadId);
+      return {
+        activeThreadId: stillActive
+          ? current.activeThreadId
+          : remaining[remaining.length - 1].id,
+        threads: remaining,
+      };
+    });
+  }, []);
   const [activePlan, setActivePlan] = useState(null);
   const [enabledChanges, setEnabledChanges] = useState({});
   // Per-effect slider value map. Initialized from plan.entries on new plans; mutated as
@@ -597,6 +905,13 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [isApplying, setIsApplying] = useState(false);
   const [restoringRevisionId, setRestoringRevisionId] = useState(null);
   const [autoPreview, setAutoPreview] = useState(true);
+  // Multi-layer state. When >1 image is on the canvas and the user's prompt is
+  // ambiguous, the server returns a list of candidate layers we need the user
+  // to confirm. When they pick, we re-request with confirmedTargetIndexes.
+  const [pendingConfirmation, setPendingConfirmation] = useState(null);
+  const [confirmedLayerIds, setConfirmedLayerIds] = useState([]);
+  // Per-layer plans for multi-target edits. Each entry: { layerIndex, layerName, canvasObject, plan }.
+  const [multiLayerPlans, setMultiLayerPlans] = useState([]);
   const [, setImageRevision] = useState(0);
   const [upscaleComparison, setUpscaleComparison] = useState(null);
   const [isCompareOpen, setIsCompareOpen] = useState(false);
@@ -622,6 +937,34 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isThinking]);
+
+  // Reload history when switching projects.
+  useEffect(() => {
+    const currentId = project?._id;
+    if (!currentId || currentId === lastLoadedProjectIdRef.current) return;
+    lastLoadedProjectIdRef.current = currentId;
+    const restored = loadStoredState(currentId);
+    if (restored) {
+      setChatState(restored);
+    } else {
+      const fresh = makeEmptyThread();
+      setChatState({ activeThreadId: fresh.id, threads: [fresh] });
+    }
+  }, [project?._id]);
+
+  // Persist on every chat-state change. We skip the case where there's exactly
+  // one thread whose only message is the welcome blurb — no point overwriting
+  // an existing stored chat with an "empty" default.
+  useEffect(() => {
+    const projectId = project?._id;
+    if (!projectId) return;
+    const onlyEmptyThread =
+      chatState.threads.length === 1 &&
+      chatState.threads[0].messages.length === 1 &&
+      chatState.threads[0].messages[0]?.id === INITIAL_WELCOME_MESSAGE.id;
+    if (onlyEmptyThread) return;
+    saveStoredState(projectId, chatState);
+  }, [chatState, project?._id]);
 
   const activeImage = getCanvasActiveImage(canvasEditor);
   const sourceUrl = getSourceUrl(activeImage, project);
@@ -717,7 +1060,26 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     }
   };
 
-  const requestPlan = async (prompt) => {
+  // Apply each layer's plan's Fabric adjustments to its own canvas image. Used
+  // by the multi-target path — bypasses previewPlanOnCanvas (which assumes a
+  // single active image).
+  const applyMultiLayerPlansToCanvas = (plans) => {
+    if (!canvasEditor || !Array.isArray(plans) || plans.length === 0) return;
+    if (!liveSnapshotRef.current) {
+      liveSnapshotRef.current = serializeCanvasState(canvasEditor);
+    }
+    for (const entry of plans) {
+      const target = entry?.canvasObject;
+      const adjustments = entry?.plan?.fabricAdjustments || {};
+      if (!target || Object.keys(adjustments).length === 0) continue;
+      applyProfessionalFilters(target, adjustments);
+    }
+    canvasEditor.requestRenderAll();
+    canvasEditor.__pushHistoryState?.();
+    setImageRevision((value) => value + 1);
+  };
+
+  const requestPlan = async (prompt, options = {}) => {
     const cleanPrompt = prompt.trim();
     if (!cleanPrompt) return;
     if (!canChat) {
@@ -742,6 +1104,11 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     // Extension intents ("extend by 20%", "outpaint left/right") still route through the
     // legacy endpoint — that path returns a special `extensionRequest` shape handled below.
     const isExtensionIntent = /\b(extend|outpaint|expand|widen|stretch)\b/i.test(cleanPrompt);
+
+    // Multi-layer detection: if the canvas has 2+ visible images, collect them
+    // and let the server's targeting step pick which ones the prompt applies to.
+    const allLayers = collectLayersForTargeting(canvasEditor, project);
+    const isMultiLayer = !isExtensionIntent && allLayers.length >= 2;
 
     try {
       let plan;
@@ -769,9 +1136,86 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         if (!response.ok || !data?.success) throw new Error(data?.error || "Agent could not build an edit");
         plan = { ...data.plan, userPrompt: cleanPrompt };
         source = data.plan?.mode || "legacy";
+      } else if (isMultiLayer) {
+        // Multi-image flow: send all visible layers, let the server pick targets.
+        const layersPayload = allLayers.map((l) => ({
+          index: l.index,
+          name: l.name,
+          sourceUrl: l.sourceUrl,
+          imageHash: l.imageHash,
+          pHash: l.pHash,
+          features: l.features,
+          thumbBase64: l.thumbBase64,
+          thumbMime: l.thumbMime,
+        }));
+        const response = await fetch("/api/ai/edit-plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: project?._id,
+            prompt: cleanPrompt,
+            layers: layersPayload,
+            confirmedTargetIndexes: options.confirmedTargetIndexes || undefined,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.success) throw new Error(data?.error || "Agent could not build an edit");
+
+        // Confirmation needed — show the candidate layers and bail out of
+        // the normal plan flow until the user picks.
+        if (data.needsConfirmation) {
+          setPendingConfirmation({
+            prompt: cleanPrompt,
+            candidates: data.candidates || allLayers.map((l) => l.index),
+            allLayers: allLayers.map((l) => ({ index: l.index, name: l.name })),
+            reason: data.reason || "Which layers should I edit?",
+          });
+          setConfirmedLayerIds(data.candidates || allLayers.map((l) => l.index));
+          toast.message("Confirm which layers", { id: toastId, description: data.reason });
+          setMessages((current) => [
+            ...current,
+            newMessage(
+              "assistant",
+              `${data.reason || "Which layers should I edit?"} Pick from the panel below.`
+            ),
+          ]);
+          return;
+        }
+
+        // Apply per-layer plans
+        const layerPlanEntries = (data.plans || [])
+          .filter((p) => p?.plan)
+          .map((entry) => {
+            const layer = allLayers.find((l) => l.index === entry.layerIndex);
+            return {
+              layerIndex: entry.layerIndex,
+              layerName: layer?.name || `Image ${entry.layerIndex + 1}`,
+              canvasObject: layer?.__canvasObject,
+              plan: adaptPlanV2(entry.plan, layer?.sourceUrl || "", cleanPrompt),
+            };
+          });
+
+        if (layerPlanEntries.length === 0) {
+          throw new Error("Agent did not return any plans");
+        }
+
+        setMultiLayerPlans(layerPlanEntries);
+        applyMultiLayerPlansToCanvas(layerPlanEntries);
+
+        const names = layerPlanEntries.map((e) => e.layerName).join(", ");
+        setMessages((current) => [
+          ...current,
+          newMessage(
+            "assistant",
+            `Applied to ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}: ${names}.`,
+          ),
+        ]);
+        toast.success(`Edited ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}`, { id: toastId });
+        return;
       } else {
-        // v2 endpoint — image-aware, deterministic, returns per-effect slider entries.
+        // v2 endpoint — single image, image-aware, deterministic, returns per-effect slider entries.
         const fingerprint = computeImageFingerprint(image);
+        const pHash = computePerceptualHash(image);
         const features = extractImageFeatures(image);
         const response = await fetch("/api/ai/edit-plan", {
           method: "POST",
@@ -781,6 +1225,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
             prompt: cleanPrompt,
             sourceUrl: latestUrl,
             imageHash: fingerprint?.hash || `nohash-${latestUrl}`,
+            pHash,
             features,
           }),
         });
@@ -1020,8 +1465,21 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    requestPlan(input);
+    // Submit button + empty input → send the placeholder default. Same logic
+    // as the Enter handler below; mirrored here so both paths agree.
+    const promptToSend = input.trim() ? input : DEFAULT_PROMPT;
+    requestPlan(promptToSend);
   };
+
+  // Autofocus the input whenever the agent tool becomes mountable (it mounts
+  // as soon as the user clicks the Agent tab in the sidebar). The user can
+  // start typing immediately, or just hit Enter for the default prompt.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      inputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(id);
+  }, []);
 
   return (
     <div className="agent-studio" style={{ "--agent-dominant": dominantColor, "--agent-soft": lighterColor }}>
@@ -1032,27 +1490,49 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
       >
         <div className="agent-command-mark" style={{ "--agent-mark": dominantColor, color: contrastingColor }}>
-          <WandSparkles className="h-4 w-4" />
+          <WandSparkles className="h-3.5 w-3.5" />
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="agent-kicker">ImageKit Studio</div>
-          <h3>{canChat ? "Ready on selected image" : "Waiting for image"}</h3>
-          <div className="agent-status-row">
-            <span className={canChat ? "is-ready" : ""}>{canChat ? "Bound" : "Idle"}</span>
-            <span>{activeChangeSummary}</span>
-          </div>
+        <div className="min-w-0 flex-1 agent-command-info">
+          <h3>{canChat ? "Ready" : "Waiting for image"}</h3>
+          <p className={`agent-command-sub ${canChat ? "is-ready" : ""}`}>
+            <span className="agent-command-dot" aria-hidden="true" />
+            {canChat ? activeChangeSummary : "Select an image to begin"}
+          </p>
         </div>
-        <motion.button
-          type="button"
-          onClick={() => setAutoPreview((value) => !value)}
-          className={`agent-toggle ${autoPreview ? "agent-toggle--on" : ""}`}
-          aria-pressed={autoPreview}
-          whileTap={{ scale: 0.96 }}
-          title="Toggle preview mode"
-        >
-          <Zap className="h-3.5 w-3.5" />
-          {autoPreview ? "Live" : "Manual"}
-        </motion.button>
+        <div className="agent-header-actions">
+          <motion.button
+            type="button"
+            onClick={() => setAutoPreview((value) => !value)}
+            className={`agent-toggle ${autoPreview ? "agent-toggle--on" : ""}`}
+            aria-pressed={autoPreview}
+            whileTap={{ scale: 0.96 }}
+            title="Toggle preview mode"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            {autoPreview ? "Live" : "Manual"}
+          </motion.button>
+          <motion.button
+            type="button"
+            onClick={startNewThread}
+            className="agent-icon-button"
+            whileTap={{ scale: 0.94 }}
+            title="Start a new chat"
+            aria-label="Start a new chat"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </motion.button>
+          <motion.button
+            type="button"
+            onClick={() => setIsHistoryOpen((value) => !value)}
+            className={`agent-icon-button ${isHistoryOpen ? "agent-icon-button--active" : ""}`}
+            whileTap={{ scale: 0.94 }}
+            title="Browse chat history"
+            aria-label="Browse chat history"
+            aria-expanded={isHistoryOpen}
+          >
+            <History className="h-3.5 w-3.5" />
+          </motion.button>
+        </div>
       </motion.div>
 
       <div className="agent-quick-rail">
@@ -1072,7 +1552,102 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         ))}
       </div>
 
-      <div className="agent-chat-log panel-scroll">
+      <div className="agent-chat-area">
+        <AnimatePresence>
+          {isHistoryOpen && (
+            <motion.div
+              key="history-panel"
+              className="agent-history-panel"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <div className="agent-history-head">
+                <div className="agent-history-title">
+                  <History className="h-3.5 w-3.5" />
+                  <span>Chat history</span>
+                  <em>{chatState.threads.length} thread{chatState.threads.length === 1 ? "" : "s"}</em>
+                </div>
+                <button
+                  type="button"
+                  className="agent-icon-button"
+                  onClick={() => setIsHistoryOpen(false)}
+                  title="Close history"
+                  aria-label="Close history"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <button
+                type="button"
+                className="agent-history-new"
+                onClick={startNewThread}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Start a new chat</span>
+              </button>
+              <div className="agent-history-list panel-scroll">
+                {[...chatState.threads]
+                  .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+                  .map((thread) => {
+                    const isActive = thread.id === chatState.activeThreadId;
+                    const userCount = thread.messages.filter((m) => m?.role === "user").length;
+                    return (
+                      <div
+                        key={thread.id}
+                        className={`agent-history-row ${isActive ? "is-active" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          className="agent-history-row-main"
+                          onClick={() => switchToThread(thread.id)}
+                          title={thread.title}
+                        >
+                          <MessageSquare className="h-3.5 w-3.5" />
+                          <span className="agent-history-row-title">{thread.title}</span>
+                          <span className="agent-history-row-meta">
+                            <em>{userCount} msg{userCount === 1 ? "" : "s"}</em>
+                            <span className="agent-history-dot" aria-hidden="true">·</span>
+                            <em>{formatRelativeTime(thread.updatedAt)}</em>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="agent-history-row-delete"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteThread(thread.id);
+                          }}
+                          title="Delete this chat"
+                          aria-label={`Delete ${thread.title}`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                {chatState.threads.length > 1 && (
+                  <button
+                    type="button"
+                    className="agent-history-clear-all"
+                    onClick={() => {
+                      clearAllThreads(project?._id);
+                      const fresh = makeEmptyThread();
+                      setChatState({ activeThreadId: fresh.id, threads: [fresh] });
+                      setIsHistoryOpen(false);
+                      toast.success("Cleared all chat history for this project");
+                    }}
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    Clear all threads
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <div className="agent-chat-log panel-scroll">
         <div className="agent-chat-stack">
           <AnimatePresence initial={false}>
             {messages.map((message) => (
@@ -1094,7 +1669,141 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           )}
           <div ref={chatEndRef} />
         </div>
+        </div>
       </div>
+
+      {/* Multi-layer confirmation panel: shown when the agent isn't sure which
+          layers the prompt was referring to. User picks → re-request. */}
+      <AnimatePresence>
+        {pendingConfirmation && (
+          <motion.div
+            className="agent-review-dock"
+            initial={{ opacity: 0, y: 18, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.98 }}
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+            key="confirm"
+          >
+            <div className="agent-review-head">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <h4>Confirm layers</h4>
+                </div>
+                <p>{pendingConfirmation.reason}</p>
+              </div>
+            </div>
+            <div className="agent-layer-confirm-list">
+              {pendingConfirmation.allLayers.map((layer) => {
+                const checked = confirmedLayerIds.includes(layer.index);
+                return (
+                  <label key={layer.index} className="agent-layer-confirm-row">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        setConfirmedLayerIds((current) =>
+                          e.target.checked
+                            ? [...new Set([...current, layer.index])]
+                            : current.filter((id) => id !== layer.index)
+                        );
+                      }}
+                    />
+                    <span>{layer.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="agent-action-row">
+              <motion.button
+                type="button"
+                onClick={() => {
+                  const confirmed = [...confirmedLayerIds];
+                  const promptToReuse = pendingConfirmation.prompt;
+                  setPendingConfirmation(null);
+                  requestPlan(promptToReuse, { confirmedTargetIndexes: confirmed });
+                }}
+                disabled={confirmedLayerIds.length === 0 || isThinking}
+                className="agent-action-button agent-action-button--primary"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                <Check className="h-3.5 w-3.5" />
+                Apply to {confirmedLayerIds.length} layer{confirmedLayerIds.length === 1 ? "" : "s"}
+              </motion.button>
+              <motion.button
+                type="button"
+                onClick={() => {
+                  setPendingConfirmation(null);
+                  setConfirmedLayerIds([]);
+                }}
+                className="agent-action-button"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                Cancel
+              </motion.button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Multi-layer applied status: shown after a multi-target edit lands. */}
+      <AnimatePresence>
+        {!pendingConfirmation && multiLayerPlans.length > 0 && !activePlan && (
+          <motion.div
+            className="agent-review-dock"
+            initial={{ opacity: 0, y: 18, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.98 }}
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+            key="multi"
+          >
+            <div className="agent-review-head">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <h4>Applied to {multiLayerPlans.length} layer{multiLayerPlans.length === 1 ? "" : "s"}</h4>
+                </div>
+                <p>{multiLayerPlans.map((p) => p.layerName).join(" · ")}</p>
+              </div>
+            </div>
+            <div className="agent-action-row">
+              <motion.button
+                type="button"
+                onClick={async () => {
+                  await restoreLiveSnapshot();
+                  setMultiLayerPlans([]);
+                  toast.message("Reverted");
+                }}
+                disabled={!liveSnapshotRef.current}
+                className="agent-action-button"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Revert
+              </motion.button>
+              <motion.button
+                type="button"
+                onClick={() => {
+                  // Multi-layer save: filters are already on the canvas; persist canvas state.
+                  canvasEditor?.__saveCanvasState?.();
+                  liveSnapshotRef.current = null;
+                  setMultiLayerPlans([]);
+                  toast.success("Saved");
+                }}
+                className="agent-action-button agent-action-button--primary"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.97 }}
+              >
+                <Check className="h-3.5 w-3.5" />
+                Keep
+              </motion.button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {activePlan && (
@@ -1235,19 +1944,23 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           <Bot className="h-3.5 w-3.5" />
         </div>
         <textarea
+          ref={inputRef}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              requestPlan(input);
+              // Empty input → send the placeholder text as the prompt so a
+              // first-time user can hit Enter and get a sensible default edit.
+              const promptToSend = input.trim() ? input : DEFAULT_PROMPT;
+              requestPlan(promptToSend);
             }
           }}
-          placeholder="Ask for an edit..."
+          placeholder={DEFAULT_PROMPT}
         />
         <motion.button
           type="submit"
-          disabled={!canChat || isThinking || !input.trim()}
+          disabled={!canChat || isThinking}
           className="agent-send-button"
           whileHover={{ scale: 1.04, rotate: 1 }}
           whileTap={{ scale: 0.95 }}
