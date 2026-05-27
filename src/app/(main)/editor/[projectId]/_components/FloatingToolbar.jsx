@@ -93,14 +93,16 @@ const FloatingToolbar = ({
             {isGenerating && (
               <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
                 {Array.from({ length: 12 }, (_, i) => {
+                  // Stable pseudo-random offsets so particle positions don't jitter on every render.
                   const angle = (i / 12) * 360
-                  const radius = 40 + Math.random() * 20
+                  const radius = 40 + ((i * 7) % 20)
+                  const radiusJitter = 2 + ((i * 3) % 3)
                   return (
                     <motion.circle
                       key={i}
                       cx={50 + Math.cos((angle * Math.PI) / 180) * radius}
                       cy={50 + Math.sin((angle * Math.PI) / 180) * radius}
-                      r={2 + Math.random() * 2}
+                      r={radiusJitter}
                       fill="var(--accent-ink)"
                       initial={{ opacity: 0.8 }}
                       animate={{ opacity: [0.8, 0.2, 0.8], scale: [1, 1.8, 1] }}

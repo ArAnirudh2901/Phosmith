@@ -32,6 +32,11 @@ import {
 import { restoreCanvasFromHistory } from "../../../../../../lib/canvas-history";
 import { serializeCanvasState } from "../../../../../../lib/canvas-state";
 import { applyProfessionalFilters } from "../../../../../../lib/professional-image-filters";
+import { computeImageFingerprint } from "@/lib/image-fingerprint";
+import { extractImageFeatures } from "@/lib/image-features";
+import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
+import { STYLE_LABELS } from "@/lib/style-profiles";
+import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
 
@@ -149,16 +154,83 @@ const getChangeItems = (plan) => {
     detail: "ImageKit URL operation",
   }));
 
-  const adjustmentItems = visibleAdjustmentEntries(plan?.fabricAdjustments).map(([key, value]) => ({
-    id: `adjust:${key}`,
-    type: "adjustment",
-    key,
-    label: ADJUSTMENT_LABELS[key] || key,
-    valueLabel: formatAdjustmentValue(key, value),
-    detail: ADJUSTMENT_HELP[key] || "Local canvas filter",
-  }));
+  // v2 plan: `entries` carry the slider metadata (min/max/why) — prefer them when present.
+  const v2Entries = Array.isArray(plan?.entries) ? plan.entries : null;
+  const adjustmentItems = v2Entries
+    ? v2Entries.map((entry) => ({
+        id: `adjust:${entry.key}`,
+        type: "adjustment",
+        key: entry.key,
+        label: entry.label || ADJUSTMENT_LABELS[entry.key] || entry.key,
+        valueLabel: formatAdjustmentValue(entry.key, entry.value),
+        detail: entry.why || ADJUSTMENT_HELP[entry.key] || "Local canvas filter",
+        min: entry.min,
+        max: entry.max,
+        neutral: entry.neutral,
+        defaultValue: entry.value,
+      }))
+    : visibleAdjustmentEntries(plan?.fabricAdjustments).map(([key, value]) => ({
+        id: `adjust:${key}`,
+        type: "adjustment",
+        key,
+        label: ADJUSTMENT_LABELS[key] || key,
+        valueLabel: formatAdjustmentValue(key, value),
+        detail: ADJUSTMENT_HELP[key] || "Local canvas filter",
+        min: ADJUSTMENT_RANGES[key]?.min ?? -100,
+        max: ADJUSTMENT_RANGES[key]?.max ?? 100,
+        neutral: ADJUSTMENT_RANGES[key]?.neutral ?? 0,
+        defaultValue: value,
+      }));
 
   return [...transformItems, ...adjustmentItems];
+};
+
+// Adapts the v2 plan response from /api/ai/edit-plan into the shape the rest of the
+// UI expects (sourceUrl, fabricAdjustments, imageKitTransforms, etc.).
+// New fields: entries (per-effect slider metadata), targetStyle, gain, alreadyMatchesTarget.
+const IMAGEKIT_AI_TOKENS = {
+  bgRemove: "e-bgremove",
+  upscale: "e-upscale",
+  retouch: "e-retouch",
+  sharpen: "e-sharpen-10",
+  contrast: "e-contrast",
+};
+
+const adaptPlanV2 = (planV2, sourceUrl, userPrompt) => {
+  const imagekitAi = planV2?.imagekitAi || {};
+  const transforms = Object.entries(IMAGEKIT_AI_TOKENS)
+    .filter(([key]) => imagekitAi[key])
+    .map(([, token]) => token);
+
+  const styleLabel = STYLE_LABELS[planV2?.targetStyle] || planV2?.targetStyle || "Custom";
+  const title = planV2?.alreadyMatchesTarget
+    ? "Already looking great"
+    : `${styleLabel} look`;
+
+  return {
+    title,
+    summary: planV2?.notes || "",
+    sourceUrl,
+    userPrompt,
+    fabricAdjustments: planV2?.adjustments || {},
+    imageKitTransforms: transforms,
+    entries: Array.isArray(planV2?.entries) ? planV2.entries : [],
+    targetStyle: planV2?.targetStyle,
+    currentStyle: planV2?.currentStyle,
+    gain: planV2?.gain,
+    alreadyMatchesTarget: !!planV2?.alreadyMatchesTarget,
+    plannerVersion: planV2?.plannerVersion,
+  };
+};
+
+// Build the per-effect value map (slider state). Initialized from plan.entries on
+// new plans; mutated as the user drags sliders.
+const createValueMap = (plan) => {
+  const out = {};
+  for (const item of getChangeItems(plan)) {
+    if (item.type === "adjustment") out[item.key] = item.defaultValue;
+  }
+  return out;
 };
 
 const createEnabledMap = (plan) =>
@@ -176,7 +248,7 @@ const getEnabledChangeDetails = (plan, enabledMap) =>
     enabled: enabledMap?.[item.id] !== false,
   }));
 
-const buildEffectivePlan = (plan, enabledMap, fallbackSourceUrl) => {
+const buildEffectivePlan = (plan, enabledMap, fallbackSourceUrl, valueMap = null) => {
   if (!plan) return null;
 
   const baseUrl = plan.sourceUrl || fallbackSourceUrl || "";
@@ -184,8 +256,16 @@ const buildEffectivePlan = (plan, enabledMap, fallbackSourceUrl) => {
     ? plan.imageKitTransforms.filter((transform, index) => enabledMap?.[`transform:${index}:${transform}`] !== false)
     : [];
 
-  const fabricAdjustments = visibleAdjustmentEntries(plan.fabricAdjustments).reduce((acc, [key, value]) => {
-    if (enabledMap?.[`adjust:${key}`] !== false) acc[key] = value;
+  // Prefer the live slider value map when provided (the user has been dragging sliders).
+  // Fall back to plan.fabricAdjustments / plan.entries for the initial computation.
+  const allAdjustmentEntries = Array.isArray(plan.entries) && plan.entries.length
+    ? plan.entries.map((entry) => [entry.key, valueMap?.[entry.key] ?? entry.value])
+    : visibleAdjustmentEntries(plan.fabricAdjustments).map(([key, value]) => [key, valueMap?.[key] ?? value]);
+
+  const fabricAdjustments = allAdjustmentEntries.reduce((acc, [key, value]) => {
+    if (enabledMap?.[`adjust:${key}`] !== false && Number.isFinite(Number(value))) {
+      acc[key] = Number(value);
+    }
     return acc;
   }, {});
 
@@ -291,6 +371,105 @@ const analyzeActiveImage = (image, project) => {
     console.warn("[ImageKit Agent] visual analysis failed:", error);
     return fallback;
   }
+};
+
+// New: slider-equipped row for "adjustment" entries; toggle-only row for ImageKit AI tokens.
+const AgentEffectControls = ({
+  plan,
+  enabledMap = {},
+  valueMap = {},
+  onToggle,
+  onValueChange,
+  interactive = true,
+  dominantColor = "#5eb8ff",
+}) => {
+  const changes = getChangeItems(plan);
+  if (!changes.length) {
+    return (
+      <div className="agent-change-empty">
+        <SlidersHorizontal className="h-3.5 w-3.5" />
+        No adjustable changes in this prompt.
+      </div>
+    );
+  }
+
+  return (
+    <div className="agent-change-list">
+      {changes.map((change) => {
+        const enabled = enabledMap?.[change.id] !== false;
+        if (change.type === "imagekit") {
+          return (
+            <button
+              key={change.id}
+              type="button"
+              className={`agent-change-row ${enabled ? "agent-change-row--enabled" : "agent-change-row--muted"}`}
+              onClick={() => interactive && onToggle?.(change.id)}
+              disabled={!interactive}
+              aria-pressed={enabled}
+              title={change.detail}
+            >
+              <span className="agent-change-switch" aria-hidden="true">
+                <span />
+              </span>
+              <span className="agent-change-copy">
+                <span className="agent-change-name">{change.label}</span>
+                <span className="agent-change-detail">{change.detail}</span>
+              </span>
+              <span className="agent-change-value">{change.valueLabel}</span>
+            </button>
+          );
+        }
+        // Adjustment row: toggle + slider + value chip
+        const liveValue = Number(valueMap?.[change.key] ?? change.defaultValue ?? change.neutral ?? 0);
+        return (
+          <div
+            key={change.id}
+            className={`agent-effect-row ${enabled ? "is-on" : "is-off"}`}
+            style={{ "--agent-effect-accent": dominantColor }}
+          >
+            <button
+              type="button"
+              className="agent-effect-toggle"
+              onClick={() => interactive && onToggle?.(change.id)}
+              disabled={!interactive}
+              aria-pressed={enabled}
+              title={enabled ? "Disable" : "Enable"}
+            >
+              <span className="agent-change-switch" aria-hidden="true">
+                <span />
+              </span>
+            </button>
+            <div className="agent-effect-body">
+              <div className="agent-effect-header">
+                <span className="agent-effect-name">{change.label}</span>
+                <span className="agent-effect-value">{formatAdjustmentValue(change.key, liveValue)}</span>
+              </div>
+              <div className={`agent-effect-slider ${enabled ? "" : "agent-effect-slider--muted"}`}>
+                <ProRulerSlider
+                  variant="instrument"
+                  value={liveValue}
+                  min={change.min}
+                  max={change.max}
+                  step={1}
+                  label={change.label}
+                  onPreview={(v) => interactive && enabled && onValueChange?.(change.key, v, { commit: false })}
+                  onCommit={(v) => interactive && enabled && onValueChange?.(change.key, v, { commit: true })}
+                  visual={{
+                    fill: "rgba(94, 184, 255, 0.35)",
+                    accent: dominantColor,
+                    trackBg: "rgba(14, 18, 26, 0.96)",
+                  }}
+                />
+              </div>
+              {change.detail && (
+                <p className="agent-effect-detail">{change.detail}</p>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 };
 
 const AgentChangeList = ({ plan, enabledMap = {}, onToggle, compact = false, interactive = true }) => {
@@ -410,6 +589,9 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [messages, setMessages] = useState(INITIAL_MESSAGES);
   const [activePlan, setActivePlan] = useState(null);
   const [enabledChanges, setEnabledChanges] = useState({});
+  // Per-effect slider value map. Initialized from plan.entries on new plans; mutated as
+  // the user drags. Lets the user tweak each adjustment without disabling it.
+  const [effectValues, setEffectValues] = useState({});
   const [pendingPrompt, setPendingPrompt] = useState(null);
   const [isThinking, setIsThinking] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
@@ -463,7 +645,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     setImageRevision((value) => value + 1);
   };
 
-  const previewPlanOnCanvas = async (plan, changeMap = enabledChanges) => {
+  const previewPlanOnCanvas = async (plan, changeMap = enabledChanges, valueMap = effectValues) => {
     if (previewPromiseRef.current) return previewPromiseRef.current;
 
     const previewPromise = (async () => {
@@ -477,7 +659,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     if (!image || !baseUrl) throw new Error("No active image to preview");
 
     liveSnapshotRef.current = serializeCanvasState(canvasEditor);
-    const effectivePlan = buildEffectivePlan(plan, changeMap, baseUrl);
+    const effectivePlan = buildEffectivePlan(plan, changeMap, baseUrl, valueMap);
     let targetImage = image;
 
     const isUpscalePlan = Array.isArray(effectivePlan?.imageKitTransforms)
@@ -557,27 +739,57 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     setPendingPrompt(cleanPrompt);
     setIsThinking(true);
 
-    try {
-      const response = await fetch("/api/imagekit/agent/plan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: cleanPrompt,
-          messages: visibleMessages,
-          sourceUrl: latestUrl,
-          projectId: project?._id,
-          project: {
-            width: project?.width,
-            height: project?.height,
-            title: project?.title,
-          },
-          imageAnalysis: analyzeActiveImage(image, project),
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data?.success) throw new Error(data?.error || "Agent could not build an edit");
+    // Extension intents ("extend by 20%", "outpaint left/right") still route through the
+    // legacy endpoint — that path returns a special `extensionRequest` shape handled below.
+    const isExtensionIntent = /\b(extend|outpaint|expand|widen|stretch)\b/i.test(cleanPrompt);
 
-      const plan = { ...data.plan, userPrompt: cleanPrompt };
+    try {
+      let plan;
+      let source = "fallback";
+
+      if (isExtensionIntent) {
+        // Legacy planner — returns extensionRequest for the AI extender flow.
+        const response = await fetch("/api/imagekit/agent/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: cleanPrompt,
+            messages: visibleMessages,
+            sourceUrl: latestUrl,
+            projectId: project?._id,
+            project: {
+              width: project?.width,
+              height: project?.height,
+              title: project?.title,
+            },
+            imageAnalysis: analyzeActiveImage(image, project),
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.success) throw new Error(data?.error || "Agent could not build an edit");
+        plan = { ...data.plan, userPrompt: cleanPrompt };
+        source = data.plan?.mode || "legacy";
+      } else {
+        // v2 endpoint — image-aware, deterministic, returns per-effect slider entries.
+        const fingerprint = computeImageFingerprint(image);
+        const features = extractImageFeatures(image);
+        const response = await fetch("/api/ai/edit-plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: project?._id,
+            prompt: cleanPrompt,
+            sourceUrl: latestUrl,
+            imageHash: fingerprint?.hash || `nohash-${latestUrl}`,
+            features,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data?.success) throw new Error(data?.error || "Agent could not build an edit");
+        plan = adaptPlanV2(data.plan, latestUrl, cleanPrompt);
+        source = data.source;
+      }
+      plan.source = source;
 
       // ──── Extension request: route to AI Extend instead of transforms ────
       if (plan.extensionRequest) {
@@ -634,11 +846,13 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       }
 
       const nextEnabledChanges = createEnabledMap(plan);
+      const nextValueMap = createValueMap(plan);
       setActivePlan(plan);
       setEnabledChanges(nextEnabledChanges);
+      setEffectValues(nextValueMap);
 
       if (autoPreview) {
-        await previewPlanOnCanvas(plan, nextEnabledChanges);
+        await previewPlanOnCanvas(plan, nextEnabledChanges, nextValueMap);
       }
 
       setMessages((current) => [
@@ -674,7 +888,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         await previewPlanOnCanvas(activePlan, enabledChanges);
       }
 
-      const effectivePlan = buildEffectivePlan(activePlan, enabledChanges, activePlan.sourceUrl || sourceUrl);
+      const effectivePlan = buildEffectivePlan(activePlan, enabledChanges, activePlan.sourceUrl || sourceUrl, effectValues);
       const enabledChangeDetails = getEnabledChangeDetails(activePlan, enabledChanges);
       const beforeSnapshot = liveSnapshotRef.current;
 
@@ -718,6 +932,8 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       toast.success("Agent edit saved", { id: toastId });
       setMessages((current) => [...current, newMessage("assistant", "Saved. The live edit is now part of this project.")]);
       setActivePlan(null);
+      setEffectValues({});
+      setEnabledChanges({});
     } catch (error) {
       toast.error(error?.message || "Failed to save edit", { id: toastId });
     } finally {
@@ -733,7 +949,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   };
 
   const copyUrl = async () => {
-    const effectivePlan = buildEffectivePlan(activePlan, enabledChanges, activePlan?.sourceUrl || sourceUrl);
+    const effectivePlan = buildEffectivePlan(activePlan, enabledChanges, activePlan?.sourceUrl || sourceUrl, effectValues);
     if (!effectivePlan?.url) return;
     await navigator.clipboard.writeText(effectivePlan.url);
     toast.success("Transformation URL copied");
@@ -749,9 +965,25 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
 
     if (autoPreview || liveSnapshotRef.current) {
       try {
-        await previewPlanOnCanvas(activePlan, nextChanges);
+        await previewPlanOnCanvas(activePlan, nextChanges, effectValues);
       } catch (error) {
         toast.error(error?.message || "Could not update preview");
+      }
+    }
+  };
+
+  const handleEffectValueChange = async (key, nextValue, { commit = false } = {}) => {
+    if (!activePlan) return;
+    const numeric = Number(nextValue);
+    if (!Number.isFinite(numeric)) return;
+    const nextValues = { ...effectValues, [key]: numeric };
+    setEffectValues(nextValues);
+    // Live re-apply on every preview tick; commit triggers a history snapshot.
+    if (autoPreview || liveSnapshotRef.current) {
+      try {
+        await previewPlanOnCanvas(activePlan, enabledChanges, nextValues);
+      } catch (error) {
+        if (commit) toast.error(error?.message || "Could not update preview");
       }
     }
   };
@@ -766,6 +998,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       liveSnapshotRef.current = null;
       setActivePlan(null);
       setEnabledChanges({});
+      setEffectValues({});
 
       await restoreCanvasFromHistory(canvasEditor, restored.canvasState, {
         imageUrl: restored.currentImageUrl || project.currentImageUrl || project.originalImageUrl,
@@ -893,10 +1126,26 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
               <strong>{getChangeItems(activePlan).filter((item) => enabledChanges?.[item.id] !== false).length}/{getChangeItems(activePlan).length} on</strong>
             </div>
 
-            <AgentChangeList
+            {activePlan.alreadyMatchesTarget && (Number(activePlan.gain) || 0) < 0.1 ? (
+              <div className="agent-already-great">
+                <Check className="h-3.5 w-3.5" />
+                <div>
+                  <strong>Already looks great</strong>
+                  <p>
+                    The image already matches the {STYLE_LABELS[activePlan.targetStyle] || activePlan.targetStyle || "requested"} look.
+                    Drag a slider below if you want to push it further.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            <AgentEffectControls
               plan={activePlan}
               enabledMap={enabledChanges}
+              valueMap={effectValues}
               onToggle={handleChangeToggle}
+              onValueChange={handleEffectValueChange}
+              dominantColor={dominantColor}
             />
 
             <div className="agent-action-row">
