@@ -658,7 +658,7 @@ const ImageManager = ({ project, dominantColor }) => {
                     </div>
 
                     {/* Actions grid */}
-                    <div className="grid grid-cols-2 gap-1.5">
+                    <div className="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-1.5">
                         <button
                             type="button"
                             onClick={flipH}

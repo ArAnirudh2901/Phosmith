@@ -65,9 +65,9 @@ import AuroraLoader from "./AuroraLoader"
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 64
 const MIN_PREVIEW_ZOOM_PERCENT = 5
-const MAX_PREVIEW_ZOOM_PERCENT = 400
-const PREVIEW_ZOOM_STEP_PERCENT = 10
-const VIEWPORT_PADDING = 88
+const MAX_PREVIEW_ZOOM_PERCENT = 300
+const PREVIEW_ZOOM_STEP_PERCENT = 1
+const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
@@ -201,8 +201,11 @@ const CanvasEditor = ({ project }) => {
         const projectH = Math.max(1, size?.height || project?.height || 1)
         if (!canvasW || !canvasH || !projectW || !projectH) return
 
-        const safeW = Math.max(canvasW - VIEWPORT_PADDING * 2, canvasW * 0.72, 1)
-        const safeH = Math.max(canvasH - VIEWPORT_PADDING * 2, canvasH * 0.72, 1)
+        // Use 92% of canvas area as the safe zone. This gives a tighter fit
+        // on small screens (13" MacBook Air) while still having breathing room.
+        // The fixed VIEWPORT_PADDING acts as a minimum margin.
+        const safeW = Math.max(canvasW * 0.92, canvasW - VIEWPORT_PADDING * 2, 1)
+        const safeH = Math.max(canvasH * 0.92, canvasH - VIEWPORT_PADDING * 2, 1)
         const fitZoom = Math.min(safeW / projectW, safeH / projectH)
         setViewportState(canvas, {
             zoom: clamp(fitZoom || 1, MIN_ZOOM, MAX_ZOOM),
@@ -746,10 +749,19 @@ const CanvasEditor = ({ project }) => {
         })
     }, [canvasEditor, undoCanvasState, redoCanvasState, pushHistoryState, saveCanvasState])
 
+    // Track the last-hydrated URL so we skip redundant re-hydrations when
+    // the parent re-renders (e.g. during sidebar resize) without the image
+    // URL actually changing. This prevents the "image refreshing" flicker.
+    const lastHydratedUrlRef = useRef(null)
+
     useEffect(() => {
         const canvas = canvasInstanceRef.current
         const imageUrl = project?.currentImageUrl || project?.originalImageUrl
         if (!canvas || !imageUrl) return
+
+        // Guard: skip if we've already hydrated this exact URL
+        if (lastHydratedUrlRef.current === imageUrl) return
+        lastHydratedUrlRef.current = imageUrl
 
         let cancelled = false
         hydrateCanvasImages(canvas, imageUrl, {
@@ -923,20 +935,49 @@ const CanvasEditor = ({ project }) => {
                 const canvas = canvasInstanceRef.current
                 if (!canvas || !project || !containerRef.current) return
 
+                const prevWidth = canvas.getWidth()
+                const prevHeight = canvas.getHeight()
                 const nextWidth = containerRef.current.clientWidth
                 const nextHeight = containerRef.current.clientHeight
                 if (!nextWidth || !nextHeight) return
 
-                if (canvas.getWidth() === nextWidth && canvas.getHeight() === nextHeight) {
+                if (prevWidth === nextWidth && prevHeight === nextHeight) {
                     canvas.calcOffset()
                     return
                 }
 
-                const viewportState = getViewportState(canvas)
+                // Capture the current viewport state BEFORE resizing the canvas
+                // element so we can preserve the user's pan position and scale
+                // the zoom proportionally to the container size change. This
+                // avoids the jarring snap-to-fit that __fitCanvasToProject does.
+                const currentViewport = getViewportState(canvas)
+                const scaleRatio = Math.min(
+                    nextWidth / (prevWidth || 1),
+                    nextHeight / (prevHeight || 1),
+                )
+
                 canvas.setDimensions({ width: nextWidth, height: nextHeight }, { backstoreOnly: false })
-                setViewportState(canvas, viewportState)
+
+                // Scale zoom proportionally but keep the same logical center
+                // point. The effect is a smooth proportional resize rather than
+                // a full recomputation from project dimensions.
+                const adjustedZoom = clamp(
+                    currentViewport.zoom * scaleRatio,
+                    MIN_ZOOM,
+                    MAX_ZOOM,
+                )
+                setViewportState(canvas, {
+                    zoom: adjustedZoom,
+                    center: currentViewport.center,
+                })
                 canvas.calcOffset()
                 canvas.requestRenderAll()
+
+                // Sync the project frame overlay and the zoom percentage HUD
+                if (typeof canvas.__syncProjectFrame === 'function') {
+                    canvas.__syncProjectFrame()
+                }
+                syncPreviewZoomState(canvas)
             })
         }
 
@@ -1060,7 +1101,7 @@ const CanvasEditor = ({ project }) => {
                     type="range"
                     min={MIN_PREVIEW_ZOOM_PERCENT}
                     max={MAX_PREVIEW_ZOOM_PERCENT}
-                    step="5"
+                    step="1"
                     value={previewSliderValue}
                     onChange={handlePreviewZoomChange}
                     disabled={!canAdjustPreview}
@@ -1113,4 +1154,4 @@ const CanvasEditor = ({ project }) => {
     )
 }
 
-export default CanvasEditor
+export default React.memo(CanvasEditor)

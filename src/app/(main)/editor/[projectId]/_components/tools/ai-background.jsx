@@ -667,7 +667,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
 
                 {unsplashImages.length > 0 && (
                     <div
-                        className="grid min-h-0 flex-1 content-start grid-cols-2 gap-2 overflow-y-auto pr-1 panel-scroll"
+                        className="grid min-h-0 flex-1 content-start grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-2 overflow-y-auto pr-1 panel-scroll"
                         onScroll={handleResultsScroll}
                     >
                         {unsplashImages.map((image) => (

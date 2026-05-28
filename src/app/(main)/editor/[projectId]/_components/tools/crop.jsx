@@ -697,7 +697,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                 {activeImage && (
                     <div>
                         <label className='panel-label mb-2.5 block'>Crop Presets</label>
-                        <div className='grid grid-cols-2 gap-1.5'>
+                        <div className='grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-1.5'>
                             {CROP_PRESETS.map((preset) => {
                                 const IconComponent = preset.icon
                                 const isSelected = isCropMode && selectedPresetId === preset.id
@@ -734,7 +734,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                 {isCropMode && (
                     <div>
                         <label className='panel-label mb-2.5 block'>Adjust</label>
-                        <div className='grid grid-cols-2 gap-1.5'>
+                        <div className='grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-1.5'>
                             {[
                                 ["frame", "Frame"],
                                 ["image", "Image"],

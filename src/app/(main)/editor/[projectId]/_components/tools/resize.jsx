@@ -244,7 +244,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                     </button>
                 </div>
 
-                <div className='mt-3 grid grid-cols-2 gap-2'>
+                <div className='mt-3 grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-2'>
                     <div>
                         <label className='mb-1 block text-[10px]' style={{ color: 'var(--text-muted)' }}>Width</label>
                         <input
@@ -310,7 +310,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                             </button>
                         </div>
 
-                        <div className='grid grid-cols-2 gap-2'>
+                        <div className='grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-2'>
                             <div>
                                 <label className='mb-1 block text-[10px]' style={{ color: 'var(--text-muted)' }}>Width</label>
                                 <input
@@ -353,7 +353,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                         />
                     </div>
 
-                    <div className='grid grid-cols-2 gap-1.5'>
+                    <div className='grid grid-cols-[repeat(auto-fit,minmax(90px,1fr))] gap-1.5'>
                         {[
                             { label: 'Original', icon: ImageIcon, action: () => setImageScale(100, true) },
                             { label: '50%', icon: Expand, action: () => setImageScale(50, true) },

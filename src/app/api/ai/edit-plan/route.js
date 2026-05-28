@@ -186,6 +186,7 @@ const callGeminiForTargeting = async ({ apiKey, model, prompt, layers }) => {
             temperature: 0,
             topP: 0,
             topK: 1,
+            seed: 42,
             responseMimeType: "application/json",
             maxOutputTokens: 256,
         },
@@ -244,13 +245,46 @@ Return STRICT JSON only, no prose, matching this schema exactly:
   "notes": "<one or two short sentences explaining what you saw and what you'd do>"
 }
 
-Rules:
-- Look at the image carefully. If the photo already matches what the user is asking for,
-  set alreadyMatchesTarget=true and gain=0 — do not "double process" a finished look.
-- gain is 0.0–1.0. 0.6 is a normal adjustment, 0.9 is strong, 1.0 is maximum.
-- Be conservative. Subtlety beats over-processing.
-- Use the imagekitAi booleans only when the user explicitly asks for that AI transform
-  (e.g. "remove background" → bgRemove=true).
+## Analysis Framework — follow these steps IN ORDER:
+
+1. **Exposure check**: Is the image well-exposed? Look at overall brightness.
+   - Mean luminance 0.36–0.64 = good exposure, NO brightness adjustment needed.
+   - Only flag if clearly under/over-exposed.
+
+2. **Contrast check**: Does the image have good tonal separation between shadows and highlights?
+   - If shadows are deep and highlights are clean, contrast is fine. Do NOT boost.
+   - Only boost contrast for flat, washed-out images.
+
+3. **Color check**: Are the colors well-balanced and appropriate for the scene?
+   - If colors are already saturated and harmonious, do NOT increase saturation.
+   - If the image has intentional desaturation (e.g. moody, cinematic), respect it.
+
+4. **Style match**: Does the image already exhibit the characteristics of the target style?
+   - Cinematic = crushed blacks, slight desaturation, warm tones, subtle grain
+   - Editorial = crisp detail, slight contrast boost, vibrant but not oversaturated
+   - Vibrant = punchy colors, high saturation, bright
+   - If the image ALREADY has these characteristics, it ALREADY matches.
+
+## Critical Rules:
+
+- **DO NOT DOUBLE-PROCESS**: If the image already looks professionally edited,
+  set alreadyMatchesTarget=true and gain=0. A cinematic image asked to be "cinematic"
+  should get gain=0. An already-bright image asked to be "brighter" should get gain=0.
+- **If 3 or more of the 4 checks above pass**, the image is already good —
+  set alreadyMatchesTarget=true and gain=0.
+- **Repeatability**: If the same instruction is applied to an already-edited image,
+  ALWAYS return gain=0. Do not re-apply adjustments on top of existing ones.
+- **Be conservative**: Subtlety beats over-processing. When in doubt, use a LOWER gain.
+
+## Gain guidance:
+  - 0.0 = no change needed (image already looks right for the target style)
+  - 0.1–0.3 = subtle tweak (image is close but could use minor polish)
+  - 0.4–0.6 = moderate adjustment (image needs visible correction)
+  - 0.7–0.9 = strong change (image significantly differs from target)
+  - 1.0 = maximum (only for dramatic style shifts like color→B&W)
+
+- Use the imagekitAi booleans ONLY when the user EXPLICITLY asks for that AI transform
+  (e.g. "remove background" → bgRemove=true). Never set these speculatively.
 - Output JSON only.`
 
 const STRICTER_RETRY_SUFFIX =
@@ -278,7 +312,29 @@ const callGeminiOnce = async ({ apiKey, model, prompt, imageBase64, mimeType, fe
             temperature: 0,
             topP: 0,
             topK: 1,
+            seed: 42,
             responseMimeType: "application/json",
+            responseSchema: {
+                type: "OBJECT",
+                properties: {
+                    currentStyle: { type: "STRING", enum: STYLE_KEYS },
+                    targetStyle: { type: "STRING", enum: STYLE_KEYS },
+                    alreadyMatchesTarget: { type: "BOOLEAN" },
+                    gain: { type: "NUMBER" },
+                    imagekitAi: {
+                        type: "OBJECT",
+                        properties: {
+                            retouch: { type: "BOOLEAN" },
+                            bgRemove: { type: "BOOLEAN" },
+                            upscale: { type: "BOOLEAN" },
+                            sharpen: { type: "BOOLEAN" },
+                            contrast: { type: "BOOLEAN" },
+                        },
+                    },
+                    notes: { type: "STRING" },
+                },
+                required: ["currentStyle", "targetStyle", "alreadyMatchesTarget", "gain", "notes"],
+            },
             maxOutputTokens: 512,
         },
     }
@@ -321,14 +377,38 @@ const callGemini = async (params) => {
     }
 }
 
-const sanitizeGeminiVerdict = (raw, fallbackIntent) => {
+const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null) => {
     const safeStyle = (s) => (STYLE_KEYS.includes(s) ? s : null)
     const targetStyle =
         safeStyle(raw?.targetStyle) || safeStyle(fallbackIntent.targetStyle) || "neutral"
     const currentStyle = safeStyle(raw?.currentStyle) || "neutral"
-    const alreadyMatchesTarget = !!raw?.alreadyMatchesTarget || currentStyle === targetStyle
-    const gainRaw = Number(raw?.gain)
-    const gain = Number.isFinite(gainRaw) ? Math.max(0, Math.min(1, gainRaw)) : 0.6
+    let alreadyMatchesTarget = !!raw?.alreadyMatchesTarget || currentStyle === targetStyle
+    let gainRaw = Number(raw?.gain)
+    let gain = Number.isFinite(gainRaw) ? Math.max(0, Math.min(1, gainRaw)) : 0.6
+
+    // If gain is near zero, force alreadyMatchesTarget to true for consistency
+    if (gain < 0.05) {
+        alreadyMatchesTarget = true
+        gain = 0
+    }
+
+    // If the client-provided features show the image is already well-exposed
+    // and has decent contrast, bias the gain down by 30% to prevent over-processing.
+    // This catches cases where the LLM misjudges a well-edited image.
+    if (features && !alreadyMatchesTarget) {
+        const lum = features?.luminance?.mean
+        const con = typeof features?.contrast === "number" ? features.contrast : null
+        const isWellExposed = lum != null && lum >= 0.36 && lum <= 0.64
+        const hasGoodContrast = con != null && con >= 0.45
+        if (isWellExposed && hasGoodContrast) {
+            gain = Math.max(0, gain * 0.7)
+            if (gain < 0.05) {
+                alreadyMatchesTarget = true
+                gain = 0
+            }
+        }
+    }
+
     const imagekitAi = {
         retouch: !!(raw?.imagekitAi?.retouch ?? fallbackIntent.imagekitAi.retouch),
         bgRemove: !!(raw?.imagekitAi?.bgRemove ?? fallbackIntent.imagekitAi.bgRemove),
@@ -423,7 +503,7 @@ const computePlanForImage = async ({
                 mimeType: fetched?.mimeType || "image/jpeg",
                 features,
             })
-            geminiVerdict = sanitizeGeminiVerdict(rawGeminiResponse, keywordIntent)
+            geminiVerdict = sanitizeGeminiVerdict(rawGeminiResponse, keywordIntent, features)
             source = "gemini"
         } catch (error) {
             console.warn("[edit-plan] Gemini failed for one image, falling back:", error?.message || error)
@@ -445,6 +525,7 @@ const computePlanForImage = async ({
                         : `Applied the "${keywordIntent.targetStyle}" preset inferred from your prompt.`,
             },
             keywordIntent,
+            features,
         )
 
     const plan = buildEditPlan({
