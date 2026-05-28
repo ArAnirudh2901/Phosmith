@@ -6,7 +6,7 @@ const CASCADE_OFFSET = 32
 // Reads a File/Blob as a data URL. Kept as a last-resort fallback for the rare
 // case where the ImageKit upload fails — at least the image stays usable in the
 // current session. Data URLs balloon the saved canvas state, so we avoid them
-// when we can (Convex documents are capped at 1 MB).
+// when we can (Neon documents are capped at 1 MB).
 const readFileAsDataURL = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -16,7 +16,7 @@ const readFileAsDataURL = (file) =>
   })
 
 // Uploads to our /api/imagekit/upload endpoint (auth-gated) and returns the CDN URL.
-// This is the path that keeps saved canvas state small enough for Convex's per-doc
+// This is the path that keeps saved canvas state small enough for Neon's per-doc
 // size limit when users add several photos to one project.
 const uploadFileToImageKit = async (file) => {
   const formData = new FormData()

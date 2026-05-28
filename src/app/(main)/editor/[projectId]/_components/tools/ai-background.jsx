@@ -7,8 +7,8 @@ import { Download, ImageIcon, Loader2, Palette, Search, Sparkles, Trash2 } from 
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { useCanvas } from '../../../../../../../context/context'
-import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
-import { api } from '../../../../../../../convex/_generated/api'
+import { useDatabaseMutation } from '../../../../../../../hooks/useDatabaseQuery'
+import { api } from "@/lib/neon-api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import Colorful from '@uiw/react-color-colorful'
 import { Input } from '@/components/ui/input'
@@ -169,7 +169,7 @@ const getToastErrorMessage = (error) => {
 
 const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterColor }) => {
     const { canvasEditor, processingMessage, setProcessingMessage } = useCanvas()
-    const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
+    const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
 
     // States
     const [backgroundColor, setBackgroundColor] = useState(dominantColor || "#ffffff")

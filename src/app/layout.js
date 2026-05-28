@@ -8,7 +8,7 @@ import { Toaster } from "@/components/ui/sonner";
 import LiquidCursorEffect from "@/components/liquid-cursor-effect";
 import { SmoothScrollProvider } from "@/components/smooth-scroll-provider";
 import Header from "@/components/header";
-import { ConvexClientProvider } from "./ConvexClientProvider";
+import { DatabaseClientProvider } from "./DatabaseClientProvider";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 
@@ -91,7 +91,7 @@ export default function RootLayout({ children }) {
             enableSystem={false}
             disableTransitionOnChange
           >
-            <ConvexClientProvider>
+            <DatabaseClientProvider>
               <SmoothScrollProvider>
                 <LiquidCursorEffect />
                 <Suspense
@@ -111,7 +111,7 @@ export default function RootLayout({ children }) {
                   {children}
                 </main>
               </SmoothScrollProvider>
-            </ConvexClientProvider>
+            </DatabaseClientProvider>
           </ThemeProvider>
         </body>
       </html>

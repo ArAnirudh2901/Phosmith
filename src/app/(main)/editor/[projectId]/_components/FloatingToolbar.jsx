@@ -7,9 +7,9 @@ import { Input } from "@/components/ui/input"
 import GlassSlider from "@/components/GlassSlider"
 import { Wand2, ChevronRight, ChevronLeft, Square, Circle, Monitor, Smartphone, Maximize2, Sparkles, Eye, EyeOff, RotateCcw } from "lucide-react"
 import { useCanvas } from "../../../../../../context/context"
-import { useConvexMutation, useConvexQuery } from "../../../../../../hooks/useConvexQuery"
+import { useDatabaseMutation, useDatabaseQuery } from "../../../../../../hooks/useDatabaseQuery"
 import usePlanAccess from "../../../../../../hooks/usePlanAccess"
-import { api } from "../../../../../../convex/_generated/api"
+import { api } from "@/lib/neon-api";
 import { serializeCanvasState } from "../../../../../lib/canvas-state"
 
 const DIRECTIONS = [

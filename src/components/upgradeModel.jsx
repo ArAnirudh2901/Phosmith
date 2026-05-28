@@ -18,8 +18,9 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason }) => {
             draw: "Doodle & Drawing Tools",
             text: "Professional Text Editor",
             images: "Multiple Image Operations",
+            mask: "Masking Tools",
         }
-        return toolNames[restrictedTool] || "Premium Feature"
+        return toolNames[restrictedTool] || "Pro Feature"
     }
 
     return (
@@ -38,10 +39,10 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason }) => {
                         </motion.div>
                         <div>
                             <DialogTitle className="text-2xl font-bold text-white tracking-tight">
-                                Upgrade to Master
+                                Upgrade to Pro
                             </DialogTitle>
                             <DialogDescription className="text-sm text-[var(--text-muted)] mt-1">
-                                Unlock the full creative suite with AI-powered tools
+                                Unlock the full creative suite with Pro tools
                             </DialogDescription>
                         </div>
                     </div>
@@ -58,7 +59,7 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason }) => {
                                 <Zap className="h-5 w-5 text-[#D946EF]" />
                                 <AlertDescription className="text-[#D946EF]/90">
                                     <div className="font-semibold text-[#D946EF] mb-1">
-                                        {getToolName()} — Master Feature
+                                        {getToolName()} — Pro Feature
                                     </div>
                                     {reason || `Upgrade now to unlock ${getToolName()}`}
                                 </AlertDescription>

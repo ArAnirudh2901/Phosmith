@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { fetchMutation } from "convex/nextjs";
-import { api } from "../../../../../convex/_generated/api";
+import { getNeonAuthContext } from "@/lib/neon/auth";
+import { runNeonMutation } from "@/lib/neon/functions";
 
 export async function POST() {
-    const { userId, has, getToken, sessionClaims } = await auth();
+    const { userId, has } = await auth();
 
     if (!userId) {
         return NextResponse.json(
@@ -13,25 +13,10 @@ export async function POST() {
         );
     }
 
-    const token =
-        sessionClaims?.aud === "convex"
-            ? await getToken()
-            : await getToken({ template: "convex" });
-
-    if (!token) {
-        return NextResponse.json(
-            { error: "Missing Convex auth token" },
-            { status: 500 },
-        );
-    }
-
     const plan = has?.({ plan: "pro" }) ? "pro" : "free";
+    const neonAuth = await getNeonAuthContext();
 
-    await fetchMutation(
-        api.users.syncPlan,
-        { plan },
-        { token },
-    );
+    await runNeonMutation("users.syncPlan", { plan }, { auth: neonAuth });
 
     return NextResponse.json({ plan });
 }

@@ -5,8 +5,8 @@ import { useCanvas } from '../../../../../../../context/context'
 import { Expand, Image as ImageIcon, Lock, Maximize2, Unlock } from 'lucide-react'
 import { toast } from 'sonner'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
-import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
-import { api } from '../../../../../../../convex/_generated/api'
+import { useDatabaseMutation } from '../../../../../../../hooks/useDatabaseQuery'
+import { api } from "@/lib/neon-api";
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 
 const isImageObject = (obj) => obj?.type?.toLowerCase() === 'image'
@@ -37,7 +37,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
     const [canvasWidth, setCanvasWidth] = useState(project?.width || 0)
     const [canvasHeight, setCanvasHeight] = useState(project?.height || 0)
     const [lockCanvasAspectRatio, setLockCanvasAspectRatio] = useState(true)
-    const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
+    const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
 
     const baseSize = useMemo(() => getBaseSize(selectedImage), [selectedImage])
     const aspectRatio = baseSize.height / baseSize.width

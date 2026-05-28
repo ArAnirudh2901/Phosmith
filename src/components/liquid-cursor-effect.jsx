@@ -178,15 +178,29 @@ function mkFBO(gl, w, h) {
 
 const R = (a, b) => a + Math.random() * (b - a);
 const CL = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-const C01 = (v) => Math.min(1, Math.max(0, v));
 const SA = (from, to) => {
   const tau = Math.PI * 2;
   return ((((to - from) + Math.PI) % tau) + tau) % tau - Math.PI;
 };
 
-const AS = 0.08;
-const AT = 0.75;
-const AM = 0.1;
+const EDGE_PAD = 0.06;
+const TARGET_REACH = 0.075;
+const MIN_TARGET_DIST = 0.30;
+const BASE_SPEED = 0.105;
+const TURN_RATE = 1.35;
+
+const randomPointAwayFrom = (x, y) => {
+  let tx = R(EDGE_PAD, 1 - EDGE_PAD);
+  let ty = R(EDGE_PAD, 1 - EDGE_PAD);
+
+  for (let i = 0; i < 10; i += 1) {
+    if (Math.hypot(tx - x, ty - y) >= MIN_TARGET_DIST) break;
+    tx = R(EDGE_PAD, 1 - EDGE_PAD);
+    ty = R(EDGE_PAD, 1 - EDGE_PAD);
+  }
+
+  return { x: tx, y: ty };
+};
 
 export default function LiquidCursorEffect() {
   const pathname = usePathname();
@@ -204,6 +218,7 @@ export default function LiquidCursorEffect() {
     aty: 0.4,
     adx: 1,
     ady: 0,
+    aSpeed: BASE_SPEED,
     aPulse: 0.3,
     aNext: 0,
     bx: 0.35,
@@ -214,6 +229,7 @@ export default function LiquidCursorEffect() {
     bty: 0.55,
     bdx: -1,
     bdy: 0,
+    bSpeed: BASE_SPEED,
     bPulse: 0.2,
     bNext: 0,
     dx: 0.5,
@@ -285,17 +301,21 @@ export default function LiquidCursorEffect() {
     const buffers = { targets: [], idx: 0, sw: 0, sh: 0 };
 
     const pickT = (state, now) => {
-      state.atx = R(AM, 0.45);
-      state.aty = R(AM, 0.45);
-      state.aPulse = Math.max(state.aPulse, R(0.1, 0.3));
-      state.aNext = now + R(4000, 8000);
+      const next = randomPointAwayFrom(state.ax, state.ay);
+      state.atx = next.x;
+      state.aty = next.y;
+      state.aSpeed = R(0.07, 0.14);
+      state.aPulse = Math.max(state.aPulse, R(0.12, 0.34));
+      state.aNext = now + R(2600, 6200);
     };
 
     const pickTB = (state, now) => {
-      state.btx = R(0.55, 1 - AM);
-      state.bty = R(0.55, 1 - AM);
-      state.bPulse = Math.max(state.bPulse, R(0.08, 0.24));
-      state.bNext = now + R(5200, 9600);
+      const next = randomPointAwayFrom(state.bx, state.by);
+      state.btx = next.x;
+      state.bty = next.y;
+      state.bSpeed = R(0.06, 0.13);
+      state.bPulse = Math.max(state.bPulse, R(0.10, 0.28));
+      state.bNext = now + R(3000, 7200);
     };
 
     const spawnD = (state, now, initial) => {
@@ -307,8 +327,8 @@ export default function LiquidCursorEffect() {
 
     const seedA = (now) => {
       const state = stateRef.current;
-      state.ax = R(AM, 0.45);
-      state.ay = R(AM, 0.45);
+      state.ax = R(EDGE_PAD, 1 - EDGE_PAD);
+      state.ay = R(EDGE_PAD, 1 - EDGE_PAD);
       state.pax = state.ax;
       state.pay = state.ay;
       state.aPulse = 0.35;
@@ -323,8 +343,8 @@ export default function LiquidCursorEffect() {
 
     const seedB = (now) => {
       const state = stateRef.current;
-      state.bx = R(0.55, 1 - AM);
-      state.by = R(0.55, 1 - AM);
+      state.bx = R(EDGE_PAD, 1 - EDGE_PAD);
+      state.by = R(EDGE_PAD, 1 - EDGE_PAD);
       state.pbx = state.bx;
       state.pby = state.by;
       state.bPulse = 0.35;
@@ -340,30 +360,27 @@ export default function LiquidCursorEffect() {
     const advA = (state, now, dt) => {
       state.pax = state.ax;
       state.pay = state.ay;
-      if (Math.hypot(state.atx - state.ax, state.aty - state.ay) < 0.14 || now >= state.aNext) {
+      if (Math.hypot(state.atx - state.ax, state.aty - state.ay) < TARGET_REACH || now >= state.aNext) {
         pickT(state, now);
       }
 
       let dx = state.atx - state.ax;
       let dy = state.aty - state.ay;
-      if (state.ax < AM) dx += (AM - state.ax) * 5;
-      if (state.ax > 0.45) dx -= (state.ax - 0.45) * 5;
-      if (state.ay < AM) dy += (AM - state.ay) * 5;
-      if (state.ay > 0.45) dy -= (state.ay - 0.45) * 5;
+      if (state.ax < EDGE_PAD) dx += (EDGE_PAD - state.ax) * 6;
+      if (state.ax > 1 - EDGE_PAD) dx -= (state.ax - (1 - EDGE_PAD)) * 6;
+      if (state.ay < EDGE_PAD) dy += (EDGE_PAD - state.ay) * 6;
+      if (state.ay > 1 - EDGE_PAD) dy -= (state.ay - (1 - EDGE_PAD)) * 6;
 
       const currentAngle = Math.atan2(state.ady, state.adx);
       const desiredAngle = Math.atan2(dy, dx);
-      const nextAngle = currentAngle + CL(SA(currentAngle, desiredAngle), -AT * dt, AT * dt);
+      const nextAngle = currentAngle + CL(SA(currentAngle, desiredAngle), -TURN_RATE * dt, TURN_RATE * dt);
       state.adx = Math.cos(nextAngle);
       state.ady = Math.sin(nextAngle);
-      state.ax = C01(state.ax + state.adx * AS * dt);
-      state.ay = C01(state.ay + state.ady * AS * dt);
+      state.ax = CL(state.ax + state.adx * state.aSpeed * dt, EDGE_PAD, 1 - EDGE_PAD);
+      state.ay = CL(state.ay + state.ady * state.aSpeed * dt, EDGE_PAD, 1 - EDGE_PAD);
 
-      if (state.ax <= AM || state.ax >= 0.45 || state.ay <= AM || state.ay >= 0.45) {
-        state.ax = CL(state.ax, AM, 0.45);
-        state.ay = CL(state.ay, AM, 0.45);
-        state.atx = R(AM, 0.45);
-        state.aty = R(AM, 0.45);
+      if (state.ax <= EDGE_PAD || state.ax >= 1 - EDGE_PAD || state.ay <= EDGE_PAD || state.ay >= 1 - EDGE_PAD) {
+        pickT(state, now);
       }
 
       state.aPulse *= Math.exp(-2.5 * dt);
@@ -373,30 +390,27 @@ export default function LiquidCursorEffect() {
     const advB = (state, now, dt) => {
       state.pbx = state.bx;
       state.pby = state.by;
-      if (Math.hypot(state.btx - state.bx, state.bty - state.by) < 0.14 || now >= state.bNext) {
+      if (Math.hypot(state.btx - state.bx, state.bty - state.by) < TARGET_REACH || now >= state.bNext) {
         pickTB(state, now);
       }
 
       let dx = state.btx - state.bx;
       let dy = state.bty - state.by;
-      if (state.bx < 0.55) dx += (0.55 - state.bx) * 5;
-      if (state.bx > 1 - AM) dx -= (state.bx - (1 - AM)) * 5;
-      if (state.by < 0.55) dy += (0.55 - state.by) * 5;
-      if (state.by > 1 - AM) dy -= (state.by - (1 - AM)) * 5;
+      if (state.bx < EDGE_PAD) dx += (EDGE_PAD - state.bx) * 6;
+      if (state.bx > 1 - EDGE_PAD) dx -= (state.bx - (1 - EDGE_PAD)) * 6;
+      if (state.by < EDGE_PAD) dy += (EDGE_PAD - state.by) * 6;
+      if (state.by > 1 - EDGE_PAD) dy -= (state.by - (1 - EDGE_PAD)) * 6;
 
       const currentAngle = Math.atan2(state.bdy, state.bdx);
       const desiredAngle = Math.atan2(dy, dx);
-      const nextAngle = currentAngle + CL(SA(currentAngle, desiredAngle), -AT * dt, AT * dt);
+      const nextAngle = currentAngle + CL(SA(currentAngle, desiredAngle), -TURN_RATE * dt, TURN_RATE * dt);
       state.bdx = Math.cos(nextAngle);
       state.bdy = Math.sin(nextAngle);
-      state.bx = C01(state.bx + state.bdx * AS * dt);
-      state.by = C01(state.by + state.bdy * AS * dt);
+      state.bx = CL(state.bx + state.bdx * state.bSpeed * dt, EDGE_PAD, 1 - EDGE_PAD);
+      state.by = CL(state.by + state.bdy * state.bSpeed * dt, EDGE_PAD, 1 - EDGE_PAD);
 
-      if (state.bx <= 0.55 || state.bx >= 1 - AM || state.by <= 0.55 || state.by >= 1 - AM) {
-        state.bx = CL(state.bx, 0.55, 1 - AM);
-        state.by = CL(state.by, 0.55, 1 - AM);
-        state.btx = R(0.55, 1 - AM);
-        state.bty = R(0.55, 1 - AM);
+      if (state.bx <= EDGE_PAD || state.bx >= 1 - EDGE_PAD || state.by <= EDGE_PAD || state.by >= 1 - EDGE_PAD) {
+        pickTB(state, now);
       }
 
       state.bPulse *= Math.exp(-2.5 * dt);

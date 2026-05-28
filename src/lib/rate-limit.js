@@ -1,6 +1,5 @@
-// Per-user rate limiters for the AI endpoints. Backed by the in-memory
-// server-cache (see server-cache.js). Limits are per-process — if you
-// horizontally scale this app, each instance has its own counter.
+// Per-user rate limiters for the AI endpoints. Backed by the Redis adapter
+// when configured, with the local in-memory cache as a development fallback.
 //
 // Implementation: fixed-window counter. Each request derives a window key
 // from floor(now/windowMs), so all requests within the same window share a
@@ -14,7 +13,7 @@
 //   - Surface a clean 429 instead of an opaque failure when quotas hit.
 
 import { NextResponse } from "next/server"
-import { cacheGet, cacheSet } from "./server-cache"
+import { getRedis } from "./redis"
 
 const LIMITERS = {
     "edit-plan":         { count: 30,  windowSec: 60 },  // 30 / minute
@@ -22,13 +21,6 @@ const LIMITERS = {
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute
     "canvas-snapshot":   { count: 240, windowSec: 60 },  // 240/ minute — write-behind cache
-}
-
-const incrementWindow = (key, ttlSeconds) => {
-    const current = Number(cacheGet(key)) || 0
-    const next = current + 1
-    cacheSet(key, next, ttlSeconds)
-    return next
 }
 
 export const enforceRateLimit = async (kind, identifier) => {
@@ -40,7 +32,7 @@ export const enforceRateLimit = async (kind, identifier) => {
     const windowEnd = windowStart + windowMs
     const key = `rl:${kind}:${identifier}:${windowStart}`
 
-    const count = incrementWindow(key, cfg.windowSec + 1)
+    const count = await getRedis().incr(key, cfg.windowSec + 1)
     const remaining = Math.max(0, cfg.count - count)
 
     if (count > cfg.count) {

@@ -18,12 +18,13 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-### Convex (backend)
+### Neon/Postgres (backend)
 
-In a second terminal:
+Configure `DATABASE_URL` and `DIRECT_URL`, then create the schema:
 
 ```bash
-bunx convex dev
+bun run prisma:generate
+bun run db:push
 ```
 
 ## Scripts
@@ -34,10 +35,10 @@ bunx convex dev
 | `bun run build` | Production build |
 | `bun start` | Start production server |
 | `bun run lint` | Run ESLint |
-| `bunx convex dev` | Run Convex dev sync |
 | `bun run imagekit:docs` | Crawl ImageKit docs into a local JSON knowledge base |
 | `bun run prisma:generate` | Generate Prisma Client |
 | `bun run prisma:migrate` | Apply Postgres schema changes with Prisma |
+| `bun run db:push` | Push the Prisma schema to Neon/Postgres |
 
 ## ImageKit Agent
 
@@ -57,13 +58,14 @@ OLLAMA_VISION_MODEL=llava:latest
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/pixxel_gpt?schema=public
 ```
 
-If Ollama is not running, the agent falls back to the local visual-metrics planner. If `DATABASE_URL` is missing, Prisma logging is skipped while the editor feature still works.
+If Ollama is not running, the agent falls back to the local visual-metrics planner. Saved projects and user data require `DATABASE_URL`.
 
 ## Learn More
 
 - [Next.js Documentation](https://nextjs.org/docs)
 - [Bun Documentation](https://bun.sh/docs)
-- [Convex Documentation](https://docs.convex.dev)
+- [Prisma Documentation](https://www.prisma.io/docs)
+- [Neon Documentation](https://neon.com/docs)
 
 ## Deploy on Vercel
 

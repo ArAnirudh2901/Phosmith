@@ -11,13 +11,11 @@ import {
     GripVertical,
     ImagePlus,
     Layers,
-    Lock,
     MoveDown,
     MoveUp,
     Pencil,
     Replace,
     Trash2,
-    Unlock,
 } from 'lucide-react'
 import { FabricImage } from 'fabric'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
@@ -424,19 +422,6 @@ const ImageManager = ({ project, dominantColor }) => {
         commitLayerState(img)
     }
 
-    const toggleLock = (img) => {
-        const locked = !img.lockMovementX
-        img.set({
-            lockMovementX: locked,
-            lockMovementY: locked,
-            lockScalingX: locked,
-            lockScalingY: locked,
-            lockRotation: locked,
-            hasControls: !locked,
-        })
-        commitLayerState(img)
-    }
-
     if (!canvasEditor) {
         return (
             <div className="p-4">
@@ -463,7 +448,6 @@ const ImageManager = ({ project, dominantColor }) => {
                     )}
                     {[...images].reverse().map((img, idx) => {
                         const isSelected = img === selectedImage
-                        const isLocked = img.lockMovementX
                         const isHidden = img.visible === false
                         const isDragging = draggingImage === img
                         const isDragTarget = dragOverImage === img && draggingImage !== img
@@ -584,17 +568,6 @@ const ImageManager = ({ project, dominantColor }) => {
                                     {isHidden
                                         ? <EyeOff className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
                                         : <Eye className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
-                                    }
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={(e) => { e.stopPropagation(); toggleLock(img) }}
-                                    className="p-1 rounded editor-interactive shrink-0"
-                                    title={isLocked ? 'Unlock' : 'Lock'}
-                                >
-                                    {isLocked
-                                        ? <Lock className="h-3 w-3" style={{ color: 'var(--accent-warning, #f59e0b)' }} />
-                                        : <Unlock className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
                                     }
                                 </button>
                             </div>
@@ -745,7 +718,6 @@ const ImageManager = ({ project, dominantColor }) => {
                     <p>• Paste images from clipboard with ⌘V</p>
                     <p>• Drag & drop images onto the canvas</p>
                     <p>• Use layers to reorder and manage images</p>
-                    <p>• Lock layers to prevent accidental edits</p>
                 </div>
             </div>
         </div>

@@ -1,20 +1,20 @@
 // /api/canvas/flush
 //
 // Reads the latest canvas snapshot from the server cache and persists it to
-// Convex. Called by the client on:
+// Neon. Called by the client on:
 //   - Debounced timer (every ~8s of idle)
 //   - Manual Save button
 //   - beforeunload (via fetch keepalive or navigator.sendBeacon)
 //
 // Idempotent: if the cache is empty or the meta blob's `dirty` flag is false
 // (already flushed since the last write), this is a no-op. After a successful
-// Convex write we clear the dirty flag so the next flush won't re-write the
+// Neon write we clear the dirty flag so the next flush won't re-write the
 // same state.
 
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { fetchMutation } from "convex/nextjs"
-import { api } from "../../../../../convex/_generated/api"
+import { getNeonAuthContext } from "@/lib/neon/auth"
+import { runNeonMutation } from "@/lib/neon/functions"
 import { getRedis, isRedisConfigured } from "@/lib/redis"
 
 const stateKey = (projectId) => `canvas:state:${projectId}`
@@ -22,7 +22,7 @@ const metaKey = (projectId) => `canvas:meta:${projectId}`
 
 export async function POST(request) {
     try {
-        const { userId, getToken, sessionClaims } = await auth()
+        const { userId } = await auth()
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
@@ -30,13 +30,7 @@ export async function POST(request) {
             return NextResponse.json({ flushed: false, reason: "no-cache" })
         }
 
-        const token =
-            sessionClaims?.aud === "convex"
-                ? await getToken()
-                : await getToken({ template: "convex" })
-        if (!token) {
-            return NextResponse.json({ error: "Missing Convex auth token" }, { status: 500 })
-        }
+        const neonAuth = await getNeonAuthContext()
 
         const body = await request.json().catch(() => ({}))
         const projectId = body.projectId
@@ -64,21 +58,21 @@ export async function POST(request) {
             return NextResponse.json({ flushed: false, reason: "owner-mismatch" })
         }
 
-        // Skip the Convex write when no edits have happened since the last
+        // Skip the Neon write when no edits have happened since the last
         // flush — this is the common case if the debounced flush fires while
         // the user is idle.
         if (parsedMeta && parsedMeta.dirty === false) {
             return NextResponse.json({ flushed: false, reason: "clean" })
         }
 
-        await fetchMutation(
-            api.projects.updateProject,
+        await runNeonMutation(
+            "projects.updateProject",
             {
                 projectId,
                 canvasState: parsedState.canvasState,
                 ...(parsedState.currentImageUrl ? { currentImageUrl: parsedState.currentImageUrl } : {}),
             },
-            { token },
+            { auth: neonAuth },
         )
 
         // Mark clean so subsequent idle flushes don't repeat the write.

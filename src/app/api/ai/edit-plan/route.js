@@ -4,7 +4,7 @@
 //
 // Flow:
 //   1. Auth (Clerk)
-//   2. Look up cache (Convex editPlanCache) keyed by (projectId + imageHash + promptKey + plannerVersion)
+//   2. Look up cache (Neon editPlanCache) keyed by (projectId + imageHash + promptKey + plannerVersion)
 //   3. Cache hit → return immediately. Same image + same prompt = byte-exact plan, forever.
 //   4. Cache miss → ask Gemini 2.0 Flash (vision, temperature=0) what style the image is now and what
 //      the user wants, then run the deterministic planner.
@@ -15,9 +15,10 @@
 
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { fetchMutation, fetchQuery } from "convex/nextjs"
-import { api } from "../../../../../convex/_generated/api"
+import { getNeonAuthContext } from "@/lib/neon/auth"
+import { runNeonMutation, runNeonQuery } from "@/lib/neon/functions"
 import { buildEditPlan, PLANNER_VERSION } from "@/lib/edit-planner"
+import { getStyleFit } from "@/lib/image-features"
 import { STYLE_KEYS } from "@/lib/style-profiles"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
 
@@ -87,6 +88,11 @@ const inferKeywordIntent = (prompt) => {
     }
     return intent
 }
+
+const FORCE_RESTYLE_PATTERN =
+    /\b(again|amplify|boost|dramatic|exaggerat\w*|extra|heavy|intense|max|more|push|strong(?:er|ly)?)\b/i
+
+const wantsForcedRestyle = (prompt) => FORCE_RESTYLE_PATTERN.test(String(prompt || ""))
 
 // Canonical prompt key. NFC-normalize so composed and decomposed Unicode
 // (e.g. precomposed "é" vs "e + ◌́") collide to the same cache row.
@@ -377,14 +383,26 @@ const callGemini = async (params) => {
     }
 }
 
-const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null) => {
+const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null, prompt = "") => {
     const safeStyle = (s) => (STYLE_KEYS.includes(s) ? s : null)
+    const keywordStyle = safeStyle(fallbackIntent?.targetStyle)
     const targetStyle =
-        safeStyle(raw?.targetStyle) || safeStyle(fallbackIntent.targetStyle) || "neutral"
-    const currentStyle = safeStyle(raw?.currentStyle) || "neutral"
-    let alreadyMatchesTarget = !!raw?.alreadyMatchesTarget || currentStyle === targetStyle
+        (keywordStyle && keywordStyle !== "neutral" ? keywordStyle : null) ||
+        safeStyle(raw?.targetStyle) ||
+        keywordStyle ||
+        "neutral"
+    const fit = features ? getStyleFit(features, targetStyle) : null
+    const currentStyle = safeStyle(raw?.currentStyle) || fit?.currentStyle || "neutral"
+    const forceRestyle = wantsForcedRestyle(prompt)
+    let alreadyMatchesTarget =
+        !forceRestyle && (!!raw?.alreadyMatchesTarget || currentStyle === targetStyle)
     let gainRaw = Number(raw?.gain)
     let gain = Number.isFinite(gainRaw) ? Math.max(0, Math.min(1, gainRaw)) : 0.6
+
+    if (fit?.alreadyMatches && !forceRestyle) {
+        alreadyMatchesTarget = true
+        gain = 0
+    }
 
     // If gain is near zero, force alreadyMatchesTarget to true for consistency
     if (gain < 0.05) {
@@ -392,16 +410,28 @@ const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null) => {
         gain = 0
     }
 
+    // If the deterministic calibration says the image is close to the requested
+    // style, cap the gain. This catches cases where the LLM misjudges a
+    // well-edited image without blocking explicit "make it stronger" prompts.
+    if (fit && !alreadyMatchesTarget && !forceRestyle) {
+        if (fit.score >= 0.8) {
+            gain = Math.min(gain, 0.18)
+        } else if (fit.score >= 0.65) {
+            gain = Math.min(gain, 0.32)
+        }
+    }
+
     // If the client-provided features show the image is already well-exposed
-    // and has decent contrast, bias the gain down by 30% to prevent over-processing.
-    // This catches cases where the LLM misjudges a well-edited image.
+    // and has decent contrast, bias the gain down to prevent over-processing.
+    // This catches broad "make it premium" prompts on images that already read
+    // as finished even if they don't fit a named preset exactly.
     if (features && !alreadyMatchesTarget) {
         const lum = features?.luminance?.mean
         const con = typeof features?.contrast === "number" ? features.contrast : null
         const isWellExposed = lum != null && lum >= 0.36 && lum <= 0.64
         const hasGoodContrast = con != null && con >= 0.45
         if (isWellExposed && hasGoodContrast) {
-            gain = Math.max(0, gain * 0.7)
+            gain = Math.min(gain, gain * 0.7)
             if (gain < 0.05) {
                 alreadyMatchesTarget = true
                 gain = 0
@@ -416,7 +446,9 @@ const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null) => {
         sharpen: !!(raw?.imagekitAi?.sharpen ?? fallbackIntent.imagekitAi.sharpen),
         contrast: !!(raw?.imagekitAi?.contrast ?? false),
     }
-    const notes = String(raw?.notes || "").slice(0, 240)
+    const notes = alreadyMatchesTarget && gain === 0
+        ? `Image already matches the ${targetStyle} look, so no automatic changes were applied.`
+        : String(raw?.notes || "").slice(0, 240)
     return { currentStyle, targetStyle, alreadyMatchesTarget, gain, imagekitAi, notes }
 }
 
@@ -435,15 +467,15 @@ const computePlanForImage = async ({
     prompt,
     promptKey,
     projectId,
-    token,
+    neonAuth,
     apiKey,
 }) => {
     // 1) Exact cache lookup — content-addressable, fast O(1).
     try {
-        const cached = await fetchQuery(
-            api.editPlanCache.getPlan,
+        const cached = await runNeonQuery(
+            "editPlanCache.getPlan",
             { imageHash, promptKey, plannerVersion: PLANNER_VERSION },
-            { token },
+            { auth: neonAuth },
         )
         if (cached?.plan) {
             return { plan: cached.plan, features: cached.features, source: "cache", model: cached.model }
@@ -459,8 +491,8 @@ const computePlanForImage = async ({
     const { pHashHead, pHashTail } = pHashBuckets(pHash)
     if (pHash && pHashHead && pHashTail) {
         try {
-            const fuzzy = await fetchQuery(
-                api.editPlanCache.getPlanFuzzy,
+            const fuzzy = await runNeonQuery(
+                "editPlanCache.getPlanFuzzy",
                 {
                     pHash,
                     pHashHead,
@@ -469,7 +501,7 @@ const computePlanForImage = async ({
                     plannerVersion: PLANNER_VERSION,
                     threshold: 8,
                 },
-                { token },
+                { auth: neonAuth },
             )
             if (fuzzy?.plan) {
                 return {
@@ -503,7 +535,7 @@ const computePlanForImage = async ({
                 mimeType: fetched?.mimeType || "image/jpeg",
                 features,
             })
-            geminiVerdict = sanitizeGeminiVerdict(rawGeminiResponse, keywordIntent, features)
+            geminiVerdict = sanitizeGeminiVerdict(rawGeminiResponse, keywordIntent, features, prompt)
             source = "gemini"
         } catch (error) {
             console.warn("[edit-plan] Gemini failed for one image, falling back:", error?.message || error)
@@ -526,6 +558,7 @@ const computePlanForImage = async ({
             },
             keywordIntent,
             features,
+            prompt,
         )
 
     const plan = buildEditPlan({
@@ -539,8 +572,8 @@ const computePlanForImage = async ({
     })
 
     try {
-        await fetchMutation(
-            api.editPlanCache.savePlan,
+        await runNeonMutation(
+            "editPlanCache.savePlan",
             {
                 imageHash,
                 promptKey,
@@ -555,7 +588,7 @@ const computePlanForImage = async ({
                 model: source === "gemini" ? GEMINI_MODEL : undefined,
                 rawResponse: source === "gemini" ? rawGeminiResponse : undefined,
             },
-            { token },
+            { auth: neonAuth },
         )
     } catch (saveError) {
         console.warn("[edit-plan] cache save failed:", saveError?.message || saveError)
@@ -567,15 +600,15 @@ const computePlanForImage = async ({
 // Multi-image targeting: ask Gemini "which of these labeled images is the user
 // referring to?" The selection is cached by (canvasSignature, promptKey) so two
 // users with the same canvas + same prompt always pick the same target images.
-const resolveTargetLayers = async ({ layers, prompt, promptKey, token, apiKey }) => {
+const resolveTargetLayers = async ({ layers, prompt, promptKey, neonAuth, apiKey }) => {
     const canvasSignature = buildCanvasSignature(layers)
 
     // Cache lookup
     try {
-        const cached = await fetchQuery(
-            api.canvasTargetCache.getTargets,
+        const cached = await runNeonQuery(
+            "canvasTargetCache.getTargets",
             { canvasSignature, promptKey, plannerVersion: PLANNER_VERSION },
-            { token },
+            { auth: neonAuth },
         )
         if (cached?.targets) {
             return {
@@ -606,8 +639,8 @@ const resolveTargetLayers = async ({ layers, prompt, promptKey, token, apiKey })
 
     // Save selection so subsequent identical canvases get the same answer.
     try {
-        await fetchMutation(
-            api.canvasTargetCache.saveTargets,
+        await runNeonMutation(
+            "canvasTargetCache.saveTargets",
             {
                 canvasSignature,
                 promptKey,
@@ -618,7 +651,7 @@ const resolveTargetLayers = async ({ layers, prompt, promptKey, token, apiKey })
                 model: raw ? GEMINI_MODEL : undefined,
                 rawResponse: raw || undefined,
             },
-            { token },
+            { auth: neonAuth },
         )
     } catch (saveError) {
         console.warn("[edit-plan] target cache save failed:", saveError?.message || saveError)
@@ -629,7 +662,7 @@ const resolveTargetLayers = async ({ layers, prompt, promptKey, token, apiKey })
 
 export async function POST(request) {
     try {
-        const { userId, getToken, sessionClaims } = await auth()
+        const { userId } = await auth()
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
@@ -641,13 +674,7 @@ export async function POST(request) {
         const limited = rateLimitResponse(limitResult)
         if (limited) return limited
 
-        const token =
-            sessionClaims?.aud === "convex"
-                ? await getToken()
-                : await getToken({ template: "convex" })
-        if (!token) {
-            return NextResponse.json({ error: "Missing Convex auth token" }, { status: 500 })
-        }
+        const neonAuth = await getNeonAuthContext()
 
         const body = await request.json().catch(() => ({}))
         const projectId = body.projectId
@@ -684,7 +711,7 @@ export async function POST(request) {
                 needsConfirmation = false
                 targetingSource = "user-confirmed"
             } else {
-                const targeting = await resolveTargetLayers({ layers, prompt, promptKey, token, apiKey })
+                const targeting = await resolveTargetLayers({ layers, prompt, promptKey, neonAuth, apiKey })
                 targetIndexes = targeting.targetIndexes
                 needsConfirmation = targeting.needsConfirmation
                 targetingReason = targeting.reason
@@ -721,7 +748,7 @@ export async function POST(request) {
                         prompt,
                         promptKey,
                         projectId,
-                        token,
+                        neonAuth,
                         apiKey,
                     })
                     return { layerIndex, ...result }
@@ -751,12 +778,12 @@ export async function POST(request) {
             imageHash,
             pHash,
             features,
-            prompt,
-            promptKey,
-            projectId,
-            token,
-            apiKey,
-        })
+                prompt,
+                promptKey,
+                projectId,
+                neonAuth,
+                apiKey,
+            })
 
         return NextResponse.json({
             success: true,

@@ -1,10 +1,36 @@
 import { useAuth } from '@clerk/nextjs'
+import { useSubscription } from '@clerk/nextjs/experimental'
+import { api } from '@/lib/neon-api'
+import { useDatabaseQuery } from './useDatabaseQuery'
+
+const PRO_PLAN_SLUG = "pro"
+
+const hasActiveProSubscription = (subscription) => {
+    if (!subscription?.subscriptionItems?.length) return false
+    return subscription.subscriptionItems.some((item) => {
+        const status = String(item?.status || "").toLowerCase()
+        const slug = String(item?.plan?.slug || "").toLowerCase()
+        const hasBaseFee = Boolean(item?.plan?.hasBaseFee)
+        return status === "active" && (slug === PRO_PLAN_SLUG || hasBaseFee)
+    })
+}
 
 const usePlanAccess = () => {
 
-    const { has } = useAuth()
+    const { isLoaded, isSignedIn, has } = useAuth()
+    const { data: subscription } = useSubscription({
+        enabled: Boolean(isLoaded && isSignedIn),
+        keepPreviousData: true,
+    })
+    const { data: currentUser } = useDatabaseQuery(
+        api.users.getCurrentUser,
+        isLoaded && isSignedIn ? {} : "skip"
+    )
 
-    const isPro = has?.({ plan: "pro" }) || false
+    const isPro =
+        has?.({ plan: PRO_PLAN_SLUG }) ||
+        currentUser?.plan === PRO_PLAN_SLUG ||
+        hasActiveProSubscription(subscription)
     const isFree = !isPro
 
     const planAccess = {
@@ -12,6 +38,7 @@ const usePlanAccess = () => {
         resize: true,
         crop: true,
         adjust: true,
+        mask: true,
 
         // Pro only tools
         text: isPro,

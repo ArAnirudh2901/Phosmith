@@ -172,7 +172,12 @@ export const classifyCurrentStyle = (features) => {
     // Black & white check first — saturation collapses to near-zero
     if (saturation.mean < 0.06) return "bw-classic"
     // Cinematic: moderate-to-low brightness, warm, lower saturation, decent contrast
-    if (luminance.mean < 0.5 && warmth > 0.04 && saturation.mean < 0.45 && contrast > 0.5) {
+    if (
+        luminance.mean < 0.55 &&
+        saturation.mean < 0.48 &&
+        contrast > 0.48 &&
+        (warmth > 0.02 || luminance.p05 < 0.12)
+    ) {
         return "cinematic"
     }
     // Vintage: lifted blacks (high shadows), faded contrast, warm
@@ -186,4 +191,148 @@ export const classifyCurrentStyle = (features) => {
     // Warm portrait: skin-tone heavy
     if (features.skinToneFraction > 0.18 && warmth > 0.02) return "warm-portrait"
     return "neutral"
+}
+
+const isFiniteNumber = (value) => Number.isFinite(Number(value))
+
+const inRange = (value, min, max) =>
+    isFiniteNumber(value) && Number(value) >= min && Number(value) <= max
+
+const atLeast = (value, min) =>
+    isFiniteNumber(value) && Number(value) >= min
+
+const atMost = (value, max) =>
+    isFiniteNumber(value) && Number(value) <= max
+
+const scoreChecks = (checks, minPasses) => {
+    const total = checks.length
+    const passed = checks.filter(Boolean).length
+    return {
+        passed,
+        total,
+        score: total ? passed / total : 0,
+        enough: total ? passed >= minPasses : false,
+    }
+}
+
+// Deterministic target-style fit check used after model analysis. This is the
+// guardrail that prevents repeated prompts from pushing an already-finished
+// image into an overprocessed look.
+export const getStyleFit = (features, targetStyle = "neutral") => {
+    const currentStyle = classifyCurrentStyle(features)
+    if (!features) {
+        return {
+            currentStyle,
+            targetStyle,
+            alreadyMatches: false,
+            score: 0,
+            passed: 0,
+            total: 0,
+        }
+    }
+
+    const lum = features.luminance || {}
+    const sat = features.saturation || {}
+    const warmth = Number(features.warmth || 0)
+    const contrast = Number(features.contrast || 0)
+    const highlightClipping = Number(features.highlightClipping || 0)
+    const shadowClipping = Number(features.shadowClipping || 0)
+    const edgeDensity = Number(features.edgeDensity || 0)
+    const skinToneFraction = Number(features.skinToneFraction || 0)
+
+    const checksByStyle = {
+        cinematic: {
+            minPasses: 5,
+            checks: [
+                inRange(lum.mean, 0.24, 0.58),
+                inRange(sat.mean, 0.08, 0.48),
+                atLeast(contrast, 0.42),
+                inRange(warmth, -0.08, 0.18),
+                atMost(highlightClipping, 0.04),
+                atMost(shadowClipping, 0.12),
+            ],
+        },
+        vintage: {
+            minPasses: 4,
+            checks: [
+                atLeast(lum.p05, 0.08),
+                atMost(contrast, 0.6),
+                atMost(sat.mean, 0.5),
+                atLeast(warmth, -0.03),
+                atMost(highlightClipping, 0.05),
+            ],
+        },
+        editorial: {
+            minPasses: 4,
+            checks: [
+                inRange(lum.mean, 0.34, 0.68),
+                inRange(sat.mean, 0.18, 0.55),
+                atLeast(contrast, 0.5),
+                atMost(highlightClipping, 0.035),
+                atLeast(edgeDensity, 0.08),
+            ],
+        },
+        vibrant: {
+            minPasses: 4,
+            checks: [
+                atLeast(sat.mean, 0.46),
+                inRange(lum.mean, 0.35, 0.72),
+                atLeast(contrast, 0.42),
+                atMost(highlightClipping, 0.04),
+                atMost(shadowClipping, 0.1),
+            ],
+        },
+        studio: {
+            minPasses: 4,
+            checks: [
+                inRange(lum.mean, 0.5, 0.78),
+                atMost(Math.abs(warmth), 0.08),
+                inRange(sat.mean, 0.1, 0.45),
+                atMost(shadowClipping, 0.04),
+                atMost(highlightClipping, 0.04),
+            ],
+        },
+        "warm-portrait": {
+            minPasses: 4,
+            checks: [
+                atLeast(skinToneFraction, 0.12),
+                inRange(lum.mean, 0.34, 0.72),
+                inRange(warmth, 0.01, 0.18),
+                atMost(highlightClipping, 0.04),
+                atMost(sat.mean, 0.55),
+            ],
+        },
+        "bw-classic": {
+            minPasses: 3,
+            checks: [
+                atMost(sat.mean, 0.08),
+                inRange(lum.mean, 0.28, 0.72),
+                atLeast(contrast, 0.38),
+                atMost(highlightClipping, 0.05),
+            ],
+        },
+        neutral: {
+            minPasses: 4,
+            checks: [
+                inRange(lum.mean, 0.34, 0.68),
+                inRange(sat.mean, 0.08, 0.55),
+                inRange(contrast, 0.35, 0.75),
+                atMost(highlightClipping, 0.04),
+                atMost(shadowClipping, 0.08),
+            ],
+        },
+    }
+
+    const definition = checksByStyle[targetStyle] || checksByStyle.neutral
+    const result = scoreChecks(definition.checks, definition.minPasses)
+    const exactStyleMatch = currentStyle === targetStyle && targetStyle !== "neutral"
+
+    return {
+        currentStyle,
+        targetStyle,
+        alreadyMatches: exactStyleMatch || result.enough,
+        score: result.score,
+        passed: result.passed,
+        total: result.total,
+    }
 }

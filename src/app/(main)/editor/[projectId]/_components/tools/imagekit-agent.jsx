@@ -6,7 +6,10 @@ import {
   Bot,
   BrainCircuit,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
+  GripHorizontal,
   History,
   Image as ImageIcon,
   Loader2,
@@ -23,8 +26,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useCanvas } from "../../../../../../../context/context";
-import { useConvexMutation, useConvexQuery } from "../../../../../../../hooks/useConvexQuery";
-import { api } from "../../../../../../../convex/_generated/api";
+import { useDatabaseMutation, useDatabaseQuery } from "../../../../../../../hooks/useDatabaseQuery";
+import { api } from "@/lib/neon-api";
 import {
   buildImageKitAiTransformUrl,
   getCanvasActiveImage,
@@ -569,6 +572,9 @@ const truncate = (value, length = 70) => {
   return text.length > length ? `${text.slice(0, length - 1)}...` : text;
 };
 
+const compactPayload = (payload) =>
+  Object.fromEntries(Object.entries(payload || {}).filter(([, value]) => value !== undefined));
+
 const analyzeActiveImage = (image, project) => {
   const element = getImageElement(image);
   const width = image?.width || element?.naturalWidth || project?.width || 0;
@@ -752,7 +758,7 @@ const AgentChangeList = ({ plan, enabledMap = {}, onToggle, compact = false, int
         animate={{ opacity: 1, y: 0 }}
       >
         <SlidersHorizontal className="h-3.5 w-3.5" />
-        No adjustable changes in this prompt.
+        No changes needed for this prompt.
       </motion.div>
     );
   }
@@ -816,8 +822,9 @@ const AgentThinkingRow = ({ prompt, autoPreview = true }) => (
   </motion.div>
 );
 
-const MessageBubble = ({ message }) => {
+const MessageBubble = ({ message, canUndoPreview = false, onUndoPreview, isApplying = false }) => {
   const isUser = message.role === "user";
+  const hasUndoablePreview = !isUser && Boolean(message.previewToken);
 
   return (
     <motion.div
@@ -839,6 +846,20 @@ const MessageBubble = ({ message }) => {
             interactive={false}
           />
         )}
+        {hasUndoablePreview && (
+          <div className="agent-message-actions">
+            <button
+              type="button"
+              className="agent-message-action"
+              onClick={() => onUndoPreview?.(message)}
+              disabled={!canUndoPreview || isApplying}
+              title={canUndoPreview ? "Undo this whole preview" : "This preview is no longer active"}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              {canUndoPreview ? "Undo preview" : "Preview settled"}
+            </button>
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -846,11 +867,19 @@ const MessageBubble = ({ message }) => {
 
 const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor }) => {
   const { canvasEditor, setProcessingMessage } = useCanvas();
-  const { mutate: updateProject } = useConvexMutation(api.projects.updateProject);
-  const { mutate: createProjectRevision } = useConvexMutation(api.projects.createProjectRevision);
-  const { mutate: restoreProjectRevision } = useConvexMutation(api.projects.restoreProjectRevision);
-  const { data: revisions = [] } = useConvexQuery(
+  const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject);
+  const { mutate: createProjectRevision } = useDatabaseMutation(api.projects.createProjectRevision);
+  const { mutate: restoreProjectRevision } = useDatabaseMutation(api.projects.restoreProjectRevision);
+  const { mutate: createOrUpdateAgentEditSet } = useDatabaseMutation(api.agentEditSets.createOrUpdateDraft);
+  const { mutate: markAgentEditSetApplied } = useDatabaseMutation(api.agentEditSets.markApplied);
+  const { mutate: markAgentEditSetPending } = useDatabaseMutation(api.agentEditSets.markPending);
+  const { mutate: markAgentEditSetRemoved } = useDatabaseMutation(api.agentEditSets.markRemoved);
+  const { data: revisions = [] } = useDatabaseQuery(
     api.projects.getProjectRevisions,
+    project?._id ? { projectId: project._id, limit: 12 } : "skip"
+  );
+  const { data: agentEditSets = [] } = useDatabaseQuery(
+    api.agentEditSets.listForProject,
     project?._id ? { projectId: project._id, limit: 12 } : "skip"
   );
   // Default prompt is shown as a placeholder (not a pre-filled value). When the
@@ -963,12 +992,47 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [confirmedLayerIds, setConfirmedLayerIds] = useState([]);
   // Per-layer plans for multi-target edits. Each entry: { layerIndex, layerName, canvasObject, plan }.
   const [multiLayerPlans, setMultiLayerPlans] = useState([]);
+  const [activeEditSetId, setActiveEditSetId] = useState(null);
   const [, setImageRevision] = useState(0);
   const [upscaleComparison, setUpscaleComparison] = useState(null);
   const [isCompareOpen, setIsCompareOpen] = useState(false);
   const liveSnapshotRef = useRef(null);
+  const livePreviewTokenRef = useRef(null);
+  const previewTokenSerialRef = useRef(0);
+  const [livePreviewToken, setLivePreviewToken] = useState(null);
   const chatEndRef = useRef(null);
   const previewPromiseRef = useRef(null);
+
+  // Resizable Edits Section State
+  const [editsHeight, setEditsHeight] = useState(null);
+  const [isEditsMinimized, setIsEditsMinimized] = useState(false);
+  const editsDragStartY = useRef(null);
+  const editsDragStartHeight = useRef(null);
+  const editsContainerRef = useRef(null);
+
+  const handleEditsDragMove = useCallback((e) => {
+    if (editsDragStartY.current === null || editsDragStartHeight.current === null) return;
+    const dy = editsDragStartY.current - e.clientY;
+    const newHeight = Math.max(64, editsDragStartHeight.current + dy);
+    setEditsHeight(newHeight);
+    setIsEditsMinimized(newHeight < 120);
+  }, []);
+
+  const handleEditsDragEnd = useCallback(() => {
+    editsDragStartY.current = null;
+    document.removeEventListener("mousemove", handleEditsDragMove);
+    document.removeEventListener("mouseup", handleEditsDragEnd);
+  }, [handleEditsDragMove]);
+
+  const handleEditsDragStart = useCallback((e) => {
+    e.preventDefault();
+    editsDragStartY.current = e.clientY;
+    if (editsContainerRef.current) {
+      editsDragStartHeight.current = editsContainerRef.current.getBoundingClientRect().height;
+    }
+    document.addEventListener("mousemove", handleEditsDragMove);
+    document.addEventListener("mouseup", handleEditsDragEnd);
+  }, [handleEditsDragMove, handleEditsDragEnd]);
 
   useEffect(() => {
     if (!canvasEditor) return undefined;
@@ -1028,6 +1092,18 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     return `${enabledCount}/${totalCount} changes enabled`;
   }, [activePlan, enabledChanges]);
 
+  const startLivePreviewSession = useCallback(() => {
+    const token = `preview-${Date.now()}-${previewTokenSerialRef.current++}`;
+    livePreviewTokenRef.current = token;
+    setLivePreviewToken(token);
+    return token;
+  }, []);
+
+  const clearLivePreviewSession = useCallback(() => {
+    livePreviewTokenRef.current = null;
+    setLivePreviewToken(null);
+  }, []);
+
   const restoreLiveSnapshot = async ({ keepSnapshot = false, pushHistory = true } = {}) => {
     if (!canvasEditor || !liveSnapshotRef.current) return;
     const snapshot = liveSnapshotRef.current;
@@ -1035,8 +1111,81 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     canvasEditor.discardActiveObject?.();
     canvasEditor.requestRenderAll();
     liveSnapshotRef.current = keepSnapshot ? snapshot : null;
+    if (!keepSnapshot) clearLivePreviewSession();
     if (pushHistory) canvasEditor.__pushHistoryState?.();
     setImageRevision((value) => value + 1);
+  };
+
+  const serializeMultiLayerEditSet = (entries = multiLayerPlans) => ({
+    mode: "multi-layer",
+    entries: entries.map(({ layerIndex, layerName, plan }) => ({
+      layerIndex,
+      layerName,
+      plan,
+    })),
+  });
+
+  const getMultiLayerChangeDetails = (entries = multiLayerPlans) =>
+    entries.map((entry) => ({
+      id: `layer:${entry.layerIndex}`,
+      type: "layer",
+      label: entry.layerName,
+      value: entry.plan?.title || "Agent edit",
+      enabled: true,
+    }));
+
+  const persistAgentEditSetDraft = async ({
+    editSetId = activeEditSetId,
+    plan = activePlan,
+    multiPlans = multiLayerPlans,
+    prompt,
+    enabledMap = enabledChanges,
+    valueMap = effectValues,
+    beforeCanvasState = liveSnapshotRef.current || undefined,
+    afterCanvasState = canvasEditor ? serializeCanvasState(canvasEditor) : undefined,
+    currentImageUrlBefore,
+    currentImageUrlAfter,
+  } = {}) => {
+    if (!project?._id) return null;
+
+    const isMultiLayerSet = !plan && Array.isArray(multiPlans) && multiPlans.length > 0;
+    const storedPlan = isMultiLayerSet ? serializeMultiLayerEditSet(multiPlans) : plan;
+    if (!storedPlan) return null;
+
+    const effectivePlan = plan
+      ? buildEffectivePlan(plan, enabledMap, plan.sourceUrl || sourceUrl, valueMap)
+      : { mode: "multi-layer" };
+    const promptText =
+      prompt ||
+      plan?.userPrompt ||
+      plan?.prompt ||
+      multiPlans?.[0]?.plan?.userPrompt ||
+      multiPlans?.[0]?.plan?.prompt ||
+      "Agent edit";
+    const changes = plan
+      ? getEnabledChangeDetails(plan, enabledMap)
+      : getMultiLayerChangeDetails(multiPlans);
+
+    return await createOrUpdateAgentEditSet(compactPayload({
+      editSetId: editSetId || undefined,
+      projectId: project._id,
+      prompt: promptText,
+      title: plan?.title || (isMultiLayerSet ? "Layer edit set" : "Agent edit set"),
+      summary: plan?.summary || (isMultiLayerSet ? `${multiPlans.length} layer${multiPlans.length === 1 ? "" : "s"} edited` : ""),
+      plan: storedPlan,
+      enabledChanges: enabledMap,
+      effectValues: valueMap,
+      effectivePlan,
+      changes,
+      beforeCanvasState,
+      afterCanvasState,
+      currentImageUrlBefore: currentImageUrlBefore || plan?.sourceUrl || sourceUrl || project.currentImageUrl || project.originalImageUrl,
+      currentImageUrlAfter: currentImageUrlAfter || getSourceUrl(getCanvasActiveImage(canvasEditor), project) || effectivePlan?.url,
+      activeTransformationsBefore: project.activeTransformations || "",
+      activeTransformationsAfter: Array.isArray(effectivePlan?.imageKitTransforms)
+        ? effectivePlan.imageKitTransforms.join(",")
+        : project.activeTransformations || "",
+    }));
   };
 
   const previewPlanOnCanvas = async (plan, changeMap = enabledChanges, valueMap = effectValues) => {
@@ -1053,6 +1202,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     if (!image || !baseUrl) throw new Error("No active image to preview");
 
     liveSnapshotRef.current = serializeCanvasState(canvasEditor);
+    const previewToken = startLivePreviewSession();
     const effectivePlan = buildEffectivePlan(plan, changeMap, baseUrl, valueMap);
     let targetImage = image;
 
@@ -1118,6 +1268,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     canvasEditor.requestRenderAll();
     canvasEditor.__pushHistoryState?.();
     setImageRevision((value) => value + 1);
+    return previewToken;
     })();
 
     previewPromiseRef.current = previewPromise;
@@ -1130,14 +1281,80 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     }
   };
 
+  const applyPlanToCurrentImage = async (plan, changeMap = null, valueMap = null) => {
+    if (!canvasEditor || !plan) throw new Error("No edit plan to apply");
+
+    const image =
+      getCanvasActiveImage(canvasEditor) ||
+      (canvasEditor.getObjects?.() || []).find(isVisibleImageOnCanvas);
+    const baseUrl = plan?.sourceUrl || getSourceUrl(image, project);
+    if (!image || !baseUrl) throw new Error("No active image to apply this edit set to");
+
+    const effectivePlan = buildEffectivePlan(
+      plan,
+      changeMap || createEnabledMap(plan),
+      baseUrl,
+      valueMap || createValueMap(plan)
+    );
+    let targetImage = image;
+
+    if (effectivePlan?.url && effectivePlan.url !== getSourceUrl(image, project)) {
+      let readyUrl = effectivePlan.url;
+
+      if (hasImageKitAiTransform(effectivePlan.imageKitTransforms)) {
+        const clientCached = getCachedTransformUrl(effectivePlan.url);
+        if (clientCached) {
+          readyUrl = clientCached;
+        } else {
+          const serverCached = await checkServerTransformCache(effectivePlan.url);
+          if (serverCached) {
+            readyUrl = serverCached;
+            setCachedTransformUrl(effectivePlan.url, serverCached);
+          } else {
+            try {
+              readyUrl = await waitForImageKitUrl(effectivePlan.url, {
+                maxAttempts: 10,
+                retryDelayMs: 4000,
+                onStatus: (attempt, total) => {
+                  setProcessingMessage?.(`ImageKit AI processing (${attempt}/${total})...`);
+                },
+              });
+              setCachedTransformUrl(effectivePlan.url, readyUrl);
+              writeServerTransformCache(effectivePlan.url, readyUrl);
+            } finally {
+              setProcessingMessage?.(null);
+            }
+          }
+        }
+      }
+
+      targetImage = await replaceCanvasImageFromUrl(canvasEditor, image, readyUrl, {
+        preserveDisplayedBounds: true,
+        placement: "fit",
+      });
+    }
+
+    applyProfessionalFilters(targetImage, effectivePlan?.fabricAdjustments);
+    canvasEditor.setActiveObject?.(targetImage);
+    canvasEditor.requestRenderAll();
+
+    return {
+      effectivePlan,
+      currentImageUrl: getSourceUrl(targetImage, project) || effectivePlan?.url || baseUrl,
+      activeTransformations: effectivePlan?.imageKitTransforms?.join(",") || "",
+    };
+  };
+
   // Apply each layer's plan's Fabric adjustments to its own canvas image. Used
   // by the multi-target path — bypasses previewPlanOnCanvas (which assumes a
   // single active image).
-  const applyMultiLayerPlansToCanvas = (plans) => {
-    if (!canvasEditor || !Array.isArray(plans) || plans.length === 0) return;
-    if (!liveSnapshotRef.current) {
-      liveSnapshotRef.current = serializeCanvasState(canvasEditor);
+  const applyMultiLayerPlansToCanvas = async (plans) => {
+    if (!canvasEditor || !Array.isArray(plans) || plans.length === 0) return null;
+    if (liveSnapshotRef.current) {
+      await restoreLiveSnapshot({ keepSnapshot: false, pushHistory: false });
     }
+    liveSnapshotRef.current = serializeCanvasState(canvasEditor);
+    const previewToken = startLivePreviewSession();
     for (const entry of plans) {
       const target = entry?.canvasObject;
       const adjustments = entry?.plan?.fabricAdjustments || {};
@@ -1147,6 +1364,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     canvasEditor.requestRenderAll();
     canvasEditor.__pushHistoryState?.();
     setImageRevision((value) => value + 1);
+    return previewToken;
   };
 
   const requestPlan = async (prompt, options = {}) => {
@@ -1270,7 +1488,24 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         }
 
         setMultiLayerPlans(layerPlanEntries);
-        applyMultiLayerPlansToCanvas(layerPlanEntries);
+        const previewToken = await applyMultiLayerPlansToCanvas(layerPlanEntries);
+        let editSetId = null;
+        try {
+          editSetId = await persistAgentEditSetDraft({
+            editSetId: null,
+            plan: null,
+            multiPlans: layerPlanEntries,
+            prompt: cleanPrompt,
+            beforeCanvasState: liveSnapshotRef.current || undefined,
+            afterCanvasState: serializeCanvasState(canvasEditor),
+            currentImageUrlBefore: latestUrl,
+            currentImageUrlAfter: getSourceUrl(getCanvasActiveImage(canvasEditor), project) || latestUrl,
+          });
+          setActiveEditSetId(editSetId);
+        } catch (persistError) {
+          console.warn("[agent] failed to persist edit set:", persistError?.message || persistError);
+          toast.error("Preview ready, but I could not store this edit set.");
+        }
 
         const names = layerPlanEntries.map((e) => e.layerName).join(", ");
         setMessages((current) => [
@@ -1278,6 +1513,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           newMessage(
             "assistant",
             `Applied to ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}: ${names}.`,
+            { previewToken, editSetId }
           ),
         ]);
         toast.success(`Edited ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}`, { id: toastId });
@@ -1366,8 +1602,29 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       setEnabledChanges(nextEnabledChanges);
       setEffectValues(nextValueMap);
 
+      let previewToken = null;
       if (autoPreview) {
-        await previewPlanOnCanvas(plan, nextEnabledChanges, nextValueMap);
+        previewToken = await previewPlanOnCanvas(plan, nextEnabledChanges, nextValueMap);
+      }
+      let editSetId = null;
+      try {
+        editSetId = await persistAgentEditSetDraft({
+          editSetId: null,
+          plan,
+          prompt: cleanPrompt,
+          enabledMap: nextEnabledChanges,
+          valueMap: nextValueMap,
+          beforeCanvasState: liveSnapshotRef.current || serializeCanvasState(canvasEditor),
+          afterCanvasState: autoPreview ? serializeCanvasState(canvasEditor) : undefined,
+          currentImageUrlBefore: latestUrl,
+          currentImageUrlAfter: autoPreview
+            ? getSourceUrl(getCanvasActiveImage(canvasEditor), project) || latestUrl
+            : latestUrl,
+        });
+        setActiveEditSetId(editSetId);
+      } catch (persistError) {
+        console.warn("[agent] failed to persist edit set:", persistError?.message || persistError);
+        toast.error("Preview ready, but I could not store this edit set.");
       }
 
       setMessages((current) => [
@@ -1377,7 +1634,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           autoPreview
             ? `${plan.title}: preview is live on the canvas.`
             : `${plan.title}: the edit plan is ready to preview.`,
-          { plan, autoPreview, enabledChanges: nextEnabledChanges }
+          { plan, autoPreview, enabledChanges: nextEnabledChanges, previewToken, editSetId }
         ),
       ]);
       toast.success(autoPreview ? "Preview ready" : "Plan ready", { id: toastId });
@@ -1443,12 +1700,30 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         changes: enabledChangeDetails,
       });
 
+      if (activeEditSetId) {
+        await markAgentEditSetApplied(compactPayload({
+          editSetId: activeEditSetId,
+          beforeCanvasState: beforeSnapshot,
+          afterCanvasState: canvasState,
+          currentImageUrlBefore: activePlan.sourceUrl || sourceUrl,
+          currentImageUrlAfter: effectivePlan?.url || activePlan.sourceUrl || sourceUrl,
+          activeTransformationsBefore: project.activeTransformations || "",
+          activeTransformationsAfter: effectivePlan?.imageKitTransforms?.join(",") || "",
+          enabledChanges,
+          effectValues,
+          effectivePlan,
+          changes: enabledChangeDetails,
+        }));
+      }
+
       liveSnapshotRef.current = null;
+      clearLivePreviewSession();
       toast.success("Agent edit saved", { id: toastId });
       setMessages((current) => [...current, newMessage("assistant", "Saved. The live edit is now part of this project.")]);
       setActivePlan(null);
       setEffectValues({});
       setEnabledChanges({});
+      setActiveEditSetId(null);
     } catch (error) {
       toast.error(error?.message || "Failed to save edit", { id: toastId });
     } finally {
@@ -1456,11 +1731,120 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     }
   };
 
-  const revertLiveEdit = async () => {
-    if (!liveSnapshotRef.current) return;
+  const commitMultiLayerEdit = async () => {
+    if (!canvasEditor || !project || multiLayerPlans.length === 0) return;
+    const toastId = toast.loading("Applying edit set");
+    setIsApplying(true);
+
+    try {
+      const canvasState = serializeCanvasState(canvasEditor);
+      const currentImageUrl = getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.currentImageUrl || project.originalImageUrl;
+      const beforeSnapshot = liveSnapshotRef.current;
+      const changes = getMultiLayerChangeDetails(multiLayerPlans);
+
+      if (beforeSnapshot) {
+        await createProjectRevision({
+          projectId: project._id,
+          canvasState: beforeSnapshot,
+          width: project.width,
+          height: project.height,
+          currentImageUrl: project.currentImageUrl || project.originalImageUrl,
+          activeTransformations: project.activeTransformations || "",
+          title: "Before layer edit set",
+          summary: "Canvas state before the agent layer edit set was applied.",
+          changes,
+        });
+      }
+
+      await updateProject({
+        projectId: project._id,
+        canvasState,
+        ...(currentImageUrl ? { currentImageUrl } : {}),
+        activeTransformations: project.activeTransformations || "",
+      });
+
+      await createProjectRevision({
+        projectId: project._id,
+        canvasState,
+        width: project.width,
+        height: project.height,
+        currentImageUrl,
+        activeTransformations: project.activeTransformations || "",
+        title: "Layer edit set",
+        summary: `${multiLayerPlans.length} layer${multiLayerPlans.length === 1 ? "" : "s"} applied by the agent.`,
+        changes,
+      });
+
+      if (activeEditSetId) {
+        await markAgentEditSetApplied(compactPayload({
+          editSetId: activeEditSetId,
+          beforeCanvasState: beforeSnapshot,
+          afterCanvasState: canvasState,
+          currentImageUrlBefore: project.currentImageUrl || project.originalImageUrl,
+          currentImageUrlAfter: currentImageUrl,
+          activeTransformationsBefore: project.activeTransformations || "",
+          activeTransformationsAfter: project.activeTransformations || "",
+          effectivePlan: { mode: "multi-layer" },
+          changes,
+        }));
+      }
+
+      liveSnapshotRef.current = null;
+      clearLivePreviewSession();
+      setMultiLayerPlans([]);
+      setActiveEditSetId(null);
+      await canvasEditor.__saveCanvasState?.({ immediate: true });
+      toast.success("Edit set applied", { id: toastId });
+      setMessages((current) => [...current, newMessage("assistant", "Applied. This edit set is saved and can be removed later.")]);
+    } catch (error) {
+      toast.error(error?.message || "Failed to apply edit set", { id: toastId });
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  const revertLiveEdit = async (options = {}) => {
+    if (!liveSnapshotRef.current) return false;
+    const addMessage = options?.addMessage !== false;
+    const editSetIdToKeep = activeEditSetId;
+    if (editSetIdToKeep) {
+      try {
+        const draftId = await persistAgentEditSetDraft({
+          editSetId: editSetIdToKeep,
+          plan: activePlan,
+          multiPlans: multiLayerPlans,
+          beforeCanvasState: liveSnapshotRef.current,
+          afterCanvasState: serializeCanvasState(canvasEditor),
+        });
+        await markAgentEditSetPending(compactPayload({
+          editSetId: draftId || editSetIdToKeep,
+          afterCanvasState: serializeCanvasState(canvasEditor),
+          enabledChanges,
+          effectValues,
+          effectivePlan: activePlan
+            ? buildEffectivePlan(activePlan, enabledChanges, activePlan.sourceUrl || sourceUrl, effectValues)
+            : { mode: "multi-layer" },
+          changes: activePlan
+            ? getEnabledChangeDetails(activePlan, enabledChanges)
+            : getMultiLayerChangeDetails(multiLayerPlans),
+        }));
+      } catch (persistError) {
+        console.warn("[agent] failed to update pending edit set:", persistError?.message || persistError);
+      }
+    }
     await restoreLiveSnapshot();
+    setActivePlan(null);
+    setEffectValues({});
+    setEnabledChanges({});
+    setMultiLayerPlans([]);
+    setUpscaleComparison(null);
+    setIsCompareOpen(false);
+    setActiveEditSetId(null);
     toast.message("Live preview reverted");
-    setMessages((current) => [...current, newMessage("assistant", "Reverted the preview. The saved project was not changed.")]);
+    if (addMessage) {
+      setMessages((current) => [...current, newMessage("assistant", "Reverted the preview. The saved project was not changed.")]);
+    }
+    return true;
   };
 
   const copyUrl = async () => {
@@ -1511,9 +1895,11 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     try {
       const restored = await restoreProjectRevision({ revisionId: revision._id });
       liveSnapshotRef.current = null;
+      clearLivePreviewSession();
       setActivePlan(null);
       setEnabledChanges({});
       setEffectValues({});
+      setActiveEditSetId(null);
 
       await restoreCanvasFromHistory(canvasEditor, restored.canvasState, {
         imageUrl: restored.currentImageUrl || project.currentImageUrl || project.originalImageUrl,
@@ -1530,6 +1916,200 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       toast.error(error?.message || "Failed to restore version", { id: toastId });
     } finally {
       setRestoringRevisionId(null);
+    }
+  };
+
+  const applyStoredEditSet = async (editSet) => {
+    if (!editSet?._id || !canvasEditor || !project) return;
+    const canRebuildFromPlan = editSet.plan && editSet.plan?.mode !== "multi-layer";
+    if (!editSet.afterCanvasState && !canRebuildFromPlan) {
+      toast.error("This edit set does not have an applied state yet.");
+      return;
+    }
+
+    const toastId = toast.loading("Applying saved edit set");
+    setIsApplying(true);
+
+    try {
+      if (liveSnapshotRef.current) {
+        await restoreLiveSnapshot({ keepSnapshot: false, pushHistory: false });
+      }
+
+      const beforeState = serializeCanvasState(canvasEditor);
+      const beforeImageUrl = getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.currentImageUrl || project.originalImageUrl;
+
+      await createProjectRevision({
+        projectId: project._id,
+        canvasState: beforeState,
+        width: project.width,
+        height: project.height,
+        currentImageUrl: beforeImageUrl,
+        activeTransformations: project.activeTransformations || "",
+        title: `Before ${editSet.title || "agent edit set"}`,
+        summary: "Canvas state before applying a stored agent edit set.",
+        prompt: editSet.prompt || "",
+        changes: editSet.changes || [],
+      });
+
+      let currentImageUrl = editSet.currentImageUrlAfter;
+      let activeTransformations = editSet.activeTransformationsAfter || "";
+      let effectivePlan = editSet.effectivePlan;
+
+      if (editSet.afterCanvasState) {
+        await restoreCanvasFromHistory(canvasEditor, editSet.afterCanvasState, {
+          imageUrl: editSet.currentImageUrlAfter || project.currentImageUrl || project.originalImageUrl,
+          hydrateOptions: {
+            forcePrimaryImageUrl: Boolean(editSet.currentImageUrlAfter),
+            canvasSize: { width: project.width, height: project.height },
+          },
+        });
+      } else {
+        const storedPlan = {
+          ...editSet.plan,
+          sourceUrl: editSet.plan?.sourceUrl || editSet.currentImageUrlBefore || beforeImageUrl,
+        };
+        const result = await applyPlanToCurrentImage(
+          storedPlan,
+          editSet.enabledChanges || createEnabledMap(storedPlan),
+          editSet.effectValues || createValueMap(storedPlan)
+        );
+        currentImageUrl = result.currentImageUrl;
+        activeTransformations = result.activeTransformations;
+        effectivePlan = result.effectivePlan;
+      }
+
+      canvasEditor.__pushHistoryState?.();
+      const canvasState = serializeCanvasState(canvasEditor);
+      currentImageUrl = currentImageUrl || getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.currentImageUrl || project.originalImageUrl;
+
+      await updateProject(compactPayload({
+        projectId: project._id,
+        canvasState,
+        currentImageUrl,
+        activeTransformations,
+      }));
+
+      await createProjectRevision({
+        projectId: project._id,
+        canvasState,
+        width: project.width,
+        height: project.height,
+        currentImageUrl,
+        activeTransformations,
+        title: editSet.title || "Agent edit set",
+        summary: editSet.summary || "Applied stored agent edit set.",
+        prompt: editSet.prompt || "",
+        changes: editSet.changes || [],
+      });
+
+      await markAgentEditSetApplied(compactPayload({
+        editSetId: editSet._id,
+        beforeCanvasState: beforeState,
+        afterCanvasState: canvasState,
+        currentImageUrlBefore: beforeImageUrl,
+        currentImageUrlAfter: currentImageUrl,
+        activeTransformationsBefore: project.activeTransformations || "",
+        activeTransformationsAfter: activeTransformations,
+        enabledChanges: editSet.enabledChanges,
+        effectValues: editSet.effectValues,
+        effectivePlan,
+        changes: editSet.changes,
+      }));
+
+      liveSnapshotRef.current = null;
+      clearLivePreviewSession();
+      setActivePlan(null);
+      setEnabledChanges({});
+      setEffectValues({});
+      setMultiLayerPlans([]);
+      setActiveEditSetId(null);
+      setImageRevision((value) => value + 1);
+      await canvasEditor.__saveCanvasState?.({ immediate: true });
+      toast.success("Edit set applied", { id: toastId });
+    } catch (error) {
+      toast.error(error?.message || "Failed to apply edit set", { id: toastId });
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  const removeStoredEditSet = async (editSet) => {
+    if (!editSet?._id || !canvasEditor || !project) return;
+    if (!editSet.beforeCanvasState) {
+      toast.error("This edit set does not have a stored before state.");
+      return;
+    }
+
+    const toastId = toast.loading("Removing saved edit set");
+    setIsApplying(true);
+
+    try {
+      if (liveSnapshotRef.current) {
+        await restoreLiveSnapshot({ keepSnapshot: false, pushHistory: false });
+      }
+
+      const currentState = serializeCanvasState(canvasEditor);
+      const currentImageUrl = getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.currentImageUrl || project.originalImageUrl;
+
+      await createProjectRevision({
+        projectId: project._id,
+        canvasState: currentState,
+        width: project.width,
+        height: project.height,
+        currentImageUrl,
+        activeTransformations: project.activeTransformations || "",
+        title: `Before removing ${editSet.title || "agent edit set"}`,
+        summary: "Canvas state before removing a stored agent edit set.",
+        prompt: editSet.prompt || "",
+        changes: editSet.changes || [],
+      });
+
+      await restoreCanvasFromHistory(canvasEditor, editSet.beforeCanvasState, {
+        imageUrl: editSet.currentImageUrlBefore || project.currentImageUrl || project.originalImageUrl,
+        hydrateOptions: {
+          forcePrimaryImageUrl: Boolean(editSet.currentImageUrlBefore),
+          canvasSize: { width: project.width, height: project.height },
+        },
+      });
+      canvasEditor.__pushHistoryState?.();
+      const canvasState = serializeCanvasState(canvasEditor);
+      const restoredImageUrl = editSet.currentImageUrlBefore || getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.originalImageUrl;
+      const restoredTransformations = editSet.activeTransformationsBefore || "";
+
+      await updateProject(compactPayload({
+        projectId: project._id,
+        canvasState,
+        currentImageUrl: restoredImageUrl,
+        activeTransformations: restoredTransformations,
+      }));
+
+      await createProjectRevision({
+        projectId: project._id,
+        canvasState,
+        width: project.width,
+        height: project.height,
+        currentImageUrl: restoredImageUrl,
+        activeTransformations: restoredTransformations,
+        title: `Removed ${editSet.title || "agent edit set"}`,
+        summary: "Removed a stored agent edit set from the canvas.",
+        prompt: editSet.prompt || "",
+        changes: editSet.changes || [],
+      });
+
+      await markAgentEditSetRemoved({ editSetId: editSet._id });
+
+      setActivePlan(null);
+      setEnabledChanges({});
+      setEffectValues({});
+      setMultiLayerPlans([]);
+      setActiveEditSetId(null);
+      setImageRevision((value) => value + 1);
+      await canvasEditor.__saveCanvasState?.({ immediate: true });
+      toast.success("Edit set removed", { id: toastId });
+    } catch (error) {
+      toast.error(error?.message || "Failed to remove edit set", { id: toastId });
+    } finally {
+      setIsApplying(false);
     }
   };
 
@@ -1721,7 +2301,13 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         <div className="agent-chat-stack">
           <AnimatePresence initial={false}>
             {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
+              <MessageBubble
+                key={message.id}
+                message={message}
+                canUndoPreview={Boolean(message.previewToken && message.previewToken === livePreviewToken)}
+                isApplying={isApplying}
+                onUndoPreview={() => revertLiveEdit({ addMessage: true })}
+              />
             ))}
             {isThinking && (
               <AgentThinkingRow
@@ -1742,264 +2328,388 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         </div>
       </div>
 
-      {/* Multi-layer confirmation panel: shown when the agent isn't sure which
-          layers the prompt was referring to. User picks → re-request. */}
-      <AnimatePresence>
-        {pendingConfirmation && (
-          <motion.div
-            className="agent-review-dock"
-            initial={{ opacity: 0, y: 18, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.98 }}
-            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-            key="confirm"
-          >
-            <div className="agent-review-head">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <h4>Confirm layers</h4>
-                </div>
-                <p>{pendingConfirmation.reason}</p>
-              </div>
-            </div>
-            <div className="agent-layer-confirm-list">
-              {pendingConfirmation.allLayers.map((layer) => {
-                const checked = confirmedLayerIds.includes(layer.index);
-                return (
-                  <label key={layer.index} className="agent-layer-confirm-row">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) => {
-                        setConfirmedLayerIds((current) =>
-                          e.target.checked
-                            ? [...new Set([...current, layer.index])]
-                            : current.filter((id) => id !== layer.index)
-                        );
-                      }}
-                    />
-                    <span>{layer.name}</span>
-                  </label>
-                );
-              })}
-            </div>
-            <div className="agent-action-row">
-              <motion.button
-                type="button"
-                onClick={() => {
-                  const confirmed = [...confirmedLayerIds];
-                  const promptToReuse = pendingConfirmation.prompt;
-                  setPendingConfirmation(null);
-                  requestPlan(promptToReuse, { confirmedTargetIndexes: confirmed });
-                }}
-                disabled={confirmedLayerIds.length === 0 || isThinking}
-                className="agent-action-button agent-action-button--primary"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                <Check className="h-3.5 w-3.5" />
-                Apply to {confirmedLayerIds.length} layer{confirmedLayerIds.length === 1 ? "" : "s"}
-              </motion.button>
-              <motion.button
-                type="button"
-                onClick={() => {
-                  setPendingConfirmation(null);
-                  setConfirmedLayerIds([]);
-                }}
-                className="agent-action-button"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                Cancel
-              </motion.button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Multi-layer applied status: shown after a multi-target edit lands. */}
-      <AnimatePresence>
-        {!pendingConfirmation && multiLayerPlans.length > 0 && !activePlan && (
-          <motion.div
-            className="agent-review-dock"
-            initial={{ opacity: 0, y: 18, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.98 }}
-            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-            key="multi"
-          >
-            <div className="agent-review-head">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <h4>Applied to {multiLayerPlans.length} layer{multiLayerPlans.length === 1 ? "" : "s"}</h4>
-                </div>
-                <p>{multiLayerPlans.map((p) => p.layerName).join(" · ")}</p>
-              </div>
-            </div>
-            <div className="agent-action-row">
-              <motion.button
-                type="button"
-                onClick={async () => {
-                  await restoreLiveSnapshot();
-                  setMultiLayerPlans([]);
-                  toast.message("Reverted");
-                }}
-                disabled={!liveSnapshotRef.current}
-                className="agent-action-button"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Revert
-              </motion.button>
-              <motion.button
-                type="button"
-                onClick={() => {
-                  // Multi-layer save: filters are already on the canvas; persist canvas state.
-                  canvasEditor?.__saveCanvasState?.();
-                  liveSnapshotRef.current = null;
-                  setMultiLayerPlans([]);
-                  toast.success("Saved");
-                }}
-                className="agent-action-button agent-action-button--primary"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                <Check className="h-3.5 w-3.5" />
-                Keep
-              </motion.button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {activePlan && (
-          <motion.div
-            className="agent-review-dock"
-            initial={{ opacity: 0, y: 18, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.98 }}
-            transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-          >
-            <div className="agent-review-head">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <h4>{activePlan.title}</h4>
-                </div>
-                <p>{activePlan.summary}</p>
-              </div>
-              <button type="button" onClick={copyUrl} className="agent-icon-action" title="Copy URL">
-                <Copy className="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            <div className="agent-review-subhead">
-              <span>
-                <SlidersHorizontal className="h-3.5 w-3.5" />
-                Changes
-              </span>
-              <strong>{getChangeItems(activePlan).filter((item) => enabledChanges?.[item.id] !== false).length}/{getChangeItems(activePlan).length} on</strong>
-            </div>
-
-            {activePlan.alreadyMatchesTarget && (Number(activePlan.gain) || 0) < 0.1 ? (
-              <div className="agent-already-great">
-                <Check className="h-3.5 w-3.5" />
-                <div>
-                  <strong>Already looks great</strong>
-                  <p>
-                    The image already matches the {STYLE_LABELS[activePlan.targetStyle] || activePlan.targetStyle || "requested"} look.
-                    Drag a slider below if you want to push it further.
-                  </p>
-                </div>
-              </div>
-            ) : null}
-
-            <AgentEffectControls
-              plan={activePlan}
-              enabledMap={enabledChanges}
-              valueMap={effectValues}
-              onToggle={handleChangeToggle}
-              onValueChange={handleEffectValueChange}
-              dominantColor={dominantColor}
-            />
-
-            <div className="agent-action-row">
-              <motion.button
-                type="button"
-                onClick={() => previewPlanOnCanvas(activePlan, enabledChanges)}
-                disabled={isThinking || isApplying}
-                className="agent-action-button"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                <BrainCircuit className="h-3.5 w-3.5" />
-                Preview
-              </motion.button>
-              <motion.button
-                type="button"
-                onClick={revertLiveEdit}
-                disabled={!liveSnapshotRef.current || isApplying}
-                className="agent-action-button"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Revert
-              </motion.button>
-              <motion.button
-                type="button"
-                onClick={commitLiveEdit}
-                disabled={isApplying}
-                className="agent-action-button agent-action-button--primary"
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-              >
-                {isApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                Save
-              </motion.button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {revisions.length > 0 && (
-        <motion.div
-          className="agent-version-dock"
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+      {/* Resizable Edits Section */}
+      {(pendingConfirmation || multiLayerPlans.length > 0 || activePlan || agentEditSets.length > 0 || revisions.length > 0) && (
+        <div
+          ref={editsContainerRef}
+          className="agent-edits-wrapper"
+          style={{
+            height: isEditsMinimized ? '32px' : (editsHeight ? `${editsHeight}px` : 'auto'),
+            maxHeight: '65vh',
+            flexShrink: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            borderTop: '1px solid var(--agent-line)',
+            marginTop: 'auto',
+            background: 'color-mix(in srgb, var(--agent-panel) 98%, transparent)',
+            position: 'relative',
+            zIndex: 10,
+          }}
         >
-          <div className="agent-version-head">
-            <span>
-              <History className="h-3.5 w-3.5" />
-              Saved versions
-            </span>
-            <small>{revisions.length}</small>
+          {/* Drag Handle */}
+          <div
+            className="agent-edits-handle"
+            onMouseDown={handleEditsDragStart}
+            style={{
+              height: '32px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'ns-resize',
+              position: 'relative',
+              flexShrink: 0,
+              userSelect: 'none',
+            }}
+          >
+            <GripHorizontal className="h-4 w-4 opacity-40 hover:opacity-80 transition-opacity" />
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsEditsMinimized(!isEditsMinimized);
+                if (isEditsMinimized && editsHeight && editsHeight < 150) {
+                  setEditsHeight(400); // Expand to default if it was too small
+                }
+              }}
+              className="agent-icon-action"
+              style={{
+                position: 'absolute',
+                right: '8px',
+                padding: '4px',
+                background: 'transparent',
+                border: 'none',
+              }}
+              title={isEditsMinimized ? "Maximize edits" : "Minimize edits"}
+            >
+              {isEditsMinimized ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </button>
           </div>
-          <div className="agent-version-row">
-            {revisions.slice(0, 6).map((revision) => (
-              <motion.button
-                key={revision._id}
-                type="button"
-                className="agent-version-chip"
-                onClick={() => restoreRevision(revision)}
-                disabled={Boolean(restoringRevisionId)}
-                whileHover={{ y: -2 }}
-                whileTap={{ scale: 0.97 }}
-                title={revision.summary || revision.title || "Restore version"}
-              >
-                <span>{truncate(revision.title || "Saved edit", 24)}</span>
-                <small>
-                  {restoringRevisionId === revision._id ? "Restoring..." : formatRevisionTime(revision.createdAt)}
-                </small>
-              </motion.button>
-            ))}
-          </div>
-        </motion.div>
+
+          {!isEditsMinimized && (
+            <div
+              className="agent-edits-content panel-scroll"
+              style={{
+                overflowY: 'auto',
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1rem',
+                padding: '0.25rem 0 1rem 0',
+              }}
+            >
+              {/* Multi-layer confirmation panel: shown when the agent isn't sure which
+                  layers the prompt was referring to. User picks → re-request. */}
+              <AnimatePresence>
+                {pendingConfirmation && (
+                  <motion.div
+                    className="agent-review-dock"
+                    initial={{ opacity: 0, y: 18, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                    transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                    key="confirm"
+                  >
+                    <div className="agent-review-head">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <h4>Confirm layers</h4>
+                        </div>
+                        <p>{pendingConfirmation.reason}</p>
+                      </div>
+                    </div>
+                    <div className="agent-layer-confirm-list">
+                      {pendingConfirmation.allLayers.map((layer) => {
+                        const checked = confirmedLayerIds.includes(layer.index);
+                        return (
+                          <label key={layer.index} className="agent-layer-confirm-row">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                setConfirmedLayerIds((current) =>
+                                  e.target.checked
+                                    ? [...new Set([...current, layer.index])]
+                                    : current.filter((id) => id !== layer.index)
+                                );
+                              }}
+                            />
+                            <span>{layer.name}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="agent-action-row">
+                      <motion.button
+                        type="button"
+                        onClick={() => {
+                          const confirmed = [...confirmedLayerIds];
+                          const promptToReuse = pendingConfirmation.prompt;
+                          setPendingConfirmation(null);
+                          requestPlan(promptToReuse, { confirmedTargetIndexes: confirmed });
+                        }}
+                        disabled={confirmedLayerIds.length === 0 || isThinking}
+                        className="agent-action-button agent-action-button--primary"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        Apply to {confirmedLayerIds.length} layer{confirmedLayerIds.length === 1 ? "" : "s"}
+                      </motion.button>
+                      <motion.button
+                        type="button"
+                        onClick={() => {
+                          setPendingConfirmation(null);
+                          setConfirmedLayerIds([]);
+                        }}
+                        className="agent-action-button"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        Cancel
+                      </motion.button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Multi-layer applied status: shown after a multi-target edit lands. */}
+              <AnimatePresence>
+                {!pendingConfirmation && multiLayerPlans.length > 0 && !activePlan && (
+                  <motion.div
+                    className="agent-review-dock"
+                    initial={{ opacity: 0, y: 18, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                    transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                    key="multi"
+                  >
+                    <div className="agent-review-head">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <h4>Applied to {multiLayerPlans.length} layer{multiLayerPlans.length === 1 ? "" : "s"}</h4>
+                        </div>
+                        <p>{multiLayerPlans.map((p) => p.layerName).join(" · ")}</p>
+                      </div>
+                    </div>
+                    <div className="agent-action-row">
+                      <motion.button
+                        type="button"
+                        onClick={() => revertLiveEdit({ addMessage: true })}
+                        disabled={!liveSnapshotRef.current}
+                        className="agent-action-button"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Not now
+                      </motion.button>
+                      <motion.button
+                        type="button"
+                        onClick={commitMultiLayerEdit}
+                        disabled={isApplying}
+                        className="agent-action-button agent-action-button--primary"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        {isApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                        Apply
+                      </motion.button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AnimatePresence>
+                {activePlan && (
+                  <motion.div
+                    className="agent-review-dock"
+                    initial={{ opacity: 0, y: 18, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                    transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+                  >
+                    <div className="agent-review-head">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <h4>{activePlan.title}</h4>
+                        </div>
+                        <p>{activePlan.summary}</p>
+                      </div>
+                      <button type="button" onClick={copyUrl} className="agent-icon-action" title="Copy URL">
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="agent-review-subhead">
+                      <span>
+                        <SlidersHorizontal className="h-3.5 w-3.5" />
+                        Changes
+                      </span>
+                      <strong>{getChangeItems(activePlan).filter((item) => enabledChanges?.[item.id] !== false).length}/{getChangeItems(activePlan).length} on</strong>
+                    </div>
+
+                    {activePlan.alreadyMatchesTarget && (Number(activePlan.gain) || 0) < 0.1 ? (
+                      <div className="agent-already-great">
+                        <Check className="h-3.5 w-3.5" />
+                        <div>
+                          <strong>Already looks great</strong>
+                          <p>
+                            The image already matches the {STYLE_LABELS[activePlan.targetStyle] || activePlan.targetStyle || "requested"} look.
+                            Drag a slider below if you want to push it further.
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <AgentEffectControls
+                      plan={activePlan}
+                      enabledMap={enabledChanges}
+                      valueMap={effectValues}
+                      onToggle={handleChangeToggle}
+                      onValueChange={handleEffectValueChange}
+                      dominantColor={dominantColor}
+                    />
+
+                    <div className="agent-action-row">
+                      <motion.button
+                        type="button"
+                        onClick={() => previewPlanOnCanvas(activePlan, enabledChanges)}
+                        disabled={isThinking || isApplying}
+                        className="agent-action-button"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        <BrainCircuit className="h-3.5 w-3.5" />
+                        Preview
+                      </motion.button>
+                      <motion.button
+                        type="button"
+                        onClick={revertLiveEdit}
+                        disabled={!liveSnapshotRef.current || isApplying}
+                        className="agent-action-button"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Not now
+                      </motion.button>
+                      <motion.button
+                        type="button"
+                        onClick={commitLiveEdit}
+                        disabled={isApplying}
+                        className="agent-action-button agent-action-button--primary"
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        {isApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                        Apply
+                      </motion.button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {agentEditSets.length > 0 && (
+                <motion.div
+                  className="agent-version-dock agent-editset-dock"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  <div className="agent-version-head">
+                    <span>
+                      <WandSparkles className="h-3.5 w-3.5" />
+                      Agent edit sets
+                    </span>
+                    <small>{agentEditSets.length}</small>
+                  </div>
+                  <div className="agent-editset-list">
+                    {agentEditSets.slice(0, 8).map((editSet) => {
+                      const isApplied = editSet.status === "applied";
+                      const isRemoved = editSet.status === "removed";
+                      const statusLabel = isApplied ? "Applied" : isRemoved ? "Removed" : "Saved";
+                      const canApplyEditSet =
+                        Boolean(editSet.afterCanvasState) ||
+                        Boolean(editSet.plan && editSet.plan?.mode !== "multi-layer");
+                      return (
+                        <div key={editSet._id} className={`agent-editset-row is-${editSet.status}`}>
+                          <div className="agent-editset-copy">
+                            <strong>{truncate(editSet.title || "Agent edit set", 32)}</strong>
+                            <span>{truncate(editSet.prompt || editSet.summary || "Stored change set", 54)}</span>
+                            <small>{statusLabel} · {formatRevisionTime(editSet.updatedAt || editSet.createdAt)}</small>
+                          </div>
+                          <div className="agent-editset-actions">
+                            {!isApplied && (
+                              <button
+                                type="button"
+                                className="agent-editset-button agent-editset-button--apply"
+                                onClick={() => applyStoredEditSet(editSet)}
+                                disabled={isApplying || !canApplyEditSet}
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                                {isRemoved ? "Apply again" : "Apply"}
+                              </button>
+                            )}
+                            {isApplied && (
+                              <button
+                                type="button"
+                                className="agent-editset-button"
+                                onClick={() => removeStoredEditSet(editSet)}
+                                disabled={isApplying || !editSet.beforeCanvasState}
+                              >
+                                <RotateCcw className="h-3.5 w-3.5" />
+                                Remove
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+
+              {revisions.length > 0 && (
+                <motion.div
+                  className="agent-version-dock"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+                >
+                  <div className="agent-version-head">
+                    <span>
+                      <History className="h-3.5 w-3.5" />
+                      Saved versions
+                    </span>
+                    <small>{revisions.length}</small>
+                  </div>
+                  <div className="agent-version-row">
+                    {revisions.slice(0, 6).map((revision) => (
+                      <motion.button
+                        key={revision._id}
+                        type="button"
+                        className="agent-version-chip"
+                        onClick={() => restoreRevision(revision)}
+                        disabled={Boolean(restoringRevisionId)}
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.97 }}
+                        title={revision.summary || revision.title || "Restore version"}
+                      >
+                        <span>{truncate(revision.title || "Saved edit", 24)}</span>
+                        <small>
+                          {restoringRevisionId === revision._id ? "Restoring..." : formatRevisionTime(revision.createdAt)}
+                        </small>
+                      </motion.button>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {!canChat && (

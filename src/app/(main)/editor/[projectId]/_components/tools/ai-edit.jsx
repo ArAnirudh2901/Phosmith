@@ -5,8 +5,8 @@ import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { Sparkles, ScanSearch, WandSparkles, BadgeCheck, Loader2 } from 'lucide-react'
 import { useCanvas } from '../../../../../../../context/context'
-import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
-import { api } from '../../../../../../../convex/_generated/api'
+import { useDatabaseMutation } from '../../../../../../../hooks/useDatabaseQuery'
+import { api } from "@/lib/neon-api";
 import { buildAiEditPresetUrl, ensureCurrentImageKitEndpoint, getCanvasActiveImage, hasImageKitAiTransform, isImageKitUrl, replaceCanvasImageFromUrl } from '../../../../../../lib/imagekit-ai'
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 import BeforeAfterCompare from '@/components/neo/BeforeAfterCompare'
@@ -47,7 +47,7 @@ const presetIncludesUpscale = (presetId) => presetId === 'upscale' || presetId =
 
 const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => {
     const { canvasEditor, setProcessingMessage } = useCanvas()
-    const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
+    const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
 
     const [selectedPreset, setSelectedPreset] = useState('premiumQuality')
     const [previewUrl, setPreviewUrl] = useState('')

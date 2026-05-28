@@ -1,4 +1,8 @@
 import { isExpansionFrameLike } from './expansion-pipeline'
+import { encodeMaskCanvas, isMaskCanvasEmpty, isPixxelMaskOverlay, maskCanvasFromClipPath } from './canvas-mask'
+
+const isMaskOverlayLike = (serializedObj, liveObj) =>
+    isPixxelMaskOverlay(serializedObj) || isPixxelMaskOverlay(liveObj)
 
 export const getCanvasViewportState = (canvas) => {
     if (!canvas) return null
@@ -22,16 +26,16 @@ export const serializeCanvasState = (canvas) => {
 
     const json = canvas.toJSON()
 
-    // Strip inline Base64 image data from objects to keep payload under Convex's 1MB limit.
+    // Strip inline Base64 image data from objects to keep payload under Neon's 1MB limit.
     // Remote URLs (http/https) are preserved as-is.
     // If an image only has a Base64 data URL, we skip it to avoid breaking the canvas restore.
     if (json?.objects) {
-        // Filter out temporary UI elements (expansion frames, etc.)
-        json.objects = json.objects.filter((obj) => !isExpansionFrameLike(obj))
         const canvasObjects = canvas.getObjects?.() || []
+        const objectPairs = json.objects
+            .map((obj, index) => ({ obj, liveObj: canvasObjects[index] }))
+            .filter(({ obj, liveObj }) => !isExpansionFrameLike(obj) && !isMaskOverlayLike(obj, liveObj))
 
-        json.objects = json.objects.map((obj, index) => {
-            const indexedObj = canvasObjects[index]
+        json.objects = objectPairs.map(({ obj, liveObj: indexedObj }) => {
             if (
                 indexedObj?._pixxelAdjustmentOverlay ||
                 indexedObj?.pixxelAdjustmentOverlay ||
@@ -83,6 +87,24 @@ export const serializeCanvasState = (canvas) => {
 
                 if (matchingObj?.pixxelImageKitAdjustValues) {
                     cleaned.pixxelImageKitAdjustValues = matchingObj.pixxelImageKitAdjustValues
+                }
+
+                const maskCanvas =
+                    matchingObj?._pixxelMaskCanvas ||
+                    (matchingObj?.clipPath
+                        ? maskCanvasFromClipPath(matchingObj.clipPath, matchingObj.width || cleaned.width || 1, matchingObj.height || cleaned.height || 1)
+                        : null)
+                const encodedMask = maskCanvas && !isMaskCanvasEmpty(maskCanvas)
+                    ? encodeMaskCanvas(maskCanvas)
+                    : null
+                if (encodedMask) {
+                    cleaned.pixxelMask = encodedMask
+                    cleaned.pixxelHasMask = true
+                    delete cleaned.clipPath
+                } else if (cleaned.clipPath?.pixxelMaskClipPath || cleaned.clipPath?.name === 'pixxel-mask-clip') {
+                    delete cleaned.clipPath
+                    delete cleaned.pixxelMask
+                    delete cleaned.pixxelHasMask
                 }
 
                 // Only strip if the src is a Base64 data URL (can be several MB)

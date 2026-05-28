@@ -1,4 +1,5 @@
 import { normalizeCanvasState } from './canvas-state'
+import { createMaskClipPath, decodeMaskCanvas } from './canvas-mask'
 
 const cleanComparableUrl = (url) =>
   String(url || '')
@@ -75,64 +76,85 @@ const fitImageToCanvas = (obj, replacement, canvasSize) => {
   })
 }
 
+const restoreSerializedMask = (FabricImage, obj) => {
+  const encodedMask = obj?.pixxelMask || obj?._pixxelMask
+  if (!encodedMask) return
+
+  const maskCanvas = decodeMaskCanvas(encodedMask)
+  if (!maskCanvas) return
+
+  obj._pixxelMaskCanvas = maskCanvas
+  obj._pixxelHasMask = true
+  obj.pixxelHasMask = true
+  obj.clipPath = createMaskClipPath(FabricImage, maskCanvas)
+  obj.set?.('dirty', true)
+  obj.setCoords?.()
+}
+
 /**
  * After loadFromJSON, ensure image objects have a loadable src.
  */
 export async function hydrateCanvasImages(canvas, imageUrl, { forcePrimaryImageUrl = false, canvasSize } = {}) {
-  if (!canvas || !imageUrl) return
+  if (!canvas) return
 
   const { FabricImage } = await import('fabric')
   const objects = canvas.getObjects?.() || []
   const desiredSrc = cleanComparableUrl(imageUrl)
 
-  await Promise.all(
-    objects
-      .filter((obj) => obj?.type?.toLowerCase() === 'image')
-      .map(async (obj, index) => {
-        const currentSrc = getImageSrc(obj)
-        const hasRemote = isUsableRemoteSrc(currentSrc)
-        const isPrimaryStale =
-          forcePrimaryImageUrl &&
-          index === 0 &&
-          desiredSrc &&
-          cleanComparableUrl(currentSrc) !== desiredSrc
+  if (imageUrl) {
+    await Promise.all(
+      objects
+        .filter((obj) => obj?.type?.toLowerCase() === 'image')
+        .map(async (obj, index) => {
+          const currentSrc = getImageSrc(obj)
+          const hasRemote = isUsableRemoteSrc(currentSrc)
+          const isPrimaryStale =
+            forcePrimaryImageUrl &&
+            index === 0 &&
+            desiredSrc &&
+            cleanComparableUrl(currentSrc) !== desiredSrc
 
-        if (hasRemote && !isPrimaryStale) return
+          if (hasRemote && !isPrimaryStale) return
 
-        try {
-          const replacement = await FabricImage.fromURL(imageUrl, { crossOrigin: 'anonymous' })
-          const geometry = {
-            left: obj.left,
-            top: obj.top,
-            width: obj.width,
-            height: obj.height,
-            scaleX: obj.scaleX,
-            scaleY: obj.scaleY,
-            angle: obj.angle,
-            originX: obj.originX,
-            originY: obj.originY,
-            cropX: obj.cropX,
-            cropY: obj.cropY,
-            flipX: obj.flipX,
-            flipY: obj.flipY,
-            skewX: obj.skewX,
-            skewY: obj.skewY,
-          }
+          try {
+            const replacement = await FabricImage.fromURL(imageUrl, { crossOrigin: 'anonymous' })
+            const geometry = {
+              left: obj.left,
+              top: obj.top,
+              width: obj.width,
+              height: obj.height,
+              scaleX: obj.scaleX,
+              scaleY: obj.scaleY,
+              angle: obj.angle,
+              originX: obj.originX,
+              originY: obj.originY,
+              cropX: obj.cropX,
+              cropY: obj.cropY,
+              flipX: obj.flipX,
+              flipY: obj.flipY,
+              skewX: obj.skewX,
+              skewY: obj.skewY,
+            }
 
-          if (typeof obj.setSrc === 'function') {
-            await obj.setSrc(imageUrl, { crossOrigin: 'anonymous' })
+            if (typeof obj.setSrc === 'function') {
+              await obj.setSrc(imageUrl, { crossOrigin: 'anonymous' })
+            }
+            if (isPrimaryStale) {
+              fitImageToCanvas(obj, replacement, canvasSize)
+            } else {
+              restoreImageGeometry(obj, geometry, replacement)
+            }
+            obj.setCoords()
+          } catch (err) {
+            console.warn('[canvas-history] hydrate image failed:', err)
           }
-          if (isPrimaryStale) {
-            fitImageToCanvas(obj, replacement, canvasSize)
-          } else {
-            restoreImageGeometry(obj, geometry, replacement)
-          }
-          obj.setCoords()
-        } catch (err) {
-          console.warn('[canvas-history] hydrate image failed:', err)
-        }
-      })
-  )
+        })
+    )
+  }
+
+  for (const obj of objects.filter((item) => item?.type?.toLowerCase() === 'image')) {
+    restoreSerializedMask(FabricImage, obj)
+  }
 
   canvas.requestRenderAll()
 }
