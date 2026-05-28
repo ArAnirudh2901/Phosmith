@@ -137,6 +137,30 @@ export const buildEditPlan = ({
         ? 0
         : clamp(Number.isFinite(gain) ? gain : 0.6, 0, 1)
 
+    // No-change guard: if the image already matches the target AND gain is 0,
+    // return a plan with zero adjustments. This guarantees idempotency —
+    // applying the same prompt to an already-edited image produces no changes.
+    // We also skip corrections because the image is already considered well-edited.
+    if (alreadyMatchesTarget && safeGain === 0) {
+        return {
+            plannerVersion: PLANNER_VERSION,
+            currentStyle,
+            targetStyle,
+            gain: 0,
+            alreadyMatchesTarget: true,
+            notes: String(notes || "Image already matches the target style — no changes applied.").trim(),
+            adjustments: {},
+            entries: [],
+            imagekitAi: {
+                retouch: !!imagekitAi.retouch,
+                bgRemove: !!imagekitAi.bgRemove,
+                upscale: !!imagekitAi.upscale,
+                sharpen: !!imagekitAi.sharpen,
+                contrast: !!imagekitAi.contrast,
+            },
+        }
+    }
+
     const styleVec = STYLE_PROFILES[targetStyle] || STYLE_PROFILES.neutral
     const scaledStyle = applyGain(styleVec, safeGain)
     const corrections = computeCorrections(features)

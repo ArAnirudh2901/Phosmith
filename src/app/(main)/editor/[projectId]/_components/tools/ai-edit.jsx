@@ -371,7 +371,7 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                 </div>
             </div>
 
-            <div className='grid grid-cols-2 gap-2'>
+            <div className='grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-2'>
                 <button
                     onClick={handlePreview}
                     disabled={!activeImage || isPreviewing || isApplying}

@@ -339,10 +339,24 @@ a:focus-visible,
   box-shadow:
     4px 4px 0 0 rgba(244, 244, 245, 0.55),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  /* Enforce horizontal layout so the spinner icon stays to the left of the
+     title + description text block. Without this, the icon can visually
+     land between the title and description lines. */
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
 }
 .neo-toast.neo-toast--loading .neo-toast-icon {
   background: rgba(14, 17, 24, 0.95);
   color: #F4F4F5;
+  flex-shrink: 0;
+  order: -1; /* force icon first in visual order */
+}
+.neo-toast.neo-toast--loading .neo-toast-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
 }
 
 /* Belt-and-braces overlay enforcement. Sonner's container is already
@@ -757,12 +771,14 @@ a:focus-visible,
   position: relative;
   display: flex;
   align-items: center;
-  gap: 0.28rem;
-  min-height: 1.9rem;
-  padding: 0.3rem 0.5rem;
+  justify-content: center;
+  gap: 0.35rem;
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0 0.5rem;
   border-radius: 4px;
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.64rem;
+  font-size: 0.65rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;

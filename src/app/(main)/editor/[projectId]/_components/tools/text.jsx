@@ -829,7 +829,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                                     onChange={setShadowBlur}
                                                     visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}
                                                 />
-                                                <div className="grid grid-cols-2 gap-2">
+                                                <div className="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-2">
                                                     <ProRulerSlider label="X" value={shadowOffsetX} min={-20} max={20} step={1} suffix="px"
                                                         onChange={setShadowOffsetX}
                                                         visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}

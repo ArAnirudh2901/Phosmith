@@ -290,7 +290,7 @@ const EditorTopbar = ({ project }) => {
                 {/* Center: Tool buttons */}
                 {/* Explicit horizontal margin so the center group can never overlap
                     the left title block or the right action group at any width. */}
-                <div className="flex flex-none items-center justify-center gap-1 px-2 mx-3">
+                <div className="flex flex-none items-center justify-center gap-2 px-2 mx-3">
                     {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
@@ -302,7 +302,7 @@ const EditorTopbar = ({ project }) => {
                                 onClick={() => handleToolChange(tool.id)}
                                 className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
                             >
-                                <Icon className="h-3.5 w-3.5 flex-none" />
+                                <Icon className="h-4 w-4 flex-none" />
                                 <span className="hidden 2xl:inline">{tool.label}</span>
                                 {tool.proOnly && !hasToolAccess && (
                                     <Lock className="h-2.5 w-2.5 ml-0.5 flex-none" style={{ color: 'var(--accent-warning)' }} />

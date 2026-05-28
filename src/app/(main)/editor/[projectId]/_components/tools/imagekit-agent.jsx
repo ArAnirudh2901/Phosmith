@@ -56,6 +56,57 @@ const QUICK_PROMPTS = [
 ];
 
 const SAMPLE_SIZE = 48;
+
+// ── Client-side ImageKit transform URL cache ──────────────────────────────
+// Caches resolved AI transform URLs (the ones waitForImageKitUrl polls for)
+// so toggling a transform off and on again is instant — no 10–30s re-poll.
+// Key: full transform URL (e.g. "https://ik.imagekit.io/.../img.jpg?tr=e-upscale")
+// Value: { resolvedUrl: string, timestamp: number }
+const CLIENT_TRANSFORM_CACHE = new Map();
+const CLIENT_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+const getCachedTransformUrl = (url) => {
+  const entry = CLIENT_TRANSFORM_CACHE.get(url);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CLIENT_CACHE_TTL_MS) {
+    CLIENT_TRANSFORM_CACHE.delete(url);
+    return null;
+  }
+  return entry.resolvedUrl;
+};
+
+const setCachedTransformUrl = (url, resolvedUrl) => {
+  CLIENT_TRANSFORM_CACHE.set(url, { resolvedUrl, timestamp: Date.now() });
+  // Bound size — evict oldest if we exceed 100 entries
+  if (CLIENT_TRANSFORM_CACHE.size > 100) {
+    const oldest = CLIENT_TRANSFORM_CACHE.keys().next().value;
+    CLIENT_TRANSFORM_CACHE.delete(oldest);
+  }
+};
+
+// Check server-side cache (fire-and-forget safe — returns null on any error)
+const checkServerTransformCache = async (url) => {
+  try {
+    const response = await fetch(
+      `/api/imagekit/transform-cache?url=${encodeURIComponent(url)}`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data?.cached ? data.resolvedUrl : null;
+  } catch {
+    return null;
+  }
+};
+
+// Write to server-side cache (fire-and-forget — errors are silently ignored)
+const writeServerTransformCache = (url, resolvedUrl) => {
+  fetch("/api/imagekit/transform-cache", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, resolvedUrl }),
+  }).catch(() => { /* ignore */ });
+};
 // Initial messages constant referenced through the file. Defined after
 // INITIAL_WELCOME_MESSAGE below to avoid the TDZ; the variable that ends up
 // here is hoisted via the export below.
@@ -1013,16 +1064,35 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       let readyUrl = effectivePlan.url;
 
       if (hasImageKitAiTransform(effectivePlan.imageKitTransforms)) {
-        try {
-          readyUrl = await waitForImageKitUrl(effectivePlan.url, {
-            maxAttempts: 10,
-            retryDelayMs: 4000,
-            onStatus: (attempt, total) => {
-              setProcessingMessage?.(`ImageKit AI processing (${attempt}/${total})...`);
-            },
-          });
-        } finally {
-          setProcessingMessage?.(null);
+        // 1. Check client-side cache first (instant)
+        const clientCached = getCachedTransformUrl(effectivePlan.url);
+        if (clientCached) {
+          readyUrl = clientCached;
+          console.log("[Agent] Transform cache hit (client)", { url: effectivePlan.url });
+        } else {
+          // 2. Check server-side cache (fast, one round-trip)
+          const serverCached = await checkServerTransformCache(effectivePlan.url);
+          if (serverCached) {
+            readyUrl = serverCached;
+            setCachedTransformUrl(effectivePlan.url, serverCached);
+            console.log("[Agent] Transform cache hit (server)", { url: effectivePlan.url });
+          } else {
+            // 3. Cache miss — poll ImageKit (slow, 10–30s first time)
+            try {
+              readyUrl = await waitForImageKitUrl(effectivePlan.url, {
+                maxAttempts: 10,
+                retryDelayMs: 4000,
+                onStatus: (attempt, total) => {
+                  setProcessingMessage?.(`ImageKit AI processing (${attempt}/${total})...`);
+                },
+              });
+              // Write to both caches on success
+              setCachedTransformUrl(effectivePlan.url, readyUrl);
+              writeServerTransformCache(effectivePlan.url, readyUrl);
+            } finally {
+              setProcessingMessage?.(null);
+            }
+          }
         }
       }
 
