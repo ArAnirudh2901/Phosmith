@@ -4,8 +4,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import React, { useState } from 'react'
 import usePlanAccess from '../../../../../hooks/usePlanAccess'
-import { useConvexMutation } from '../../../../../hooks/useConvexQuery'
-import { api } from '../../../../../convex/_generated/api'
+import { useDatabaseMutation } from '../../../../../hooks/useDatabaseQuery'
+import { api } from "@/lib/neon-api";
 import { Crown, ImageIcon, Loader2, Upload, X } from 'lucide-react'
 import { useDropzone } from 'react-dropzone'
 import { Label } from '@/components/ui/label'
@@ -102,7 +102,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
     const { isFree, canCreateProject } = usePlanAccess()
     const canCreate = canCreateProject(currentProjectCount)
 
-    const { mutate: createProject } = useConvexMutation(api.projects.create)
+    const { mutate: createProject } = useDatabaseMutation(api.projects.create)
 
     const clearSelectedFile = () => {
         if (previewUrl) {
@@ -177,7 +177,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
             if (!uploadData.success)
                 throw new Error(uploadData.error || "Failed to upload the image")
 
-            // Creating a project in Convex
+            // Creating a project in Neon
             const projectId = await createProject({
                 title: projectTitle.trim(),
                 originalImageUrl: uploadData.url,

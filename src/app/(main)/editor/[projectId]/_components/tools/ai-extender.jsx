@@ -5,8 +5,8 @@ import { toast } from 'sonner'
 import { Loader2, ImagePlus, Square } from 'lucide-react'
 import { Rect } from 'fabric'
 import { useCanvas } from '../../../../../../../context/context'
-import { useConvexMutation } from '../../../../../../../hooks/useConvexQuery'
-import { api } from '../../../../../../../convex/_generated/api'
+import { useDatabaseMutation } from '../../../../../../../hooks/useDatabaseQuery'
+import { api } from "@/lib/neon-api";
 import {
     getCanvasActiveImage,
 } from '../../../../../../lib/imagekit-ai'
@@ -82,7 +82,7 @@ const buildExtendRequest = ({ sourceUrl, sourceRender, expansion, prompt }) => {
 
 const AIExtender = ({ project }) => {
     const { canvasEditor, setProcessingMessage, setExpansionPreview } = useCanvas()
-    const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
+    const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
 
     const [prompt, setPrompt] = useState(
         'soft cinematic continuation, realistic background, seamless extension'

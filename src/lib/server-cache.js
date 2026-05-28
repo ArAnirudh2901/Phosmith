@@ -13,7 +13,7 @@
 // store later without changing any caller — they only use the exports below.
 //
 // Persistence: lost on process restart. For canvas state that's safe because we
-// flush to Convex on every critical event (Save button, beforeunload). The
+// flush to Neon on every critical event (Save button, beforeunload). The
 // cache is a write-behind buffer, not the source of truth.
 
 const MAX_ENTRIES = 5000              // LRU eviction kicks in past this

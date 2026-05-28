@@ -2,13 +2,13 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { api } from "../../../../convex/_generated/api"
-import { useConvexMutation, useConvexQuery } from "../../../../hooks/useConvexQuery"
+import { api } from "@/lib/neon-api";
+import { useDatabaseMutation, useDatabaseQuery } from "../../../../hooks/useDatabaseQuery"
 import { useStoreUser } from "../../../../hooks/useStoreUser"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { Calendar, Check, ImageIcon, Loader2, Plus, Trash2, X } from "lucide-react"
+import { Calendar, Check, Database, ImageIcon, Loader2, Plus, Trash2, X } from "lucide-react"
 import NewProjectModel from "./_components/newProjectModel"
 import ShortcutsGuide from "@/components/neo/ShortcutsGuide"
 import useDashboardShortcuts from "../../../../hooks/useDashboardShortcuts"
@@ -195,7 +195,7 @@ const ProjectCard = ({
 }
 
 const Dashboard = () => {
-    const { isLoading: isAuthLoading, isAuthenticated } = useStoreUser()
+    const { isLoading: isAuthLoading, isAuthenticated, databaseSetupMissing } = useStoreUser()
     const [showNewProjectModal, setShowNewProjectModal] = useState(false)
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedProjectIds, setSelectedProjectIds] = useState([])
@@ -205,12 +205,12 @@ const Dashboard = () => {
     const [deleteConfirm, setDeleteConfirm] = useState(emptyDeleteConfirm)
     const [showShortcuts, setShowShortcuts] = useState(false)
 
-    const { data: projects = [], isLoading: isProjectsLoading } = useConvexQuery(
+    const { data: projects = [], isLoading: isProjectsLoading } = useDatabaseQuery(
         api.projects.getUserProjects,
         isAuthenticated ? {} : "skip"
     )
-    const { mutate: deleteProjectMutate } = useConvexMutation(api.projects.deleteProject)
-    const { mutate: bulkDeleteProjectsMutate } = useConvexMutation(api.projects.bulkDeleteProjects)
+    const { mutate: deleteProjectMutate } = useDatabaseMutation(api.projects.deleteProject)
+    const { mutate: bulkDeleteProjectsMutate } = useDatabaseMutation(api.projects.bulkDeleteProjects)
     const isLoading = isAuthLoading || isProjectsLoading
     const projectCount = projects.length
     const hasProjects = projectCount > 0
@@ -431,7 +431,9 @@ const Dashboard = () => {
     ])
 
     useDashboardShortcuts({
-        onNewProject: () => setShowNewProjectModal(true),
+        onNewProject: () => {
+            if (!databaseSetupMissing) setShowNewProjectModal(true)
+        },
         onToggleShortcuts: () => setShowShortcuts((value) => !value),
         onToggleSelectMode: handleSelectionModeToggle,
         onSelectAll: () => {
@@ -480,6 +482,7 @@ const Dashboard = () => {
                             variant="primary"
                             size="md"
                             onClick={() => setShowNewProjectModal(true)}
+                            disabled={databaseSetupMissing}
                         >
                             <Plus className="h-4 w-4" strokeWidth={2.5} />
                             New Project
@@ -521,7 +524,27 @@ const Dashboard = () => {
                         </div>
                     )}
 
-                    {isLoading ? (
+                    {databaseSetupMissing ? (
+                        <GlassPanel className="!py-14 !px-6 text-center">
+                            <div className="mx-auto flex max-w-xl flex-col items-center gap-4">
+                                <div
+                                    className="flex h-14 w-14 items-center justify-center rounded-lg border"
+                                    style={{
+                                        borderColor: "rgba(6, 184, 212, 0.35)",
+                                        background: "rgba(6, 184, 212, 0.08)",
+                                    }}
+                                >
+                                    <Database className="h-7 w-7 text-cyan-300" />
+                                </div>
+                                <div>
+                                    <p className="text-lg font-semibold text-[var(--text-primary)]">Neon database setup required</p>
+                                    <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                                        Add `DATABASE_URL` and `DIRECT_URL`, then run `bun run db:push` before creating or loading saved projects.
+                                    </p>
+                                </div>
+                            </div>
+                        </GlassPanel>
+                    ) : isLoading ? (
                         <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                             {loadingCards.map((_, index) => (
                                 <div
@@ -584,6 +607,7 @@ const Dashboard = () => {
                                         variant="primary"
                                         size="md"
                                         onClick={() => setShowNewProjectModal(true)}
+                                        disabled={databaseSetupMissing}
                                     >
                                         <Plus className="h-4 w-4" strokeWidth={2.5} />
                                         Create Project

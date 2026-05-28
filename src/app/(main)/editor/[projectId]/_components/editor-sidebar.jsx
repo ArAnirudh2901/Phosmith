@@ -12,7 +12,8 @@ import AIEdits from "./tools/ai-edit"
 import ImageKitAgent from "./tools/imagekit-agent"
 import ImageManager from "./tools/images"
 import DrawControls from "./tools/draw"
-import { Bot, Crop, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text } from "lucide-react"
+import MaskControls from "./tools/mask"
+import { Bot, Crop, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
 
 const TOOL_CONFIGS = {
@@ -21,6 +22,7 @@ const TOOL_CONFIGS = {
     images: { title: "Images", icon: ImagePlus },
     adjust: { title: "Adjust", icon: Sliders },
     draw: { title: "Draw", icon: Pen },
+    mask: { title: "Mask", icon: Scissors },
     text: { title: "Text", icon: Text },
     ai_background: { title: "AI Background", icon: Palette },
     ai_extender: { title: "AI Extender", icon: Maximize2 },
@@ -71,6 +73,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "images": return project ? <ImageManager project={project} {...colorProps} /> : <div>Loading...</div>
             case "adjust": return <AdjustControls {...colorProps} />
             case "draw": return <DrawControls {...colorProps} />
+            case "mask": return <MaskControls {...colorProps} />
             case "text": return <TextControls {...colorProps} />
             case "ai_background": return project ? <BackgroundControls project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_extender": return project ? <AIExtender project={project} {...colorProps} /> : <div>Loading...</div>

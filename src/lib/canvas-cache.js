@@ -1,15 +1,15 @@
 // Client-side helpers for the canvas write-behind cache. The editor calls
-// these instead of writing to Convex directly during active editing — every
+// these instead of writing to Neon directly during active editing — every
 // edit hits the in-memory server cache (fast) and a debounced flush runs the
-// actual Convex mutation periodically and on critical events.
+// actual Neon mutation periodically and on critical events.
 //
 // Three exports:
 //   - snapshotToCache(projectId, canvasState, currentImageUrl)
 //       Persists the latest state to the server cache. Fire-and-forget; safe
 //       to call on every keystroke / slider tick. Returns true on success.
 //
-//   - flushToConvex(projectId, { keepalive })
-//       Asks the server to flush the cached state to Convex. Idempotent —
+//   - flushToNeon(projectId, { keepalive })
+//       Asks the server to flush the cached state to Neon. Idempotent —
 //       if nothing has changed, this is a no-op. `keepalive` lets the request
 //       survive a page unload (use on beforeunload).
 //
@@ -47,7 +47,7 @@ export const snapshotToCache = async (projectId, canvasState, currentImageUrl = 
     }
 }
 
-export const flushToConvex = async (projectId, { keepalive = false } = {}) => {
+export const flushToNeon = async (projectId, { keepalive = false } = {}) => {
     if (!projectId) return false
     try {
         const response = await fetch(FLUSH_ENDPOINT, {
@@ -88,7 +88,7 @@ export const createDebouncedFlusher = (projectId, debounceMs = 8000) => {
     let handle = null
     const flush = () => {
         handle = null
-        flushToConvex(projectId)
+        flushToNeon(projectId)
     }
     return {
         schedule() {
@@ -103,7 +103,7 @@ export const createDebouncedFlusher = (projectId, debounceMs = 8000) => {
         },
         async flushNow() {
             this.cancel()
-            return flushToConvex(projectId)
+            return flushToNeon(projectId)
         },
     }
 }

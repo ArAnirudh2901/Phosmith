@@ -7,7 +7,6 @@
 import { logger } from "./logger"
 
 const REQUIRED_CLIENT = [
-  "NEXT_PUBLIC_CONVEX_URL",
   "NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT",
   "NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY",
 ]
@@ -21,6 +20,10 @@ const OPTIONAL_HINTS = [
   "NEXT_PUBLIC_UNSPLASH_ACCESS_KEY",
   "HUGGINGFACE_API_TOKEN",
   "CLERK_JWT_ISSUER_DOMAIN",
+  "DATABASE_URL",
+  "DIRECT_URL",
+  "UPSTASH_REDIS_REST_URL",
+  "UPSTASH_REDIS_REST_TOKEN",
   // AI Agent v2 vision model. Free tier at https://aistudio.google.com.
   // Without it, the agent falls back to a deterministic keyword planner — still
   // works, just can't make image-aware judgments ("is this already cinematic?").

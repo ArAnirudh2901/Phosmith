@@ -3,11 +3,11 @@
 import { useParams } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { CanvasContext, DynamicAccentContext } from "../../../../../context/context"
-import { Monitor } from "lucide-react"
-import { useConvexQuery } from "../../../../../hooks/useConvexQuery"
+import { Database, Monitor } from "lucide-react"
+import { useDatabaseQuery } from "../../../../../hooks/useDatabaseQuery"
 import { useStoreUser } from "../../../../../hooks/useStoreUser"
 import { useDynamicAccent as useImageAccent } from "@/hooks/useDynamicAccent"
-import { api } from "../../../../../convex/_generated/api"
+import { api } from "@/lib/neon-api";
 import AuroraLoader from "./_components/AuroraLoader"
 import CanvasEditor from "./_components/canvas"
 import EditorTopbar from "./_components/editor-topbar"
@@ -39,7 +39,7 @@ const getStoredPanelWidth = (key, fallback, min, max) => {
 const Editor = () => {
     const params = useParams()
     const projectId = params.projectId
-    const { isLoading: isAuthLoading, isAuthenticated } = useStoreUser()
+    const { isLoading: isAuthLoading, isAuthenticated, databaseSetupMissing } = useStoreUser()
 
     const [canvasEditor, setCanvasEditor] = useState(null)
     const [processingMessage, setProcessingMessage] = useState(null)
@@ -212,7 +212,7 @@ const Editor = () => {
         }
     }, [handleContextMenu, handleRadialPointerDown, handleRadialPointerUp])
 
-    const { data: project, isLoading: isProjectLoading, error } = useConvexQuery(
+    const { data: project, isLoading: isProjectLoading, error } = useDatabaseQuery(
         api.projects.getProject,
         isAuthenticated ? { projectId } : "skip"
     )
@@ -232,6 +232,25 @@ const Editor = () => {
     if (isLoading) return (
         <div className="neo-loader-surface relative min-h-screen flex items-center justify-center">
             <AuroraLoader message="Loading editor" />
+        </div>
+    )
+
+    if (databaseSetupMissing) return (
+        <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-void-darkest)" }}>
+            <motion.div
+                className="max-w-md px-6 text-center"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: duration.normal, ease: easeOut }}
+            >
+                <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-lg border border-cyan-300/35 bg-cyan-300/10">
+                    <Database className="h-7 w-7 text-cyan-300" />
+                </div>
+                <h1 className="mb-2 text-xl font-bold" style={{ color: "var(--text-primary)" }}>Neon database setup required</h1>
+                <p style={{ color: "var(--text-muted)" }} className="text-sm leading-6">
+                    Add `DATABASE_URL` and `DIRECT_URL`, then run `bun run db:push` before opening saved projects.
+                </p>
+            </motion.div>
         </div>
     )
 

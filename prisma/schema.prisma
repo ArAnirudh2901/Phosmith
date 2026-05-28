@@ -51,3 +51,178 @@ model ImageKitAgentRun {
   @@index([userId, createdAt])
   @@index([projectId, createdAt])
 }
+
+model User {
+  id               String   @id @default(cuid())
+  clerkUserId      String?  @unique
+  tokenIdentifier  String   @unique
+  name             String
+  email            String?
+  imageUrl         String?
+  plan             String   @default("free")
+  projectsUsed     Int      @default(0)
+  exportsThisMonth Int      @default(0)
+  createdAt        DateTime @default(now())
+  lastActiveAt     DateTime @default(now())
+
+  projects                  Project[]
+  projectRevisions          ProjectRevision[]
+  folders                   Folder[]
+  agentEditSets             AgentEditSet[]
+  agentEditSetSnapshots     AgentEditSetSnapshot[]
+  firstTriggeredEditPlanRows EditPlanCache[]
+
+  @@index([email])
+  @@index([name])
+}
+
+model Project {
+  id                    String   @id @default(cuid())
+  title                 String
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canvasState           Json?
+  width                 Int
+  height                Int
+  originalImageUrl      String?
+  currentImageUrl       String?
+  thumbnailUrl          String?
+  activeTransformations String?
+  backgroundRemoved     Boolean?
+  folderId              String?
+  folder                Folder?  @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @default(now())
+
+  revisions                 ProjectRevision[]
+  agentEditSets             AgentEditSet[]
+  agentEditSetSnapshots     AgentEditSetSnapshot[]
+  firstTriggeredEditPlanRows EditPlanCache[]
+
+  @@index([userId])
+  @@index([userId, updatedAt])
+  @@index([folderId])
+}
+
+model ProjectRevision {
+  id                    String   @id @default(cuid())
+  projectId             String
+  project               Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canvasState           Json?
+  width                 Int
+  height                Int
+  currentImageUrl       String?
+  activeTransformations String?
+  title                 String?
+  summary               String?
+  prompt                String?
+  changes               Json?
+  createdAt             DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model AgentEditSet {
+  id                          String   @id @default(cuid())
+  projectId                   String
+  project                     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId                      String
+  user                        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  prompt                      String
+  title                       String
+  summary                     String?
+  status                      String
+  plan                        Json
+  enabledChanges              Json?
+  effectValues                Json?
+  effectivePlan               Json?
+  changes                     Json?
+  beforeCanvasState           Json?
+  afterCanvasState            Json?
+  currentImageUrlBefore       String?
+  currentImageUrlAfter        String?
+  activeTransformationsBefore String?
+  activeTransformationsAfter  String?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @default(now())
+  appliedAt                   DateTime?
+  removedAt                   DateTime?
+
+  snapshots AgentEditSetSnapshot[]
+
+  @@index([projectId, updatedAt])
+  @@index([userId, updatedAt])
+}
+
+model AgentEditSetSnapshot {
+  id                    String       @id @default(cuid())
+  editSetId             String
+  editSet               AgentEditSet @relation(fields: [editSetId], references: [id], onDelete: Cascade)
+  projectId             String
+  project               Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId                String
+  user                  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind                  String
+  canvasState           Json
+  currentImageUrl       String?
+  activeTransformations String?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @default(now())
+
+  @@unique([editSetId, kind])
+  @@index([projectId, updatedAt])
+}
+
+model Folder {
+  id        String   @id @default(cuid())
+  name      String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  projects Project[]
+
+  @@index([userId])
+}
+
+model CanvasTargetCache {
+  id                String   @id @default(cuid())
+  canvasSignature   String
+  promptKey         String
+  plannerVersion    Int
+  targets           Int[]
+  needsConfirmation Boolean
+  reason            String?
+  model             String?
+  rawResponse       Json?
+  createdAt         DateTime @default(now())
+
+  @@unique([canvasSignature, promptKey, plannerVersion])
+}
+
+model EditPlanCache {
+  id             String   @id @default(cuid())
+  imageHash      String
+  promptKey      String
+  plannerVersion Int
+  plan           Json
+  features       Json
+  source         String
+  pHash          String?
+  pHashHead      String?
+  pHashTail      String?
+  projectId      String?
+  project        Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  model          String?
+  rawResponse    Json?
+  createdAt      DateTime @default(now())
+
+  @@unique([imageHash, promptKey, plannerVersion])
+  @@index([pHashHead, promptKey, plannerVersion])
+  @@index([pHashTail, promptKey, plannerVersion])
+}

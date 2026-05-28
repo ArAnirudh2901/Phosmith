@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
-    Bot, Crop, ImagePlus, Maximize2, Palette, Pen, Sliders, Sparkles, Type,
+    Bot, Crop, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Sparkles, Type,
 } from "lucide-react"
 import { useCanvas } from "../../../../../../context/context"
 import usePlanAccess from "../../../../../../hooks/usePlanAccess"
@@ -30,6 +30,7 @@ const TOOLS = [
         ],
     },
     { id: "draw", label: "Draw", icon: Pen, shortcut: "D", pro: true },
+    { id: "mask", label: "Mask", icon: Scissors, shortcut: "M" },
     { id: "text", label: "Text", icon: Type, shortcut: "T", pro: true },
     {
         id: "ai_background", label: "AI BG", icon: Palette, pro: true,
@@ -67,12 +68,9 @@ const INNER_R = 52
 const ICON_R = 98
 const CENTER_R = 44
 const DEADZONE_R = 30
-// Sub-ring lives just outside the main wedges. Hovering a wedge with subs
-// makes a fan of small chips appear at this radius; dragging into one selects
-// it and fires onToolSelect(toolId, subId).
-const SUB_RING_R = 178
-const SUB_ICON_R = 178
-const SUB_RING_DEPTH = 60
+// Sub-ring lives just outside the main wedges.
+const SUB_RING_R = 172
+const SUB_RING_OUTER = 230
 
 // Build a wedge SVG path (annular sector)
 function wedgePath(startAngle, endAngle, innerR, outerR) {
@@ -116,13 +114,12 @@ const RadialToolMenu = ({
 
     const handleToolClick = (tool, subId = null) => {
         if (tool.pro && !hasAccess(tool.id)) return
-        // Pass subId as a second arg so the parent route can switch tool and react
-        // to the sub-selection (e.g. set crop aspect, pre-fill agent prompt).
         onToolSelect?.(tool.id, subId)
         onClose?.()
     }
 
     // Track mouse position → which wedge (main ring) + which sub (outer ring).
+    // Only select a wedge when the cursor is actually within the ring annulus.
     const handlePointerMove = useCallback(
         (e) => {
             if (!visible) return
@@ -130,39 +127,56 @@ const RadialToolMenu = ({
             const dy = e.clientY - position.y
             const dist = Math.sqrt(dx * dx + dy * dy)
 
+            // Dead zone at center — deselect everything
             if (dist < DEADZONE_R) {
                 setHoveredIndex(-1)
                 setHoveredSubIndex(-1)
                 return
             }
 
-            let angle = (Math.atan2(dy, dx) * 180) / Math.PI
-            angle = (angle + 90 + 360) % 360
-            angle = (angle + sliceAngle / 2) % 360
+            // Compute angle for wedge detection
+            let rawAngle = (Math.atan2(dy, dx) * 180) / Math.PI
+            let normalizedAngle = (rawAngle + 90 + 360) % 360 // 0 is top
 
-            const wedgeIdx = Math.floor(angle / sliceAngle)
-            const tool = TOOLS[wedgeIdx]
-            setHoveredIndex(wedgeIdx >= 0 && wedgeIdx < count ? wedgeIdx : -1)
+            // Shifted angle for main ring detection so wedges are centered
+            let shiftedAngle = (normalizedAngle + sliceAngle / 2) % 360
+            const wedgeIdx = Math.floor(shiftedAngle / sliceAngle)
 
-            // Sub-ring detection: only when we're past OUTER_R, the hovered wedge has
-            // subs, and we're still within the sub-ring annulus. Otherwise reset.
-            if (
-                dist > OUTER_R &&
-                dist < OUTER_R + SUB_RING_DEPTH &&
-                tool?.subs?.length
-            ) {
-                // Each sub spans sliceAngle / subCount within the parent wedge.
-                // Compute the sub-relative angle within the wedge.
-                const wedgeStart = wedgeIdx * sliceAngle
-                const within = angle - wedgeStart // 0..sliceAngle
-                const subSpan = sliceAngle / tool.subs.length
-                const subIdx = Math.floor(within / subSpan)
-                setHoveredSubIndex(subIdx >= 0 && subIdx < tool.subs.length ? subIdx : -1)
-            } else {
+            // Main ring: only highlight wedge when cursor is within the ring
+            if (dist >= INNER_R && dist <= OUTER_R) {
+                setHoveredIndex(wedgeIdx >= 0 && wedgeIdx < count ? wedgeIdx : -1)
                 setHoveredSubIndex(-1)
+                return
             }
+
+            // Sub-ring zone: only keep the parent wedge highlighted if the cursor
+            // is within the specific angular fan of that tool's sub-chips.
+            if (dist > OUTER_R && dist < SUB_RING_OUTER && hoveredIndex !== -1) {
+                const tool = TOOLS[hoveredIndex]
+                if (tool?.subs?.length) {
+                    const wedgeMidAngle = hoveredIndex * sliceAngle
+                    let diff = normalizedAngle - wedgeMidAngle
+                    // Shortest angular distance
+                    diff = ((diff + 180 + 360) % 360) - 180
+
+                    const minSubSpan = 22
+                    const idealSubSpan = sliceAngle / tool.subs.length
+                    const subSpan = Math.max(idealSubSpan, minSubSpan)
+                    const totalSubArc = subSpan * tool.subs.length
+
+                    // Add a small padding to the fan edges so it's forgiving
+                    if (Math.abs(diff) <= totalSubArc / 2 + 6) {
+                        // Cursor is inside the sub-chip fan area - keep wedge highlighted
+                        return
+                    }
+                }
+            }
+
+            // Cursor is outside all valid hover zones — clear everything
+            setHoveredIndex(-1)
+            setHoveredSubIndex(-1)
         },
-        [visible, position.x, position.y, sliceAngle, count]
+        [visible, position.x, position.y, sliceAngle, count, hoveredIndex]
     )
 
     // Propagate hovered tool + hovered sub
@@ -247,7 +261,6 @@ const RadialToolMenu = ({
                         const isHovered = hoveredIndex === idx
                         const isActive = activeTool === tool.id
                         const canAccess = !tool.pro || hasAccess(tool.id)
-                        // Start angle: -90° is top, offset by half slice to center
                         const startAngle = idx * sliceAngle - 90 - sliceAngle / 2
                         const endAngle = startAngle + sliceAngle
 
@@ -280,7 +293,6 @@ const RadialToolMenu = ({
                                     filter: isHovered && canAccess ? "url(#radial-glow)" : "none",
                                 }}
                                 onClick={() => handleToolClick(tool)}
-                                onPointerEnter={() => setHoveredIndex(idx)}
                             />
                         )
                     })}
@@ -370,7 +382,6 @@ const RadialToolMenu = ({
                                 className="w-4 h-4"
                                 style={{ color }}
                             />
-                            {/* Pro badge */}
                             {tool.pro && !canAccess && (
                                 <span
                                     className="absolute -bottom-1 -right-1 text-[6px] font-bold px-1 rounded-full"
@@ -433,95 +444,80 @@ const RadialToolMenu = ({
                     )}
                 </div>
 
-                {/* Sub-ring: render fan of small chips around the hovered wedge's outer arc.
-                    Each chip is laid out by angular position within the parent wedge. */}
-                {hoveredTool?.subs?.length > 0 && (() => {
-                    const subs = hoveredTool.subs
-                    const wedgeStart = hoveredIndex * sliceAngle
-                    const subSpan = sliceAngle / subs.length
-                    return subs.map((sub, sIdx) => {
-                        // Center angle for each sub-chip, converted to math radians:
-                        //   wedge starts at top (we offset by -90° to align with main ring).
-                        const subCenter = wedgeStart + subSpan * (sIdx + 0.5)
-                        const angleRad = ((subCenter - 90) * Math.PI) / 180
-                        const cx = OUTER_R + SUB_ICON_R * Math.cos(angleRad)
-                        const cy = OUTER_R + SUB_ICON_R * Math.sin(angleRad)
-                        const isSubHovered = hoveredSubIndex === sIdx
-                        return (
-                            <motion.div
-                                key={`sub-${hoveredTool.id}-${sub.id}`}
-                                className="absolute"
-                                style={{
-                                    left: cx - 28,
-                                    top: cy - 12,
-                                    width: 56,
-                                    height: 24,
-                                    pointerEvents: "none",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    borderRadius: 12,
-                                    background: isSubHovered
-                                        ? "rgba(6, 184, 212, 0.22)"
-                                        : "rgba(10, 14, 22, 0.85)",
-                                    border: isSubHovered
-                                        ? "1px solid rgba(6, 184, 212, 0.65)"
-                                        : "1px solid rgba(255, 255, 255, 0.10)",
-                                    color: isSubHovered ? "#00E5FF" : "rgba(255, 255, 255, 0.78)",
-                                    fontSize: 10,
-                                    fontWeight: 700,
-                                    letterSpacing: "0.04em",
-                                    textTransform: "uppercase",
-                                    boxShadow: isSubHovered
-                                        ? "0 4px 16px rgba(6, 184, 212, 0.32)"
-                                        : "0 2px 8px rgba(0,0,0,0.35)",
-                                }}
-                                initial={{ opacity: 0, scale: 0.6 }}
-                                animate={{
-                                    opacity: 1,
-                                    scale: isSubHovered ? 1.1 : 1,
-                                }}
-                                transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-                            >
-                                {sub.label}
-                            </motion.div>
-                        )
-                    })
-                })()}
+                {/* Sub-ring: fan of clickable chips outside the hovered wedge.
+                    Chips use onMouseEnter/Leave for hover instead of distance math. */}
+                <AnimatePresence>
+                    {hoveredTool?.subs?.length > 0 && (() => {
+                        const subs = hoveredTool.subs
+                        // Spread subs evenly across the parent wedge's angular range,
+                        // but give each at least 22° of arc to avoid cramping (matches hover math).
+                        const minSubSpan = 22
+                        const idealSubSpan = sliceAngle / subs.length
+                        const subSpan = Math.max(idealSubSpan, minSubSpan)
+                        const totalSubArc = subSpan * subs.length
+                        const wedgeMidAngle = hoveredIndex * sliceAngle
+                        const subGroupStart = wedgeMidAngle - totalSubArc / 2
 
-                {/* Hovered tool label (outside the ring) */}
-                {hoveredTool && (
-                    <motion.div
-                        className="absolute"
-                        style={{
-                            left: OUTER_R - 60,
-                            top: size + 8,
-                            width: 120,
-                            textAlign: "center",
-                            pointerEvents: "none",
-                        }}
-                        initial={{ opacity: 0, y: -4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.1 }}
-                    >
-                        <span
-                            className="text-[10px] font-semibold px-2 py-1 rounded-md"
-                            style={{
-                                background: "rgba(10, 14, 22, 0.9)",
-                                border: "1px solid rgba(255, 255, 255, 0.08)",
-                                color: "#e2e8f0",
-                                backdropFilter: "blur(12px)",
-                            }}
-                        >
-                            {hoveredTool.label}
-                            {hoveredTool.shortcut && (
-                                <span style={{ color: "rgba(255,255,255,0.3)", marginLeft: 4 }}>
-                                    {hoveredTool.shortcut}
-                                </span>
-                            )}
-                        </span>
-                    </motion.div>
-                )}
+                        return subs.map((sub, sIdx) => {
+                            const subCenter = subGroupStart + subSpan * (sIdx + 0.5)
+                            const angleRad = ((subCenter - 90) * Math.PI) / 180
+                            const cx = OUTER_R + SUB_RING_R * Math.cos(angleRad)
+                            const cy = OUTER_R + SUB_RING_R * Math.sin(angleRad)
+                            const isSubHovered = hoveredSubIndex === sIdx
+                            return (
+                                <motion.button
+                                    key={`sub-${hoveredTool.id}-${sub.id}`}
+                                    type="button"
+                                    className="absolute"
+                                    onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleToolClick(hoveredTool, sub.id)
+                                    }}
+                                    onMouseEnter={() => setHoveredSubIndex(sIdx)}
+                                    onMouseLeave={() => setHoveredSubIndex(-1)}
+                                    style={{
+                                        left: cx - 32,
+                                        top: cy - 14,
+                                        width: 64,
+                                        height: 28,
+                                        pointerEvents: "auto",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        borderRadius: 14,
+                                        cursor: "pointer",
+                                        background: isSubHovered
+                                            ? "rgba(6, 184, 212, 0.22)"
+                                            : "rgba(10, 14, 22, 0.92)",
+                                        border: isSubHovered
+                                            ? "1px solid rgba(6, 184, 212, 0.65)"
+                                            : "1px solid rgba(255, 255, 255, 0.12)",
+                                        color: isSubHovered ? "#00E5FF" : "rgba(255, 255, 255, 0.78)",
+                                        fontSize: 10,
+                                        fontWeight: 700,
+                                        letterSpacing: "0.04em",
+                                        textTransform: "uppercase",
+                                        boxShadow: isSubHovered
+                                            ? "0 4px 16px rgba(6, 184, 212, 0.32)"
+                                            : "0 2px 8px rgba(0,0,0,0.4)",
+                                        backdropFilter: "blur(8px)",
+                                    }}
+                                    initial={{ opacity: 0, scale: 0.5 }}
+                                    animate={{
+                                        opacity: 1,
+                                        scale: isSubHovered ? 1.12 : 1,
+                                    }}
+                                    exit={{ opacity: 0, scale: 0.5 }}
+                                    transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1], delay: sIdx * 0.025 }}
+                                >
+                                    {sub.label}
+                                </motion.button>
+                            )
+                        })
+                    })()}
+                </AnimatePresence>
+
+
             </motion.div>
 
             {/* Backdrop blur behind the wheel */}

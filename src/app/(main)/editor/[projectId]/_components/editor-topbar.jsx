@@ -1,6 +1,7 @@
 "use client"
 
-import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Sliders, Text, Crop, ArrowLeft, Lock, ChevronDown, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
+import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
@@ -9,8 +10,10 @@ import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
 import { addImageFilesToCanvas } from '@/lib/canvas-images'
 import ProBadge from '@/components/pro-badge'
+import InkDropLogo from '@/components/ink-drop-logo'
 import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
 import { motion, AnimatePresence } from 'framer-motion'
+import { isPixxelMaskOverlay } from '@/lib/canvas-mask'
 
 const EXPORT_PRESETS = [
     { id: 'png', label: 'PNG', description: 'Lossless · Best quality', format: 'png', quality: 1 },
@@ -25,12 +28,17 @@ const TOOLS = [
     { id: "images", label: "Images", icon: ImagePlus },
     { id: "adjust", label: "Adjust", icon: Sliders },
     { id: "draw", label: "Draw", icon: Pen },
+    { id: "mask", label: "Mask", icon: Scissors },
     { id: "text", label: "Text", icon: Text },
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
     { id: "ai_edit", label: "AI Edit", icon: Eye, proOnly: true },
     { id: "ai_agent", label: "Agent", icon: Bot },
 ]
+
+const isExportTransientObject = (obj) =>
+    obj?.excludeFromExport ||
+    isPixxelMaskOverlay(obj)
 
 const EditorTopbar = ({ project }) => {
 
@@ -146,7 +154,7 @@ const EditorTopbar = ({ project }) => {
         } catch (error) {
             console.error('[Save] Failed:', error)
             const msg = error?.message || String(error) || 'Unknown error'
-            // Convex's per-document size limit is 1 MB. If saved state exceeds that
+            // Neon's per-document size limit is 1 MB. If saved state exceeds that
             // (large data URLs from uploaded images), the user needs to know — that's
             // the root cause of "my changes are suddenly gone".
             const isSizeError = /too large|maximum.*size|1MB|1 MB/i.test(msg)
@@ -183,27 +191,72 @@ const EditorTopbar = ({ project }) => {
         const previousActive = canvasEditor.getActiveObject?.()
         if (previousActive) canvasEditor.discardActiveObject()
 
+        // Hoist viewport save variables so `finally` can always restore them.
+        let savedVpt = null
+        let savedW = null
+        let savedH = null
+        const hiddenForExport = []
+
         try {
-            // Use project dimensions for full-resolution export.
-            const projectW = Number(project.width) || canvasEditor.getWidth()
-            const projectH = Number(project.height) || canvasEditor.getHeight()
-            if (!projectW || !projectH) {
-                throw new Error('Project dimensions are not set')
+            for (const obj of canvasEditor.getObjects?.() || []) {
+                if (obj.visible !== false && isExportTransientObject(obj)) {
+                    hiddenForExport.push(obj)
+                    obj.set?.('visible', false)
+                }
             }
 
-            // toCanvasElement renders all visible (visible:true) Fabric objects at their
-            // canvas-coordinate positions, bypassing the viewport pan/zoom.
+            // Fabric.js v7 export fix: temporarily reset the viewport to identity
+            // so objects render at their true project-space positions.
+            savedVpt = [...canvasEditor.viewportTransform]
+            savedW = canvasEditor.getWidth()
+            savedH = canvasEditor.getHeight()
+
+            canvasEditor.viewportTransform = [1, 0, 0, 1, 0, 0]
+            canvasEditor.calcOffset()
+            canvasEditor.renderAll()
+
+            // Compute the tight bounding box around ALL visible objects.
+            // This ensures only the actual image content is exported — no
+            // surrounding empty project canvas.
+            const objects = canvasEditor.getObjects().filter(o => o.visible !== false && !isExportTransientObject(o))
+            if (!objects.length) {
+                throw new Error('No visible objects on the canvas to export')
+            }
+
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+            for (const obj of objects) {
+                const rect = obj.getBoundingRect(true) // absolute coords, no viewport
+                minX = Math.min(minX, rect.left)
+                minY = Math.min(minY, rect.top)
+                maxX = Math.max(maxX, rect.left + rect.width)
+                maxY = Math.max(maxY, rect.top + rect.height)
+            }
+
+            // Round outward to whole pixels
+            const cropLeft = Math.floor(minX)
+            const cropTop = Math.floor(minY)
+            const cropW = Math.ceil(maxX) - cropLeft
+            const cropH = Math.ceil(maxY) - cropTop
+
+            if (cropW < 1 || cropH < 1) {
+                throw new Error('Object bounding box is empty')
+            }
+
+            // Set canvas dimensions large enough to contain the crop region
+            const canvasSizeW = Math.max(cropLeft + cropW, savedW)
+            const canvasSizeH = Math.max(cropTop + cropH, savedH)
+            canvasEditor.setDimensions({ width: canvasSizeW, height: canvasSizeH })
+            canvasEditor.calcOffset()
+            canvasEditor.renderAll()
+
+            // Export only the bounding box region
             const exportCanvas = canvasEditor.toCanvasElement(1, {
-                width: projectW,
-                height: projectH,
-                left: 0,
-                top: 0,
+                width: cropW,
+                height: cropH,
+                left: cropLeft,
+                top: cropTop,
             })
 
-            // For JPEG/WebP we need a solid background — those formats don't support alpha.
-            // Note: canvas.backgroundColor defaults to "transparent" in this app, which the
-            // 2d context treats as transparent (filling has no effect) and the JPEG encoder
-            // then bakes in BLACK. Use white explicitly unless a real color is set.
             let finalCanvas = exportCanvas
             if (format !== 'png') {
                 finalCanvas = document.createElement('canvas')
@@ -245,11 +298,22 @@ const EditorTopbar = ({ project }) => {
             console.error('[Export] Failed:', error)
             toast.error(`Export failed: ${error?.message || 'Unknown error'}`, { id: toastId })
         } finally {
+            // Always restore viewport dimensions and transform, even if export failed.
+            for (const obj of hiddenForExport) {
+                try { obj.set?.('visible', true) } catch { /* object may have been removed */ }
+            }
+            if (savedVpt && typeof savedW === 'number' && typeof savedH === 'number') {
+                try {
+                    canvasEditor.setDimensions({ width: savedW, height: savedH })
+                    canvasEditor.viewportTransform = savedVpt
+                    canvasEditor.calcOffset()
+                } catch { /* canvas may have been disposed */ }
+            }
             // Always restore the selection the user had before they clicked Export.
             if (previousActive && canvasEditor.contextContainer) {
                 try { canvasEditor.setActiveObject(previousActive) } catch { /* selection may have been removed */ }
-                canvasEditor.requestRenderAll()
             }
+            canvasEditor.requestRenderAll()
             setIsExporting(false)
         }
     }
@@ -261,6 +325,15 @@ const EditorTopbar = ({ project }) => {
 
                 {/* Left section: Back + Project name */}
                 <div className="flex flex-1 items-center gap-2 min-w-0">
+                    <Link
+                        href="/dashboard"
+                        className="editor-logo-button flex items-center justify-center flex-none"
+                        title="Go to dashboard"
+                        aria-label="Go to dashboard"
+                    >
+                        <InkDropLogo />
+                    </Link>
+
                     <motion.button
 
                         onClick={handleBackToDashboard}
@@ -297,17 +370,19 @@ const EditorTopbar = ({ project }) => {
                         const hasToolAccess = hasAccess(tool.id)
 
                         return (
-                            <motion.button
-                                key={tool.id}
-                                onClick={() => handleToolChange(tool.id)}
-                                className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
-                            >
-                                <Icon className="h-4 w-4 flex-none" />
-                                <span className="hidden 2xl:inline">{tool.label}</span>
-                                {tool.proOnly && !hasToolAccess && (
-                                    <Lock className="h-2.5 w-2.5 ml-0.5 flex-none" style={{ color: 'var(--accent-warning)' }} />
+                            <React.Fragment key={tool.id}>
+                                {/* Visual dividers to create tool groups */}
+                                {(tool.id === 'mask' || tool.id === 'ai_background') && (
+                                    <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
                                 )}
-                            </motion.button>
+                                <motion.button
+                                    onClick={() => handleToolChange(tool.id)}
+                                    className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
+                                >
+                                    <Icon className="h-4 w-4 flex-none" />
+                                    <span className="hidden 2xl:inline">{tool.label}</span>
+                                </motion.button>
+                            </React.Fragment>
                         )
                     })}
                 </div>

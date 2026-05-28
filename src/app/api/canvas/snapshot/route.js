@@ -1,23 +1,23 @@
 // /api/canvas/snapshot
 //
 // Redis-backed write-behind cache for canvas state. The editor saves to Redis
-// continuously (every edit) and only syncs to Convex periodically (debounced
-// flush) or on critical events (manual Save, beforeunload). This drops Convex
+// continuously (every edit) and only syncs to Neon periodically (debounced
+// flush) or on critical events (manual Save, beforeunload). This drops Neon
 // mutation volume by ~10-30× for active editing sessions while keeping data
 // recoverable across reload — if the user closes the tab before a flush, the
-// next page load reads from Redis instead of stale Convex state.
+// next page load reads from Redis instead of stale Neon state.
 //
 // POST → store the latest canvas snapshot. Fast (one Redis SET command).
 // GET  → return the latest cached snapshot for a project (or null).
 //
-// Both routes auth via Clerk and verify the user owns the project via Convex
+// Both routes auth via Clerk and verify the user owns the project via Neon
 // before reading/writing — so a leaked projectId can't read someone else's
 // in-flight state.
 
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { fetchQuery } from "convex/nextjs"
-import { api } from "../../../../../convex/_generated/api"
+import { getNeonAuthContext } from "@/lib/neon/auth"
+import { runNeonQuery } from "@/lib/neon/functions"
 import { getRedis, isRedisConfigured } from "@/lib/redis"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
 
@@ -28,15 +28,15 @@ const SNAPSHOT_TTL_SECONDS = 24 * 60 * 60
 const stateKey = (projectId) => `canvas:state:${projectId}`
 const metaKey = (projectId) => `canvas:meta:${projectId}`
 
-const ensureOwnership = async (projectId, token) => {
-    const project = await fetchQuery(api.projects.getProject, { projectId }, { token })
+const ensureOwnership = async (projectId, neonAuth) => {
+    const project = await runNeonQuery("projects.getProject", { projectId }, { auth: neonAuth })
     if (!project) throw new Error("Project not found or access denied")
     return project
 }
 
 export async function POST(request) {
     try {
-        const { userId, getToken, sessionClaims } = await auth()
+        const { userId } = await auth()
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
@@ -48,17 +48,11 @@ export async function POST(request) {
 
         if (!isRedisConfigured()) {
             // No Redis → tell the client to skip the write-behind path and use
-            // the legacy direct-Convex save instead. Client honors this flag.
+            // the direct-Neon save path instead. Client honors this flag.
             return NextResponse.json({ ok: false, redisUnavailable: true }, { status: 200 })
         }
 
-        const token =
-            sessionClaims?.aud === "convex"
-                ? await getToken()
-                : await getToken({ template: "convex" })
-        if (!token) {
-            return NextResponse.json({ error: "Missing Convex auth token" }, { status: 500 })
-        }
+        const neonAuth = await getNeonAuthContext()
 
         const body = await request.json().catch(() => ({}))
         const projectId = body.projectId
@@ -71,7 +65,7 @@ export async function POST(request) {
 
         // Cheap ownership check — re-uses the existing project read auth so a
         // malicious client can't spam another user's project keys.
-        await ensureOwnership(projectId, token)
+        await ensureOwnership(projectId, neonAuth)
 
         const redis = getRedis()
         const payload = JSON.stringify({ canvasState, currentImageUrl, updatedAt: clientUpdatedAt, userId })
@@ -99,7 +93,7 @@ export async function POST(request) {
 
 export async function GET(request) {
     try {
-        const { userId, getToken, sessionClaims } = await auth()
+        const { userId } = await auth()
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
@@ -113,14 +107,8 @@ export async function GET(request) {
             return NextResponse.json({ error: "projectId required" }, { status: 400 })
         }
 
-        const token =
-            sessionClaims?.aud === "convex"
-                ? await getToken()
-                : await getToken({ template: "convex" })
-        if (!token) {
-            return NextResponse.json({ error: "Missing Convex auth token" }, { status: 500 })
-        }
-        await ensureOwnership(projectId, token)
+        const neonAuth = await getNeonAuthContext()
+        await ensureOwnership(projectId, neonAuth)
 
         const redis = getRedis()
         const raw = await redis.get(stateKey(projectId))

@@ -1,26 +1,27 @@
 import { useAuth, useUser } from "@clerk/nextjs";
-import { useConvexAuth } from "convex/react";
 import { useEffect, useState } from "react";
-import { useMutation } from "convex/react";
-import { api } from "../convex/_generated/api";
+import { api } from "@/lib/neon-api";
+import { isDatabaseSetupError } from "@/lib/database-errors";
+import { useDatabaseMutation } from "./useDatabaseQuery";
 import { toast } from "sonner";
 
 export function useStoreUser() {
-    const { isLoading, isAuthenticated } = useConvexAuth();
-    const { has } = useAuth();
+    const { isLoaded, isSignedIn, has } = useAuth();
     const { user } = useUser();
     const isPro = has?.({ plan: "pro" }) || false;
     // When this state is set we know the server
     // has stored the user.
     const [userId, setUserId] = useState(null);
-    const storeUser = useMutation(api.users.store);
+    const [databaseSetupMissing, setDatabaseSetupMissing] = useState(false);
+    const { mutate: storeUser } = useDatabaseMutation(api.users.store);
     // Call the `storeUser` mutation function to store
     // the current user in the `users` table and return the `Id` value.
     useEffect(() => {
         let isCancelled = false;
 
         // Wait until auth has settled and we have a Clerk user id before syncing.
-        if (isLoading || !isAuthenticated || !user?.id) {
+        if (!isLoaded || !isSignedIn || !user?.id) {
+            setDatabaseSetupMissing(false);
             return () => {
                 isCancelled = true;
             };
@@ -32,6 +33,7 @@ export function useStoreUser() {
         async function createUser() {
             try {
                 const id = await storeUser();
+                setDatabaseSetupMissing(false);
 
                 try {
                     const response = await fetch("/api/billing/sync", {
@@ -42,15 +44,24 @@ export function useStoreUser() {
                         throw new Error("Billing plan sync failed.");
                     }
                 } catch (syncError) {
-                    console.error("Failed to sync billing plan to Convex.", syncError);
+                    console.error("Failed to sync billing plan to Neon.", syncError);
                 }
 
                 if (!isCancelled) {
                     setUserId(id);
                 }
             } catch (error) {
+                if (isDatabaseSetupError(error)) {
+                    if (!isCancelled) {
+                        setUserId(null);
+                        setDatabaseSetupMissing(true);
+                    }
+                    return;
+                }
+
                 if (!isCancelled) {
                     setUserId(null);
+                    setDatabaseSetupMissing(false);
                 }
 
                 const message =
@@ -58,7 +69,7 @@ export function useStoreUser() {
                         ? error.message
                         : "Unable to sync your account right now.";
 
-                console.error("Failed to store signed-in user in Convex.", error);
+                console.error("Failed to store signed-in user in Neon.", error);
                 toast.error(message);
             }
         }
@@ -71,10 +82,11 @@ export function useStoreUser() {
         };
         // Make sure the effect reruns if the user logs in with
         // a different identity
-    }, [isAuthenticated, isLoading, isPro, storeUser, user?.id]);
+    }, [isLoaded, isSignedIn, isPro, storeUser, user?.id]);
     // Combine the local state with the state from context
     return {
-        isLoading: isLoading || (isAuthenticated && userId === null),
-        isAuthenticated: isAuthenticated && userId !== null,
+        isLoading: !isLoaded || (isSignedIn && userId === null && !databaseSetupMissing),
+        isAuthenticated: isSignedIn && userId !== null,
+        databaseSetupMissing,
     };
 }

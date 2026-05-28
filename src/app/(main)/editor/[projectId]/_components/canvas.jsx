@@ -2,8 +2,8 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react"
 import { useCanvas } from "../../../../../../context/context"
-import { useConvexMutation } from "../../../../../../hooks/useConvexQuery"
-import { api } from "../../../../../../convex/_generated/api"
+import { useDatabaseMutation } from "../../../../../../hooks/useDatabaseQuery"
+import { api } from "@/lib/neon-api";
 import { Hand, Maximize2, ZoomIn, ZoomOut } from "lucide-react"
 import {
     Canvas,
@@ -57,9 +57,10 @@ import { addImageFilesToCanvas } from "../../../../../lib/canvas-images"
 import {
     createDebouncedFlusher,
     fetchCachedSnapshot,
-    flushToConvex,
+    flushToNeon,
     snapshotToCache,
 } from "../../../../../lib/canvas-cache"
+import { isPixxelMaskOverlay } from "../../../../../lib/canvas-mask"
 import AuroraLoader from "./AuroraLoader"
 
 const MIN_ZOOM = 0.05
@@ -69,6 +70,7 @@ const MAX_PREVIEW_ZOOM_PERCENT = 300
 const PREVIEW_ZOOM_STEP_PERCENT = 1
 const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
+const MAX_CONVEX_STATE_CHARS = 900_000
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
 const getPrimaryRemoteImageUrl = (canvas) => {
@@ -138,7 +140,7 @@ const CanvasEditor = ({ project }) => {
     const isBusy = Boolean(processingMessage) || isLoading
     const activeToolRef = useRef(activeTool)
     activeToolRef.current = activeTool
-    const { mutate: updateProject } = useConvexMutation(api.projects.updateProject)
+    const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
 
     const disposeCanvasInstance = useCallback(() => {
         const existing = canvasInstanceRef.current
@@ -289,19 +291,26 @@ const CanvasEditor = ({ project }) => {
 
         const canvasJSON = serializeCanvasState(canvas)
         const currentImageUrl = getPrimaryRemoteImageUrl(canvas)
-        const fullState = {
+        let fullState = {
             ...canvasJSON,
             history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
             historyIndex: historyIndexRef.current,
         }
+        if (fullState.history.length > 0 && JSON.stringify(fullState).length > MAX_CONVEX_STATE_CHARS) {
+            fullState = {
+                ...canvasJSON,
+                history: [],
+                historyIndex: -1,
+            }
+        }
 
         // Strategy:
         //   - Always write to the server cache first (fast in-memory store, no DB hit).
-        //   - For autosave (default): schedule a debounced flush to Convex. Lots of
+        //   - For autosave (default): schedule a debounced flush to Neon. Lots of
         //     edits coalesce into one DB write.
         //   - For manual Save or `immediate: true` / `rethrow: true`: flush right
         //     now so the user gets a hard guarantee the state is persisted.
-        //   - If the cache write fails for any reason, fall back to direct Convex
+        //   - If the cache write fails for any reason, fall back to direct Neon
         //     so no edit is ever lost.
         const cached = await snapshotToCache(proj._id, fullState, currentImageUrl)
 
@@ -322,8 +331,8 @@ const CanvasEditor = ({ project }) => {
 
             if (immediate || rethrow) {
                 // Manual Save or explicit immediate request: flush the cached state
-                // through to Convex right now and wait for the result.
-                const flushed = await flushToConvex(proj._id)
+                // through to Neon right now and wait for the result.
+                const flushed = await flushToNeon(proj._id)
                 if (!flushed && rethrow) {
                     // Cache had nothing new to flush OR flush failed — write
                     // directly so the user's Save-button click isn't a no-op.
@@ -360,7 +369,7 @@ const CanvasEditor = ({ project }) => {
         }
     }, [project?._id])
 
-    // beforeunload + pagehide: force-flush the cache to Convex before the user
+    // beforeunload + pagehide: force-flush the cache to Neon before the user
     // navigates away. `keepalive` lets the fetch survive the page unloading.
     useEffect(() => {
         const projectId = project?._id
@@ -369,7 +378,7 @@ const CanvasEditor = ({ project }) => {
             try { flusherRef.current?.cancel() } catch { /* ignore */ }
             // Fire and forget. The browser will let this request finish even
             // though the page is going away thanks to keepalive.
-            flushToConvex(projectId, { keepalive: true })
+            flushToNeon(projectId, { keepalive: true })
         }
         window.addEventListener("beforeunload", handler)
         window.addEventListener("pagehide", handler)
@@ -414,7 +423,7 @@ const CanvasEditor = ({ project }) => {
             canvas.setDimensions({ width: width || project.width, height: height || project.height }, { backstoreOnly: false })
 
             // Read-through: if the server cache has a newer snapshot than what's
-            // in Convex (because a previous session ended with pending debounced
+            // in Neon (because a previous session ended with pending debounced
             // writes that haven't been flushed yet), prefer that. Otherwise the
             // user would see an old version of their work after a reload.
             let rawCanvasState = project.canvasState
@@ -907,6 +916,7 @@ const CanvasEditor = ({ project }) => {
 
         const handleCanvasChange = (event) => {
             if (isExpansionFrameLike(event?.target)) return
+            if (isPixxelMaskOverlay(event?.target)) return
             scheduleHistoryPush()
             clearTimeout(saveTimeout)
             saveTimeout = setTimeout(() => { saveCanvasState() }, 2000)
