@@ -43,6 +43,7 @@ const EDITOR_SECTIONS = [
             { keys: ["Shift", "I"], desc: "Add image" },
             { keys: [MOD, "K"], desc: "Open command palette" },
             { keys: ["[", "]"], desc: "Brush size − / +" },
+            { keys: ["Alt", "paint"], desc: "Invert erase / mask brush" },
         ],
     },
     {
@@ -53,6 +54,8 @@ const EDITOR_SECTIONS = [
             { keys: ["I"], desc: "Images" },
             { keys: ["A"], desc: "Adjust" },
             { keys: ["D"], desc: "Draw" },
+            { keys: ["X"], desc: "Erase" },
+            { keys: ["M"], desc: "Mask" },
             { keys: ["T"], desc: "Text" },
             { keys: ["B"], desc: "AI background" },
             { keys: ["G"], desc: "Generative extend" },
@@ -84,9 +87,34 @@ const DASHBOARD_SECTIONS = [
     },
 ]
 
+const MARKETING_SECTIONS = [
+    {
+        title: "Navigate",
+        items: [
+            { keys: ["G"], desc: "Open the studio" },
+            { keys: ["?"], desc: "Toggle this guide" },
+            { keys: ["Esc"], desc: "Close this guide" },
+        ],
+    },
+]
+
+const AUTH_SECTIONS = [
+    {
+        title: "Sign in",
+        items: [
+            { keys: ["Tab"], desc: "Move between fields" },
+            { keys: ["Enter"], desc: "Submit the form" },
+            { keys: ["?"], desc: "Toggle this guide" },
+            { keys: ["Esc"], desc: "Back to home" },
+        ],
+    },
+]
+
 const VARIANT_SECTIONS = {
     editor: EDITOR_SECTIONS,
     dashboard: DASHBOARD_SECTIONS,
+    marketing: MARKETING_SECTIONS,
+    auth: AUTH_SECTIONS,
 }
 
 const Key = ({ children }) => (
@@ -116,7 +144,8 @@ const ShortcutsGuide = ({ open, onClose, variant = "editor" }) => {
     useEffect(() => {
         if (!open) return
         const onKey = (event) => {
-            if (event.key === "Escape") onClose?.()
+            // Escape or Enter dismiss the reference overlay (it has no form to submit).
+            if (event.key === "Escape" || event.key === "Enter") onClose?.()
         }
         window.addEventListener("keydown", onKey)
         return () => window.removeEventListener("keydown", onKey)

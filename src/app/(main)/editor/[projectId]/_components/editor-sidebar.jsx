@@ -1,20 +1,43 @@
 "use client"
 
 import React, { useEffect, useState } from "react"
+import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
-import TextControls from "./tools/text"
-import ResizeControls from "./tools/resize"
-import CropContent from "./tools/crop"
-import AdjustControls from "./tools/adjust"
-import BackgroundControls from "./tools/ai-background"
-import AIExtender from "./tools/ai-extender"
-import AIEdits from "./tools/ai-edit"
-import ImageKitAgent from "./tools/imagekit-agent"
-import ImageManager from "./tools/images"
-import DrawControls from "./tools/draw"
-import MaskControls from "./tools/mask"
-import { Bot, Crop, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text } from "lucide-react"
+import { Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
+// Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
+// they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
+// them would leave the canvas selectable during the chunk fetch, so an early drag could
+// move the image instead of painting. Keep these two eager (they're small); the heavy
+// panels below stay split out.
+import MaskControls from "./tools/mask"
+import EraseControls from "./tools/erase"
+
+// Lazy-load each tool panel so the editor's initial bundle stays small — only the
+// active tool's code is fetched (on first use, then cached). The heaviest panels
+// (the AI agent, the adjust/curves panel) are split into their own chunks instead
+// of shipping with the editor shell. A lightweight skeleton fills the panel during
+// the chunk load. ssr:false because every panel is a client-only canvas tool.
+const PanelLoading = () => (
+    <div className="space-y-3 p-1" aria-busy="true" aria-label="Loading tool">
+        <div className="h-8 rounded-lg animate-pulse" style={{ background: "var(--bg-elevated)" }} />
+        <div className="h-24 rounded-lg animate-pulse" style={{ background: "var(--bg-elevated)" }} />
+        <div className="h-8 rounded-lg animate-pulse" style={{ background: "var(--bg-elevated)" }} />
+        <div className="h-8 w-2/3 rounded-lg animate-pulse" style={{ background: "var(--bg-elevated)" }} />
+    </div>
+)
+const lazyTool = (loader) => dynamic(loader, { ssr: false, loading: PanelLoading })
+
+const TextControls = lazyTool(() => import("./tools/text"))
+const ResizeControls = lazyTool(() => import("./tools/resize"))
+const CropContent = lazyTool(() => import("./tools/crop"))
+const AdjustControls = lazyTool(() => import("./tools/adjust"))
+const BackgroundControls = lazyTool(() => import("./tools/ai-background"))
+const AIExtender = lazyTool(() => import("./tools/ai-extender"))
+const AIEdits = lazyTool(() => import("./tools/ai-edit"))
+const ImageKitAgent = lazyTool(() => import("./tools/imagekit-agent"))
+const ImageManager = lazyTool(() => import("./tools/images"))
+const DrawControls = lazyTool(() => import("./tools/draw"))
 
 const TOOL_CONFIGS = {
     resize: { title: "Resize", icon: Expand },
@@ -22,6 +45,7 @@ const TOOL_CONFIGS = {
     images: { title: "Images", icon: ImagePlus },
     adjust: { title: "Adjust", icon: Sliders },
     draw: { title: "Draw", icon: Pen },
+    erase: { title: "Erase", icon: Eraser },
     mask: { title: "Mask", icon: Scissors },
     text: { title: "Text", icon: Text },
     ai_background: { title: "AI Background", icon: Palette },
@@ -73,6 +97,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "images": return project ? <ImageManager project={project} {...colorProps} /> : <div>Loading...</div>
             case "adjust": return <AdjustControls {...colorProps} />
             case "draw": return <DrawControls {...colorProps} />
+            case "erase": return <EraseControls project={project} {...colorProps} />
             case "mask": return <MaskControls {...colorProps} />
             case "text": return <TextControls {...colorProps} />
             case "ai_background": return project ? <BackgroundControls project={project} {...colorProps} /> : <div>Loading...</div>

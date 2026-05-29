@@ -15,8 +15,10 @@ import {
   Loader2,
   MessageSquare,
   Plus,
+  Redo2,
   RotateCcw,
   Send,
+  Undo2,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -746,7 +748,7 @@ const AgentEffectControls = ({
   );
 };
 
-const AgentChangeList = ({ plan, enabledMap = {}, onToggle, compact = false, interactive = true }) => {
+const AgentChangeList = React.memo(({ plan, enabledMap = {}, onToggle, compact = false, interactive = true }) => {
   const changes = getChangeItems(plan);
 
   if (!changes.length) {
@@ -802,7 +804,8 @@ const AgentChangeList = ({ plan, enabledMap = {}, onToggle, compact = false, int
       })}
     </motion.div>
   );
-};
+});
+AgentChangeList.displayName = "AgentChangeList";
 
 const AgentThinkingRow = ({ prompt, autoPreview = true }) => (
   <motion.div
@@ -994,6 +997,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [multiLayerPlans, setMultiLayerPlans] = useState([]);
   const [activeEditSetId, setActiveEditSetId] = useState(null);
   const [, setImageRevision] = useState(0);
+  // Canvas-history undo/redo state, mirrored into the agent header so its edits
+  // (which all push onto the global history) can be stepped back and forth here.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [upscaleComparison, setUpscaleComparison] = useState(null);
   const [isCompareOpen, setIsCompareOpen] = useState(false);
   const liveSnapshotRef = useRef(null);
@@ -1002,6 +1009,19 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [livePreviewToken, setLivePreviewToken] = useState(null);
   const chatEndRef = useRef(null);
   const previewPromiseRef = useRef(null);
+  // Mounted guard + in-flight poll abort. The send/preview flow awaits a
+  // 10–30s ImageKit poll; if the panel unmounts mid-poll (user switches tools)
+  // the post-await setState calls would warn/leak. isMountedRef gates them and
+  // pollAbortRef cancels the active waitForImageKitUrl. Mirrors erase.jsx.
+  const isMountedRef = useRef(true);
+  const pollAbortRef = useRef(null);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      pollAbortRef.current?.abort();
+    };
+  }, []);
 
   // Resizable Edits Section State
   const [editsHeight, setEditsHeight] = useState(null);
@@ -1047,6 +1067,60 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       canvasEditor.off("selection:cleared", bump);
       canvasEditor.off("object:modified", bump);
     };
+  }, [canvasEditor]);
+
+  // Mirror the canvas undo/redo availability into the agent header.
+  useEffect(() => {
+    if (!canvasEditor) {
+      setCanUndo(false);
+      setCanRedo(false);
+      return undefined;
+    }
+    const sync = () => {
+      const state = canvasEditor.__getHistoryState?.();
+      if (state) {
+        setCanUndo(Boolean(state.canUndo));
+        setCanRedo(Boolean(state.canRedo));
+      }
+    };
+    sync();
+    canvasEditor.on("history:changed", sync);
+    return () => canvasEditor.off("history:changed", sync);
+  }, [canvasEditor]);
+
+  const handleAgentUndo = useCallback(async () => {
+    if (!canvasEditor?.__undoCanvasState) return;
+    // Step out of any un-applied live preview first, then walk canvas history.
+    if (livePreviewTokenRef.current && liveSnapshotRef.current) {
+      await restoreLiveSnapshot();
+      setActivePlan(null);
+      setEffectValues({});
+      setEnabledChanges({});
+      setMultiLayerPlans([]);
+      setImageRevision((value) => value + 1);
+      return;
+    }
+    const didUndo = await canvasEditor.__undoCanvasState();
+    if (didUndo) {
+      await canvasEditor.__saveCanvasState?.();
+      setImageRevision((value) => value + 1);
+    } else {
+      toast.message("Nothing to undo");
+    }
+    // restoreLiveSnapshot is declared below and is ref-driven (stable behaviour);
+    // it can't go in the dep array without a TDZ, and isn't needed there.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasEditor]);
+
+  const handleAgentRedo = useCallback(async () => {
+    if (!canvasEditor?.__redoCanvasState) return;
+    const didRedo = await canvasEditor.__redoCanvasState();
+    if (didRedo) {
+      await canvasEditor.__saveCanvasState?.();
+      setImageRevision((value) => value + 1);
+    } else {
+      toast.message("Nothing to redo");
+    }
   }, [canvasEditor]);
 
   useEffect(() => {
@@ -1227,11 +1301,16 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
             setCachedTransformUrl(effectivePlan.url, serverCached);
             console.log("[Agent] Transform cache hit (server)", { url: effectivePlan.url });
           } else {
-            // 3. Cache miss — poll ImageKit (slow, 10–30s first time)
+            // 3. Cache miss — poll ImageKit (slow, 10–30s first time). The poll
+            // is cancelled if the panel unmounts mid-flight (see cleanup effect).
+            pollAbortRef.current?.abort();
+            const controller = new AbortController();
+            pollAbortRef.current = controller;
             try {
               readyUrl = await waitForImageKitUrl(effectivePlan.url, {
                 maxAttempts: 10,
                 retryDelayMs: 4000,
+                signal: controller.signal,
                 onStatus: (attempt, total) => {
                   setProcessingMessage?.(`ImageKit AI processing (${attempt}/${total})...`);
                 },
@@ -1241,6 +1320,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
               writeServerTransformCache(effectivePlan.url, readyUrl);
             } finally {
               setProcessingMessage?.(null);
+              if (pollAbortRef.current === controller) pollAbortRef.current = null;
             }
           }
         }
@@ -1254,7 +1334,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       if (isUpscalePlan && targetImage) {
         const upscaledWidth = Math.max(1, Math.round(targetImage.width || project?.width || 1));
         const upscaledHeight = Math.max(1, Math.round(targetImage.height || project?.height || 1));
-        if (beforeUrlForComparison) {
+        if (beforeUrlForComparison && isMountedRef.current) {
           setUpscaleComparison({ beforeUrl: beforeUrlForComparison, afterUrl: readyUrl, width: upscaledWidth, height: upscaledHeight });
         }
         toast.success(`Upscaled to ${upscaledWidth} × ${upscaledHeight}`, {
@@ -1267,7 +1347,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     canvasEditor.setActiveObject?.(targetImage);
     canvasEditor.requestRenderAll();
     canvasEditor.__pushHistoryState?.();
-    setImageRevision((value) => value + 1);
+    if (isMountedRef.current) setImageRevision((value) => value + 1);
     return previewToken;
     })();
 
@@ -1501,21 +1581,23 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
             currentImageUrlBefore: latestUrl,
             currentImageUrlAfter: getSourceUrl(getCanvasActiveImage(canvasEditor), project) || latestUrl,
           });
-          setActiveEditSetId(editSetId);
+          if (isMountedRef.current) setActiveEditSetId(editSetId);
         } catch (persistError) {
           console.warn("[agent] failed to persist edit set:", persistError?.message || persistError);
           toast.error("Preview ready, but I could not store this edit set.");
         }
 
-        const names = layerPlanEntries.map((e) => e.layerName).join(", ");
-        setMessages((current) => [
-          ...current,
-          newMessage(
-            "assistant",
-            `Applied to ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}: ${names}.`,
-            { previewToken, editSetId }
-          ),
-        ]);
+        if (isMountedRef.current) {
+          const names = layerPlanEntries.map((e) => e.layerName).join(", ");
+          setMessages((current) => [
+            ...current,
+            newMessage(
+              "assistant",
+              `Applied to ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}: ${names}.`,
+              { previewToken, editSetId }
+            ),
+          ]);
+        }
         toast.success(`Edited ${layerPlanEntries.length} layer${layerPlanEntries.length === 1 ? "" : "s"}`, { id: toastId });
         return;
       } else {
@@ -1606,6 +1688,8 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       if (autoPreview) {
         previewToken = await previewPlanOnCanvas(plan, nextEnabledChanges, nextValueMap);
       }
+      // Panel unmounted during the preview poll — stop before touching state.
+      if (!isMountedRef.current) return;
       let editSetId = null;
       try {
         editSetId = await persistAgentEditSetDraft({
@@ -1621,32 +1705,42 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
             ? getSourceUrl(getCanvasActiveImage(canvasEditor), project) || latestUrl
             : latestUrl,
         });
-        setActiveEditSetId(editSetId);
+        if (isMountedRef.current) setActiveEditSetId(editSetId);
       } catch (persistError) {
         console.warn("[agent] failed to persist edit set:", persistError?.message || persistError);
         toast.error("Preview ready, but I could not store this edit set.");
       }
 
-      setMessages((current) => [
-        ...current,
-        newMessage(
-          "assistant",
-          autoPreview
-            ? `${plan.title}: preview is live on the canvas.`
-            : `${plan.title}: the edit plan is ready to preview.`,
-          { plan, autoPreview, enabledChanges: nextEnabledChanges, previewToken, editSetId }
-        ),
-      ]);
+      if (isMountedRef.current) {
+        setMessages((current) => [
+          ...current,
+          newMessage(
+            "assistant",
+            autoPreview
+              ? `${plan.title}: preview is live on the canvas.`
+              : `${plan.title}: the edit plan is ready to preview.`,
+            { plan, autoPreview, enabledChanges: nextEnabledChanges, previewToken, editSetId }
+          ),
+        ]);
+      }
       toast.success(autoPreview ? "Preview ready" : "Plan ready", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Agent edit failed", { id: toastId });
-      setMessages((current) => [
-        ...current,
-        newMessage("assistant", error?.message || "I could not complete that edit. Try a simpler request."),
-      ]);
+      // Unmounted mid-poll (the in-flight waitForImageKitUrl was aborted on
+      // cleanup): swallow silently — there's no panel left to surface this in.
+      if (!isMountedRef.current || error?.name === "AbortError") {
+        toast.dismiss(toastId);
+      } else {
+        toast.error(error?.message || "Agent edit failed", { id: toastId });
+        setMessages((current) => [
+          ...current,
+          newMessage("assistant", error?.message || "I could not complete that edit. Try a simpler request."),
+        ]);
+      }
     } finally {
-      setIsThinking(false);
-      setPendingPrompt(null);
+      if (isMountedRef.current) {
+        setIsThinking(false);
+        setPendingPrompt(null);
+      }
     }
   };
 
@@ -2150,6 +2244,28 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           </p>
         </div>
         <div className="agent-header-actions">
+          <motion.button
+            type="button"
+            onClick={handleAgentUndo}
+            disabled={!canUndo && !livePreviewToken}
+            className="agent-icon-button disabled:opacity-35"
+            whileTap={{ scale: 0.94 }}
+            title="Undo the agent's last change (⌘Z)"
+            aria-label="Undo last change"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </motion.button>
+          <motion.button
+            type="button"
+            onClick={handleAgentRedo}
+            disabled={!canRedo}
+            className="agent-icon-button disabled:opacity-35"
+            whileTap={{ scale: 0.94 }}
+            title="Redo (⌘⇧Z)"
+            aria-label="Redo change"
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </motion.button>
           <motion.button
             type="button"
             onClick={() => setAutoPreview((value) => !value)}
