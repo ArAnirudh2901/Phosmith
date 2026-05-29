@@ -496,34 +496,144 @@ const EditorTopbar = ({ project }) => {
                         <AnimatePresence>
                             {showExportMenu && (
                                 <motion.div
-                                    className="absolute right-0 top-full mt-2 z-50 w-64 overflow-hidden rounded-xl glass-panel"
-                                    style={{ boxShadow: 'var(--shadow-lg)', transformOrigin: 'top right' }}
-                                    initial={{ opacity: 0, y: -6 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, y: -6 }}
+                                    className="absolute right-0 top-full mt-2 z-50 overflow-hidden"
+                                    style={{
+                                        width: 'clamp(240px, 22vw, 280px)',
+                                        background: '#000',
+                                        border: '2px solid rgba(244, 244, 245, 0.85)',
+                                        borderRadius: '4px',
+                                        boxShadow: '5px 5px 0 0 rgba(168, 121, 78, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
+                                        transformOrigin: 'top right',
+                                    }}
+                                    initial={{ opacity: 0, y: -8, scale: 0.96 }}
+                                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                                    exit={{ opacity: 0, y: -8, scale: 0.96 }}
                                     transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                                 >
-                                    <div className="p-1.5">
+                                    {/* Header strip */}
+                                    <div
+                                        className="flex items-center justify-between gap-2"
+                                        style={{
+                                            padding: '0.5rem 0.65rem',
+                                            borderBottom: '1.5px solid rgba(244, 244, 245, 0.55)',
+                                            background: 'linear-gradient(180deg, rgba(244, 244, 245, 0.045), transparent)',
+                                        }}
+                                    >
+                                        <span
+                                            style={{
+                                                fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                                fontSize: '0.6rem',
+                                                fontWeight: 800,
+                                                letterSpacing: '0.1em',
+                                                textTransform: 'uppercase',
+                                                color: '#F4F4F5',
+                                            }}
+                                        >
+                                            Download
+                                        </span>
+                                        {exportResolutionLabel && (
+                                            <span
+                                                style={{
+                                                    fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                                    fontSize: '0.55rem',
+                                                    fontWeight: 600,
+                                                    letterSpacing: '0.06em',
+                                                    color: 'rgba(244, 244, 245, 0.5)',
+                                                }}
+                                            >
+                                                {exportResolutionLabel}
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    {/* Export items */}
+                                    <div style={{ padding: '0.35rem' }}>
                                         {EXPORT_PRESETS.map((preset, idx) => (
                                             <motion.button
                                                 key={preset.id}
                                                 type="button"
-                                                initial={{ opacity: 0 }}
-                                                animate={{ opacity: 1 }}
-                                                transition={{ delay: idx * 0.03 }}
+                                                initial={{ opacity: 0, x: 6 }}
+                                                animate={{ opacity: 1, x: 0 }}
+                                                transition={{ delay: idx * 0.04, duration: 0.15 }}
                                                 onClick={() => handleExport(preset)}
-                                                className="flex w-full items-center gap-3 rounded-full px-3 py-2.5 text-left editor-interactive"
-                                                style={{ color: 'var(--text-primary)' }}
-                                                onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-                                                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                                                disabled={isExporting}
+                                                className="neo-export-item"
+                                                style={{
+                                                    display: 'flex',
+                                                    width: '100%',
+                                                    alignItems: 'center',
+                                                    gap: '0.6rem',
+                                                    padding: '0.5rem 0.55rem',
+                                                    borderRadius: '3px',
+                                                    border: '1.5px solid transparent',
+                                                    background: 'transparent',
+                                                    cursor: isExporting ? 'wait' : 'pointer',
+                                                    textAlign: 'left',
+                                                    transition: 'background 120ms, border-color 120ms, box-shadow 120ms',
+                                                }}
+                                                onMouseEnter={e => {
+                                                    e.currentTarget.style.background = 'rgba(168, 121, 78, 0.12)'
+                                                    e.currentTarget.style.borderColor = 'rgba(168, 121, 78, 0.5)'
+                                                    e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                                }}
+                                                onMouseLeave={e => {
+                                                    e.currentTarget.style.background = 'transparent'
+                                                    e.currentTarget.style.borderColor = 'transparent'
+                                                    e.currentTarget.style.boxShadow = 'none'
+                                                }}
+                                                onMouseDown={e => {
+                                                    e.currentTarget.style.transform = 'translate(2px, 2px)'
+                                                    e.currentTarget.style.boxShadow = 'none'
+                                                }}
+                                                onMouseUp={e => {
+                                                    e.currentTarget.style.transform = ''
+                                                    e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                                }}
                                             >
-                                                <div className="flex h-8 w-8 items-center justify-center rounded-full"
-                                                     style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
-                                                    <Download className="h-3.5 w-3.5" style={{ color: 'var(--accent-secondary)' }} />
+                                                {/* Icon tile */}
+                                                <div
+                                                    style={{
+                                                        display: 'grid',
+                                                        placeItems: 'center',
+                                                        width: '1.65rem',
+                                                        height: '1.65rem',
+                                                        flexShrink: 0,
+                                                        borderRadius: '3px',
+                                                        border: '1.5px solid rgba(244, 244, 245, 0.5)',
+                                                        background: '#A8794E',
+                                                        color: '#03050A',
+                                                        boxShadow: '1.5px 1.5px 0 0 rgba(244, 244, 245, 0.3)',
+                                                    }}
+                                                >
+                                                    <Download className="h-3 w-3" strokeWidth={2.5} />
                                                 </div>
-                                                <div>
-                                                    <div className="text-xs font-semibold">{preset.label}</div>
-                                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{preset.description}</div>
+
+                                                {/* Label */}
+                                                <div style={{ minWidth: 0 }}>
+                                                    <div
+                                                        style={{
+                                                            fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                                            fontSize: '0.65rem',
+                                                            fontWeight: 700,
+                                                            letterSpacing: '0.06em',
+                                                            textTransform: 'uppercase',
+                                                            color: '#F4F4F5',
+                                                            lineHeight: 1.3,
+                                                        }}
+                                                    >
+                                                        {preset.label}
+                                                    </div>
+                                                    <div
+                                                        style={{
+                                                            fontSize: '0.58rem',
+                                                            fontWeight: 500,
+                                                            color: 'rgba(161, 168, 180, 0.75)',
+                                                            lineHeight: 1.3,
+                                                            marginTop: '1px',
+                                                        }}
+                                                    >
+                                                        {preset.description}
+                                                    </div>
                                                 </div>
                                             </motion.button>
                                         ))}
