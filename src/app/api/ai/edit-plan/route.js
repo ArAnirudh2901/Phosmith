@@ -105,10 +105,13 @@ const parseDirectAdjustments = (prompt) => {
     if (/\b(very|really|much|way|a\s*lot|lots|quite|noticeabl\w*)\b/.test(p)) mult = 1.6
     if (/\b(super|extremely|insanely|drastically|heavil\w*|heavy|extreme|max(?:imum)?|crank\w*|blast|tons?\s*of)\b/.test(p)) mult = 2.3
 
-    // Optional explicit magnitude ("by 30%", "30%", "+20"). Applied to whichever
-    // directives are present (a reasonable approximation for single-knob asks).
-    const numMatch = p.match(/(?:by\s*)?([+-]?\d{1,3})\s*%?\b/)
-    const explicit = numMatch ? Math.min(100, Math.abs(parseInt(numMatch[1], 10))) : null
+    // Optional explicit magnitude. Only a "30%" or "by 30" form counts — a bare
+    // number is IGNORED so film/camera/year tokens ("Portra 400", "800T", "16mm",
+    // "1990s photo") don't get mistaken for an adjustment amount and slammed to max.
+    const numMatch = p.match(/by\s+([+-]?\d{1,3})\b|([+-]?\d{1,3})\s*%/)
+    const explicit = numMatch
+        ? Math.min(100, Math.abs(parseInt(numMatch[1] ?? numMatch[2], 10)))
+        : null
     const amt = (base) => Math.round(explicit != null ? explicit : base * mult)
 
     const has = (re) => re.test(p)

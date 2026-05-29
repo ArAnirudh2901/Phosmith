@@ -5,6 +5,13 @@ import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
 import { Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
+// Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
+// they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
+// them would leave the canvas selectable during the chunk fetch, so an early drag could
+// move the image instead of painting. Keep these two eager (they're small); the heavy
+// panels below stay split out.
+import MaskControls from "./tools/mask"
+import EraseControls from "./tools/erase"
 
 // Lazy-load each tool panel so the editor's initial bundle stays small — only the
 // active tool's code is fetched (on first use, then cached). The heaviest panels
@@ -31,8 +38,6 @@ const AIEdits = lazyTool(() => import("./tools/ai-edit"))
 const ImageKitAgent = lazyTool(() => import("./tools/imagekit-agent"))
 const ImageManager = lazyTool(() => import("./tools/images"))
 const DrawControls = lazyTool(() => import("./tools/draw"))
-const MaskControls = lazyTool(() => import("./tools/mask"))
-const EraseControls = lazyTool(() => import("./tools/erase"))
 
 const TOOL_CONFIGS = {
     resize: { title: "Resize", icon: Expand },
