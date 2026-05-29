@@ -399,6 +399,55 @@ a:focus-visible,
 
 [data-sonner-toaster] [data-sonner-toast] {
   position: relative;
+  pointer-events: auto;
+}
+
+/* ── Neo-brutalist toast close (X) button ──────────────────────────────────
+   Positioned inside the toast, top-right corner. Small square tile with the
+   same border language as the icon tile. Always visible — no hover-to-reveal
+   gimmick — so the user instantly knows they can dismiss. */
+.neo-toast-close {
+  position: absolute !important;
+  top: 6px !important;
+  right: 6px !important;
+  left: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 20px !important;
+  height: 20px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 1.5px solid rgba(244, 244, 245, 0.5) !important;
+  border-radius: 3px !important;
+  background: rgba(244, 244, 245, 0.08) !important;
+  color: rgba(244, 244, 245, 0.6) !important;
+  font-size: 12px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  pointer-events: auto !important;
+  z-index: 10 !important;
+  transition: background 150ms, color 150ms, border-color 150ms, box-shadow 150ms;
+}
+
+.neo-toast-close:hover {
+  background: rgba(244, 63, 94, 0.2) !important;
+  border-color: rgba(244, 63, 94, 0.7) !important;
+  color: #F43F5E !important;
+  box-shadow: 1px 1px 0 0 rgba(244, 63, 94, 0.5);
+}
+
+.neo-toast-close:active {
+  background: rgba(244, 63, 94, 0.35) !important;
+  transform: translate(1px, 1px) !important;
+  box-shadow: none;
+}
+
+/* Give the toast title some right-padding so it doesn't overlap the close btn */
+.neo-toast .neo-toast-content {
+  padding-right: 18px;
 }
 
 /* ── Neo-brutalist loader card ─────────────────────────────────────────────

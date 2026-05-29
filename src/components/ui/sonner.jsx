@@ -44,6 +44,7 @@ const defaultToastClassNames = {
     "rounded-[3px] border-[1.5px] border-[rgba(244,244,245,0.7)] bg-[#06B8D4] text-[#03050A]",
     "shadow-[2px_2px_0_0_rgba(244,244,245,0.4)]"
   ),
+  closeButton: "neo-toast-close",
   actionButton: cn(
     "neo-toast-action inline-flex h-7 shrink-0 items-center justify-center",
     "rounded-[3px] border-[1.5px] border-[rgba(244,244,245,0.7)] bg-[#06B8D4] px-2.5",
@@ -81,7 +82,7 @@ const Toaster = ({
 
   const mergedToastOptions = {
     duration: 4500,
-    closeButton: false,
+    closeButton: true,
     unstyled: true,
     ...toastOptions,
     classNames: {
@@ -100,7 +101,7 @@ const Toaster = ({
       position="top-center"
       expand={false}
       visibleToasts={3}
-      closeButton={false}
+      closeButton={true}
       offset={{ top: 76, right: 20, bottom: 24, left: 20 }}
       mobileOffset={{ top: 68, right: 12, bottom: 16, left: 12 }}
       gap={10}
