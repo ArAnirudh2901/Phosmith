@@ -397,49 +397,42 @@ const Editor = () => {
                     )}
                 </AnimatePresence>
 
-                <motion.div ref={workspaceRef} className={`editor-workspace flex min-h-0 flex-1 overflow-hidden ${activeTool === "ai_agent" ? "editor-workspace--agent" : ""}`}>
-                    {activeTool === "ai_agent" ? (
-                        <>
-                            <div className="agent-live-image-pane min-w-0 flex-1">
-                                <CanvasEditor project={activeProject} />
-                            </div>
+                {/* CanvasEditor MUST stay mounted across the AI-agent toggle so the
+                    Fabric canvas (and its undo/mask state) isn't disposed and
+                    rebuilt. To guarantee that, the three children — sidebar,
+                    resizer, canvas pane — are rendered as the SAME element types
+                    at the SAME sibling indices in both modes, so React reconciles
+                    instead of remounting. Only props/className change between modes.
+                    Agent mode visually places the canvas on the left and the
+                    sidebar on the right; we flip the visual order with
+                    `flex-row-reverse` on the container (DOM order stays
+                    [sidebar, resizer, canvas]) rather than reordering the DOM,
+                    which would force a remount. The original agent layout was
+                    literally that DOM order reversed, so the result is identical. */}
+                {(() => {
+                    const isAgent = activeTool === "ai_agent"
+                    return (
+                        <motion.div ref={workspaceRef} className={`editor-workspace flex min-h-0 flex-1 overflow-hidden ${isAgent ? "flex-row-reverse editor-workspace--agent" : ""}`}>
+                            <EditorSidebar project={activeProject} width={isAgent ? agentSidebarWidth : sidebarWidth} />
                             <div
                                 role="separator"
                                 tabIndex={0}
-                                className="editor-sidebar-resizer editor-sidebar-resizer--right"
-                                onPointerDown={startSidebarResize("right")}
-                                onKeyDown={handleSidebarResizeKey("right")}
-                                aria-label="Resize agent sidebar"
+                                className={`editor-sidebar-resizer ${isAgent ? "editor-sidebar-resizer--right" : "editor-sidebar-resizer--left"}`}
+                                onPointerDown={startSidebarResize(isAgent ? "right" : "left")}
+                                onKeyDown={handleSidebarResizeKey(isAgent ? "right" : "left")}
+                                aria-label={isAgent ? "Resize agent sidebar" : "Resize editor sidebar"}
                                 aria-orientation="vertical"
-                                aria-valuemin={MIN_AGENT_SIDEBAR_WIDTH}
-                                aria-valuemax={MAX_AGENT_SIDEBAR_WIDTH}
-                                aria-valuenow={agentSidebarWidth}
+                                aria-valuemin={isAgent ? MIN_AGENT_SIDEBAR_WIDTH : MIN_SIDEBAR_WIDTH}
+                                aria-valuemax={isAgent ? MAX_AGENT_SIDEBAR_WIDTH : MAX_SIDEBAR_WIDTH}
+                                aria-valuenow={isAgent ? agentSidebarWidth : sidebarWidth}
                                 title="Drag to resize sidebar"
                             />
-                            <EditorSidebar project={activeProject} width={agentSidebarWidth} />
-                        </>
-                    ) : (
-                        <>
-                            <EditorSidebar project={activeProject} width={sidebarWidth} />
-                            <div
-                                role="separator"
-                                tabIndex={0}
-                                className="editor-sidebar-resizer editor-sidebar-resizer--left"
-                                onPointerDown={startSidebarResize("left")}
-                                onKeyDown={handleSidebarResizeKey("left")}
-                                aria-label="Resize editor sidebar"
-                                aria-orientation="vertical"
-                                aria-valuemin={MIN_SIDEBAR_WIDTH}
-                                aria-valuemax={MAX_SIDEBAR_WIDTH}
-                                aria-valuenow={sidebarWidth}
-                                title="Drag to resize sidebar"
-                            />
-                            <div className="min-w-0 flex-1">
+                            <div className={`min-w-0 flex-1${isAgent ? " agent-live-image-pane" : ""}`}>
                                 <CanvasEditor project={activeProject} />
                             </div>
-                        </>
-                    )}
-                </motion.div>
+                        </motion.div>
+                    )
+                })()}
             </div>
 
             {/* Mobile fallback — below 768px (sm and smaller) the editor's

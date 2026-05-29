@@ -36,6 +36,14 @@ const GEMINI_ENDPOINT = (model) =>
 const GEMINI_TIMEOUT_MS = 12_000
 const MAX_IMAGE_BYTES_FOR_VISION = 4 * 1024 * 1024 // 4 MB — fetch a downsized image if larger
 
+// DoS guards for the multi-layer path. A client could otherwise send an
+// arbitrarily long layers[] and drive N concurrent image fetches + N Gemini
+// calls. Cap the layer count, bound the fan-out concurrency, and reject any
+// thumbnail whose base64 payload is unreasonably large.
+const MAX_LAYERS = 12
+const PLAN_FANOUT_CONCURRENCY = 4
+const MAX_THUMB_BASE64_CHARS = 2 * 1024 * 1024 // ~1.5 MB decoded — generous for a thumbnail
+
 // When the source is an ImageKit URL, append this canonical transform so
 // different users uploading the same scene at different sizes/qualities all
 // end up sending the SAME bytes to Gemini. That eliminates a major source of
@@ -94,46 +102,110 @@ const inferKeywordIntent = (prompt) => {
 // "sharper", "rotate the hue") into concrete adjustment values, so the agent
 // handles arbitrary corrections even with NO named style and even when the
 // vision model is unavailable. Values are in the same units as STYLE_PROFILES.
+// Each adjustment is a {key, sign, base, re} tuple so the magnitude pairing
+// below can map "30% brighter" / "warmer by 20" to the SPECIFIC adjustment whose
+// keyword is adjacent to the number, instead of slamming one global number onto
+// every detected key. `order` is significant only for the brightness/contrast/
+// saturation/temperature pairs where the positive variant is checked first
+// (matching the original if/else-if precedence).
+const DIRECT_ADJUSTMENT_RULES = [
+    { key: "brightness", sign: 1, base: 18, re: /\b(bright(?:er|en)?|lighter|too\s*dark|more\s*exposure|expose\s*up)\b/, group: "brightness" },
+    { key: "brightness", sign: -1, base: 18, re: /\b(darker|darken|too\s*bright|less\s*exposure|underexpos\w*)\b/, group: "brightness" },
+    { key: "contrast", sign: 1, base: 16, re: /\b(more\s*contrast|contrast(?:y|ier)?|punch(?:y|ier)?|add\s*contrast)\b/, group: "contrast" },
+    { key: "contrast", sign: -1, base: 16, re: /\b(less\s*contrast|flat(?:ter)?|low\s*contrast|reduce\s*contrast)\b/, group: "contrast" },
+    { key: "saturation", sign: 1, base: 18, re: /\b(more\s*satur\w*|more\s*colou?rs?|vivid\w*|pop\s*(?:the\s*)?colou?rs?|colou?r\s*pop)\b/, group: "saturation" },
+    { key: "saturation", sign: -1, base: 18, re: /\b(desatur\w*|less\s*satur\w*|less\s*colou?rs?|muted?|drain\s*colou?r|wash\s*out\s*colou?r)\b/, group: "saturation" },
+    { key: "vibrance", sign: 1, base: 16, re: /\bvibran\w*\b/, group: "vibrance" },
+    { key: "temperature", sign: 1, base: 18, re: /\bwarm(?:er|th)?\b|warm\s*it|golden\s*warm|cozy\s*warm/, group: "temperature" },
+    { key: "temperature", sign: -1, base: 18, re: /\bcool(?:er)?\b|cold(?:er)?\b|bluer|more\s*blue|icy\s*tone/, group: "temperature" },
+    { key: "sharpness", sign: 1, base: 18, re: /\bsharp(?:er|en)?\b|crisp(?:er)?\b|clearer|more\s*detail\b/, group: "sharpness" },
+    { key: "blur", sign: 1, base: 14, re: /\bblur(?:ry|red)?\b|soften|softer\b|out\s*of\s*focus|bokeh|gaussian\s*blur/, group: "blur" },
+    { key: "noise", sign: 1, base: 14, re: /\bgrain(?:y)?\b|film\s*grain|noise|noisy\b/, group: "noise" },
+    { key: "hue", sign: 1, base: 30, re: /\b(rotate|shift|swap)\s*(?:the\s*)?(hue|colou?rs?|color\s*wheel)|hue\s*(shift|rotation|rotate)/, group: "hue" },
+]
+
+// Words that, when paired with an explicit number, count as an "adjustment word"
+// (grain/detail/faded/sharper/etc.) so callers can decide NOT to force a creative
+// restyle / gain floor when the prompt is really a direct numeric adjustment.
+const ADJUSTMENT_INTENSITY_WORDS =
+    /\b(grain(?:y)?|noise|noisy|detail|faded?|fade|sharp(?:er|en)?|crisp(?:er)?|bright(?:er|en)?|dark(?:er)?|contrast(?:y|ier)?|satur\w*|vibran\w*|warm(?:er|th)?|cool(?:er)?|blur(?:ry|red)?|soft(?:er|en)?)\b/i
+
 const parseDirectAdjustments = (prompt) => {
     const p = String(prompt || "").toLowerCase()
     if (!p) return {}
     const adj = {}
 
-    // Global intensity multiplier from modifier words.
+    // Intensity multiplier from modifier words. Choose a SINGLE multiplier
+    // deterministically rather than letting the last matching tier overwrite a
+    // contradictory earlier one: prefer the tier whose keyword appears earliest
+    // in the prompt, breaking ties toward the smaller magnitude.
+    const MULT_TIERS = [
+        { value: 0.55, re: /\b(slight\w*|subtle|barely|gently|softly|a\s*(little|bit|touch|hair)|just\s*a\s*bit)\b/ },
+        { value: 1.6, re: /\b(very|really|much|way|a\s*lot|lots|quite|noticeabl\w*)\b/ },
+        { value: 2.3, re: /\b(super|extremely|insanely|drastically|heavil\w*|heavy|extreme|max(?:imum)?|crank\w*|blast|tons?\s*of)\b/ },
+    ]
     let mult = 1
-    if (/\b(slight\w*|subtle|barely|gently|softly|a\s*(little|bit|touch|hair)|just\s*a\s*bit)\b/.test(p)) mult = 0.55
-    if (/\b(very|really|much|way|a\s*lot|lots|quite|noticeabl\w*)\b/.test(p)) mult = 1.6
-    if (/\b(super|extremely|insanely|drastically|heavil\w*|heavy|extreme|max(?:imum)?|crank\w*|blast|tons?\s*of)\b/.test(p)) mult = 2.3
+    let bestPos = Infinity
+    for (const tier of MULT_TIERS) {
+        const m = p.match(tier.re)
+        if (!m) continue
+        const pos = m.index
+        if (pos < bestPos || (pos === bestPos && tier.value < mult)) {
+            bestPos = pos
+            mult = tier.value
+        }
+    }
 
     // Optional explicit magnitude. Only a "30%" or "by 30" form counts — a bare
     // number is IGNORED so film/camera/year tokens ("Portra 400", "800T", "16mm",
     // "1990s photo") don't get mistaken for an adjustment amount and slammed to max.
+    // Capture the number's POSITION so we apply it to ONLY ONE adjustment — the
+    // single keyword nearest the number in the SAME clause — instead of one global
+    // value smeared across every detected key (distinct prompts must not collide).
     const numMatch = p.match(/by\s+([+-]?\d{1,3})\b|([+-]?\d{1,3})\s*%/)
     const explicit = numMatch
         ? Math.min(100, Math.abs(parseInt(numMatch[1] ?? numMatch[2], 10)))
         : null
-    const amt = (base) => Math.round(explicit != null ? explicit : base * mult)
+    const numStart = numMatch ? numMatch.index : -1
+    const numEnd = numMatch ? numMatch.index + numMatch[0].length : -1
 
-    const has = (re) => re.test(p)
+    // First pass: collect every matched adjustment (one per group, positive variant
+    // first to preserve the original if/else-if precedence) with its keyword index.
+    const usedGroups = new Set()
+    const matched = []
+    for (const rule of DIRECT_ADJUSTMENT_RULES) {
+        if (usedGroups.has(rule.group)) continue
+        const m = p.match(rule.re)
+        if (!m) continue
+        usedGroups.add(rule.group)
+        matched.push({ rule, start: m.index, end: m.index + m[0].length })
+    }
 
-    if (has(/\b(bright(?:er|en)?|lighter|too\s*dark|more\s*exposure|expose\s*up)\b/)) adj.brightness = amt(18)
-    else if (has(/\b(darker|darken|too\s*bright|less\s*exposure|underexpos\w*)\b/)) adj.brightness = -amt(18)
+    // Decide which single matched adjustment (if any) the explicit number scopes:
+    // the closest keyword by character distance, but only if no clause separator
+    // (comma/semicolon/"and"/"but") sits between the number and that keyword.
+    let explicitTargetKey = null
+    if (explicit != null && matched.length > 0) {
+        let best = null
+        for (const item of matched) {
+            const gapStart = item.end <= numStart ? item.end : numEnd
+            const gapEnd = item.end <= numStart ? numStart : item.start
+            if (gapEnd < gapStart) continue
+            const gap = p.slice(gapStart, gapEnd)
+            if (/[,;]|\band\b|\bbut\b/.test(gap)) continue // different clause — skip
+            const dist = gapEnd - gapStart
+            if (best == null || dist < best.dist) best = { key: item.rule.key, dist }
+        }
+        if (best) explicitTargetKey = best.key
+    }
 
-    if (has(/\b(more\s*contrast|contrast(?:y|ier)?|punch(?:y|ier)?|add\s*contrast)\b/)) adj.contrast = amt(16)
-    else if (has(/\b(less\s*contrast|flat(?:ter)?|low\s*contrast|reduce\s*contrast)\b/)) adj.contrast = -amt(16)
-
-    if (has(/\b(more\s*satur\w*|more\s*colou?rs?|vivid\w*|pop\s*(?:the\s*)?colou?rs?|colou?r\s*pop)\b/)) adj.saturation = amt(18)
-    else if (has(/\b(desatur\w*|less\s*satur\w*|less\s*colou?rs?|muted?|drain\s*colou?r|wash\s*out\s*colou?r)\b/)) adj.saturation = -amt(18)
-
-    if (has(/\bvibran\w*\b/)) adj.vibrance = amt(16)
-
-    if (has(/\bwarm(?:er|th)?\b|warm\s*it|golden\s*warm|cozy\s*warm/)) adj.temperature = amt(18)
-    else if (has(/\bcool(?:er)?\b|cold(?:er)?\b|bluer|more\s*blue|icy\s*tone/)) adj.temperature = -amt(18)
-
-    if (has(/\bsharp(?:er|en)?\b|crisp(?:er)?\b|clearer|more\s*detail\b/)) adj.sharpness = amt(18)
-    if (has(/\bblur(?:ry|red)?\b|soften|softer\b|out\s*of\s*focus|bokeh|gaussian\s*blur/)) adj.blur = amt(14)
-    if (has(/\bgrain(?:y)?\b|film\s*grain|noise|noisy\b/)) adj.noise = amt(14)
-    if (has(/\b(rotate|shift|swap)\s*(?:the\s*)?(hue|colou?rs?|color\s*wheel)|hue\s*(shift|rotation|rotate)/)) adj.hue = amt(30)
+    for (const { rule } of matched) {
+        // Apply the explicit number to ONLY the single nearest in-clause adjustment;
+        // every other detected adjustment falls back to its per-phrase base*mult.
+        const useExplicit = explicitTargetKey != null && rule.key === explicitTargetKey
+        const magnitude = Math.round(useExplicit ? explicit : rule.base * mult)
+        adj[rule.key] = rule.sign * magnitude
+    }
 
     return adj
 }
@@ -149,6 +221,13 @@ const normalizePromptKey = (prompt) =>
     String(prompt || "")
         .normalize("NFC")
         .toLowerCase()
+        // Preserve the load-bearing magnitude tokens BEFORE stripping punctuation:
+        // a "%" and a +/- sign that directly precedes a digit both change the parsed
+        // adjustment plan, so they must survive into the key as distinct word tokens.
+        .replace(/\+(?=\d)/g, " plustok ")
+        .replace(/-(?=\d)/g, " minustok ")
+        .replace(/%/g, " pcttok ")
+        // Fold away everything else that isn't a letter/number/space.
         .replace(/[^\p{L}\p{N}\s]+/gu, " ")
         .replace(/\s+/g, " ")
         .trim()
@@ -168,14 +247,60 @@ const buildCanvasSignature = (layers) => {
     return parts.join("|")
 }
 
+// SSRF guard for server-side image fetches. The sourceUrl is client-controlled,
+// so before fetching we require https:, reject hosts that resolve to private /
+// loopback / link-local IP literals, and allowlist only the image hosts this app
+// actually serves from (ImageKit + Unsplash). Returns true only for safe URLs.
+const ALLOWED_IMAGE_HOST_SUFFIXES = ["imagekit.io", "images.unsplash.com"]
+
+const isPrivateOrLocalHost = (host) => {
+    const h = String(host || "").toLowerCase().replace(/^\[|\]$/g, "")
+    if (!h || h === "localhost" || h === "0.0.0.0" || h.endsWith(".localhost")) return true
+    // IPv6 loopback / unique-local (fc00::/7 → fc.. or fd..) / link-local (fe80::)
+    if (h === "::1" || /^fc/.test(h) || /^fd/.test(h) || /^fe80:/.test(h)) return true
+    // IPv4 literal ranges: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16
+    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+    if (m) {
+        const [a, b] = [Number(m[1]), Number(m[2])]
+        if (a === 127 || a === 10 || a === 0) return true
+        if (a === 172 && b >= 16 && b <= 31) return true
+        if (a === 192 && b === 168) return true
+        if (a === 169 && b === 254) return true
+    }
+    return false
+}
+
+const validateOutboundImageUrl = (url) => {
+    if (typeof url !== "string" || !url) return false
+    let u
+    try {
+        u = new URL(url)
+    } catch {
+        return false
+    }
+    if (u.protocol !== "https:") return false
+    const host = u.hostname.toLowerCase()
+    if (isPrivateOrLocalHost(host)) return false
+    return ALLOWED_IMAGE_HOST_SUFFIXES.some(
+        (suffix) => host === suffix || host.endsWith(`.${suffix}`),
+    )
+}
+
 const fetchImageAsBase64 = async (url) => {
     if (!url) return null
+    if (!validateOutboundImageUrl(url)) {
+        console.warn("[edit-plan] blocked outbound image fetch for disallowed url")
+        return null
+    }
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS)
     try {
         const response = await fetch(url, { signal: controller.signal })
         if (!response.ok) throw new Error(`Image fetch ${response.status}`)
         const contentType = response.headers.get("content-type") || "image/jpeg"
+        if (!contentType.toLowerCase().startsWith("image/")) {
+            throw new Error(`Image fetch returned non-image content-type: ${contentType}`)
+        }
         const buffer = await response.arrayBuffer()
         if (buffer.byteLength > MAX_IMAGE_BYTES_FOR_VISION) {
             // Gemini accepts up to 20 MB inline; we keep it tight to keep latency low.
@@ -516,17 +641,29 @@ const callGemini = async (params) => {
 const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null, prompt = "") => {
     const safeStyle = (s) => (STYLE_KEYS.includes(s) ? s : null)
     const keywordStyle = safeStyle(fallbackIntent?.targetStyle)
+    // The MODEL verdict wins when present — it actually looked at the image and the
+    // full prompt. The keyword router is only a fallback for when the model returns
+    // nothing (or an out-of-enum value), and the bare keyword catch-alls were
+    // overriding correct, more-specific Gemini verdicts.
     const targetStyle =
-        (keywordStyle && keywordStyle !== "neutral" ? keywordStyle : null) ||
         safeStyle(raw?.targetStyle) ||
-        keywordStyle ||
+        (keywordStyle && keywordStyle !== "neutral" ? keywordStyle : null) ||
         "neutral"
     const fit = features ? getStyleFit(features, targetStyle) : null
     const currentStyle = safeStyle(raw?.currentStyle) || fit?.currentStyle || "neutral"
     const forceRestyle = wantsForcedRestyle(prompt)
+    // When the prompt is really a DIRECT numeric/tonal adjustment (e.g. "add more
+    // grain", "+15% detail", "make it more faded", "sharper") we must NOT treat it
+    // as a creative restyle and slam a gain floor on top — that double-applies the
+    // edit. We detect this when parseDirectAdjustments produced something AND the
+    // prompt contains an adjustment-intensity word (grain/detail/faded/sharper/etc.).
+    const directAdj = parseDirectAdjustments(prompt)
+    const isDirectAdjustmentPrompt =
+        Object.keys(directAdj).length > 0 && ADJUSTMENT_INTENSITY_WORDS.test(prompt)
     // Determine if this is a creative style change (vintage, cinematic, etc.)
     // vs a generic correction. Creative changes should not be suppressed.
-    const isCreativeRestyle = targetStyle !== "neutral" && targetStyle !== currentStyle
+    const isCreativeRestyle =
+        targetStyle !== "neutral" && targetStyle !== currentStyle && !isDirectAdjustmentPrompt
     let alreadyMatchesTarget =
         !forceRestyle && (!!raw?.alreadyMatchesTarget || currentStyle === targetStyle)
     let gainRaw = Number(raw?.gain)
@@ -832,13 +969,35 @@ export async function POST(request) {
         const body = await request.json().catch(() => ({}))
         const projectId = body.projectId
         const prompt = String(body.prompt || "").slice(0, 1000)
-        const layers = Array.isArray(body.layers) ? body.layers : null
+        // Cap the layer count BEFORE anything fans out over it. An unbounded
+        // layers[] would otherwise drive N concurrent fetches + N Gemini calls.
+        // Also strip any thumbnail whose base64 is unreasonably large so it never
+        // reaches the vision model.
+        const layers = Array.isArray(body.layers)
+            ? body.layers.slice(0, MAX_LAYERS).map((layer) => {
+                  if (
+                      layer &&
+                      typeof layer.thumbBase64 === "string" &&
+                      layer.thumbBase64.length > MAX_THUMB_BASE64_CHARS
+                  ) {
+                      // Drop the oversized thumbnail so it never reaches the vision
+                      // model; keep the rest of the layer (name/hash/sourceUrl) intact.
+                      const sanitized = { ...layer }
+                      delete sanitized.thumbBase64
+                      delete sanitized.thumbMime
+                      return sanitized
+                  }
+                  return layer
+              })
+            : null
         // Optional override from the client when the user has explicitly confirmed
         // (or de-selected) which layers to edit — bypasses the auto-targeting step.
+        // Bounded to the same capped layer set below (i < layers.length).
         const overrideIndexes = Array.isArray(body.confirmedTargetIndexes)
             ? body.confirmedTargetIndexes
                   .map((n) => Number(n))
                   .filter((n) => Number.isInteger(n) && n >= 0)
+                  .slice(0, MAX_LAYERS)
             : null
 
         if (!projectId) {
@@ -883,30 +1042,40 @@ export async function POST(request) {
                 })
             }
 
-            // Compute one plan per targeted layer in parallel. Each call uses
-            // the per-image cache (with perceptual-hash fallback) so common-image
-            // plans are O(1) and "slightly-different version of the same scene"
-            // plans hit the fuzzy cache.
-            const plans = await Promise.all(
-                targetIndexes.map(async (layerIndex) => {
-                    const layer = layers[layerIndex]
-                    if (!layer?.imageHash || !layer?.sourceUrl) {
-                        return { layerIndex, error: "missing layer data" }
-                    }
-                    const result = await computePlanForImage({
-                        sourceUrl: layer.sourceUrl,
-                        imageHash: layer.imageHash,
-                        pHash: layer.pHash || null,
-                        features: layer.features || null,
-                        prompt,
-                        promptKey,
-                        projectId,
-                        neonAuth,
-                        apiKey,
-                    })
-                    return { layerIndex, ...result }
-                }),
-            )
+            // Defensive: never compute more than MAX_LAYERS plans even if a cached
+            // targeting row somehow carried a longer list.
+            const boundedTargetIndexes = targetIndexes.slice(0, MAX_LAYERS)
+
+            // Compute one plan per targeted layer. Each call uses the per-image
+            // cache (with perceptual-hash fallback) so common-image plans are O(1)
+            // and "slightly-different version of the same scene" plans hit the fuzzy
+            // cache. Fan-out is bounded to PLAN_FANOUT_CONCURRENCY so a large canvas
+            // can't open N concurrent image fetches + N Gemini calls at once.
+            const planFor = async (layerIndex) => {
+                const layer = layers[layerIndex]
+                if (!layer?.imageHash || !layer?.sourceUrl) {
+                    return { layerIndex, error: "missing layer data" }
+                }
+                const result = await computePlanForImage({
+                    sourceUrl: layer.sourceUrl,
+                    imageHash: layer.imageHash,
+                    pHash: layer.pHash || null,
+                    features: layer.features || null,
+                    prompt,
+                    promptKey,
+                    projectId,
+                    neonAuth,
+                    apiKey,
+                })
+                return { layerIndex, ...result }
+            }
+
+            const plans = []
+            for (let i = 0; i < boundedTargetIndexes.length; i += PLAN_FANOUT_CONCURRENCY) {
+                const batch = boundedTargetIndexes.slice(i, i + PLAN_FANOUT_CONCURRENCY)
+                const batchResults = await Promise.all(batch.map(planFor))
+                plans.push(...batchResults)
+            }
 
             return NextResponse.json({
                 success: true,
@@ -946,10 +1115,13 @@ export async function POST(request) {
             model: result.model,
         })
     } catch (error) {
+        // Keep the full error server-side for ops, but never leak the raw internal
+        // message to the client. Only include details outside production.
         console.error("[edit-plan] failed:", error)
-        return NextResponse.json(
-            { error: "Failed to build edit plan", details: error?.message || String(error) },
-            { status: 500 },
-        )
+        const payload = { error: "Failed to build edit plan" }
+        if (process.env.NODE_ENV !== "production") {
+            payload.details = error?.message || String(error)
+        }
+        return NextResponse.json(payload, { status: 500 })
     }
 }

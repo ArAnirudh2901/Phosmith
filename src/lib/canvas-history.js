@@ -84,22 +84,36 @@ const restoreSerializedMask = (FabricImage, obj) => {
   if (!maskCanvas) return
 
   const feather = Math.max(0, Math.round(obj?.pixxelMaskFeather || obj?._pixxelMaskFeather || 0))
-  obj._pixxelMaskCanvas = maskCanvas
+
+  // The mask was authored at the saved bitmap size. If the image was rehydrated to
+  // a different-resolution source, resize the decoded CRISP mask to the live bitmap
+  // size and store THAT as the editable mask. This way ensureMaskCanvas (in
+  // usePixelMaskTool) finds an attached canvas of the right size and never has to
+  // reconstruct the editable mask from the scaled/blurred clipPath — which would
+  // bake the feather into the mask the moment the user re-enters the tool.
+  const targetW = Math.max(1, Math.round(obj.width || maskCanvas.width))
+  const targetH = Math.max(1, Math.round(obj.height || maskCanvas.height))
+  let editableMask = maskCanvas
+  if (targetW !== maskCanvas.width || targetH !== maskCanvas.height) {
+    const resized = document.createElement('canvas')
+    resized.width = targetW
+    resized.height = targetH
+    // willReadFrequently: the editable mask is read back via getImageData on
+    // virtually every use (encode, overlay paint, flood fill, empty check) once
+    // the tool reopens. The attribute is only honored on the FIRST getContext call.
+    const rctx = resized.getContext('2d', { willReadFrequently: true })
+    rctx.drawImage(maskCanvas, 0, 0, targetW, targetH)
+    editableMask = resized
+  }
+
+  obj._pixxelMaskCanvas = editableMask
   obj._pixxelHasMask = true
   obj.pixxelHasMask = true
   obj.pixxelMaskFeather = feather
   obj._pixxelMaskFeather = feather
-  const clip = createMaskClipPath(FabricImage, maskCanvas, { feather })
-  // The mask was authored at the saved bitmap size. If the image was rehydrated to
-  // a different-resolution source, scale the (center-origin) clip so it still covers
-  // the live image exactly instead of misaligning to the saved dimensions.
-  const targetW = Math.max(1, Math.round(obj.width || maskCanvas.width))
-  const targetH = Math.max(1, Math.round(obj.height || maskCanvas.height))
-  if (targetW !== maskCanvas.width || targetH !== maskCanvas.height) {
-    clip.scaleX = targetW / maskCanvas.width
-    clip.scaleY = targetH / maskCanvas.height
-  }
-  obj.clipPath = clip
+  // Build the clip from the size-matched crisp mask so feather stays a live,
+  // non-destructive parameter and the clip already covers the live image exactly.
+  obj.clipPath = createMaskClipPath(FabricImage, editableMask, { feather })
   obj.set?.('dirty', true)
   obj.setCoords?.()
 }

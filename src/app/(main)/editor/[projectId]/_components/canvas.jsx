@@ -945,7 +945,7 @@ const CanvasEditor = ({ project }) => {
                 canvasEditor.backgroundImage &&
                 event?.target?.type?.toLowerCase?.() === 'image'
             ) {
-                try { syncBackgroundGrade(canvasEditor, true) } catch { /* ignore */ }
+                try { syncBackgroundGrade(canvasEditor, true, event.target) } catch { /* ignore */ }
             }
             scheduleHistoryPush()
             clearTimeout(saveTimeout)

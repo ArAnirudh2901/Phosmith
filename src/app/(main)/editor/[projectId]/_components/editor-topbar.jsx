@@ -74,6 +74,7 @@ const reloadCanvasImagesWithCors = async (canvas) => {
             left: obj.left, top: obj.top, scaleX: obj.scaleX, scaleY: obj.scaleY,
             angle: obj.angle, originX: obj.originX, originY: obj.originY,
             flipX: obj.flipX, flipY: obj.flipY, cropX: obj.cropX, cropY: obj.cropY,
+            width: obj.width, height: obj.height,
         }
         return obj
             .setSrc(src, { crossOrigin: "anonymous" })

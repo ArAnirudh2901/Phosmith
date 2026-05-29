@@ -107,7 +107,7 @@ const filtersSignature = (filters) => {
  * on every object:modified. The GL filter backend is disabled app-wide, so the
  * Canvas2D filters can be shared between objects without cross-canvas caching.
  */
-export const syncBackgroundGrade = (canvasEditor, enabled) => {
+export const syncBackgroundGrade = (canvasEditor, enabled, sourceImage = null) => {
   const bg = canvasEditor?.backgroundImage
   if (!bg || typeof bg.applyFilters !== 'function') return
 
@@ -121,7 +121,12 @@ export const syncBackgroundGrade = (canvasEditor, enabled) => {
     return
   }
 
-  const foreground = getForegroundImages(canvasEditor)[0]
+  // Grade from the photo that actually changed when one is provided; otherwise
+  // fall back to the first foreground image.
+  const foreground =
+    (isImageObject(sourceImage) && sourceImage.visible !== false && !isPixxelMaskOverlay(sourceImage)
+      ? sourceImage
+      : null) || getForegroundImages(canvasEditor)[0]
   const filters = foreground?.filters || []
   const sig = filtersSignature(filters)
   if (bg.__pixxelGradeSig === sig) return
