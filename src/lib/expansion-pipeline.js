@@ -377,6 +377,10 @@ export function createExpansionCompositeCanvas(imageElement, expansion) {
   canvas.height = targetHeight
   const ctx = canvas.getContext('2d')
 
+  if (!ctx) {
+    throw new Error(`Browser refused to create a ${targetWidth}x${targetHeight} canvas. The requested size may be too large for this device's memory. Try scaling down.`)
+  }
+
   ctx.clearRect(0, 0, targetWidth, targetHeight)
   ctx.drawImage(
     imageElement,
