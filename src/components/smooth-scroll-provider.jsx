@@ -30,8 +30,17 @@ export function SmoothScrollProvider({ children }) {
         cancelAnimationFrame(frameRef.current)
         frameRef.current = null
       }
+      // Reset scroll when switching to native scroll routes so the
+      // destination page (e.g., /dashboard) starts at the top.
+      window.scrollTo(0, 0)
       return undefined
     }
+
+    // Reset scroll position before creating Lenis so content starts
+    // at the top when navigating back from native-scroll routes
+    // (e.g., /dashboard → /). Without this, the browser retains the
+    // stale offset and the smooth-scroll page appears blank.
+    window.scrollTo(0, 0)
 
     const lenis = new Lenis({
       duration: 0.85,
@@ -39,6 +48,10 @@ export function SmoothScrollProvider({ children }) {
       smoothWheel: true,
       syncTouch: false,
     })
+
+    // Sync Lenis to position 0 immediately so it doesn't
+    // interpolate from a stale scroll offset.
+    lenis.scrollTo(0, { immediate: true })
 
     lenisRef.current = lenis
 

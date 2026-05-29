@@ -70,7 +70,7 @@ const MAX_PREVIEW_ZOOM_PERCENT = 300
 const PREVIEW_ZOOM_STEP_PERCENT = 1
 const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
-const MAX_CONVEX_STATE_CHARS = 900_000
+const MAX_NEON_STATE_CHARS = 900_000
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
 const getPrimaryRemoteImageUrl = (canvas) => {
@@ -296,7 +296,7 @@ const CanvasEditor = ({ project }) => {
             history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
             historyIndex: historyIndexRef.current,
         }
-        if (fullState.history.length > 0 && JSON.stringify(fullState).length > MAX_CONVEX_STATE_CHARS) {
+        if (fullState.history.length > 0 && JSON.stringify(fullState).length > MAX_NEON_STATE_CHARS) {
             fullState = {
                 ...canvasJSON,
                 history: [],

@@ -362,8 +362,9 @@ const EditorTopbar = ({ project }) => {
 
                 {/* Center: Tool buttons */}
                 {/* Explicit horizontal margin so the center group can never overlap
-                    the left title block or the right action group at any width. */}
-                <div className="flex flex-none items-center justify-center gap-2 px-2 mx-3">
+                    the left title block or the right action group at any width.
+                    Uses overflow-x-auto so tools scroll on very narrow viewports. */}
+                <div className="flex flex-none items-center justify-center gap-1 lg:gap-1.5 xl:gap-2 px-1 lg:px-2 mx-1 lg:mx-3 overflow-x-auto scrollbar-hide">
                     {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
@@ -387,8 +388,8 @@ const EditorTopbar = ({ project }) => {
                     })}
                 </div>
 
-                {/* Right: Actions */}
-                <div className="flex flex-1 items-center justify-end gap-1 min-w-0">
+                {/* Right: Actions — overflow-visible so the export dropdown isn't clipped */}
+                <div className="flex flex-1 items-center justify-end gap-0.5 lg:gap-1 min-w-0" style={{ overflow: 'visible' }}>
                     {/* Undo / Redo */}
                     <motion.button
                         onClick={handleUndo}
@@ -495,7 +496,7 @@ const EditorTopbar = ({ project }) => {
                         <AnimatePresence>
                             {showExportMenu && (
                                 <motion.div
-                                    className="fixed right-3 top-[58px] z-50 w-64 overflow-hidden rounded-xl glass-panel"
+                                    className="absolute right-0 top-full mt-2 z-50 w-64 overflow-hidden rounded-xl glass-panel"
                                     style={{ boxShadow: 'var(--shadow-lg)', transformOrigin: 'top right' }}
                                     initial={{ opacity: 0, y: -6 }}
                                     animate={{ opacity: 1, y: 0 }}
