@@ -15,8 +15,10 @@ import {
   Loader2,
   MessageSquare,
   Plus,
+  Redo2,
   RotateCcw,
   Send,
+  Undo2,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -746,7 +748,7 @@ const AgentEffectControls = ({
   );
 };
 
-const AgentChangeList = ({ plan, enabledMap = {}, onToggle, compact = false, interactive = true }) => {
+const AgentChangeList = React.memo(({ plan, enabledMap = {}, onToggle, compact = false, interactive = true }) => {
   const changes = getChangeItems(plan);
 
   if (!changes.length) {
@@ -802,7 +804,8 @@ const AgentChangeList = ({ plan, enabledMap = {}, onToggle, compact = false, int
       })}
     </motion.div>
   );
-};
+});
+AgentChangeList.displayName = "AgentChangeList";
 
 const AgentThinkingRow = ({ prompt, autoPreview = true }) => (
   <motion.div
@@ -994,6 +997,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const [multiLayerPlans, setMultiLayerPlans] = useState([]);
   const [activeEditSetId, setActiveEditSetId] = useState(null);
   const [, setImageRevision] = useState(0);
+  // Canvas-history undo/redo state, mirrored into the agent header so its edits
+  // (which all push onto the global history) can be stepped back and forth here.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [upscaleComparison, setUpscaleComparison] = useState(null);
   const [isCompareOpen, setIsCompareOpen] = useState(false);
   const liveSnapshotRef = useRef(null);
@@ -1047,6 +1054,60 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       canvasEditor.off("selection:cleared", bump);
       canvasEditor.off("object:modified", bump);
     };
+  }, [canvasEditor]);
+
+  // Mirror the canvas undo/redo availability into the agent header.
+  useEffect(() => {
+    if (!canvasEditor) {
+      setCanUndo(false);
+      setCanRedo(false);
+      return undefined;
+    }
+    const sync = () => {
+      const state = canvasEditor.__getHistoryState?.();
+      if (state) {
+        setCanUndo(Boolean(state.canUndo));
+        setCanRedo(Boolean(state.canRedo));
+      }
+    };
+    sync();
+    canvasEditor.on("history:changed", sync);
+    return () => canvasEditor.off("history:changed", sync);
+  }, [canvasEditor]);
+
+  const handleAgentUndo = useCallback(async () => {
+    if (!canvasEditor?.__undoCanvasState) return;
+    // Step out of any un-applied live preview first, then walk canvas history.
+    if (livePreviewTokenRef.current && liveSnapshotRef.current) {
+      await restoreLiveSnapshot();
+      setActivePlan(null);
+      setEffectValues({});
+      setEnabledChanges({});
+      setMultiLayerPlans([]);
+      setImageRevision((value) => value + 1);
+      return;
+    }
+    const didUndo = await canvasEditor.__undoCanvasState();
+    if (didUndo) {
+      await canvasEditor.__saveCanvasState?.();
+      setImageRevision((value) => value + 1);
+    } else {
+      toast.message("Nothing to undo");
+    }
+    // restoreLiveSnapshot is declared below and is ref-driven (stable behaviour);
+    // it can't go in the dep array without a TDZ, and isn't needed there.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasEditor]);
+
+  const handleAgentRedo = useCallback(async () => {
+    if (!canvasEditor?.__redoCanvasState) return;
+    const didRedo = await canvasEditor.__redoCanvasState();
+    if (didRedo) {
+      await canvasEditor.__saveCanvasState?.();
+      setImageRevision((value) => value + 1);
+    } else {
+      toast.message("Nothing to redo");
+    }
   }, [canvasEditor]);
 
   useEffect(() => {
@@ -2150,6 +2211,28 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           </p>
         </div>
         <div className="agent-header-actions">
+          <motion.button
+            type="button"
+            onClick={handleAgentUndo}
+            disabled={!canUndo && !livePreviewToken}
+            className="agent-icon-button disabled:opacity-35"
+            whileTap={{ scale: 0.94 }}
+            title="Undo the agent's last change (⌘Z)"
+            aria-label="Undo last change"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </motion.button>
+          <motion.button
+            type="button"
+            onClick={handleAgentRedo}
+            disabled={!canRedo}
+            className="agent-icon-button disabled:opacity-35"
+            whileTap={{ scale: 0.94 }}
+            title="Redo (⌘⇧Z)"
+            aria-label="Redo change"
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </motion.button>
           <motion.button
             type="button"
             onClick={() => setAutoPreview((value) => !value)}

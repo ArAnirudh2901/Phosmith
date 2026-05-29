@@ -284,7 +284,10 @@ a:focus-visible,
 
 /* Dashboard Projects header — pitch-black fill with a permanent cyan offset
    shadow. The hover state is locked to the same look so moving the mouse over
-   it doesn't change anything (it's a static title bar, not a button). */
+   it doesn't change anything (it's a static title bar, not a button).
+   Border is full-opacity white by default (was rgba(244,244,245,0.85), which
+   read as a muted off-white against the #000 fill); width bumped to 2px to
+   match the neo-brutalist weight of the other framed surfaces in the editor. */
 .dashboard-projects-header,
 .dashboard-projects-header:hover {
   --dashboard-header-accent: #06B8D4;
@@ -292,7 +295,7 @@ a:focus-visible,
   background: #000 !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
-  border-color: rgba(244, 244, 245, 0.85);
+  border: 2px solid #F4F4F5 !important;
   box-shadow:
     7px 7px 0 0 var(--dashboard-header-accent),
     inset 0 1px 0 rgba(255, 255, 255, 0.10) !important;
@@ -849,7 +852,10 @@ a:focus-visible,
   padding: 0 0.5rem;
   border-radius: 4px;
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.65rem;
+  /* The rail is icon-only until 2000px (labels turn on there). 0.6rem keeps the
+     label readable with breathing room between the icon, text, and border when
+     labels do appear on ultrawide displays. */
+  font-size: 0.6rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -862,14 +868,22 @@ a:focus-visible,
   box-shadow: 0 0 0 0 transparent;
 }
 
-/* Wider screens get a tiny bit more breathing room — but stay tight enough that
-   10 labeled tool buttons + the left title block + the right action group all
-   fit without overlapping on common 1700-2000px viewports. */
+/* ≥1536px the rail is still icon-only (labels turn on at 2000px). Give the icon
+   buttons a comfortable, near-square footprint so 12 tools sit evenly spaced. */
 @media (min-width: 1536px) {
   .tool-btn {
     gap: 0.32rem;
-    padding: 0.32rem 0.6rem;
+    padding: 0.34rem 0.62rem;
     font-size: 0.66rem;
+  }
+}
+
+/* ≥2000px there's genuine room to show all 12 tool labels alongside the title
+   and the right-hand action group without crowding — widen the buttons so the
+   icon + label have breathing room. */
+@media (min-width: 2000px) {
+  .tool-btn {
+    padding: 0.34rem 0.8rem;
   }
 }
 
@@ -967,21 +981,31 @@ a:focus-visible,
     radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.035), transparent 34%),
     #05070B;
   color: var(--text-primary);
+  /* Position context for the overlay sidebar + backdrop at narrow viewports.
+     Also exposes --topbar-h so the overlay sidebar / backdrop can start
+     exactly at the topbar's bottom edge without hardcoding heights at the
+     call site. Each topbar media query below overrides this value. */
+  position: relative;
+  --topbar-h: 54px;
 }
 
 .editor-topbar {
-  height: 54px;
+  height: var(--topbar-h, 54px);
   flex-shrink: 0;
   border-bottom: 1.5px solid rgba(244, 244, 245, 0.85);
   background: #07090E;
   box-shadow: 0 1px 0 0 rgba(244, 244, 245, 0.15);
   overflow: visible;
+  /* Stay above the overlay-sidebar backdrop (z-30) so the toggle button
+     and other utilities remain clickable when the sidebar is open. */
+  position: relative;
+  z-index: 35;
 }
 
 /* ── Responsive topbar: common laptops (≤ 1440px) ── */
 @media (max-width: 1440px) {
+  .editor-shell { --topbar-h: 48px; }
   .editor-topbar {
-    height: 48px;
     padding-left: 0.5rem;
     padding-right: 0.5rem;
   }
@@ -1009,8 +1033,8 @@ a:focus-visible,
 
 /* ── Smaller laptops / large tablets (≤ 1280px) ── */
 @media (max-width: 1280px) {
+  .editor-shell { --topbar-h: 44px; }
   .editor-topbar {
-    height: 44px;
     padding-left: 0.375rem;
     padding-right: 0.375rem;
   }
@@ -1041,8 +1065,8 @@ a:focus-visible,
 
 /* ── Tablet landscape / minimum supported (≤ 1100px) ── */
 @media (max-width: 1100px) {
+  .editor-shell { --topbar-h: 42px; }
   .editor-topbar {
-    height: 42px;
     padding-left: 0.25rem;
     padding-right: 0.25rem;
   }
@@ -1061,6 +1085,125 @@ a:focus-visible,
   .editor-topbar .tool-btn svg {
     width: 0.7rem;
     height: 0.7rem;
+  }
+}
+
+/* ── Tablet portrait / iPad landscape (≤ 1023px) ──
+   This is the new tablet floor: the editor is no longer hidden here. The
+   sidebar enters overlay mode via data-sidebar-mode="overlay" set in
+   page.jsx, and the topbar tightens further to fit alongside the new
+   sidebar-toggle button. Title truncates via the JSX clamp() so it can't
+   push the tool row off-screen. */
+@media (max-width: 1023.98px) {
+  .editor-shell { --topbar-h: 44px; }
+  .editor-topbar {
+    padding-left: 0.375rem;
+    padding-right: 0.375rem;
+  }
+  /* Slightly larger than the 1100px rule because tablet users hit these
+     targets with fingers, not a pointer. ~26px = 1.625rem keeps Apple's
+     "minimum 44px touch target" close enough when stacked with hover state. */
+  .editor-topbar .tool-btn {
+    height: 1.625rem;
+    min-width: 1.625rem;
+    padding: 0 0.3rem;
+    gap: 0.2rem;
+    border-width: 1px;
+  }
+  .editor-topbar .editor-icon-button,
+  .editor-topbar .editor-logo-button {
+    width: 1.625rem;
+    height: 1.625rem;
+    border-width: 1px;
+  }
+  .editor-topbar .editor-icon-button svg,
+  .editor-topbar .tool-btn svg {
+    width: 0.78rem;
+    height: 0.78rem;
+  }
+  /* Mask out the right edge of the scrollable tool row with a subtle fade
+     so users see there's more content to scroll to. */
+  .editor-topbar .editor-topbar-tools {
+    mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+  }
+}
+
+/* ── Sidebar overlay mode ──
+   When the shell is at <lg viewport (data-sidebar-mode="overlay"), the
+   sidebar is hidden by default and slides over the canvas on toggle.
+   At lg+ (data-sidebar-mode="persistent"), the sidebar is in-flow and
+   resizable as before — no rule below applies. */
+
+/* Hide the resizer entirely in overlay mode — it's a pointer-only affordance
+   that doesn't make sense when the sidebar isn't a permanent column. */
+.editor-shell[data-sidebar-mode="overlay"] .editor-sidebar-resizer {
+  display: none;
+}
+
+/* Closed: remove the sidebar entirely so canvas takes full width. */
+.editor-shell[data-sidebar-mode="overlay"][data-sidebar-open="false"] .editor-sidebar {
+  display: none;
+}
+
+/* Open (left sidebar — normal mode): slide in from the left. The overlay
+   sits BELOW the topbar (top: var(--topbar-h)) so the topbar — including
+   its sidebar-toggle — remains visible and clickable. */
+.editor-shell[data-sidebar-mode="overlay"][data-sidebar-open="true"] .editor-sidebar {
+  position: absolute;
+  left: 0;
+  top: var(--topbar-h, 44px);
+  bottom: 0;
+  z-index: 32;
+  width: min(360px, 82vw);
+  flex-basis: auto;
+  border-right: 1.5px solid rgba(244, 244, 245, 0.85);
+  box-shadow:
+    8px 0 32px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(244, 244, 245, 0.18);
+  animation: pixxel-sidebar-slide-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Open (agent mode — sidebar is on the right): slide in from the right. */
+.editor-shell[data-sidebar-mode="overlay"][data-sidebar-open="true"][data-agent-mode="true"] .editor-sidebar {
+  left: auto;
+  right: 0;
+  border-right: 0;
+  border-left: 1.5px solid rgba(244, 244, 245, 0.85);
+  box-shadow:
+    -8px 0 32px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(244, 244, 245, 0.18);
+  animation: pixxel-sidebar-slide-in-right 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pixxel-sidebar-slide-in {
+  from { transform: translateX(-100%); opacity: 0.4; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+@keyframes pixxel-sidebar-slide-in-right {
+  from { transform: translateX(100%);  opacity: 0.4; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+
+/* Backdrop — dims and slightly blurs the canvas behind the overlay sidebar
+   to indicate the modal state. Sits BELOW topbar (z-30 vs topbar z-35). */
+.editor-sidebar-backdrop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--topbar-h, 44px);
+  bottom: 0;
+  z-index: 30;
+  background: rgba(3, 5, 10, 0.55);
+  backdrop-filter: blur(2px) saturate(0.85);
+  -webkit-backdrop-filter: blur(2px) saturate(0.85);
+  cursor: pointer;
+}
+
+/* Defense in depth — backdrop should never appear at lg+, even if state lingers. */
+@media (min-width: 1024px) {
+  .editor-sidebar-backdrop {
+    display: none;
   }
 }
 
@@ -2864,7 +3007,11 @@ a:focus-visible,
 
 .adjust-tabs {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(4.35rem, 1fr));
+  /* 6 groups laid out as an even 3×2 grid so the row never wraps lopsidedly
+     (auto-fit packed 5 + 1, leaving ImageKit alone on a second row). Equal
+     columns keep every tab the same width and the layout symmetric at every
+     sidebar width, and the labels always fit. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.35rem;
   align-items: stretch;
   border-bottom: 1px solid rgba(210, 220, 235, 0.10);
@@ -4022,4 +4169,37 @@ a:focus-visible,
   .liquid-reactive-text-stroke {
     transition: none;
   }
+}
+
+/* ── Live brush cursor (Mask / Erase tools) ──
+   A floating ring that tracks the pointer over the canvas, sized to the brush's
+   on-screen footprint (brush px × image scale × zoom). The inner dashed ring
+   marks the hardness falloff boundary, Photoshop/CapCut style. Managed entirely
+   by usePixelMaskTool, which appends it to <body> and sets size/colour inline. */
+.pixxel-brush-cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  display: none;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1.5px solid rgba(220, 60, 80, 0.95);
+  background: rgba(220, 60, 80, 0.08);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 9998;
+  will-change: left, top, width, height;
+  transition: width 60ms ease, height 60ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.pixxel-brush-cursor-inner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: none;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.55);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }

@@ -15,6 +15,8 @@ import { ActiveSelection } from "fabric"
  *   I  → Images
  *   A  → Adjust
  *   D  → Draw
+ *   X  → Erase
+ *   M  → Mask
  *   T  → Text
  *   G  → Generative Extend (AI Extender)
  *   B  → AI Background
@@ -103,6 +105,13 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             // ─── Undo / Redo ───
             if (metaOrCtrl && key === "z") {
                 event.preventDefault()
+                // While the Mask/Erase tool is active, let it consume undo/redo against
+                // its own per-stroke stack first (it falls back to the global history
+                // when its stack is empty). Avoids the confusing dual-stack behaviour.
+                if (activeTool === "mask" || activeTool === "erase") {
+                    window.dispatchEvent(new CustomEvent(event.shiftKey ? "pixxel:mask-redo" : "pixxel:mask-undo"))
+                    return
+                }
                 if (event.shiftKey) {
                     canvasEditor?.__redoCanvasState?.()
                 } else {
@@ -234,6 +243,10 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
             // ─── Brush size adjustment ───
             if (key === "[" || key === "]") {
                 event.preventDefault()
+                // The Mask/Erase tools own brush sizing via usePixelMaskTool's own
+                // bracket handler (it drives the live cursor + image-space radius).
+                // Skip the freeDrawingBrush path for them to avoid double-handling.
+                if (activeTool === "mask" || activeTool === "erase") return
                 if (canvasEditor?.freeDrawingBrush) {
                     const currentWidth = canvasEditor.freeDrawingBrush.width || 10
                     const delta = key === "[" ? -BRUSH_STEP : BRUSH_STEP
@@ -295,6 +308,14 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 case "d":
                     event.preventDefault()
                     if (hasAccess("draw")) onToolChange?.("draw")
+                    break
+                case "m":
+                    event.preventDefault()
+                    if (hasAccess("mask")) onToolChange?.("mask")
+                    break
+                case "x":
+                    event.preventDefault()
+                    if (hasAccess("erase")) onToolChange?.("erase")
                     break
                 case "t":
                     event.preventDefault()

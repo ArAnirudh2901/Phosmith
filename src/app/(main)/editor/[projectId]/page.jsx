@@ -57,6 +57,12 @@ const Editor = () => {
         getStoredPanelWidth(AGENT_SIDEBAR_WIDTH_KEY, DEFAULT_AGENT_SIDEBAR_WIDTH, MIN_AGENT_SIDEBAR_WIDTH, MAX_AGENT_SIDEBAR_WIDTH)
     )
     const [resizingSidebar, setResizingSidebar] = useState(null)
+    // Narrow-viewport overlay mode for the sidebar (tablets, 768–1023px). The
+    // sidebar slides over the canvas on demand instead of consuming a permanent
+    // 292px column, so there's enough room for a usable canvas at 768px width.
+    // At lg+ this state is ignored — the sidebar is always persistent there.
+    const [isNarrowViewport, setIsNarrowViewport] = useState(false)
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false)
     const workspaceRef = useRef(null)
     const [contextualBarPosition, setContextualBarPosition] = useState({ x: 0, y: 120 })
     const radialHoldRef = useRef(false)
@@ -95,6 +101,49 @@ const Editor = () => {
     useEffect(() => {
         window.localStorage.setItem(AGENT_SIDEBAR_WIDTH_KEY, String(agentSidebarWidth))
     }, [agentSidebarWidth])
+
+    // Track whether we're below the lg breakpoint (1024px). At narrow widths
+    // the sidebar enters overlay mode — hidden by default, slides over the
+    // canvas when toggled. matchMedia is used directly so this stays in sync
+    // with the corresponding @media query in globals.css.
+    useEffect(() => {
+        if (typeof window === "undefined") return undefined
+        const mql = window.matchMedia("(max-width: 1023.98px)")
+        const apply = () => setIsNarrowViewport(mql.matches)
+        apply()
+        // Older Safari uses addListener/removeListener (non-prefixed equivalents
+        // are recent). Detect with feature check rather than UA sniffing.
+        if (typeof mql.addEventListener === "function") {
+            mql.addEventListener("change", apply)
+            return () => mql.removeEventListener("change", apply)
+        }
+        mql.addListener(apply)
+        return () => mql.removeListener(apply)
+    }, [])
+
+    // When the viewport grows past lg, reset the overlay-open state — the
+    // user shouldn't be left with a toggle button that's no longer rendered.
+    // The persistent sidebar then takes over and ignores isSidebarOpen.
+    useEffect(() => {
+        if (!isNarrowViewport && isSidebarOpen) setIsSidebarOpen(false)
+    }, [isNarrowViewport, isSidebarOpen])
+
+    // Escape closes the overlay sidebar. We deliberately do NOT auto-close on
+    // tool change — when a user picks Crop in the topbar while the sidebar
+    // already shows the Adjust panel, the sidebar should stay open and switch
+    // to the Crop panel (the panel content follows activeTool).
+    useEffect(() => {
+        if (!isNarrowViewport || !isSidebarOpen) return undefined
+        const onKey = (e) => {
+            if (e.key === "Escape") setIsSidebarOpen(false)
+        }
+        window.addEventListener("keydown", onKey)
+        return () => window.removeEventListener("keydown", onKey)
+    }, [isNarrowViewport, isSidebarOpen])
+
+    const handleSidebarToggle = useCallback(() => {
+        setIsSidebarOpen((open) => !open)
+    }, [])
 
     useEffect(() => {
         if (!resizingSidebar) return undefined
@@ -281,7 +330,16 @@ const Editor = () => {
 
     const editorContent = (
         <CanvasContext.Provider value={{ canvasEditor, setCanvasEditor, activeTool, onToolChange: handleActiveToolChange, processingMessage, setProcessingMessage, setProcessingPhase, expansionPreview, setExpansionPreview }}>
-            <div className="editor-shell hidden h-screen min-h-screen flex-col overflow-hidden lg:flex" data-agent-mode={activeTool === "ai_agent"} style={{ ...accentCSS }}>
+            {/* editor-shell is hidden below md (768px) — the editor is too cramped
+                on phones. At md–lg (768–1023px, tablet) the sidebar enters overlay
+                mode via data-sidebar-mode="overlay"; at lg+ it's persistent. */}
+            <div
+                className="editor-shell hidden h-screen min-h-screen flex-col overflow-hidden md:flex"
+                data-agent-mode={activeTool === "ai_agent"}
+                data-sidebar-mode={isNarrowViewport ? "overlay" : "persistent"}
+                data-sidebar-open={isSidebarOpen ? "true" : "false"}
+                style={{ ...accentCSS }}
+            >
                 {/* Processing overlay */}
                 <AnimatePresence>
                     {processingMessage && (
@@ -312,7 +370,32 @@ const Editor = () => {
                     onToolSelect={handleActiveToolChange}
                 />
                 <ContextualActionBar visible={!!canvasEditor?.getActiveObject?.()} position={contextualBarPosition} />
-                <EditorTopbar project={activeProject} />
+                <EditorTopbar
+                    project={activeProject}
+                    onToggleSidebar={isNarrowViewport ? handleSidebarToggle : undefined}
+                    isSidebarOpen={isSidebarOpen}
+                    isNarrowViewport={isNarrowViewport}
+                />
+
+                {/* Sidebar backdrop — appears only when the overlay sidebar is open
+                    on a narrow viewport. Clicking outside the sidebar dismisses it,
+                    matching the standard overlay-drawer pattern. The element is
+                    always mounted but inert when closed so the fade-in transition
+                    can play on open without remounting. */}
+                <AnimatePresence>
+                    {isNarrowViewport && isSidebarOpen && (
+                        <motion.div
+                            key="sidebar-backdrop"
+                            className="editor-sidebar-backdrop"
+                            onClick={() => setIsSidebarOpen(false)}
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: 0.18, ease: easeOut }}
+                            aria-hidden="true"
+                        />
+                    )}
+                </AnimatePresence>
 
                 <motion.div ref={workspaceRef} className={`editor-workspace flex min-h-0 flex-1 overflow-hidden ${activeTool === "ai_agent" ? "editor-workspace--agent" : ""}`}>
                     {activeTool === "ai_agent" ? (
@@ -359,14 +442,16 @@ const Editor = () => {
                 </motion.div>
             </div>
 
-            {/* Mobile restriction */}
-            <div className="lg:hidden min-h-screen flex items-center justify-center p-6" style={{ background: "var(--bg-void-darkest)" }}>
+            {/* Mobile fallback — below 768px (sm and smaller) the editor's
+                canvas + toolbar can't fit usefully even with overlays. iPad
+                portrait (768×1024) and larger now reach the full editor. */}
+            <div className="md:hidden min-h-screen flex items-center justify-center p-6" style={{ background: "var(--bg-void-darkest)" }}>
                 <motion.div className="text-center max-w-md" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                     <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style={{ background: "rgba(6,184,212,0.1)", border: "1px solid rgba(6,184,212,0.2)" }}>
                         <Monitor className="h-7 w-7" style={{ color: "var(--accent-ink)" }} />
                     </div>
-                    <h1 className="text-xl font-bold mb-3" style={{ color: "var(--text-primary)" }}>Desktop Required</h1>
-                    <p style={{ color: "var(--text-muted)" }} className="text-sm">The editor requires a larger screen for the best experience.</p>
+                    <h1 className="text-xl font-bold mb-3" style={{ color: "var(--text-primary)" }}>Tablet or larger needed</h1>
+                    <p style={{ color: "var(--text-muted)" }} className="text-sm">The editor works on tablets (768px+) and up. Rotate to landscape or open this on a larger screen.</p>
                 </motion.div>
             </div>
         </CanvasContext.Provider>

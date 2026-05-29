@@ -30,7 +30,12 @@ export const serializeCanvasState = (canvas) => {
     // Remote URLs (http/https) are preserved as-is.
     // If an image only has a Base64 data URL, we skip it to avoid breaking the canvas restore.
     if (json?.objects) {
-        const canvasObjects = canvas.getObjects?.() || []
+        // CRITICAL: toJSON() already drops objects with excludeFromExport (the mask/
+        // erase overlay sets it), so json.objects is SHORTER than canvas.getObjects().
+        // We must zip json.objects against the SAME filtered, same-order live list —
+        // otherwise indices shift past the overlay and layers above it get paired with
+        // the wrong live object (and silently dropped on save).
+        const canvasObjects = (canvas.getObjects?.() || []).filter((o) => !o.excludeFromExport)
         const objectPairs = json.objects
             .map((obj, index) => ({ obj, liveObj: canvasObjects[index] }))
             .filter(({ obj, liveObj }) => !isExpansionFrameLike(obj) && !isMaskOverlayLike(obj, liveObj))
@@ -100,11 +105,22 @@ export const serializeCanvasState = (canvas) => {
                 if (encodedMask) {
                     cleaned.pixxelMask = encodedMask
                     cleaned.pixxelHasMask = true
+                    const feather = matchingObj?.pixxelMaskFeather ?? matchingObj?._pixxelMaskFeather
+                    if (feather) cleaned.pixxelMaskFeather = feather
                     delete cleaned.clipPath
-                } else if (cleaned.clipPath?.pixxelMaskClipPath || cleaned.clipPath?.name === 'pixxel-mask-clip') {
+                } else if (
+                    // Detect the mask clip off the LIVE object — toJSON() emits no custom
+                    // props, so the serialized clipPath has no marker. Without this a
+                    // now-empty mask would leave a full raw-image clipPath in the JSON.
+                    matchingObj?.clipPath?.pixxelMaskClipPath ||
+                    matchingObj?.clipPath?.name === 'pixxel-mask-clip' ||
+                    cleaned.clipPath?.pixxelMaskClipPath ||
+                    cleaned.clipPath?.name === 'pixxel-mask-clip'
+                ) {
                     delete cleaned.clipPath
                     delete cleaned.pixxelMask
                     delete cleaned.pixxelHasMask
+                    delete cleaned.pixxelMaskFeather
                 }
 
                 // Only strip if the src is a Base64 data URL (can be several MB)

@@ -365,7 +365,12 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
 
         try {
             const fabricImage = await FabricImage.fromURL(imageUrl, {
-                crossOrigin: imageUrl.startsWith("") || imageUrl.startsWith("blob:")
+                // Only data:/blob: URLs are same-origin and need no CORS opt-in.
+                // Every other (remote) URL MUST load with crossOrigin "anonymous"
+                // or it taints the canvas and breaks PNG/JPEG export (toBlob throws
+                // a SecurityError). The previous `startsWith("")` was always true,
+                // so background images were never CORS-loaded.
+                crossOrigin: imageUrl.startsWith("data:") || imageUrl.startsWith("blob:")
                     ? undefined
                     : "anonymous"
             })

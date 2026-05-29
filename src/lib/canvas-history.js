@@ -83,10 +83,23 @@ const restoreSerializedMask = (FabricImage, obj) => {
   const maskCanvas = decodeMaskCanvas(encodedMask)
   if (!maskCanvas) return
 
+  const feather = Math.max(0, Math.round(obj?.pixxelMaskFeather || obj?._pixxelMaskFeather || 0))
   obj._pixxelMaskCanvas = maskCanvas
   obj._pixxelHasMask = true
   obj.pixxelHasMask = true
-  obj.clipPath = createMaskClipPath(FabricImage, maskCanvas)
+  obj.pixxelMaskFeather = feather
+  obj._pixxelMaskFeather = feather
+  const clip = createMaskClipPath(FabricImage, maskCanvas, { feather })
+  // The mask was authored at the saved bitmap size. If the image was rehydrated to
+  // a different-resolution source, scale the (center-origin) clip so it still covers
+  // the live image exactly instead of misaligning to the saved dimensions.
+  const targetW = Math.max(1, Math.round(obj.width || maskCanvas.width))
+  const targetH = Math.max(1, Math.round(obj.height || maskCanvas.height))
+  if (targetW !== maskCanvas.width || targetH !== maskCanvas.height) {
+    clip.scaleX = targetW / maskCanvas.width
+    clip.scaleY = targetH / maskCanvas.height
+  }
+  obj.clipPath = clip
   obj.set?.('dirty', true)
   obj.setCoords?.()
 }

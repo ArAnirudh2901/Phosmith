@@ -3,12 +3,13 @@
 import React, { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
-    Bot, Crop, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Sparkles, Type,
+    Bot, Crop, Eraser, ImagePlus, Maximize2, MousePointer2, Palette, Pen, Scissors, Sliders, Sparkles, Type,
 } from "lucide-react"
 import { useCanvas } from "../../../../../../context/context"
 import usePlanAccess from "../../../../../../hooks/usePlanAccess"
 
 const TOOLS = [
+    { id: "resize", label: "Move", icon: MousePointer2, shortcut: "V" },
     {
         id: "crop", label: "Crop", icon: Crop, shortcut: "C",
         subs: [
@@ -30,6 +31,15 @@ const TOOLS = [
         ],
     },
     { id: "draw", label: "Draw", icon: Pen, shortcut: "D", pro: true },
+    {
+        id: "erase", label: "Erase", icon: Eraser, shortcut: "X",
+        subs: [
+            { id: "brush",   label: "Brush" },
+            { id: "magic",   label: "Magic" },
+            { id: "auto",    label: "Auto BG" },
+            { id: "restore", label: "Restore" },
+        ],
+    },
     { id: "mask", label: "Mask", icon: Scissors, shortcut: "M" },
     { id: "text", label: "Text", icon: Type, shortcut: "T", pro: true },
     {

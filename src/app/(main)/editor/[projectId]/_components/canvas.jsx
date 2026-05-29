@@ -601,8 +601,10 @@ const CanvasEditor = ({ project }) => {
                 if (shouldStartPan(opt)) {
                     isPanningRef.current = true
                     lastPointerRef.current = { x: opt.e.clientX, y: opt.e.clientY }
+                    // Cursor is a DOM style change (no canvas render needed). The
+                    // viewport hasn't moved yet, so a render here would paint nothing
+                    // new — the first mouse:move pans and renders.
                     canvas.upperCanvasEl.style.cursor = 'grabbing'
-                    canvas.requestRenderAll()
                     opt.e.preventDefault()
                     opt.e.stopPropagation()
                 }
@@ -811,7 +813,15 @@ const CanvasEditor = ({ project }) => {
         if (activeTool !== 'draw' && canvas.isDrawingMode) {
             canvas.isDrawingMode = false
         }
-        if (activeTool !== 'draw' && activeTool !== 'ai_extender') {
+        // Mask/Erase manage their own crosshair + skipTargetFind via
+        // usePixelMaskTool's canvas lock; don't stomp it here or the brush cursor
+        // flickers back to the move cursor on tool entry.
+        if (
+            activeTool !== 'draw' &&
+            activeTool !== 'ai_extender' &&
+            activeTool !== 'mask' &&
+            activeTool !== 'erase'
+        ) {
             canvas.skipTargetFind = false
             canvas.hoverCursor = 'move'
             canvas.moveCursor = 'move'
@@ -849,7 +859,14 @@ const CanvasEditor = ({ project }) => {
 
     const toggleHandTool = useCallback(() => {
         const canvas = canvasInstanceRef.current
-        if (!canvas || activeToolRef.current === 'ai_extender') return
+        // Disabled while painting (Mask/Erase) or expanding — the hand tool would
+        // pan-drag while the brush is also painting. Hold Space to pan instead.
+        if (
+            !canvas ||
+            activeToolRef.current === 'ai_extender' ||
+            activeToolRef.current === 'mask' ||
+            activeToolRef.current === 'erase'
+        ) return
         const next = !handToolActiveRef.current
         canvas.__setHandToolActive?.(next)
         setIsHandToolActive(next)
