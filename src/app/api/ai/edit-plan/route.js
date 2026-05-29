@@ -19,7 +19,11 @@ import { getNeonAuthContext } from "@/lib/neon/auth"
 import { runNeonMutation, runNeonQuery } from "@/lib/neon/functions"
 import { buildEditPlan, PLANNER_VERSION } from "@/lib/edit-planner"
 import { getStyleFit } from "@/lib/image-features"
-import { STYLE_KEYS } from "@/lib/style-profiles"
+import {
+    KEYWORD_STYLE_ROUTES,
+    STYLE_DESCRIPTORS,
+    STYLE_KEYS,
+} from "@/lib/style-profiles"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
 
 // Model is configurable via env so we can pin to a specific snapshot (e.g.
@@ -31,6 +35,14 @@ const GEMINI_ENDPOINT = (model) =>
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`
 const GEMINI_TIMEOUT_MS = 12_000
 const MAX_IMAGE_BYTES_FOR_VISION = 4 * 1024 * 1024 // 4 MB — fetch a downsized image if larger
+
+// DoS guards for the multi-layer path. A client could otherwise send an
+// arbitrarily long layers[] and drive N concurrent image fetches + N Gemini
+// calls. Cap the layer count, bound the fan-out concurrency, and reject any
+// thumbnail whose base64 payload is unreasonably large.
+const MAX_LAYERS = 12
+const PLAN_FANOUT_CONCURRENCY = 4
+const MAX_THUMB_BASE64_CHARS = 2 * 1024 * 1024 // ~1.5 MB decoded — generous for a thumbnail
 
 // When the source is an ImageKit URL, append this canonical transform so
 // different users uploading the same scene at different sizes/qualities all
@@ -56,21 +68,12 @@ const buildStandardizedVisionUrl = (sourceUrl) => {
     }
 }
 
-// Map of keywords → preferred target style for the keyword fallback.
-// Broad patterns so vague prompts like "old camera" or "moody look" still
-// resolve to a concrete style instead of falling through to "neutral".
-const KEYWORD_STYLE_HINTS = [
-    [/cinemat|movie|filmic|blockbust|hollywo/i, "cinematic"],
-    [/editorial|magazine|lookbook/i, "editorial"],
-    [/vibrant|punchy|bold|pop|vivid|colorful|colourful|neon/i, "vibrant"],
-    [/vintag|retro|film|analog|old\s*camera|old\s*school|nostalgi|faded|aged|grain|worn|sepia|70s|80s|90s|polaroid|disposable|kodak|fuji|vsco|hipster/i, "vintage"],
-    [/studio|clean|product|minimalist|commercial/i, "studio"],
-    [/portrait|skin|face|warm|golden\s*hour|sunset\s*glow|cozy|cosy/i, "warm-portrait"],
-    [/black\s*and\s*white|monochrome|b&?w|greyscale|grayscale|noir/i, "bw-classic"],
-    [/moo?dy|dark|dramatic|gritty|desaturat/i, "cinematic"],
-    [/dream|ethereal|soft\s*glow|pastel|hazy|misty/i, "vintage"],
-    [/instagram|influenc|aesthetic|vibe|premium|polished|professional/i, "editorial"],
-]
+// Keyword → target-style routing table. Sourced from style-profiles.js so that
+// adding a new film/camera preset updates BOTH the system prompt and this
+// deterministic fallback from one place. Order is significant — the FIRST
+// regex that matches wins, and specific film/camera names come before generic
+// fallbacks (e.g. "Portra" must beat the catch-all "vintage" entry).
+const KEYWORD_STYLE_HINTS = KEYWORD_STYLE_ROUTES
 
 const KEYWORD_AI = [
     [/remove\s+background|cut\s*out|no\s+background/i, "bgRemove"],
@@ -94,6 +97,119 @@ const inferKeywordIntent = (prompt) => {
     return intent
 }
 
+// Deterministic direct-adjustment parser. Extracts explicit tonal/technical
+// moves from the prompt ("warmer", "30% brighter", "add grain", "less saturated",
+// "sharper", "rotate the hue") into concrete adjustment values, so the agent
+// handles arbitrary corrections even with NO named style and even when the
+// vision model is unavailable. Values are in the same units as STYLE_PROFILES.
+// Each adjustment is a {key, sign, base, re} tuple so the magnitude pairing
+// below can map "30% brighter" / "warmer by 20" to the SPECIFIC adjustment whose
+// keyword is adjacent to the number, instead of slamming one global number onto
+// every detected key. `order` is significant only for the brightness/contrast/
+// saturation/temperature pairs where the positive variant is checked first
+// (matching the original if/else-if precedence).
+const DIRECT_ADJUSTMENT_RULES = [
+    { key: "brightness", sign: 1, base: 18, re: /\b(bright(?:er|en)?|lighter|too\s*dark|more\s*exposure|expose\s*up)\b/, group: "brightness" },
+    { key: "brightness", sign: -1, base: 18, re: /\b(darker|darken|too\s*bright|less\s*exposure|underexpos\w*)\b/, group: "brightness" },
+    { key: "contrast", sign: 1, base: 16, re: /\b(more\s*contrast|contrast(?:y|ier)?|punch(?:y|ier)?|add\s*contrast)\b/, group: "contrast" },
+    { key: "contrast", sign: -1, base: 16, re: /\b(less\s*contrast|flat(?:ter)?|low\s*contrast|reduce\s*contrast)\b/, group: "contrast" },
+    { key: "saturation", sign: 1, base: 18, re: /\b(more\s*satur\w*|more\s*colou?rs?|vivid\w*|pop\s*(?:the\s*)?colou?rs?|colou?r\s*pop)\b/, group: "saturation" },
+    { key: "saturation", sign: -1, base: 18, re: /\b(desatur\w*|less\s*satur\w*|less\s*colou?rs?|muted?|drain\s*colou?r|wash\s*out\s*colou?r)\b/, group: "saturation" },
+    { key: "vibrance", sign: 1, base: 16, re: /\bvibran\w*\b/, group: "vibrance" },
+    { key: "temperature", sign: 1, base: 18, re: /\bwarm(?:er|th)?\b|warm\s*it|golden\s*warm|cozy\s*warm/, group: "temperature" },
+    { key: "temperature", sign: -1, base: 18, re: /\bcool(?:er)?\b|cold(?:er)?\b|bluer|more\s*blue|icy\s*tone/, group: "temperature" },
+    { key: "sharpness", sign: 1, base: 18, re: /\bsharp(?:er|en)?\b|crisp(?:er)?\b|clearer|more\s*detail\b/, group: "sharpness" },
+    { key: "blur", sign: 1, base: 14, re: /\bblur(?:ry|red)?\b|soften|softer\b|out\s*of\s*focus|bokeh|gaussian\s*blur/, group: "blur" },
+    { key: "noise", sign: 1, base: 14, re: /\bgrain(?:y)?\b|film\s*grain|noise|noisy\b/, group: "noise" },
+    { key: "hue", sign: 1, base: 30, re: /\b(rotate|shift|swap)\s*(?:the\s*)?(hue|colou?rs?|color\s*wheel)|hue\s*(shift|rotation|rotate)/, group: "hue" },
+]
+
+// Words that, when paired with an explicit number, count as an "adjustment word"
+// (grain/detail/faded/sharper/etc.) so callers can decide NOT to force a creative
+// restyle / gain floor when the prompt is really a direct numeric adjustment.
+const ADJUSTMENT_INTENSITY_WORDS =
+    /\b(grain(?:y)?|noise|noisy|detail|faded?|fade|sharp(?:er|en)?|crisp(?:er)?|bright(?:er|en)?|dark(?:er)?|contrast(?:y|ier)?|satur\w*|vibran\w*|warm(?:er|th)?|cool(?:er)?|blur(?:ry|red)?|soft(?:er|en)?)\b/i
+
+const parseDirectAdjustments = (prompt) => {
+    const p = String(prompt || "").toLowerCase()
+    if (!p) return {}
+    const adj = {}
+
+    // Intensity multiplier from modifier words. Choose a SINGLE multiplier
+    // deterministically rather than letting the last matching tier overwrite a
+    // contradictory earlier one: prefer the tier whose keyword appears earliest
+    // in the prompt, breaking ties toward the smaller magnitude.
+    const MULT_TIERS = [
+        { value: 0.55, re: /\b(slight\w*|subtle|barely|gently|softly|a\s*(little|bit|touch|hair)|just\s*a\s*bit)\b/ },
+        { value: 1.6, re: /\b(very|really|much|way|a\s*lot|lots|quite|noticeabl\w*)\b/ },
+        { value: 2.3, re: /\b(super|extremely|insanely|drastically|heavil\w*|heavy|extreme|max(?:imum)?|crank\w*|blast|tons?\s*of)\b/ },
+    ]
+    let mult = 1
+    let bestPos = Infinity
+    for (const tier of MULT_TIERS) {
+        const m = p.match(tier.re)
+        if (!m) continue
+        const pos = m.index
+        if (pos < bestPos || (pos === bestPos && tier.value < mult)) {
+            bestPos = pos
+            mult = tier.value
+        }
+    }
+
+    // Optional explicit magnitude. Only a "30%" or "by 30" form counts — a bare
+    // number is IGNORED so film/camera/year tokens ("Portra 400", "800T", "16mm",
+    // "1990s photo") don't get mistaken for an adjustment amount and slammed to max.
+    // Capture the number's POSITION so we apply it to ONLY ONE adjustment — the
+    // single keyword nearest the number in the SAME clause — instead of one global
+    // value smeared across every detected key (distinct prompts must not collide).
+    const numMatch = p.match(/by\s+([+-]?\d{1,3})\b|([+-]?\d{1,3})\s*%/)
+    const explicit = numMatch
+        ? Math.min(100, Math.abs(parseInt(numMatch[1] ?? numMatch[2], 10)))
+        : null
+    const numStart = numMatch ? numMatch.index : -1
+    const numEnd = numMatch ? numMatch.index + numMatch[0].length : -1
+
+    // First pass: collect every matched adjustment (one per group, positive variant
+    // first to preserve the original if/else-if precedence) with its keyword index.
+    const usedGroups = new Set()
+    const matched = []
+    for (const rule of DIRECT_ADJUSTMENT_RULES) {
+        if (usedGroups.has(rule.group)) continue
+        const m = p.match(rule.re)
+        if (!m) continue
+        usedGroups.add(rule.group)
+        matched.push({ rule, start: m.index, end: m.index + m[0].length })
+    }
+
+    // Decide which single matched adjustment (if any) the explicit number scopes:
+    // the closest keyword by character distance, but only if no clause separator
+    // (comma/semicolon/"and"/"but") sits between the number and that keyword.
+    let explicitTargetKey = null
+    if (explicit != null && matched.length > 0) {
+        let best = null
+        for (const item of matched) {
+            const gapStart = item.end <= numStart ? item.end : numEnd
+            const gapEnd = item.end <= numStart ? numStart : item.start
+            if (gapEnd < gapStart) continue
+            const gap = p.slice(gapStart, gapEnd)
+            if (/[,;]|\band\b|\bbut\b/.test(gap)) continue // different clause — skip
+            const dist = gapEnd - gapStart
+            if (best == null || dist < best.dist) best = { key: item.rule.key, dist }
+        }
+        if (best) explicitTargetKey = best.key
+    }
+
+    for (const { rule } of matched) {
+        // Apply the explicit number to ONLY the single nearest in-clause adjustment;
+        // every other detected adjustment falls back to its per-phrase base*mult.
+        const useExplicit = explicitTargetKey != null && rule.key === explicitTargetKey
+        const magnitude = Math.round(useExplicit ? explicit : rule.base * mult)
+        adj[rule.key] = rule.sign * magnitude
+    }
+
+    return adj
+}
+
 const FORCE_RESTYLE_PATTERN =
     /\b(again|amplify|boost|dramatic|exaggerat\w*|extra|heavy|intense|max|more|push|strong(?:er|ly)?)\b/i
 
@@ -105,6 +221,13 @@ const normalizePromptKey = (prompt) =>
     String(prompt || "")
         .normalize("NFC")
         .toLowerCase()
+        // Preserve the load-bearing magnitude tokens BEFORE stripping punctuation:
+        // a "%" and a +/- sign that directly precedes a digit both change the parsed
+        // adjustment plan, so they must survive into the key as distinct word tokens.
+        .replace(/\+(?=\d)/g, " plustok ")
+        .replace(/-(?=\d)/g, " minustok ")
+        .replace(/%/g, " pcttok ")
+        // Fold away everything else that isn't a letter/number/space.
         .replace(/[^\p{L}\p{N}\s]+/gu, " ")
         .replace(/\s+/g, " ")
         .trim()
@@ -124,14 +247,60 @@ const buildCanvasSignature = (layers) => {
     return parts.join("|")
 }
 
+// SSRF guard for server-side image fetches. The sourceUrl is client-controlled,
+// so before fetching we require https:, reject hosts that resolve to private /
+// loopback / link-local IP literals, and allowlist only the image hosts this app
+// actually serves from (ImageKit + Unsplash). Returns true only for safe URLs.
+const ALLOWED_IMAGE_HOST_SUFFIXES = ["imagekit.io", "images.unsplash.com"]
+
+const isPrivateOrLocalHost = (host) => {
+    const h = String(host || "").toLowerCase().replace(/^\[|\]$/g, "")
+    if (!h || h === "localhost" || h === "0.0.0.0" || h.endsWith(".localhost")) return true
+    // IPv6 loopback / unique-local (fc00::/7 → fc.. or fd..) / link-local (fe80::)
+    if (h === "::1" || /^fc/.test(h) || /^fd/.test(h) || /^fe80:/.test(h)) return true
+    // IPv4 literal ranges: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16
+    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+    if (m) {
+        const [a, b] = [Number(m[1]), Number(m[2])]
+        if (a === 127 || a === 10 || a === 0) return true
+        if (a === 172 && b >= 16 && b <= 31) return true
+        if (a === 192 && b === 168) return true
+        if (a === 169 && b === 254) return true
+    }
+    return false
+}
+
+const validateOutboundImageUrl = (url) => {
+    if (typeof url !== "string" || !url) return false
+    let u
+    try {
+        u = new URL(url)
+    } catch {
+        return false
+    }
+    if (u.protocol !== "https:") return false
+    const host = u.hostname.toLowerCase()
+    if (isPrivateOrLocalHost(host)) return false
+    return ALLOWED_IMAGE_HOST_SUFFIXES.some(
+        (suffix) => host === suffix || host.endsWith(`.${suffix}`),
+    )
+}
+
 const fetchImageAsBase64 = async (url) => {
     if (!url) return null
+    if (!validateOutboundImageUrl(url)) {
+        console.warn("[edit-plan] blocked outbound image fetch for disallowed url")
+        return null
+    }
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS)
     try {
         const response = await fetch(url, { signal: controller.signal })
         if (!response.ok) throw new Error(`Image fetch ${response.status}`)
         const contentType = response.headers.get("content-type") || "image/jpeg"
+        if (!contentType.toLowerCase().startsWith("image/")) {
+            throw new Error(`Image fetch returned non-image content-type: ${contentType}`)
+        }
         const buffer = await response.arrayBuffer()
         if (buffer.byteLength > MAX_IMAGE_BYTES_FOR_VISION) {
             // Gemini accepts up to 20 MB inline; we keep it tight to keep latency low.
@@ -244,6 +413,15 @@ const sanitizeTargeting = (raw, layerCount) => {
     }
 }
 
+// Build the per-style reference table from STYLE_DESCRIPTORS so adding a new
+// film/camera preset in style-profiles.js automatically updates the prompt.
+const STYLE_REFERENCE_TABLE = STYLE_KEYS
+    .map((key) => {
+        const d = STYLE_DESCRIPTORS[key] || {}
+        return `- ${key}\n    look: ${d.characteristics || "—"}\n    pick when: ${d.whenToPick || "—"}`
+    })
+    .join("\n")
+
 const GEMINI_SYSTEM_PROMPT = `You are a senior photo retoucher analyzing an image and a user instruction.
 Return STRICT JSON only, no prose, matching this schema exactly:
 
@@ -253,52 +431,107 @@ Return STRICT JSON only, no prose, matching this schema exactly:
   "alreadyMatchesTarget": true|false,
   "gain": 0.0,
   "imagekitAi": { "retouch": false, "bgRemove": false, "upscale": false, "sharpen": false, "contrast": false },
+  "adjustments": { },
   "notes": "<one or two short sentences explaining what you saw and what you'd do>"
 }
 
-## Two types of edits — handle them DIFFERENTLY:
+## Style reference — pick the MOST SPECIFIC matching key
 
-### Type A: CORRECTIONS ("make it brighter", "fix the exposure", "increase contrast")
-These are technical fixes. Only set gain>0 if the image actually needs the correction.
-If the image is already well-exposed and the user asks to brighten it, gain=0 is correct.
+${STYLE_REFERENCE_TABLE}
 
-### Type B: CREATIVE STYLE CHANGES ("make it vintage", "cinematic look", "editorial", "black and white")
-These are INTENTIONAL RESTYLING. The user wants the image to look DIFFERENT.
-- A well-exposed photo asked to look "vintage" should get gain 0.5–0.8.
-- A bright colorful photo asked to be "cinematic" should get gain 0.6–0.9.
-- ONLY set alreadyMatchesTarget=true if the image ALREADY exhibits the target style
-  characteristics (e.g., a photo that already has lifted blacks, faded colors, and warm
-  tones when asked for "vintage").
-- Do NOT refuse creative restyling just because the image is technically good.
+## Vague-prompt routing rules (CRITICAL — read carefully)
 
-## Style Characteristics:
-- Cinematic = crushed blacks, slight desaturation, warm/teal tones, subtle grain
-- Vintage = lifted shadows, faded contrast, warm color cast, reduced saturation, subtle grain
-- Editorial = crisp detail, punchy contrast, vibrant but controlled
-- Vibrant = punchy colors, high saturation, bright
-- Black & white = full desaturation, strong tonal contrast
+The user will often describe a look in vague language. Translate it to the most
+specific enum key that fits. Generic keys ("vintage", "cinematic") are LAST
+RESORTS — only use them when no specific film stock, camera, or mood key fits.
 
-## Critical Rules:
+Concrete routing:
+- "Shot on RED" / "RED camera" / "RED Dragon/Helium/Monstro/Komodo" / "IPP2" → red-cinema
+  (NOT cinematic. RED is a specific digital cinema look.)
+- "ARRI" / "Alexa" / "Log-C" → arri-alexa (NOT cinematic.)
+- "Portra" / "Kodak Portra" / "wedding film" → kodak-portra (NOT vintage or warm-portrait.)
+- "Fuji Pro 400H" / "Pro 400H" / "soft green pastel film" → fuji-pro400h
+- "CineStill" / "800T" / "halation" / "neon film" / "tungsten film" → cinestill-800t
+- "Kodachrome" / "National Geographic film" / "rich slide film" → kodachrome
+- "Polaroid" / "SX-70" / "Instax" / "instant film" → polaroid (NOT vintage.)
+- "Tri-X" / "pushed B&W" / "gritty grainy black and white" / "street B&W" → bw-tri-x
+- "Super 8" / "16mm" / "8mm film" / "old home movie" → super8
+- "VHS" / "camcorder" / "analog video" / "tracking lines" → vhs-tape
+- "Golden hour" / "magic hour" / "sunset glow" / "sun-soaked" → golden-hour
+- "Pastel" / "washed out" / "milky" / "IG aesthetic" → faded-pastel
 
-- **DO NOT DOUBLE-PROCESS**: Only set alreadyMatchesTarget=true when the image
-  ALREADY has the specific visual characteristics of the target style.
-  A "normal" well-exposed photo is NOT "already cinematic" or "already vintage".
-- **HONOR THE USER'S INTENT**: If the user asks for a style change, APPLY IT.
-  Good exposure/contrast does not mean the style already matches.
-- **Be proportional**: Use moderate gain (0.4–0.7) for style changes on well-edited
-  images. Use higher gain (0.7–1.0) for dramatic shifts. Use lower gain (0.1–0.3)
+Vague era-only prompts (no specific film named):
+- "Make it look like a vintage photo from an old camera" → super8 (for snapshot
+  / candid subjects) OR kodachrome (for landscapes / saturated scenes). Use the
+  image to decide which fits better.
+- "Old camera" / "old photo" / "old-fashioned" alone → super8 by default.
+- "70s photo" → kodachrome (slides) or super8 (home movies) — pick based on image.
+- Generic "vintage" with NOTHING specific → vintage (the catch-all).
+
+## Two types of edits — handle them DIFFERENTLY
+
+### Type A: CORRECTIONS ("brighter", "fix exposure", "more contrast")
+Technical fixes. Use targetStyle="neutral". Only set gain>0 if the image
+actually needs the correction. If well-exposed and user says "brighten",
+gain=0 is correct.
+
+### Type B: CREATIVE STYLE CHANGE
+The user wants the image to LOOK DIFFERENT.
+- A well-exposed photo asked to look "vintage" / "cinematic" / "shot on RED" /
+  "like a Polaroid" etc. should get gain 0.5–0.8.
+- ONLY set alreadyMatchesTarget=true if the image ALREADY has the SPECIFIC
+  visual characteristics of the target style — e.g. an image with lifted
+  blacks, faded colors and warm tones when asked for "vintage". A normal
+  well-exposed photo is NOT "already cinematic" or "already RED".
+- Do NOT refuse a creative restyle just because the image is technically good.
+
+## Critical Rules
+
+- DO NOT DOUBLE-PROCESS: alreadyMatchesTarget=true ONLY when the image already
+  exhibits the SPECIFIC characteristics listed above for the target key.
+- HONOR USER INTENT: if the user names a film stock or camera, route to its
+  specific key. Generic "cinematic" or "vintage" are last-resort fallbacks.
+- BE PROPORTIONAL: use moderate gain (0.4–0.7) for typical style shifts on
+  well-edited images; higher (0.7–1.0) for dramatic shifts; lower (0.1–0.3)
   only when the image is genuinely close to the target style.
 
-## Gain guidance:
-  - 0.0 = image already exhibits the target style (same currentStyle as targetStyle)
-  - 0.1–0.3 = subtle tweak (image is close to the target but needs minor refinement)
-  - 0.4–0.6 = moderate style shift (typical for most creative style requests)
-  - 0.7–0.9 = strong change (image is very different from the target style)
-  - 1.0 = maximum (dramatic shifts like color→B&W)
+## Gain guidance
 
-- Use the imagekitAi booleans ONLY when the user EXPLICITLY asks for that AI transform
-  (e.g. "remove background" → bgRemove=true). Never set these speculatively.
-- Output JSON only.`
+- 0.0 = image already exhibits the target style (currentStyle === targetStyle)
+- 0.1–0.3 = subtle refinement (image is close to target)
+- 0.4–0.6 = moderate style shift (typical for most creative requests)
+- 0.7–0.9 = strong change (image is far from target)
+- 1.0 = dramatic shift (e.g. color → B&W)
+
+## imagekitAi
+
+Set these booleans ONLY when the user EXPLICITLY asks for that AI transform
+("remove background" → bgRemove=true). Never speculative.
+
+## adjustments (direct tonal/technical moves — the catch-all for ANY edit)
+
+Use "adjustments" for explicit, concrete requests that a named style does not
+capture — this is how you handle arbitrary, "tough", or compound edits. Leave it
+{} when the user only asked for a named look.
+
+Keys + units (omit any you don't need; values are DELTAS from neutral except
+gamma which is absolute, neutral 100):
+- brightness/contrast/saturation/vibrance/temperature: -100..100
+- sharpness/blur/noise: 0..100
+- gamma: 20..220 (100 = neutral)
+- hue: -180..180
+
+Examples:
+- "make it 30% brighter and a bit warmer" → { "brightness": 30, "temperature": 12 }
+- "add heavy film grain and soften it" → { "noise": 28, "blur": 12 }
+- "less saturated, more contrast" → { "saturation": -22, "contrast": 18 }
+- "lift the shadows / fix crushed blacks" → { "gamma": 116 }
+- "shift the colors / rotate hue toward teal" → { "hue": -28 }
+
+You MAY combine adjustments WITH a named style (e.g. targetStyle="cinematic" plus
+adjustments {"noise": 20}). Be proportional — match the magnitude to the request.
+
+Output JSON only.`
 
 const STRICTER_RETRY_SUFFIX =
     "\n\nPrevious response was not valid JSON. YOU MUST RETURN VALID JSON. NO COMMENTS. NO MARKDOWN FENCES. NO PROSE. Only the object."
@@ -342,6 +575,21 @@ const callGeminiOnce = async ({ apiKey, model, prompt, imageBase64, mimeType, fe
                             upscale: { type: "BOOLEAN" },
                             sharpen: { type: "BOOLEAN" },
                             contrast: { type: "BOOLEAN" },
+                        },
+                    },
+                    adjustments: {
+                        type: "OBJECT",
+                        properties: {
+                            brightness: { type: "NUMBER" },
+                            contrast: { type: "NUMBER" },
+                            saturation: { type: "NUMBER" },
+                            vibrance: { type: "NUMBER" },
+                            temperature: { type: "NUMBER" },
+                            gamma: { type: "NUMBER" },
+                            sharpness: { type: "NUMBER" },
+                            blur: { type: "NUMBER" },
+                            noise: { type: "NUMBER" },
+                            hue: { type: "NUMBER" },
                         },
                     },
                     notes: { type: "STRING" },
@@ -393,17 +641,29 @@ const callGemini = async (params) => {
 const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null, prompt = "") => {
     const safeStyle = (s) => (STYLE_KEYS.includes(s) ? s : null)
     const keywordStyle = safeStyle(fallbackIntent?.targetStyle)
+    // The MODEL verdict wins when present — it actually looked at the image and the
+    // full prompt. The keyword router is only a fallback for when the model returns
+    // nothing (or an out-of-enum value), and the bare keyword catch-alls were
+    // overriding correct, more-specific Gemini verdicts.
     const targetStyle =
-        (keywordStyle && keywordStyle !== "neutral" ? keywordStyle : null) ||
         safeStyle(raw?.targetStyle) ||
-        keywordStyle ||
+        (keywordStyle && keywordStyle !== "neutral" ? keywordStyle : null) ||
         "neutral"
     const fit = features ? getStyleFit(features, targetStyle) : null
     const currentStyle = safeStyle(raw?.currentStyle) || fit?.currentStyle || "neutral"
     const forceRestyle = wantsForcedRestyle(prompt)
+    // When the prompt is really a DIRECT numeric/tonal adjustment (e.g. "add more
+    // grain", "+15% detail", "make it more faded", "sharper") we must NOT treat it
+    // as a creative restyle and slam a gain floor on top — that double-applies the
+    // edit. We detect this when parseDirectAdjustments produced something AND the
+    // prompt contains an adjustment-intensity word (grain/detail/faded/sharper/etc.).
+    const directAdj = parseDirectAdjustments(prompt)
+    const isDirectAdjustmentPrompt =
+        Object.keys(directAdj).length > 0 && ADJUSTMENT_INTENSITY_WORDS.test(prompt)
     // Determine if this is a creative style change (vintage, cinematic, etc.)
     // vs a generic correction. Creative changes should not be suppressed.
-    const isCreativeRestyle = targetStyle !== "neutral" && targetStyle !== currentStyle
+    const isCreativeRestyle =
+        targetStyle !== "neutral" && targetStyle !== currentStyle && !isDirectAdjustmentPrompt
     let alreadyMatchesTarget =
         !forceRestyle && (!!raw?.alreadyMatchesTarget || currentStyle === targetStyle)
     let gainRaw = Number(raw?.gain)
@@ -463,10 +723,19 @@ const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null, prompt = ""
         sharpen: !!(raw?.imagekitAi?.sharpen ?? fallbackIntent.imagekitAi.sharpen),
         contrast: !!(raw?.imagekitAi?.contrast ?? false),
     }
-    const notes = alreadyMatchesTarget && gain === 0
+    // Pass through any explicit adjustment deltas the model emitted. The planner
+    // re-clamps/filters these, so we only need to coerce to finite numbers here.
+    const adjustments = {}
+    if (raw?.adjustments && typeof raw.adjustments === "object") {
+        for (const [k, v] of Object.entries(raw.adjustments)) {
+            const n = Number(v)
+            if (Number.isFinite(n)) adjustments[k] = n
+        }
+    }
+    const notes = alreadyMatchesTarget && gain === 0 && Object.keys(adjustments).length === 0
         ? `Image already matches the ${targetStyle} look, so no automatic changes were applied.`
         : String(raw?.notes || "").slice(0, 240)
-    return { currentStyle, targetStyle, alreadyMatchesTarget, gain, imagekitAi, notes }
+    return { currentStyle, targetStyle, alreadyMatchesTarget, gain, imagekitAi, adjustments, notes }
 }
 
 const pHashBuckets = (pHash) => {
@@ -578,6 +847,9 @@ const computePlanForImage = async ({
             prompt,
         )
 
+    // Explicit user tonal moves win over the model's suggested deltas per key.
+    const directAdjustments = { ...(verdict.adjustments || {}), ...parseDirectAdjustments(prompt) }
+
     const plan = buildEditPlan({
         features,
         targetStyle: verdict.targetStyle,
@@ -586,6 +858,7 @@ const computePlanForImage = async ({
         alreadyMatchesTarget: verdict.alreadyMatchesTarget,
         notes: verdict.notes,
         imagekitAi: verdict.imagekitAi,
+        directAdjustments,
     })
 
     try {
@@ -696,13 +969,35 @@ export async function POST(request) {
         const body = await request.json().catch(() => ({}))
         const projectId = body.projectId
         const prompt = String(body.prompt || "").slice(0, 1000)
-        const layers = Array.isArray(body.layers) ? body.layers : null
+        // Cap the layer count BEFORE anything fans out over it. An unbounded
+        // layers[] would otherwise drive N concurrent fetches + N Gemini calls.
+        // Also strip any thumbnail whose base64 is unreasonably large so it never
+        // reaches the vision model.
+        const layers = Array.isArray(body.layers)
+            ? body.layers.slice(0, MAX_LAYERS).map((layer) => {
+                  if (
+                      layer &&
+                      typeof layer.thumbBase64 === "string" &&
+                      layer.thumbBase64.length > MAX_THUMB_BASE64_CHARS
+                  ) {
+                      // Drop the oversized thumbnail so it never reaches the vision
+                      // model; keep the rest of the layer (name/hash/sourceUrl) intact.
+                      const sanitized = { ...layer }
+                      delete sanitized.thumbBase64
+                      delete sanitized.thumbMime
+                      return sanitized
+                  }
+                  return layer
+              })
+            : null
         // Optional override from the client when the user has explicitly confirmed
         // (or de-selected) which layers to edit — bypasses the auto-targeting step.
+        // Bounded to the same capped layer set below (i < layers.length).
         const overrideIndexes = Array.isArray(body.confirmedTargetIndexes)
             ? body.confirmedTargetIndexes
                   .map((n) => Number(n))
                   .filter((n) => Number.isInteger(n) && n >= 0)
+                  .slice(0, MAX_LAYERS)
             : null
 
         if (!projectId) {
@@ -747,30 +1042,40 @@ export async function POST(request) {
                 })
             }
 
-            // Compute one plan per targeted layer in parallel. Each call uses
-            // the per-image cache (with perceptual-hash fallback) so common-image
-            // plans are O(1) and "slightly-different version of the same scene"
-            // plans hit the fuzzy cache.
-            const plans = await Promise.all(
-                targetIndexes.map(async (layerIndex) => {
-                    const layer = layers[layerIndex]
-                    if (!layer?.imageHash || !layer?.sourceUrl) {
-                        return { layerIndex, error: "missing layer data" }
-                    }
-                    const result = await computePlanForImage({
-                        sourceUrl: layer.sourceUrl,
-                        imageHash: layer.imageHash,
-                        pHash: layer.pHash || null,
-                        features: layer.features || null,
-                        prompt,
-                        promptKey,
-                        projectId,
-                        neonAuth,
-                        apiKey,
-                    })
-                    return { layerIndex, ...result }
-                }),
-            )
+            // Defensive: never compute more than MAX_LAYERS plans even if a cached
+            // targeting row somehow carried a longer list.
+            const boundedTargetIndexes = targetIndexes.slice(0, MAX_LAYERS)
+
+            // Compute one plan per targeted layer. Each call uses the per-image
+            // cache (with perceptual-hash fallback) so common-image plans are O(1)
+            // and "slightly-different version of the same scene" plans hit the fuzzy
+            // cache. Fan-out is bounded to PLAN_FANOUT_CONCURRENCY so a large canvas
+            // can't open N concurrent image fetches + N Gemini calls at once.
+            const planFor = async (layerIndex) => {
+                const layer = layers[layerIndex]
+                if (!layer?.imageHash || !layer?.sourceUrl) {
+                    return { layerIndex, error: "missing layer data" }
+                }
+                const result = await computePlanForImage({
+                    sourceUrl: layer.sourceUrl,
+                    imageHash: layer.imageHash,
+                    pHash: layer.pHash || null,
+                    features: layer.features || null,
+                    prompt,
+                    promptKey,
+                    projectId,
+                    neonAuth,
+                    apiKey,
+                })
+                return { layerIndex, ...result }
+            }
+
+            const plans = []
+            for (let i = 0; i < boundedTargetIndexes.length; i += PLAN_FANOUT_CONCURRENCY) {
+                const batch = boundedTargetIndexes.slice(i, i + PLAN_FANOUT_CONCURRENCY)
+                const batchResults = await Promise.all(batch.map(planFor))
+                plans.push(...batchResults)
+            }
 
             return NextResponse.json({
                 success: true,
@@ -810,10 +1115,13 @@ export async function POST(request) {
             model: result.model,
         })
     } catch (error) {
+        // Keep the full error server-side for ops, but never leak the raw internal
+        // message to the client. Only include details outside production.
         console.error("[edit-plan] failed:", error)
-        return NextResponse.json(
-            { error: "Failed to build edit plan", details: error?.message || String(error) },
-            { status: 500 },
-        )
+        const payload = { error: "Failed to build edit plan" }
+        if (process.env.NODE_ENV !== "production") {
+            payload.details = error?.message || String(error)
+        }
+        return NextResponse.json(payload, { status: 500 })
     }
 }

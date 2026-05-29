@@ -39,6 +39,7 @@ const usePlanAccess = () => {
         crop: true,
         adjust: true,
         mask: true,
+        erase: true,
 
         // Pro only tools
         text: isPro,

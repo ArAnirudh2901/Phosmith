@@ -61,6 +61,7 @@ import {
     snapshotToCache,
 } from "../../../../../lib/canvas-cache"
 import { isPixxelMaskOverlay } from "../../../../../lib/canvas-mask"
+import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
 import AuroraLoader from "./AuroraLoader"
 
 const MIN_ZOOM = 0.05
@@ -461,6 +462,8 @@ const CanvasEditor = ({ project }) => {
                 let loadedFromState = false
                 try {
                     await canvas.loadFromJSON(canvasState.canvas || canvasState)
+                    // Restore the "grade background" intent so it keeps tracking after reload.
+                    canvas.__pixxelGradeBackground = Boolean(canvasState.gradeBackground)
                     removeExpansionFramesFromCanvas(canvas)
                     if (canvasState.viewport) { setViewportState(canvas, canvasState.viewport, { x: project.width / 2, y: project.height / 2 }); hasRestoredViewport = true }
                     const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
@@ -601,8 +604,10 @@ const CanvasEditor = ({ project }) => {
                 if (shouldStartPan(opt)) {
                     isPanningRef.current = true
                     lastPointerRef.current = { x: opt.e.clientX, y: opt.e.clientY }
+                    // Cursor is a DOM style change (no canvas render needed). The
+                    // viewport hasn't moved yet, so a render here would paint nothing
+                    // new — the first mouse:move pans and renders.
                     canvas.upperCanvasEl.style.cursor = 'grabbing'
-                    canvas.requestRenderAll()
                     opt.e.preventDefault()
                     opt.e.stopPropagation()
                 }
@@ -811,7 +816,15 @@ const CanvasEditor = ({ project }) => {
         if (activeTool !== 'draw' && canvas.isDrawingMode) {
             canvas.isDrawingMode = false
         }
-        if (activeTool !== 'draw' && activeTool !== 'ai_extender') {
+        // Mask/Erase manage their own crosshair + skipTargetFind via
+        // usePixelMaskTool's canvas lock; don't stomp it here or the brush cursor
+        // flickers back to the move cursor on tool entry.
+        if (
+            activeTool !== 'draw' &&
+            activeTool !== 'ai_extender' &&
+            activeTool !== 'mask' &&
+            activeTool !== 'erase'
+        ) {
             canvas.skipTargetFind = false
             canvas.hoverCursor = 'move'
             canvas.moveCursor = 'move'
@@ -849,7 +862,14 @@ const CanvasEditor = ({ project }) => {
 
     const toggleHandTool = useCallback(() => {
         const canvas = canvasInstanceRef.current
-        if (!canvas || activeToolRef.current === 'ai_extender') return
+        // Disabled while painting (Mask/Erase) or expanding — the hand tool would
+        // pan-drag while the brush is also painting. Hold Space to pan instead.
+        if (
+            !canvas ||
+            activeToolRef.current === 'ai_extender' ||
+            activeToolRef.current === 'mask' ||
+            activeToolRef.current === 'erase'
+        ) return
         const next = !handToolActiveRef.current
         canvas.__setHandToolActive?.(next)
         setIsHandToolActive(next)
@@ -917,6 +937,16 @@ const CanvasEditor = ({ project }) => {
         const handleCanvasChange = (event) => {
             if (isExpansionFrameLike(event?.target)) return
             if (isPixxelMaskOverlay(event?.target)) return
+            // When "color grade background" is on, mirror the photo's grade onto the
+            // canvas background. Gated to image edits (skip text/shape moves) and to
+            // when a background actually exists; change-detected inside.
+            if (
+                canvasEditor.__pixxelGradeBackground &&
+                canvasEditor.backgroundImage &&
+                event?.target?.type?.toLowerCase?.() === 'image'
+            ) {
+                try { syncBackgroundGrade(canvasEditor, true, event.target) } catch { /* ignore */ }
+            }
             scheduleHistoryPush()
             clearTimeout(saveTimeout)
             saveTimeout = setTimeout(() => { saveCanvasState() }, 2000)

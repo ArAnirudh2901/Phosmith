@@ -27,7 +27,7 @@ const CONFIGS = [
 
 const isAgentFilter = (filter) => filter?._pixxelAgentFilter === true;
 
-export const buildProfessionalFilters = (adjustments = {}) =>
+const buildProfessionalFilters = (adjustments = {}) =>
   CONFIGS.reduce((acc, config) => {
     const value = Number(adjustments[config.key] ?? config.defaultValue);
     if (value === config.defaultValue) return acc;

@@ -3,11 +3,13 @@ import HeroSection from "@/components/hero";
 import Pricing from "@/components/pricing";
 import NeoButton from "@/components/neo/NeoButton";
 import LandingChrome from "@/components/neo/LandingChrome";
+import SiteShortcuts from "@/components/neo/SiteShortcuts";
 import { ArrowRight } from "lucide-react";
 
 export default function Home() {
     return (
         <div style={{ background: "#07090E" }}>
+            <SiteShortcuts variant="marketing" />
             <LandingChrome />
             <HeroSection />
             <Features />

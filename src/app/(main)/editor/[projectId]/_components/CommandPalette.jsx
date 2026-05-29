@@ -26,6 +26,8 @@ import {
     Bot,
     ImagePlus,
     Pen,
+    Eraser,
+    Scissors,
     Type,
     Trash2,
     Copy,
@@ -52,6 +54,8 @@ const COMMANDS = [
     { id: "tool-images", label: "Images", category: "Tools", icon: ImagePlus, shortcut: "I" },
     { id: "tool-adjust", label: "Adjust", category: "Tools", icon: Settings, shortcut: "A" },
     { id: "tool-draw", label: "Draw", category: "Tools", icon: Pen, shortcut: "D" },
+    { id: "tool-erase", label: "Erase", category: "Tools", icon: Eraser, shortcut: "X" },
+    { id: "tool-mask", label: "Mask", category: "Tools", icon: Scissors, shortcut: "M" },
     { id: "tool-text", label: "Text", category: "Tools", icon: Type, shortcut: "T" },
 
     // Actions
@@ -139,6 +143,12 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                     break
                 case "tool-draw":
                     onToolChange?.("draw")
+                    break
+                case "tool-erase":
+                    onToolChange?.("erase")
+                    break
+                case "tool-mask":
+                    onToolChange?.("mask")
                     break
                 case "tool-text":
                     onToolChange?.("text")

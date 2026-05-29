@@ -1,43 +1,85 @@
 import { memo } from 'react'
 
+/**
+ * Pixxel brand mark — a 5×7 pixel-block capital "P" with one cell of the
+ * middle bar (the bar that closes the bowl and joins the descender)
+ * replaced with brand cyan. That cell is the structural pivot of the
+ * letterform: it sits at the geometric horizontal center and at the
+ * junction between bowl and descender. Highlighting it in cyan reads as
+ * "this is the specific pixel the editor is currently working on" — the
+ * single pixel of the photo (the P) being edited or created.
+ *
+ * Why every design decision is what it is:
+ *   • A real P, not an icon — the bowl is left *open* (a 3×2 void).
+ *     Filling the bowl would close the letterform and break the P.
+ *   • The cyan pixel belongs to the P, not the void — it replaces a real
+ *     pixel of the middle bar instead of floating inside the bowl. Anchored
+ *     on both sides by white P pixels, it can't be misread as a stray dot
+ *     the way the original ink-drop's splash circles were.
+ *   • The position is the geometric and structural focal point of the
+ *     letter — middle of the middle bar — so the cyan reads as the focus
+ *     of the mark, not an arbitrary accent.
+ *   • 5×7 cell grid (not 4×6) so the bowl has a proper 3×2 interior void
+ *     and the middle bar has an unambiguous odd-numbered center cell. The
+ *     letter reads as typographically real, not as a stunted icon.
+ *   • Cyan is #06B8D4 — the same accent used for active tools, the export
+ *     pill's offset shadow, and the dashboard header's hard shadow. The
+ *     focal pixel reads as the editor's brand-signature interaction.
+ *
+ * Geometry: 28-unit viewBox, 4×4 pixel cells. The letterform occupies
+ * 20×28 — full bleed vertically, with a 4-unit margin on each side
+ * horizontally — so the cells stay pixel-perfect at every integer scale
+ * (the editor topbar renders at 22px display). Strictly solid rectangles
+ * in two colors; nothing in the SVG can produce a floating dot artifact.
+ *
+ * Export name `InkDropLogo` is preserved for the editor-topbar import
+ * even though the design is no longer an ink drop.
+ */
 const InkDropLogo = memo(function InkDropLogo() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <circle cx="24" cy="24" r="20" stroke="url(#ringGrad)" strokeWidth="1.5" opacity="0.3" />
-      <circle cx="24" cy="24" r="16" stroke="url(#ringGrad)" strokeWidth="0.8" opacity="0.2" />
+    return (
+        <svg
+            width="22"
+            height="22"
+            viewBox="0 0 28 28"
+            fill="none"
+            role="img"
+            aria-label="Pixxel"
+        >
+            <title>Pixxel</title>
 
-      <path d="M24 4C24 4 10 20 10 24C10 27.31 12.69 30 16 30C19.31 30 22 27.31 22 24C22 22 21 20 20 18C19.5 19 18.5 20 17.5 20C15.57 20 14 18.43 14 16.5C14 15.5 14.5 14.5 15 14L24 4Z" fill="url(#dropGrad1)" opacity="0.9" />
-      <path d="M24 4C24 4 10 20 10 24C10 27.31 12.69 30 16 30C19.31 30 22 27.31 22 24C22 22 21 20 20 18C19.5 19 18.5 20 17.5 20C15.57 20 14 18.43 14 16.5C14 15.5 14.5 14.5 15 14L24 4Z" fill="url(#dropGrad2)" opacity="0.3" transform="translate(1.5, 1.5)" />
+            {/* Top bar — 5 white cells across the top of the bowl */}
+            <rect x="4" y="0" width="4" height="4" fill="#F4F4F5" />
+            <rect x="8" y="0" width="4" height="4" fill="#F4F4F5" />
+            <rect x="12" y="0" width="4" height="4" fill="#F4F4F5" />
+            <rect x="16" y="0" width="4" height="4" fill="#F4F4F5" />
+            <rect x="20" y="0" width="4" height="4" fill="#F4F4F5" />
 
-      <path d="M18 10C17 12 15.5 15.5 16 18.5C16.5 21 17.5 22.5 19 23" stroke="white" strokeWidth="1" opacity="0.25" strokeLinecap="round" fill="none" />
+            {/* Bowl row 1 — left stem + right side (interior is the open void
+                that makes the shape read as a P) */}
+            <rect x="4" y="4" width="4" height="4" fill="#F4F4F5" />
+            <rect x="20" y="4" width="4" height="4" fill="#F4F4F5" />
 
-      <circle cx="11" cy="28" r="1.2" fill="#00E5FF" opacity="0.38" />
-      <circle cx="30" cy="30" r="1" fill="#D946EF" opacity="0.32" />
-      <circle cx="34" cy="22" r="0.8" fill="#C8956C" opacity="0.38" />
-      <circle cx="13" cy="34" r="0.7" fill="#00E5FF" opacity="0.24" />
-      <circle cx="28" cy="18" r="0.9" fill="#D946EF" opacity="0.3" />
+            {/* Bowl row 2 — same */}
+            <rect x="4" y="8" width="4" height="4" fill="#F4F4F5" />
+            <rect x="20" y="8" width="4" height="4" fill="#F4F4F5" />
 
-      <path d="M14 16L19 11" stroke="white" strokeWidth="0.5" opacity="0.15" strokeLinecap="round" />
-      <path d="M16 14L21 9" stroke="white" strokeWidth="0.5" opacity="0.1" strokeLinecap="round" />
+            {/* Middle bar — closes the bowl and joins the descender. The
+                center cell is cyan: the structural pivot of the letter and
+                the focal pixel being edited. Anchored on both sides by
+                white P cells so it reads as part of the letterform, not
+                as a free-floating dot. */}
+            <rect x="4" y="12" width="4" height="4" fill="#F4F4F5" />
+            <rect x="8" y="12" width="4" height="4" fill="#F4F4F5" />
+            <rect x="12" y="12" width="4" height="4" fill="#06B8D4" />
+            <rect x="16" y="12" width="4" height="4" fill="#F4F4F5" />
+            <rect x="20" y="12" width="4" height="4" fill="#F4F4F5" />
 
-      <defs>
-        <linearGradient id="dropGrad1" x1="10" y1="4" x2="24" y2="30" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#00E5FF" />
-          <stop offset="0.5" stopColor="#7C3AED" />
-          <stop offset="1" stopColor="#D946EF" />
-        </linearGradient>
-        <linearGradient id="dropGrad2" x1="10" y1="4" x2="24" y2="30" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#C8956C" />
-          <stop offset="1" stopColor="#FBBF24" />
-        </linearGradient>
-        <linearGradient id="ringGrad" x1="4" y1="4" x2="44" y2="44" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#00E5FF" />
-          <stop offset="0.5" stopColor="#D946EF" />
-          <stop offset="1" stopColor="#C8956C" />
-        </linearGradient>
-      </defs>
-    </svg>
-  )
+            {/* Descender — 3 stem cells continuing below the bowl */}
+            <rect x="4" y="16" width="4" height="4" fill="#F4F4F5" />
+            <rect x="4" y="20" width="4" height="4" fill="#F4F4F5" />
+            <rect x="4" y="24" width="4" height="4" fill="#F4F4F5" />
+        </svg>
+    )
 })
 
 export default InkDropLogo

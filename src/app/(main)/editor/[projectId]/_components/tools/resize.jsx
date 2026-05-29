@@ -251,6 +251,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                             type="number"
                             value={canvasWidth}
                             onChange={(e) => handleCanvasWidthChange(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === 'Enter' && hasCanvasChanges) { e.preventDefault(); applyCanvasResize() } }}
                             min="1"
                             max="20000"
                             className="panel-input"
@@ -262,6 +263,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                             type="number"
                             value={canvasHeight}
                             onChange={(e) => handleCanvasHeightChange(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === 'Enter' && hasCanvasChanges) { e.preventDefault(); applyCanvasResize() } }}
                             min="1"
                             max="20000"
                             className="panel-input"
@@ -317,6 +319,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                                     type="number"
                                     value={newWidth}
                                     onChange={(e) => handleWidthChange(e.target.value)}
+                                    onKeyDown={(e) => { if (e.key === 'Enter' && hasChanges) { e.preventDefault(); applyImageResize() } }}
                                     min="1"
                                     max="20000"
                                     className="panel-input"
@@ -328,6 +331,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                                     type="number"
                                     value={newHeight}
                                     onChange={(e) => handleHeightChange(e.target.value)}
+                                    onKeyDown={(e) => { if (e.key === 'Enter' && hasChanges) { e.preventDefault(); applyImageResize() } }}
                                     min="1"
                                     max="20000"
                                     className="panel-input"

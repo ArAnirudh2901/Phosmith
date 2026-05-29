@@ -36,6 +36,20 @@ const uploadFileToImageKit = async (file) => {
   return data.url
 }
 
+// Uploads a raw image Blob (e.g. a flattened merge) to ImageKit and returns the
+// CDN URL. Throws on failure so callers can fall back to a data URL.
+export const uploadImageBlobToImageKit = async (blob, fileName = 'image.png') => {
+  if (!blob) throw new Error('No blob to upload')
+  const formData = new FormData()
+  formData.append('file', blob, fileName)
+  formData.append('fileName', fileName)
+  const response = await fetch('/api/imagekit/upload', { method: 'POST', body: formData })
+  if (!response.ok) throw new Error(`ImageKit upload failed: ${response.status}`)
+  const data = await response.json()
+  if (!data?.success || !data?.url) throw new Error(data?.error || 'ImageKit upload returned no URL')
+  return data.url
+}
+
 export const loadFabricImageFromFile = async (file, { silent = false } = {}) =>
   loadFabricImage(file, { silent })
 

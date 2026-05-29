@@ -30,7 +30,12 @@ export const serializeCanvasState = (canvas) => {
     // Remote URLs (http/https) are preserved as-is.
     // If an image only has a Base64 data URL, we skip it to avoid breaking the canvas restore.
     if (json?.objects) {
-        const canvasObjects = canvas.getObjects?.() || []
+        // CRITICAL: toJSON() already drops objects with excludeFromExport (the mask/
+        // erase overlay sets it), so json.objects is SHORTER than canvas.getObjects().
+        // We must zip json.objects against the SAME filtered, same-order live list —
+        // otherwise indices shift past the overlay and layers above it get paired with
+        // the wrong live object (and silently dropped on save).
+        const canvasObjects = (canvas.getObjects?.() || []).filter((o) => !o.excludeFromExport)
         const objectPairs = json.objects
             .map((obj, index) => ({ obj, liveObj: canvasObjects[index] }))
             .filter(({ obj, liveObj }) => !isExpansionFrameLike(obj) && !isMaskOverlayLike(obj, liveObj))
@@ -60,7 +65,15 @@ export const serializeCanvasState = (canvas) => {
 
             if (obj.type === 'image' || obj.type === 'Image') {
                 const cleaned = { ...obj }
+                // Prefer the index-paired live object (indexedObj) so per-image mask/
+                // adjust/filter/src data binds to the SAME image it was serialized from.
+                // Two images sharing a position would otherwise cross-attach via the
+                // positional lookup, which we keep only as a fallback when indexedObj
+                // is missing or isn't an image.
                 const matchingObj =
+                    (indexedObj && (indexedObj.type === 'image' || indexedObj.type === 'Image')
+                        ? indexedObj
+                        : null) ||
                     canvasObjects.find(
                         (o) =>
                             (o.type === 'image' || o.type === 'Image') &&
@@ -100,11 +113,22 @@ export const serializeCanvasState = (canvas) => {
                 if (encodedMask) {
                     cleaned.pixxelMask = encodedMask
                     cleaned.pixxelHasMask = true
+                    const feather = matchingObj?.pixxelMaskFeather ?? matchingObj?._pixxelMaskFeather
+                    if (feather) cleaned.pixxelMaskFeather = feather
                     delete cleaned.clipPath
-                } else if (cleaned.clipPath?.pixxelMaskClipPath || cleaned.clipPath?.name === 'pixxel-mask-clip') {
+                } else if (
+                    // Detect the mask clip off the LIVE object — toJSON() emits no custom
+                    // props, so the serialized clipPath has no marker. Without this a
+                    // now-empty mask would leave a full raw-image clipPath in the JSON.
+                    matchingObj?.clipPath?.pixxelMaskClipPath ||
+                    matchingObj?.clipPath?.name === 'pixxel-mask-clip' ||
+                    cleaned.clipPath?.pixxelMaskClipPath ||
+                    cleaned.clipPath?.name === 'pixxel-mask-clip'
+                ) {
                     delete cleaned.clipPath
                     delete cleaned.pixxelMask
                     delete cleaned.pixxelHasMask
+                    delete cleaned.pixxelMaskFeather
                 }
 
                 // Only strip if the src is a Base64 data URL (can be several MB)
@@ -135,9 +159,25 @@ export const serializeCanvasState = (canvas) => {
         })
     }
 
+    // Background image: keep only a remote URL. A data:/blob: background (e.g. the
+    // AI-background route's upload-failure fallback) would bloat the payload past
+    // Neon's 1 MB cap and break the save, so substitute the live remote src or drop it.
+    if (json?.backgroundImage?.src && String(json.backgroundImage.src).startsWith('data:')) {
+        const liveBg = canvas.backgroundImage
+        const liveSrc = liveBg?._originalElement?.src || liveBg?.getSrc?.() || ''
+        if (liveSrc && !String(liveSrc).startsWith('data:') && !String(liveSrc).startsWith('blob:')) {
+            json.backgroundImage.src = liveSrc
+        } else {
+            delete json.backgroundImage
+        }
+    }
+
     return {
         canvas: json,
         viewport: getCanvasViewportState(canvas),
+        // Persist the "grade background with the photo" intent so it keeps tracking
+        // after reload (runtime flag set by the AI Background tool).
+        gradeBackground: Boolean(canvas.__pixxelGradeBackground),
     }
 }
 

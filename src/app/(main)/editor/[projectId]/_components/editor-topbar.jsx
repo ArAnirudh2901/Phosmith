@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
+import { Bot, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -22,12 +22,23 @@ const EXPORT_PRESETS = [
     { id: 'webp90', label: 'WebP 90%', description: 'Modern · Smallest file', format: 'webp', quality: 0.9 },
 ]
 
+// Resolution multipliers exposed in the export menu. 1× is "as displayed",
+// 2× / 3× re-render at higher resolution via fabric's toCanvasElement scale arg.
+// Capped at 3× to keep memory bounded — a 4K canvas at 3× is already ~150 MB
+// of pixel data, which is the practical ceiling for browser canvas exports.
+const SCALE_OPTIONS = [
+    { id: '1x', label: '1×', value: 1 },
+    { id: '2x', label: '2×', value: 2 },
+    { id: '3x', label: '3×', value: 3 },
+]
+
 const TOOLS = [
     { id: "resize", label: "Resize", icon: Expand },
     { id: "crop", label: "Crop", icon: Crop },
     { id: "images", label: "Images", icon: ImagePlus },
     { id: "adjust", label: "Adjust", icon: Sliders },
     { id: "draw", label: "Draw", icon: Pen },
+    { id: "erase", label: "Erase", icon: Eraser },
     { id: "mask", label: "Mask", icon: Scissors },
     { id: "text", label: "Text", icon: Text },
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
@@ -40,11 +51,59 @@ const isExportTransientObject = (obj) =>
     obj?.excludeFromExport ||
     isPixxelMaskOverlay(obj)
 
-const EditorTopbar = ({ project }) => {
+const isTaintError = (error) =>
+    /taint|insecure|securityerror|cross-?origin/i.test(
+        `${error?.name || ""} ${error?.message || error || ""}`
+    )
+
+// Recover from a tainted-canvas export: re-load every remote image element with
+// crossOrigin "anonymous" so the canvas becomes exportable. Geometry + filters
+// are preserved (same src, just a CORS-clean fetch). Used as a one-shot retry
+// when toBlob throws a SecurityError on a session whose images were loaded
+// without CORS (e.g. a background applied before the crossOrigin fix).
+const reloadCanvasImagesWithCors = async (canvas) => {
+    if (!canvas) return
+    const reloadOne = (obj) => {
+        if (!obj || obj.type?.toLowerCase?.() !== "image") return null
+        const el = obj._originalElement || obj._element
+        const src = obj.getSrc?.() || el?.src || obj.src
+        if (!src || src.startsWith("data:") || src.startsWith("blob:")) return null
+        if (el?.crossOrigin === "anonymous") return null // already CORS-clean
+        if (typeof obj.setSrc !== "function") return null
+        const geometry = {
+            left: obj.left, top: obj.top, scaleX: obj.scaleX, scaleY: obj.scaleY,
+            angle: obj.angle, originX: obj.originX, originY: obj.originY,
+            flipX: obj.flipX, flipY: obj.flipY, cropX: obj.cropX, cropY: obj.cropY,
+            width: obj.width, height: obj.height,
+        }
+        return obj
+            .setSrc(src, { crossOrigin: "anonymous" })
+            .then(() => {
+                obj.set(geometry)
+                obj.applyFilters?.()
+                obj.setCoords?.()
+            })
+            .catch(() => { /* leave as-is; retry will surface the original error */ })
+    }
+    const tasks = []
+    for (const obj of canvas.getObjects?.() || []) {
+        const task = reloadOne(obj)
+        if (task) tasks.push(task)
+    }
+    const bgTask = reloadOne(canvas.backgroundImage)
+    if (bgTask) tasks.push(bgTask)
+    await Promise.all(tasks)
+    canvas.requestRenderAll()
+}
+
+const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarrowViewport = false }) => {
 
     const router = useRouter()
     const exportMenuRef = useRef(null)
     const addImageInputRef = useRef(null)
+    // Horizontally-scrollable tool row at narrow viewports — the active tool
+    // is scrolled into view so users on tablets/laptops never lose track of it.
+    const toolsScrollRef = useRef(null)
 
     const [showUpgradeModel, setShowUpgradeModel] = useState(false)
     const [restrictedTool, setRestrictedTool] = useState(null)
@@ -54,6 +113,9 @@ const EditorTopbar = ({ project }) => {
     const [showShortcuts, setShowShortcuts] = useState(false)
     const [isSaving, setIsSaving] = useState(false)
     const [isExporting, setIsExporting] = useState(false)
+    const [exportScale, setExportScale] = useState(1)
+    // "idle" | "copying" | "copied" — drives the inline state of the Copy item.
+    const [copyState, setCopyState] = useState('idle')
 
     const triggerAddImage = useCallback(() => {
         addImageInputRef.current?.click()
@@ -91,16 +153,55 @@ const EditorTopbar = ({ project }) => {
         return `${project.width} × ${project.height}`
     }, [project?.width, project?.height])
 
+    // Reset the transient Copy-to-clipboard state whenever the menu closes,
+    // so reopening always shows the default "Copy to clipboard" affordance
+    // instead of a stale "Copied!" from the previous session.
     useEffect(() => {
+        if (!showExportMenu) setCopyState('idle')
+    }, [showExportMenu])
+
+    // Auto-scroll the active tool into view inside the (potentially overflowing)
+    // tools row. Without this, a user on a 1024–1280 viewport who picks "Agent"
+    // via the keyboard or radial menu would see the row still scrolled to the
+    // left, with the active button invisible. `block: "nearest"` keeps the row
+    // stable when the active tool is already in view (no jitter).
+    useEffect(() => {
+        const row = toolsScrollRef.current
+        if (!row) return
+        const activeBtn = row.querySelector(`[data-tool-id="${activeTool}"]`)
+        if (!activeBtn) return
+        try {
+            activeBtn.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' })
+        } catch {
+            // Older Safari without smooth behavior support — fall back to instant.
+            activeBtn.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+        }
+    }, [activeTool])
+
+    useEffect(() => {
+        if (!showExportMenu) return undefined
+
         const handleClickOutside = (event) => {
             if (exportMenuRef.current && !exportMenuRef.current.contains(event.target)) {
                 setShowExportMenu(false)
             }
         }
+        // Escape closes the menu. Without this the only way to dismiss it was
+        // clicking outside, which is an accessibility miss for keyboard users.
+        const handleKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                setShowExportMenu(false)
+            }
+        }
 
         window.addEventListener('mousedown', handleClickOutside)
-        return () => window.removeEventListener('mousedown', handleClickOutside)
-    }, [])
+        window.addEventListener('keydown', handleKeyDown)
+        return () => {
+            window.removeEventListener('mousedown', handleClickOutside)
+            window.removeEventListener('keydown', handleKeyDown)
+        }
+    }, [showExportMenu])
 
     useEffect(() => {
         if (!canvasEditor) {
@@ -178,20 +279,15 @@ const EditorTopbar = ({ project }) => {
         onToolChange(toolId)
     }
 
-    const handleExport = async ({ format, quality }) => {
-        if (!canvasEditor || !project || isExporting) return
-        setIsExporting(true)
-        const toastId = toast.loading(`Exporting as ${format.toUpperCase()}…`)
-
-        // Multi-image edge case: if the user has multiple images selected (ActiveSelection)
-        // when they click Export, Fabric's render path treats those objects as children of
-        // the active selection group — they end up double-transformed and render at wrong
-        // positions or get clipped. Discard the selection before snapshotting and restore
-        // it after so the export captures pixels at their real positions.
+    // Take a tight snapshot of the canvas contents and return an encoded Blob.
+    // Shared between the download path and the clipboard path so both use
+    // identical bounding-box math, viewport handling, and restore logic.
+    // The caller passes scale (1/2/3×), format ("png"|"jpeg"|"webp"), and quality.
+    const snapshotCanvasToBlob = async ({ scale = 1, format = 'png', quality = 1 }) => {
         const previousActive = canvasEditor.getActiveObject?.()
         if (previousActive) canvasEditor.discardActiveObject()
 
-        // Hoist viewport save variables so `finally` can always restore them.
+        // Hoist viewport save variables so the finally block can always restore them.
         let savedVpt = null
         let savedW = null
         let savedH = null
@@ -215,42 +311,68 @@ const EditorTopbar = ({ project }) => {
             canvasEditor.calcOffset()
             canvasEditor.renderAll()
 
-            // Compute the tight bounding box around ALL visible objects.
-            // This ensures only the actual image content is exported — no
-            // surrounding empty project canvas.
+            // When a canvas background (image or color) is present, the background
+            // defines the frame, so export the FULL project rect — otherwise the
+            // tight object bbox would crop the background to the photo's bounds.
+            const bgColor = canvasEditor.backgroundColor
+            const hasBackground =
+                Boolean(canvasEditor.backgroundImage) ||
+                (typeof bgColor === 'string' && bgColor !== '' && bgColor !== 'transparent')
+
             const objects = canvasEditor.getObjects().filter(o => o.visible !== false && !isExportTransientObject(o))
-            if (!objects.length) {
+            if (!objects.length && !hasBackground) {
                 throw new Error('No visible objects on the canvas to export')
             }
 
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+            // Tight bounding box around all visible non-transient objects.
+            let objMinX = Infinity, objMinY = Infinity, objMaxX = -Infinity, objMaxY = -Infinity
             for (const obj of objects) {
                 const rect = obj.getBoundingRect(true) // absolute coords, no viewport
-                minX = Math.min(minX, rect.left)
-                minY = Math.min(minY, rect.top)
-                maxX = Math.max(maxX, rect.left + rect.width)
-                maxY = Math.max(maxY, rect.top + rect.height)
+                objMinX = Math.min(objMinX, rect.left)
+                objMinY = Math.min(objMinY, rect.top)
+                objMaxX = Math.max(objMaxX, rect.left + rect.width)
+                objMaxY = Math.max(objMaxY, rect.top + rect.height)
             }
 
-            // Round outward to whole pixels
-            const cropLeft = Math.floor(minX)
-            const cropTop = Math.floor(minY)
-            const cropW = Math.ceil(maxX) - cropLeft
-            const cropH = Math.ceil(maxY) - cropTop
+            let cropLeft
+            let cropTop
+            let cropW
+            let cropH
+
+            if (hasBackground) {
+                // The background defines the frame, so include the full project rect —
+                // but UNION it with the object bbox so objects extending past the canvas
+                // aren't clipped. Fall back to the live canvas size if dims are missing.
+                const frameW = Math.round(project?.width || savedW || 1)
+                const frameH = Math.round(project?.height || savedH || 1)
+                const hasObjects = objects.length > 0
+                cropLeft = hasObjects ? Math.min(0, Math.floor(objMinX)) : 0
+                cropTop = hasObjects ? Math.min(0, Math.floor(objMinY)) : 0
+                const right = hasObjects ? Math.max(frameW, Math.ceil(objMaxX)) : frameW
+                const bottom = hasObjects ? Math.max(frameH, Math.ceil(objMaxY)) : frameH
+                cropW = right - cropLeft
+                cropH = bottom - cropTop
+            } else {
+                // No background: tight content bbox, no empty project margin.
+                cropLeft = Math.floor(objMinX)
+                cropTop = Math.floor(objMinY)
+                cropW = Math.ceil(objMaxX) - cropLeft
+                cropH = Math.ceil(objMaxY) - cropTop
+            }
 
             if (cropW < 1 || cropH < 1) {
                 throw new Error('Object bounding box is empty')
             }
 
-            // Set canvas dimensions large enough to contain the crop region
             const canvasSizeW = Math.max(cropLeft + cropW, savedW)
             const canvasSizeH = Math.max(cropTop + cropH, savedH)
             canvasEditor.setDimensions({ width: canvasSizeW, height: canvasSizeH })
             canvasEditor.calcOffset()
             canvasEditor.renderAll()
 
-            // Export only the bounding box region
-            const exportCanvas = canvasEditor.toCanvasElement(1, {
+            // Pass scale through to fabric so 2×/3× exports re-render at higher
+            // resolution rather than upscaling the already-rasterized snapshot.
+            const exportCanvas = canvasEditor.toCanvasElement(scale, {
                 width: cropW,
                 height: cropH,
                 left: cropLeft,
@@ -258,7 +380,10 @@ const EditorTopbar = ({ project }) => {
             })
 
             let finalCanvas = exportCanvas
-            if (format !== 'png') {
+            // Only JPEG lacks an alpha channel, so only it needs a flattened
+            // background. PNG and WebP both support transparency — preserve the
+            // erased/masked alpha for them instead of filling it white.
+            if (format === 'jpeg') {
                 finalCanvas = document.createElement('canvas')
                 finalCanvas.width = exportCanvas.width
                 finalCanvas.height = exportCanvas.height
@@ -272,7 +397,7 @@ const EditorTopbar = ({ project }) => {
 
             const mimeType = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png'
 
-            // toBlob with a Blob URL avoids materializing the full base64 string into JS
+            // toBlob (vs toDataURL) avoids materializing the full base64 string into JS
             // memory — important for full-resolution exports of 4K+ images, where the
             // toDataURL string can be tens of MB and crash mobile browsers.
             const blob = await new Promise((resolve, reject) => {
@@ -282,21 +407,7 @@ const EditorTopbar = ({ project }) => {
                     quality,
                 )
             })
-            const blobUrl = URL.createObjectURL(blob)
-            const link = document.createElement('a')
-            link.href = blobUrl
-            link.download = `${project.title || 'export'}.${format === 'jpeg' ? 'jpg' : format}`
-            document.body.appendChild(link)
-            link.click()
-            link.remove()
-            // Release the blob URL on the next tick — Safari needs the link click first.
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
-
-            setShowExportMenu(false)
-            toast.success(`Exported as ${format.toUpperCase()}`, { id: toastId })
-        } catch (error) {
-            console.error('[Export] Failed:', error)
-            toast.error(`Export failed: ${error?.message || 'Unknown error'}`, { id: toastId })
+            return { blob, mimeType }
         } finally {
             // Always restore viewport dimensions and transform, even if export failed.
             for (const obj of hiddenForExport) {
@@ -309,22 +420,151 @@ const EditorTopbar = ({ project }) => {
                     canvasEditor.calcOffset()
                 } catch { /* canvas may have been disposed */ }
             }
-            // Always restore the selection the user had before they clicked Export.
-            if (previousActive && canvasEditor.contextContainer) {
+            // Restore the prior selection only if that object STILL EXISTS on the
+            // canvas — otherwise setActiveObject would attach a stale fabric
+            // reference whose internal _set/_objects state has been torn down,
+            // leading to "active object's cacheCanvas is null" errors on next click.
+            const stillExists = previousActive && canvasEditor.getObjects?.().includes?.(previousActive)
+            if (stillExists && canvasEditor.contextContainer) {
                 try { canvasEditor.setActiveObject(previousActive) } catch { /* selection may have been removed */ }
             }
             canvasEditor.requestRenderAll()
+        }
+    }
+
+    // Export with one-shot tainted-canvas recovery: if toBlob throws a
+    // SecurityError because an image was loaded without CORS, reload images with
+    // crossOrigin "anonymous" and try once more.
+    const snapshotCanvasToBlobSafe = async (opts) => {
+        try {
+            return await snapshotCanvasToBlob(opts)
+        } catch (error) {
+            if (!isTaintError(error)) throw error
+            await reloadCanvasImagesWithCors(canvasEditor)
+            return await snapshotCanvasToBlob(opts)
+        }
+    }
+
+    const handleExport = async ({ format, quality }) => {
+        if (!canvasEditor || !project || isExporting) return
+        setIsExporting(true)
+        const scaleLabel = exportScale > 1 ? ` (${exportScale}×)` : ''
+        const toastId = toast.loading(`Exporting as ${format.toUpperCase()}${scaleLabel}…`)
+
+        try {
+            const { blob } = await snapshotCanvasToBlobSafe({ scale: exportScale, format, quality })
+            const blobUrl = URL.createObjectURL(blob)
+            const link = document.createElement('a')
+            link.href = blobUrl
+            // Tag the filename with the scale so users can tell e.g. a 2× PNG
+            // apart from a 1× PNG without having to read the dimensions.
+            const scaleSuffix = exportScale > 1 ? `@${exportScale}x` : ''
+            link.download = `${project.title || 'export'}${scaleSuffix}.${format === 'jpeg' ? 'jpg' : format}`
+            document.body.appendChild(link)
+            link.click()
+            link.remove()
+            // Release the blob URL on the next tick — Safari needs the link click first.
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
+
+            setShowExportMenu(false)
+            toast.success(`Exported as ${format.toUpperCase()}${scaleLabel}`, { id: toastId })
+        } catch (error) {
+            console.error('[Export] Failed:', error)
+            const message = isTaintError(error)
+                ? "Export blocked: an image on the canvas can't be read for security (it loaded without cross-origin access). Re-add it from the Images panel and try again."
+                : `Export failed: ${error?.message || 'Unknown error'}`
+            toast.error(message, { id: toastId })
+        } finally {
+            setIsExporting(false)
+        }
+    }
+
+    const handleCopyToClipboard = async () => {
+        if (!canvasEditor || !project || isExporting) return
+        // Browsers only reliably accept image/png in the clipboard. Force PNG
+        // even if the user selected JPEG/WebP — quality is moot for clipboard.
+        if (typeof navigator === 'undefined' ||
+            typeof navigator.clipboard?.write !== 'function' ||
+            typeof window.ClipboardItem !== 'function') {
+            toast.error('Clipboard images are not supported in this browser')
+            return
+        }
+
+        setIsExporting(true)
+        setCopyState('copying')
+        const toastId = toast.loading('Copying to clipboard…')
+
+        try {
+            const { blob } = await snapshotCanvasToBlobSafe({ scale: exportScale, format: 'png', quality: 1 })
+            await navigator.clipboard.write([new window.ClipboardItem({ 'image/png': blob })])
+            setCopyState('copied')
+            toast.success('Copied to clipboard', { id: toastId })
+            // Auto-revert the "Copied!" affordance after a beat so the user can
+            // copy again without reopening the menu.
+            setTimeout(() => setCopyState('idle'), 1600)
+        } catch (error) {
+            console.error('[Copy] Failed:', error)
+            setCopyState('idle')
+            // Most common failure: document not focused (Firefox) or permission denied.
+            const msg = /not\s*focused|focus/i.test(error?.message || '')
+                ? 'Click the page first, then try Copy again'
+                : `Copy failed: ${error?.message || 'Unknown error'}`
+            toast.error(msg, { id: toastId })
+        } finally {
             setIsExporting(false)
         }
     }
 
     return (
         <>
-            {/* ── Top Navigation Bar ── */}
-            <div className="editor-topbar flex items-center px-3 justify-between">
+            {/* ── Top Navigation Bar ──
+                Layout contract (the core fix for tablet/laptop overlap):
+                  • LEFT (flex-none, max-w 42%): logo, optional back, title, badges. Title
+                    truncates with a fluid clamp() so it never pushes the middle off-screen.
+                  • MIDDLE (flex-1, min-w-0, overflow-x-auto): tool buttons. Takes ALL
+                    remaining space and scrolls horizontally when its content can't fit.
+                    This is what stops the right section from being clipped at <1700px.
+                  • RIGHT (flex-none): utility icons + Export. Never shrinks below its
+                    content width — Export is the primary action, must always be reachable.
+                Old layout had left+right as flex-1 and middle as flex-none, which caused
+                the right section to be pushed past the viewport at <1700px with tool
+                labels on, and again at <1280px because of accumulated content width. */}
+            {/* Spacing scale (uniform across every section so the row reads as one
+                rhythm instead of three different ones):
+                  768–1023:  gap-1.5  (6px)
+                  1024–1279: gap-2    (8px)
+                  1280–1699: gap-2.5  (10px)
+                  1700+:     gap-3    (12px)
+                These map onto common laptop / tablet / desktop densities — at the
+                15" 16:10 size (≈1728 logical) the scale is 12px, comfortable for a
+                Retina display without being airy. The same tokens are reused for
+                root, left, middle, and right so every adjacent pair of elements
+                sits the same distance apart. Dividers contribute only their 1px
+                width; per-element mx-* margins were removed to keep spacing
+                gap-only and predictable. */}
+            <div className="editor-topbar flex items-center justify-between gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 px-2 lg:px-3 min-w-0">
 
-                {/* Left section: Back + Project name */}
-                <div className="flex flex-1 items-center gap-2 min-w-0">
+                {/* Left section: navigation chrome + project identity */}
+                <div className="flex flex-none items-center gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 min-w-0 max-w-[42%]">
+                    {/* Sidebar toggle — visible only when the parent is in overlay-mode
+                        (<lg viewport), where the sidebar is hidden by default. Icon flips
+                        to PanelRight when the agent sidebar (right side) is active so the
+                        affordance points at the side it affects. */}
+                    {onToggleSidebar && (
+                        <motion.button
+                            onClick={onToggleSidebar}
+                            className="editor-icon-button flex lg:hidden items-center justify-center flex-none"
+                            title={isSidebarOpen ? 'Hide tools panel' : 'Show tools panel'}
+                            aria-label={isSidebarOpen ? 'Hide tools panel' : 'Show tools panel'}
+                            aria-expanded={isSidebarOpen}
+                            aria-controls="editor-sidebar"
+                        >
+                            {activeTool === 'ai_agent'
+                                ? <PanelRight className="h-4 w-4" />
+                                : <PanelLeft className="h-4 w-4" />}
+                        </motion.button>
+                    )}
+
                     <Link
                         href="/dashboard"
                         className="editor-logo-button flex items-center justify-center flex-none"
@@ -334,37 +574,50 @@ const EditorTopbar = ({ project }) => {
                         <InkDropLogo />
                     </Link>
 
+                    {/* Back arrow — redundant with the logo link (both go to /dashboard).
+                        Hidden below xl to save ~40px of width on laptops/tablets. */}
                     <motion.button
-
                         onClick={handleBackToDashboard}
-                        className="editor-icon-button flex items-center justify-center flex-none"
+                        className="editor-icon-button hidden xl:flex items-center justify-center flex-none"
                         title="Back to projects"
+                        aria-label="Back to projects"
                     >
                         <ArrowLeft className="h-4 w-4" />
                     </motion.button>
 
-                    <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
+                    <div className="hidden xl:block h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
-                    <span className="text-sm font-semibold truncate max-w-[80px] sm:max-w-[120px] xl:max-w-[160px] flex-none"
-                          style={{ color: 'var(--text-primary)' }}>
+                    {/* Title with fluid truncation. clamp(60px, 12vw, 280px) scales
+                        smoothly from a 60px stub on narrow tablets up to 280px on
+                        ultrawide, with no discrete jumps that re-flow the row. */}
+                    <span className="text-sm font-semibold truncate flex-none"
+                          style={{ color: 'var(--text-primary)', maxWidth: 'clamp(60px, 12vw, 280px)' }}
+                          title={project.title}>
                         {project.title}
                     </span>
 
                     <ProBadge size="sm" />
 
+                    {/* Resolution badge — hidden below xl. Already surfaced inside
+                        the Export menu header, so removing it from the topbar at
+                        narrow widths costs no information. */}
                     {exportResolutionLabel && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded flex-none"
+                        <span className="hidden xl:inline-flex text-[10px] px-1.5 py-0.5 rounded flex-none"
                               style={{ color: 'var(--text-secondary)', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)' }}>
                             {exportResolutionLabel}
                         </span>
                     )}
                 </div>
 
-                {/* Center: Tool buttons */}
-                {/* Explicit horizontal margin so the center group can never overlap
-                    the left title block or the right action group at any width.
-                    Uses overflow-x-auto so tools scroll on very narrow viewports. */}
-                <div className="flex flex-none items-center justify-center gap-1 lg:gap-1.5 xl:gap-2 px-1 lg:px-2 mx-1 lg:mx-3 overflow-x-auto scrollbar-hide">
+                {/* Center: Tool buttons.
+                    flex-1 + min-w-0 + overflow-x-auto is the magic combination — middle
+                    takes ALL remaining space (so the right section can't be pushed off
+                    screen) and overflows horizontally when content is too wide.
+                    Active tool auto-scrolls into view via the effect below. */}
+                <div
+                    className="editor-topbar-tools flex flex-1 min-w-0 items-center justify-start gap-1 lg:gap-1.5 xl:gap-2 min-[1700px]:gap-2.5 min-[2000px]:gap-3 overflow-x-auto scrollbar-hide"
+                    ref={toolsScrollRef}
+                >
                     {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
@@ -373,29 +626,43 @@ const EditorTopbar = ({ project }) => {
                         return (
                             <React.Fragment key={tool.id}>
                                 {/* Visual dividers to create tool groups */}
-                                {(tool.id === 'mask' || tool.id === 'ai_background') && (
+                                {(tool.id === 'erase' || tool.id === 'ai_background') && (
                                     <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
                                 )}
                                 <motion.button
                                     onClick={() => handleToolChange(tool.id)}
+                                    data-tool-id={tool.id}
                                     className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
+                                    aria-label={tool.label}
+                                    aria-pressed={isActive}
+                                    title={tool.label}
                                 >
                                     <Icon className="h-4 w-4 flex-none" />
-                                    <span className="hidden 2xl:inline">{tool.label}</span>
+                                    {/* Icon-only by default (tooltips + the radial menu carry the
+                                        labels). Text labels only appear at 2000px+, where all 12
+                                        labeled tools genuinely fit alongside the title + actions
+                                        without crowding. Below that the rail stays clean and
+                                        evenly spaced. */}
+                                    <span className="hidden min-[2000px]:inline">{tool.label}</span>
                                 </motion.button>
                             </React.Fragment>
                         )
                     })}
                 </div>
 
-                {/* Right: Actions — overflow-visible so the export dropdown isn't clipped */}
-                <div className="flex flex-1 items-center justify-end gap-0.5 lg:gap-1 min-w-0" style={{ overflow: 'visible' }}>
-                    {/* Undo / Redo */}
+                {/* Right: Actions — content-sized so Export is always reachable.
+                    overflow-visible keeps the export dropdown from being clipped
+                    by the topbar bounds. Non-essential icons (zoom reset, keyboard
+                    shortcuts) collapse out at narrow widths since they have
+                    keyboard shortcuts (⌘0, ?). */}
+                <div className="flex flex-none items-center justify-end gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3" style={{ overflow: 'visible' }}>
+                    {/* Undo / Redo — always visible (core workflow) */}
                     <motion.button
                         onClick={handleUndo}
                         disabled={!canUndo}
                         className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
                         title="Undo (⌘Z)"
+                        aria-label="Undo"
                     >
                         <Undo2 className="h-3.5 w-3.5" />
                     </motion.button>
@@ -405,12 +672,14 @@ const EditorTopbar = ({ project }) => {
                         disabled={!canRedo}
                         className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
                         title="Redo (⌘⇧Z)"
+                        aria-label="Redo"
                     >
                         <Redo2 className="h-3.5 w-3.5" />
                     </motion.button>
 
-                    <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
+                    <div className="hidden lg:block h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
+                    {/* Hidden file picker — used by the add-image button below */}
                     <input
                         ref={addImageInputRef}
                         type="file"
@@ -424,55 +693,65 @@ const EditorTopbar = ({ project }) => {
                             await addImageFilesToCanvas(canvasEditor, files, project)
                         }}
                     />
+                    {/* Add image — keyboard-accessible via Shift+I, hide at <lg
+                        to keep the row tight. Tablet users get the same affordance
+                        from inside the Images tool panel. */}
                     <motion.button
                         onClick={() => addImageInputRef.current?.click()}
                         disabled={!canvasEditor}
-                        className="editor-icon-button flex items-center justify-center disabled:opacity-35 flex-none"
+                        className="editor-icon-button hidden lg:flex items-center justify-center disabled:opacity-35 flex-none"
                         title="Add image (Shift + I)"
                         aria-label="Add image"
                     >
                         <ImagePlus className="h-3.5 w-3.5" />
                     </motion.button>
 
-                    <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
+                    <div className="hidden xl:block h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
-                    {/* Reset View */}
+                    {/* Reset View — hide below xl (⌘0 keyboard shortcut still works) */}
                     <motion.button
                         onClick={() => canvasEditor?.__resetCanvasView?.()}
-                        className="editor-icon-button flex items-center justify-center flex-none"
+                        className="editor-icon-button hidden xl:flex items-center justify-center flex-none"
                         title="Reset view"
+                        aria-label="Reset view"
                     >
                         <ZoomIn className="h-3.5 w-3.5" />
                     </motion.button>
 
-                    {/* Save */}
+                    {/* Save — always visible (it's the core "don't lose your work" button) */}
                     <motion.button
                         onClick={handleSave}
                         disabled={isSaving}
                         className="editor-icon-button flex items-center justify-center flex-none disabled:opacity-50 disabled:cursor-wait"
                         title={isSaving ? 'Saving…' : 'Save (⌘S)'}
+                        aria-label={isSaving ? 'Saving' : 'Save project'}
                     >
                         {isSaving
                             ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             : <Save className="h-3.5 w-3.5" />}
                     </motion.button>
 
-                    {/* Keyboard shortcuts */}
+                    {/* Keyboard shortcuts — hide below xl (still openable via the ? key) */}
                     <motion.button
                         onClick={() => setShowShortcuts(true)}
-                        className="editor-icon-button flex items-center justify-center flex-none"
+                        className="editor-icon-button hidden xl:flex items-center justify-center flex-none"
                         title="Keyboard shortcuts (?)"
                         aria-label="Show keyboard shortcuts"
                     >
                         <Keyboard className="h-3.5 w-3.5" />
                     </motion.button>
 
-                    <div className="h-5 w-px mx-1 flex-none" style={{ background: 'var(--border-default)' }} />
+                    <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Export dropdown */}
                     <div className="relative flex-none" ref={exportMenuRef}>
                         <motion.button
                             onClick={() => setShowExportMenu(prev => !prev)}
+                            disabled={isExporting}
+                            aria-haspopup="menu"
+                            aria-expanded={showExportMenu}
+                            aria-controls="export-menu"
+                            aria-label={isExporting ? 'Exporting…' : 'Open export menu'}
                             className="flex items-center gap-1.5 editor-interactive pill-control"
                             style={{
                                 background: '#A8794E',
@@ -486,9 +765,16 @@ const EditorTopbar = ({ project }) => {
                                 fontSize: '0.7rem',
                                 padding: '0.5rem 0.85rem',
                                 borderRadius: 0,
+                                // Visually mute the trigger while an export is in
+                                // flight so users get feedback that further clicks
+                                // are no-ops (the disabled attr handles the actual block).
+                                opacity: isExporting ? 0.55 : 1,
+                                cursor: isExporting ? 'wait' : 'pointer',
                             }}
                         >
-                            <Download className="h-3.5 w-3.5" strokeWidth={2.5} />
+                            {isExporting
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.5} />
+                                : <Download className="h-3.5 w-3.5" strokeWidth={2.5} />}
                             Export
                             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showExportMenu ? 'rotate-180' : ''}`} />
                         </motion.button>
@@ -496,6 +782,9 @@ const EditorTopbar = ({ project }) => {
                         <AnimatePresence>
                             {showExportMenu && (
                                 <motion.div
+                                    id="export-menu"
+                                    role="menu"
+                                    aria-label="Export options"
                                     className="absolute right-0 top-full mt-2 z-50 overflow-hidden"
                                     style={{
                                         width: 'clamp(240px, 22vw, 280px)',
@@ -541,22 +830,192 @@ const EditorTopbar = ({ project }) => {
                                                     color: 'rgba(244, 244, 245, 0.5)',
                                                 }}
                                             >
-                                                {exportResolutionLabel}
+                                                {exportScale > 1
+                                                    ? `${exportResolutionLabel} · ${exportScale}×`
+                                                    : exportResolutionLabel}
                                             </span>
                                         )}
                                     </div>
 
+                                    {/* Scale selector row — picks the resolution multiplier
+                                        applied to ALL downloads + Copy in this menu session. */}
+                                    <div
+                                        role="radiogroup"
+                                        aria-label="Export resolution"
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '0.4rem',
+                                            padding: '0.4rem 0.55rem',
+                                            borderBottom: '1.5px solid rgba(244, 244, 245, 0.18)',
+                                        }}
+                                    >
+                                        <span
+                                            style={{
+                                                fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                                fontSize: '0.55rem',
+                                                fontWeight: 700,
+                                                letterSpacing: '0.1em',
+                                                textTransform: 'uppercase',
+                                                color: 'rgba(244, 244, 245, 0.55)',
+                                            }}
+                                        >
+                                            Scale
+                                        </span>
+                                        <div style={{ display: 'flex', gap: '0.25rem' }}>
+                                            {SCALE_OPTIONS.map((opt) => {
+                                                const selected = exportScale === opt.value
+                                                return (
+                                                    <button
+                                                        key={opt.id}
+                                                        type="button"
+                                                        role="radio"
+                                                        aria-checked={selected}
+                                                        onClick={() => setExportScale(opt.value)}
+                                                        disabled={isExporting}
+                                                        style={{
+                                                            minWidth: '2rem',
+                                                            padding: '0.2rem 0.45rem',
+                                                            borderRadius: '2px',
+                                                            border: selected
+                                                                ? '1.5px solid #A8794E'
+                                                                : '1.5px solid rgba(244, 244, 245, 0.3)',
+                                                            background: selected ? '#A8794E' : 'transparent',
+                                                            color: selected ? '#03050A' : '#F4F4F5',
+                                                            fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                                            fontSize: '0.6rem',
+                                                            fontWeight: 800,
+                                                            letterSpacing: '0.06em',
+                                                            cursor: isExporting ? 'wait' : 'pointer',
+                                                            transition: 'background 120ms, border-color 120ms, color 120ms',
+                                                        }}
+                                                    >
+                                                        {opt.label}
+                                                    </button>
+                                                )
+                                            })}
+                                        </div>
+                                    </div>
+
                                     {/* Export items */}
                                     <div style={{ padding: '0.35rem' }}>
+                                        {/* Copy to clipboard — sits at the top because it's
+                                            the fastest "I just want this image" path. */}
+                                        <motion.button
+                                            key="copy-to-clipboard"
+                                            type="button"
+                                            role="menuitem"
+                                            initial={{ opacity: 0, x: 6 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            transition={{ duration: 0.15 }}
+                                            onClick={handleCopyToClipboard}
+                                            disabled={isExporting}
+                                            aria-label={copyState === 'copied' ? 'Copied to clipboard' : 'Copy image to clipboard'}
+                                            className="neo-export-item"
+                                            style={{
+                                                display: 'flex',
+                                                width: '100%',
+                                                alignItems: 'center',
+                                                gap: '0.6rem',
+                                                padding: '0.5rem 0.55rem',
+                                                borderRadius: '3px',
+                                                border: '1.5px solid transparent',
+                                                background: 'transparent',
+                                                cursor: isExporting ? 'wait' : 'pointer',
+                                                textAlign: 'left',
+                                                transition: 'background 120ms, border-color 120ms, box-shadow 120ms',
+                                                marginBottom: '0.2rem',
+                                            }}
+                                            onMouseEnter={e => {
+                                                e.currentTarget.style.background = 'rgba(168, 121, 78, 0.12)'
+                                                e.currentTarget.style.borderColor = 'rgba(168, 121, 78, 0.5)'
+                                                e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                            }}
+                                            onMouseLeave={e => {
+                                                e.currentTarget.style.background = 'transparent'
+                                                e.currentTarget.style.borderColor = 'transparent'
+                                                e.currentTarget.style.boxShadow = 'none'
+                                            }}
+                                            onMouseDown={e => {
+                                                e.currentTarget.style.transform = 'translate(2px, 2px)'
+                                                e.currentTarget.style.boxShadow = 'none'
+                                            }}
+                                            onMouseUp={e => {
+                                                e.currentTarget.style.transform = ''
+                                                e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    display: 'grid',
+                                                    placeItems: 'center',
+                                                    width: '1.65rem',
+                                                    height: '1.65rem',
+                                                    flexShrink: 0,
+                                                    borderRadius: '3px',
+                                                    border: '1.5px solid rgba(244, 244, 245, 0.5)',
+                                                    background: copyState === 'copied' ? '#9BF95B' : '#A8794E',
+                                                    color: '#03050A',
+                                                    boxShadow: '1.5px 1.5px 0 0 rgba(244, 244, 245, 0.3)',
+                                                    transition: 'background 160ms',
+                                                }}
+                                            >
+                                                {copyState === 'copying'
+                                                    ? <Loader2 className="h-3 w-3 animate-spin" strokeWidth={2.5} />
+                                                    : copyState === 'copied'
+                                                        ? <Check className="h-3 w-3" strokeWidth={2.8} />
+                                                        : <Copy className="h-3 w-3" strokeWidth={2.5} />}
+                                            </div>
+                                            <div style={{ minWidth: 0 }}>
+                                                <div
+                                                    style={{
+                                                        fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
+                                                        fontSize: '0.65rem',
+                                                        fontWeight: 700,
+                                                        letterSpacing: '0.06em',
+                                                        textTransform: 'uppercase',
+                                                        color: '#F4F4F5',
+                                                        lineHeight: 1.3,
+                                                    }}
+                                                >
+                                                    {copyState === 'copied' ? 'Copied!' : 'Copy to clipboard'}
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        fontSize: '0.58rem',
+                                                        fontWeight: 500,
+                                                        color: 'rgba(161, 168, 180, 0.75)',
+                                                        lineHeight: 1.3,
+                                                        marginTop: '1px',
+                                                    }}
+                                                >
+                                                    PNG · paste into Slack, Notion, anywhere
+                                                </div>
+                                            </div>
+                                        </motion.button>
+
+                                        {/* Divider between the clipboard shortcut and the download presets. */}
+                                        <div
+                                            aria-hidden="true"
+                                            style={{
+                                                height: '1px',
+                                                margin: '0.25rem 0.1rem 0.35rem',
+                                                background: 'rgba(244, 244, 245, 0.12)',
+                                            }}
+                                        />
+
                                         {EXPORT_PRESETS.map((preset, idx) => (
                                             <motion.button
                                                 key={preset.id}
                                                 type="button"
+                                                role="menuitem"
                                                 initial={{ opacity: 0, x: 6 }}
                                                 animate={{ opacity: 1, x: 0 }}
-                                                transition={{ delay: idx * 0.04, duration: 0.15 }}
+                                                transition={{ delay: (idx + 1) * 0.04, duration: 0.15 }}
                                                 onClick={() => handleExport(preset)}
                                                 disabled={isExporting}
+                                                aria-label={`Download as ${preset.label}${exportScale > 1 ? ` at ${exportScale}× resolution` : ''}`}
                                                 className="neo-export-item"
                                                 style={{
                                                     display: 'flex',
