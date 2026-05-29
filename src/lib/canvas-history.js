@@ -177,6 +177,8 @@ export async function restoreCanvasFromHistory(canvas, state, { imageUrl, setVie
 
   const nextState = normalizeCanvasState(state)
   await canvas.loadFromJSON(nextState.canvas || nextState)
+  // Keep the "grade background" intent in sync across undo/redo restores.
+  canvas.__pixxelGradeBackground = Boolean(nextState.gradeBackground)
 
   if (nextState.viewport && setViewportState) {
     setViewportState(canvas, nextState.viewport, fallbackCenter)

@@ -151,9 +151,25 @@ export const serializeCanvasState = (canvas) => {
         })
     }
 
+    // Background image: keep only a remote URL. A data:/blob: background (e.g. the
+    // AI-background route's upload-failure fallback) would bloat the payload past
+    // Neon's 1 MB cap and break the save, so substitute the live remote src or drop it.
+    if (json?.backgroundImage?.src && String(json.backgroundImage.src).startsWith('data:')) {
+        const liveBg = canvas.backgroundImage
+        const liveSrc = liveBg?._originalElement?.src || liveBg?.getSrc?.() || ''
+        if (liveSrc && !String(liveSrc).startsWith('data:') && !String(liveSrc).startsWith('blob:')) {
+            json.backgroundImage.src = liveSrc
+        } else {
+            delete json.backgroundImage
+        }
+    }
+
     return {
         canvas: json,
         viewport: getCanvasViewportState(canvas),
+        // Persist the "grade background with the photo" intent so it keeps tracking
+        // after reload (runtime flag set by the AI Background tool).
+        gradeBackground: Boolean(canvas.__pixxelGradeBackground),
     }
 }
 

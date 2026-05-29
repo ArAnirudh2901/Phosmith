@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
-import { Download, ImageIcon, Loader2, Palette, Search, Sparkles, Trash2 } from 'lucide-react'
+import { Download, ImageIcon, Layers, Loader2, Palette, Search, Sparkles, Trash2, Wand2 } from 'lucide-react'
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { useCanvas } from '../../../../../../../context/context'
@@ -13,6 +13,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import Colorful from '@uiw/react-color-colorful'
 import { Input } from '@/components/ui/input'
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
+import {
+    applyCanvasSizedBackground,
+    getForegroundImages,
+    mergeBackgroundWithImages,
+    syncBackgroundGrade,
+} from '../../../../../../lib/canvas-background'
 
 const UNSPLASH_ACCESS_KEY = process.env.NEXT_PUBLIC_UNSPLASH_ACCESS_KEY
 const UNSPLASH_API_URL = "https://api.unsplash.com"
@@ -22,6 +28,12 @@ const INITIAL_RETRY_DELAY = 1500
 const MAX_RETRY_DELAY = 8000
 const UNSPLASH_RESULTS_PER_PAGE = 30
 const API_TIMEOUT = 120000 // 2 minutes
+
+// Quick background-color swatches for the Color tab.
+const BG_SWATCHES = [
+    '#ffffff', '#000000', '#0b0d12', '#f4f4f5', '#1f2937', '#e5e7eb',
+    '#fde68a', '#bfdbfe', '#fbcfe8', '#bbf7d0', '#06b8d4', '#a8794e',
+]
 
 const wait = (duration) => new Promise(resolve => setTimeout(resolve, duration))
 
@@ -183,6 +195,11 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
     const [generationPrompt, setGenerationPrompt] = useState("")
     const [generatedBackgroundUrl, setGeneratedBackgroundUrl] = useState("")
     const [isGeneratingBackground, setIsGeneratingBackground] = useState(false)
+    // After an image background is applied, offer to merge it with the photo(s).
+    const [pendingMerge, setPendingMerge] = useState(false)
+    const [isMerging, setIsMerging] = useState(false)
+    // Whether color grading (user or agent) also applies to the background.
+    const [gradeBackground, setGradeBackground] = useState(false)
 
     // Refs for deduping/abort
     const abortControllerRef = useRef(null)
@@ -357,47 +374,83 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         if (!canvasEditor) return
         canvasEditor.backgroundImage = null
         canvasEditor.backgroundColor = backgroundColor
+        canvasEditor.__pixxelGradeBackground = false
         canvasEditor.requestRenderAll()
+        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__saveCanvasState?.()
+        setPendingMerge(false)
+        setGradeBackground(false)
     }
 
     const applyImageBackground = async (imageUrl) => {
-        if (!canvasEditor || !project) return
+        if (!canvasEditor) return
 
         try {
-            const fabricImage = await FabricImage.fromURL(imageUrl, {
-                // Only data:/blob: URLs are same-origin and need no CORS opt-in.
-                // Every other (remote) URL MUST load with crossOrigin "anonymous"
-                // or it taints the canvas and breaks PNG/JPEG export (toBlob throws
-                // a SecurityError). The previous `startsWith("")` was always true,
-                // so background images were never CORS-loaded.
-                crossOrigin: imageUrl.startsWith("data:") || imageUrl.startsWith("blob:")
-                    ? undefined
-                    : "anonymous"
-            })
-
-            const canvasWidth = project.width
-            const canvasHeight = project.height
-
-            const scaleX = canvasWidth / fabricImage.width
-            const scaleY = canvasHeight / fabricImage.height
-            const scale = Math.max(scaleX, scaleY)
-
-            fabricImage.set({
-                scaleX: scale,
-                scaleY: scale,
-                originX: "center",
-                originY: "center",
-                left: canvasWidth / 2,
-                top: canvasHeight / 2,
-            })
-
-            canvasEditor.backgroundColor = null
-            canvasEditor.backgroundImage = fabricImage
-            canvasEditor.requestRenderAll()
+            // Sizes the background to EXACTLY the canvas (cover-crop, no overflow,
+            // no distortion) while keeping the remote URL so saves stay small.
+            await applyCanvasSizedBackground(canvasEditor, FabricImage, imageUrl, project)
+            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__saveCanvasState?.()
+            // If there's a photo on the canvas, offer to merge the background into it.
+            setPendingMerge(getForegroundImages(canvasEditor).length >= 1)
         } catch (error) {
+            console.warn('[ai-background] apply failed:', error)
             toast.error("Failed to apply background image")
         }
     }
+
+    // Flatten the background + photo layer(s) into a single uploaded image.
+    const handleMergeBackground = async () => {
+        if (!canvasEditor || isMerging) return
+        setIsMerging(true)
+        const toastId = toast.loading('Merging background with photo...')
+        try {
+            const merged = await mergeBackgroundWithImages(canvasEditor, FabricImage, project)
+            if (merged) {
+                setPendingMerge(false)
+                setGradeBackground(false)
+                toast.success('Merged into a single layer', { id: toastId })
+            } else {
+                toast.error('Nothing to merge', { id: toastId })
+            }
+        } catch (error) {
+            console.warn('[ai-background] merge failed:', error)
+            toast.error('Merge failed — keeping the layers separate', { id: toastId })
+        } finally {
+            setIsMerging(false)
+        }
+    }
+
+    // Enable/disable color grading on the background (mirrors the photo's grade).
+    const toggleGradeBackground = () => {
+        if (!canvasEditor) return
+        const next = !gradeBackground
+        setGradeBackground(next)
+        canvasEditor.__pixxelGradeBackground = next
+        syncBackgroundGrade(canvasEditor, next)
+        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__saveCanvasState?.()
+    }
+
+    // Keep the panel in sync with the canvas: initialize the grade toggle, and on
+    // any canvas change (undo, external background removal, merge) drop a stale
+    // merge prompt and re-read the grade flag, forcing a re-render via bgRevision.
+    const [, setBgRevision] = useState(0)
+    useEffect(() => {
+        if (!canvasEditor) return undefined
+        const sync = () => {
+            setGradeBackground(Boolean(canvasEditor.__pixxelGradeBackground))
+            if (!canvasEditor.backgroundImage) setPendingMerge(false)
+            setBgRevision((v) => v + 1)
+        }
+        sync()
+        canvasEditor.on('history:changed', sync)
+        canvasEditor.on('object:removed', sync)
+        return () => {
+            canvasEditor.off('history:changed', sync)
+            canvasEditor.off('object:removed', sync)
+        }
+    }, [canvasEditor])
 
     const fetchUnsplashImages = async (query, page, signal) => {
         const params = new URLSearchParams({
@@ -553,7 +606,12 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         if (!canvasEditor) return
         canvasEditor.backgroundColor = null
         canvasEditor.backgroundImage = null
+        canvasEditor.__pixxelGradeBackground = false
         canvasEditor.requestRenderAll()
+        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__saveCanvasState?.()
+        setPendingMerge(false)
+        setGradeBackground(false)
     }
 
     return (
@@ -580,6 +638,78 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                     </p>
                 )}
             </div>
+
+            {/* Background layer: after applying a background, offer to merge it with
+                the photo, or keep it separate with an optional color-grade link. */}
+            {(pendingMerge || canvasEditor?.backgroundImage) && (
+                <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                    {pendingMerge ? (
+                        <>
+                            <label className="panel-label">Background applied</label>
+                            <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                                Merge it with your photo into one layer, or keep them separate to edit each independently.
+                            </p>
+                            <div className="grid grid-cols-2 gap-1.5">
+                                <button
+                                    type="button"
+                                    onClick={handleMergeBackground}
+                                    disabled={isMerging}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold editor-interactive disabled:opacity-50"
+                                    style={{ background: 'var(--accent-primary)', color: '#03050A', border: 'none' }}
+                                >
+                                    {isMerging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layers className="h-3.5 w-3.5" />}
+                                    Merge
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setPendingMerge(false)}
+                                    disabled={isMerging}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium editor-interactive"
+                                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                                >
+                                    Keep separate
+                                </button>
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <label className="panel-label">Background</label>
+                            <button
+                                type="button"
+                                onClick={toggleGradeBackground}
+                                aria-pressed={gradeBackground}
+                                className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left editor-interactive"
+                                style={{
+                                    background: gradeBackground ? 'rgba(6,184,212,0.1)' : 'transparent',
+                                    border: `1px solid ${gradeBackground ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                    color: gradeBackground ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                }}
+                            >
+                                <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0"
+                                    style={{ background: gradeBackground ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)', border: `1px solid ${gradeBackground ? 'var(--accent-primary)' : 'var(--border-default)'}` }}>
+                                    <Wand2 className="h-4 w-4" />
+                                </div>
+                                <div className="min-w-0">
+                                    <div className="text-xs font-semibold">Color grade background: {gradeBackground ? 'On' : 'Off'}</div>
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Apply your photo&apos;s grade (and the agent&apos;s) to the background too</div>
+                                </div>
+                            </button>
+                            {getForegroundImages(canvasEditor).length >= 1 && (
+                                <button
+                                    type="button"
+                                    onClick={handleMergeBackground}
+                                    disabled={isMerging}
+                                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive disabled:opacity-50"
+                                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                                >
+                                    {isMerging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layers className="h-3.5 w-3.5" />}
+                                    Merge background with photo
+                                </button>
+                            )}
+                        </>
+                    )}
+                </div>
+            )}
 
             <Tabs defaultValue="color" className="min-h-0 w-full flex-1 overflow-hidden">
                 <TabsList className="grid w-full grid-cols-3" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
@@ -630,6 +760,22 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                             className="h-9 w-9 shrink-0 rounded-lg"
                             style={{ backgroundColor, border: '1px solid var(--border-default)' }}
                         />
+                    </div>
+                    <div className="grid grid-cols-6 gap-1.5">
+                        {BG_SWATCHES.map((c) => (
+                            <button
+                                key={c}
+                                type="button"
+                                onClick={() => setBackgroundColor(c)}
+                                aria-label={`Use ${c}`}
+                                className="h-6 rounded-md editor-interactive"
+                                style={{
+                                    backgroundColor: c,
+                                    border: `2px solid ${String(backgroundColor).toLowerCase() === c ? 'var(--accent-primary)' : 'transparent'}`,
+                                    boxShadow: String(backgroundColor).toLowerCase() === c ? '0 0 0 1px rgba(6,184,212,0.3)' : 'none',
+                                }}
+                            />
+                        ))}
                     </div>
                     <button
                         onClick={handleColorBackground}
