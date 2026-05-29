@@ -310,26 +310,54 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
             canvasEditor.calcOffset()
             canvasEditor.renderAll()
 
-            // Tight bounding box around all visible non-transient objects, so the
-            // export contains only the actual image content — no empty project margin.
+            // When a canvas background (image or color) is present, the background
+            // defines the frame, so export the FULL project rect — otherwise the
+            // tight object bbox would crop the background to the photo's bounds.
+            const bgColor = canvasEditor.backgroundColor
+            const hasBackground =
+                Boolean(canvasEditor.backgroundImage) ||
+                (typeof bgColor === 'string' && bgColor !== '' && bgColor !== 'transparent')
+
             const objects = canvasEditor.getObjects().filter(o => o.visible !== false && !isExportTransientObject(o))
-            if (!objects.length) {
+            if (!objects.length && !hasBackground) {
                 throw new Error('No visible objects on the canvas to export')
             }
 
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+            // Tight bounding box around all visible non-transient objects.
+            let objMinX = Infinity, objMinY = Infinity, objMaxX = -Infinity, objMaxY = -Infinity
             for (const obj of objects) {
                 const rect = obj.getBoundingRect(true) // absolute coords, no viewport
-                minX = Math.min(minX, rect.left)
-                minY = Math.min(minY, rect.top)
-                maxX = Math.max(maxX, rect.left + rect.width)
-                maxY = Math.max(maxY, rect.top + rect.height)
+                objMinX = Math.min(objMinX, rect.left)
+                objMinY = Math.min(objMinY, rect.top)
+                objMaxX = Math.max(objMaxX, rect.left + rect.width)
+                objMaxY = Math.max(objMaxY, rect.top + rect.height)
             }
 
-            const cropLeft = Math.floor(minX)
-            const cropTop = Math.floor(minY)
-            const cropW = Math.ceil(maxX) - cropLeft
-            const cropH = Math.ceil(maxY) - cropTop
+            let cropLeft
+            let cropTop
+            let cropW
+            let cropH
+
+            if (hasBackground) {
+                // The background defines the frame, so include the full project rect —
+                // but UNION it with the object bbox so objects extending past the canvas
+                // aren't clipped. Fall back to the live canvas size if dims are missing.
+                const frameW = Math.round(project?.width || savedW || 1)
+                const frameH = Math.round(project?.height || savedH || 1)
+                const hasObjects = objects.length > 0
+                cropLeft = hasObjects ? Math.min(0, Math.floor(objMinX)) : 0
+                cropTop = hasObjects ? Math.min(0, Math.floor(objMinY)) : 0
+                const right = hasObjects ? Math.max(frameW, Math.ceil(objMaxX)) : frameW
+                const bottom = hasObjects ? Math.max(frameH, Math.ceil(objMaxY)) : frameH
+                cropW = right - cropLeft
+                cropH = bottom - cropTop
+            } else {
+                // No background: tight content bbox, no empty project margin.
+                cropLeft = Math.floor(objMinX)
+                cropTop = Math.floor(objMinY)
+                cropW = Math.ceil(objMaxX) - cropLeft
+                cropH = Math.ceil(objMaxY) - cropTop
+            }
 
             if (cropW < 1 || cropH < 1) {
                 throw new Error('Object bounding box is empty')
