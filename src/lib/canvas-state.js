@@ -65,7 +65,15 @@ export const serializeCanvasState = (canvas) => {
 
             if (obj.type === 'image' || obj.type === 'Image') {
                 const cleaned = { ...obj }
+                // Prefer the index-paired live object (indexedObj) so per-image mask/
+                // adjust/filter/src data binds to the SAME image it was serialized from.
+                // Two images sharing a position would otherwise cross-attach via the
+                // positional lookup, which we keep only as a fallback when indexedObj
+                // is missing or isn't an image.
                 const matchingObj =
+                    (indexedObj && (indexedObj.type === 'image' || indexedObj.type === 'Image')
+                        ? indexedObj
+                        : null) ||
                     canvasObjects.find(
                         (o) =>
                             (o.type === 'image' || o.type === 'Image') &&

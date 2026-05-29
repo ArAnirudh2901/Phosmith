@@ -50,15 +50,22 @@ const computeCorrections = (features) => {
         out.contrast = round(clamp((0.55 - contrast) * 35, 0, 14))
     }
 
+    // Highlight recovery and shadow lift both move gamma. Compute each as a
+    // signed delta from neutral (100) and net them into a single gamma value so
+    // one signal does not clobber the other (an image can be both highlight-
+    // clipped and shadow-crushed). Single-signal magnitudes are preserved.
+    let gammaDelta = 0
     // Highlight recovery: if more than ~3% of pixels are clipped white, pull
     // highlights down via a gamma decrease.
     if (typeof highlightClipping === "number" && highlightClipping > 0.03) {
-        out.gamma = round(clamp(100 - highlightClipping * 200, 80, 100))
+        gammaDelta += clamp(100 - highlightClipping * 200, 80, 100) - 100
     }
-
     // Shadow lift: if more than ~6% of pixels are crushed to black, lift gamma.
     if (typeof shadowClipping === "number" && shadowClipping > 0.06) {
-        out.gamma = round(clamp(100 + shadowClipping * 140, 100, 122))
+        gammaDelta += clamp(100 + shadowClipping * 140, 100, 122) - 100
+    }
+    if (gammaDelta !== 0) {
+        out.gamma = round(clamp(100 + gammaDelta, 80, 122))
     }
 
     // White-balance: strong warm cast → cool slightly; strong cool cast → warm slightly.
@@ -141,8 +148,18 @@ const sanitizeDirectAdjustments = (raw) => {
     if (!raw || typeof raw !== "object") return out
     for (const [key, value] of Object.entries(raw)) {
         const range = ADJUSTMENT_RANGES[key]
-        const num = Number(value)
+        let num = Number(value)
         if (!range || !Number.isFinite(num)) continue
+        // Gamma disambiguation: gamma is an absolute scale (neutral 100, 20..220)
+        // but every other channel uses deltas around their neutral. Models often
+        // emit gamma as a delta too (e.g. 15 meaning "+15", -10 meaning "-10").
+        // A small-magnitude absolute value (|v| <= 40) would otherwise clamp to
+        // the 20 floor and cause heavy unintended darkening, so treat it as a
+        // delta from neutral instead. Legitimate absolute values (>= ~50) are
+        // left untouched.
+        if (key === "gamma" && Math.abs(num) <= 40) {
+            num = range.neutral + num
+        }
         const clamped = round(clamp(num, range.min, range.max))
         if (isNonZero(key, clamped)) out[key] = clamped
     }
@@ -193,14 +210,24 @@ export const buildEditPlan = ({
         }
     }
 
-    const styleVec = STYLE_PROFILES[targetStyle] || STYLE_PROFILES.neutral
-    const scaledStyle = applyGain(styleVec, safeGain)
-    const corrections = computeCorrections(features)
-
-    // Layer order: style (gain-scaled) → objective corrections → explicit user
-    // adjustments last so a direct "make it warmer" is never overridden by the
-    // style/correction layers. Corrections always apply even when style gain is 0.
-    const merged = mergeAdjustments(mergeAdjustments(scaledStyle, corrections), directVec)
+    // Direct-only path: the no-change guard above was bypassed ONLY because the
+    // user asked for an explicit adjustment on an image that already matches the
+    // target (gain 0). In that case apply just the requested delta — do not drag
+    // in the objective correction stack (brightness/contrast/gamma), which the
+    // user did not ask for. So "make it warmer" applies only the warmth move.
+    const directOnly = alreadyMatchesTarget && safeGain === 0 && hasDirect
+    const merged = directOnly
+        ? mergeAdjustments({}, directVec)
+        : (() => {
+              const styleVec = STYLE_PROFILES[targetStyle] || STYLE_PROFILES.neutral
+              const scaledStyle = applyGain(styleVec, safeGain)
+              const corrections = computeCorrections(features)
+              // Layer order: style (gain-scaled) → objective corrections →
+              // explicit user adjustments last so a direct "make it warmer" is
+              // never overridden by the style/correction layers. Corrections
+              // always apply even when style gain is 0.
+              return mergeAdjustments(mergeAdjustments(scaledStyle, corrections), directVec)
+          })()
     const entries = enumerateEntries(merged)
 
     return {

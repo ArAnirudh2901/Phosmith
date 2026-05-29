@@ -105,7 +105,9 @@ const EraseControls = ({ project, dominantColor }) => {
         }
         window.addEventListener('pixxel:tool-sub', onSub)
         return () => window.removeEventListener('pixxel:tool-sub', onSub)
-    }, [tool])
+        // setMagic/setMode are stable useState setters and handleAutoEraseRef is a
+        // ref, so the listener binds once instead of re-binding every render.
+    }, [tool.setMagic, tool.setMode])
 
     const handleAutoErase = useCallback(async () => {
         if (!canvasEditor || isAutoErasing) return

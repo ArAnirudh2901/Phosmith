@@ -6,6 +6,8 @@ import {
     PIXEL_MASK_OVERLAY_NAME,
     createMaskCanvas,
     createMaskClipPath,
+    decodeMaskCanvas,
+    encodeMaskCanvas,
     floodFillMask,
     getImageBitmapSize,
     getImageSourceElement,
@@ -248,11 +250,21 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
 
     /* ─── undo / redo ─── */
 
+    // History snapshots are stored in the compact RLE form (encodeMaskCanvas)
+    // instead of raw full-res ImageData, so a 40-deep stack on a large image no
+    // longer pins tens of MB of RGBA buffers on the Fabric object. We keep the
+    // canvas dimensions alongside the encoding so applySnapshot can validate (and
+    // if needed scale) the decode against the live mask canvas. `encoded` is null
+    // for a blank (all-white) mask — that is a valid state we must restore, so we
+    // never collapse it into a missing snapshot.
     const snapshot = useCallback(() => {
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return null
-        const ctx = maskCanvas.getContext('2d')
-        return ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
+        return {
+            width: maskCanvas.width,
+            height: maskCanvas.height,
+            encoded: encodeMaskCanvas(maskCanvas),
+        }
     }, [])
 
     const pushUndo = useCallback(() => {
@@ -268,7 +280,24 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
     const applySnapshot = useCallback((snap) => {
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas || !snap) return
-        maskCanvas.getContext('2d').putImageData(snap, 0, 0)
+        const ctx = maskCanvas.getContext('2d')
+        // A null encoding means the snapshot was a blank (all-white) mask: reset.
+        if (!snap.encoded) {
+            ctx.fillStyle = '#ffffff'
+            ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height)
+            return
+        }
+        const decoded = decodeMaskCanvas(snap.encoded)
+        if (!decoded) return
+        // If the snapshot was authored at a different resolution than the live
+        // mask canvas (image rehydrated to a different-res source), blindly
+        // putImageData would corrupt/misalign the mask — scale the decode to fit.
+        if (decoded.width === maskCanvas.width && decoded.height === maskCanvas.height) {
+            ctx.putImageData(decoded.getContext('2d').getImageData(0, 0, decoded.width, decoded.height), 0, 0)
+        } else {
+            ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
+            ctx.drawImage(decoded, 0, 0, maskCanvas.width, maskCanvas.height)
+        }
     }, [])
 
     const undo = useCallback(() => {
@@ -550,9 +579,15 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         featherRef.current = storedFeather
         setFeather(storedFeather)
         // Restore any undo/redo history stashed on this image from a previous visit,
-        // so switching tools and back doesn't silently discard the stack.
-        undoStackRef.current = Array.isArray(targetImage._pixxelUndoStack) ? targetImage._pixxelUndoStack : []
-        redoStackRef.current = Array.isArray(targetImage._pixxelRedoStack) ? targetImage._pixxelRedoStack : []
+        // so switching tools and back doesn't silently discard the stack — but only
+        // if the stashed snapshots match the current bitmap size (a rehydrate to a
+        // different-resolution source would make them corrupt the mask on apply).
+        const { width: seedW, height: seedH } = getImageBitmapSize(targetImage)
+        const seedStackFits = (stack) =>
+            Array.isArray(stack) &&
+            stack.every((snap) => snap?.width === seedW && snap?.height === seedH)
+        undoStackRef.current = seedStackFits(targetImage._pixxelUndoStack) ? targetImage._pixxelUndoStack : []
+        redoStackRef.current = seedStackFits(targetImage._pixxelRedoStack) ? targetImage._pixxelRedoStack : []
         setUndoDepth(undoStackRef.current.length)
         setRedoDepth(redoStackRef.current.length)
         lockCanvas(canvasEditor, targetImage)
@@ -706,7 +741,10 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             if (spaceRef.current) return
             const local = localFromEvent(opt.e)
             if (!isPointInImage(local, targetImageRef.current)) {
-                lastPointRef.current = null
+                // Pointer briefly left the image bounds mid-stroke. Do NOT clear
+                // lastPointRef — keeping the last in-bounds point means the next
+                // in-bounds move strokes a continuous segment back into the image
+                // instead of dropping a lone disconnected dab.
                 return
             }
             opt.e.preventDefault?.()
@@ -760,8 +798,15 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
                     return
                 }
                 ensureMaskCanvas(next)
-                undoStackRef.current = Array.isArray(next._pixxelUndoStack) ? next._pixxelUndoStack : []
-                redoStackRef.current = Array.isArray(next._pixxelRedoStack) ? next._pixxelRedoStack : []
+                // Discard any stashed history whose snapshots were authored at a
+                // different bitmap size than the freshly-restored image — applying
+                // a mismatched-resolution snapshot would corrupt the mask.
+                const { width: nextW, height: nextH } = getImageBitmapSize(next)
+                const stackFits = (stack) =>
+                    Array.isArray(stack) &&
+                    stack.every((snap) => snap?.width === nextW && snap?.height === nextH)
+                undoStackRef.current = stackFits(next._pixxelUndoStack) ? next._pixxelUndoStack : []
+                redoStackRef.current = stackFits(next._pixxelRedoStack) ? next._pixxelRedoStack : []
                 setUndoDepth(undoStackRef.current.length)
                 setRedoDepth(redoStackRef.current.length)
                 const f = Math.max(0, Math.round(next.pixxelMaskFeather || next._pixxelMaskFeather || 0))
@@ -812,8 +857,15 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             // (or switching Erase↔Mask) keeps the history.
             const stashImg = targetImageRef.current
             if (stashImg && canvasEditor.getObjects?.().includes(stashImg)) {
-                stashImg._pixxelUndoStack = undoStackRef.current
-                stashImg._pixxelRedoStack = redoStackRef.current
+                // Cap what we retain and avoid pinning empty arrays on the image:
+                // when there's nothing to keep, drop the refs entirely so the
+                // (RLE-encoded) snapshots can be garbage-collected.
+                const undoTail = undoStackRef.current.slice(-MAX_HISTORY)
+                const redoTail = redoStackRef.current.slice(-MAX_HISTORY)
+                if (undoTail.length) stashImg._pixxelUndoStack = undoTail
+                else delete stashImg._pixxelUndoStack
+                if (redoTail.length) stashImg._pixxelRedoStack = redoTail
+                else delete stashImg._pixxelRedoStack
             }
             canvasEditor.off('mouse:down', onMouseDown)
             canvasEditor.off('mouse:move', onMouseMove)

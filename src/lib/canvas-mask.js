@@ -53,7 +53,10 @@ export const createMaskCanvas = (width, height, fill = '#ffffff') => {
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
-  const ctx = canvas.getContext('2d')
+  // Mask canvases are read back via getImageData on virtually every use
+  // (encode, overlay paint, flood fill, empty check). Context attributes are
+  // only honored on the FIRST getContext call, so request willReadFrequently here.
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
   ctx.fillStyle = fill
   ctx.fillRect(0, 0, width, height)
   return canvas
@@ -73,7 +76,7 @@ export const maskCanvasFromClipPath = (clipPath, width, height) => {
     const source = document.createElement('canvas')
     source.width = width
     source.height = height
-    const sourceCtx = source.getContext('2d')
+    const sourceCtx = source.getContext('2d', { willReadFrequently: true })
     sourceCtx.drawImage(element, 0, 0, width, height)
 
     const sourceData = sourceCtx.getImageData(0, 0, width, height)
@@ -127,14 +130,54 @@ export const buildMaskClipCanvas = (maskCanvas, { feather = 0 } = {}) => {
   const featherPx = Math.max(0, Math.round(feather))
   if (featherPx > 0 && typeof clipCtx.filter !== 'undefined') {
     clipCtx.putImageData(clipData, 0, 0)
+    const w = clipCanvas.width
+    const h = clipCanvas.height
     const crisp = document.createElement('canvas')
-    crisp.width = clipCanvas.width
-    crisp.height = clipCanvas.height
+    crisp.width = w
+    crisp.height = h
     crisp.getContext('2d').drawImage(clipCanvas, 0, 0)
-    clipCtx.clearRect(0, 0, clipCanvas.width, clipCanvas.height)
-    clipCtx.filter = `blur(${featherPx}px)`
-    clipCtx.drawImage(crisp, 0, 0)
-    clipCtx.filter = 'none'
+
+    // Pad by ~3x the feather radius (a CSS blur(N) kernel reaches ~3*N px) and
+    // replicate the crisp alpha's edge pixels (clamp-to-edge) into the padding.
+    // Without this, the blur near the image border samples the transparent
+    // off-image area and fades fully-opaque borders (alpha 255) toward 0 — a soft
+    // transparent rim around the whole image. Holding the border value constant
+    // through the padding keeps opaque borders opaque.
+    const pad = featherPx * 3
+    const padded = document.createElement('canvas')
+    padded.width = w + pad * 2
+    padded.height = h + pad * 2
+    const paddedCtx = padded.getContext('2d')
+    // 1px edge strips of the crisp alpha, stretched to fill each padding band.
+    // Corners.
+    paddedCtx.drawImage(crisp, 0, 0, 1, 1, 0, 0, pad, pad)
+    paddedCtx.drawImage(crisp, w - 1, 0, 1, 1, pad + w, 0, pad, pad)
+    paddedCtx.drawImage(crisp, 0, h - 1, 1, 1, 0, pad + h, pad, pad)
+    paddedCtx.drawImage(crisp, w - 1, h - 1, 1, 1, pad + w, pad + h, pad, pad)
+    // Edges.
+    paddedCtx.drawImage(crisp, 0, 0, w, 1, pad, 0, w, pad) // top
+    paddedCtx.drawImage(crisp, 0, h - 1, w, 1, pad, pad + h, w, pad) // bottom
+    paddedCtx.drawImage(crisp, 0, 0, 1, h, 0, pad, pad, h) // left
+    paddedCtx.drawImage(crisp, w - 1, 0, 1, h, pad + w, pad, pad, h) // right
+    // Center.
+    paddedCtx.drawImage(crisp, pad, pad)
+
+    // Pass 1: blur the ENTIRE padded canvas (replicated edges included) onto a
+    // same-size intermediate. A full-canvas draw makes the whole padded image the
+    // filter input — drawing with a source sub-rect would crop the padding away
+    // BEFORE the filter runs (per the canvas drawing model), so the blur would
+    // still fade against transparent at the real border and the rim would persist.
+    const blurred = document.createElement('canvas')
+    blurred.width = padded.width
+    blurred.height = padded.height
+    const blurredCtx = blurred.getContext('2d')
+    blurredCtx.filter = `blur(${featherPx}px)`
+    blurredCtx.drawImage(padded, 0, 0)
+    blurredCtx.filter = 'none'
+
+    // Pass 2: copy the center (real-image) region back with NO filter active.
+    clipCtx.clearRect(0, 0, w, h)
+    clipCtx.drawImage(blurred, pad, pad, w, h, 0, 0, w, h)
     return clipCanvas
   }
 
@@ -210,8 +253,16 @@ export const decodeMaskCanvas = (encoded) => {
   if (!encoded || encoded.type !== MASK_RLE_TYPE || !encoded.data || typeof atob !== 'function') return null
   if (typeof document === 'undefined') return null
 
+  // Persisted state is untrusted input: REJECT (not clamp) any mask whose
+  // dimensions are implausibly large, so a malformed/hostile width*height can't
+  // allocate gigabytes. Clamping would also silently misalign the mask — the RLE
+  // runs were encoded for the original width and would decode into a mis-sized
+  // canvas — so dropping the mask is safer than restoring a corrupt one.
+  const MAX_DIMENSION = 8192
+  const MAX_PIXELS = 8192 * 8192
   const width = Math.max(1, Math.round(encoded.width || 1))
   const height = Math.max(1, Math.round(encoded.height || 1))
+  if (width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS) return null
   const bytes = base64ToBytes(encoded.data)
   const canvas = createMaskCanvas(width, height)
   const ctx = canvas.getContext('2d')
@@ -225,7 +276,8 @@ export const decodeMaskCanvas = (encoded) => {
     const value = bytes[state.offset]
     state.offset += 1
     const runLength = readVarint(bytes, state)
-    const end = Math.min(totalPixels, pixel + runLength)
+    // Guard against run lengths that overrun the pixel budget (corrupt/hostile data).
+    const end = Math.min(totalPixels, pixel + Math.min(runLength, totalPixels))
 
     for (; pixel < end; pixel += 1) {
       const i = pixel * 4
@@ -442,11 +494,17 @@ export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 
       const p = rowBase + xi
       visited[p] = 1
       const i = p * 4
-      mdata[i] = fill
-      mdata[i + 1] = fill
-      mdata[i + 2] = fill
-      mdata[i + 3] = 255
-      affected += 1
+      // Only write + count when the mask value actually changes. An idempotent
+      // flood (re-erasing already-hidden pixels) then returns 0 so the caller can
+      // short-circuit and skip pushing undo / marking dirty. Visited marking and
+      // neighbour seeding still happen so the scanline traversal stays correct.
+      if (mdata[i] !== fill) {
+        mdata[i] = fill
+        mdata[i + 1] = fill
+        mdata[i + 2] = fill
+        mdata[i + 3] = 255
+        affected += 1
+      }
 
       if (y > 0) {
         const up = p - w
