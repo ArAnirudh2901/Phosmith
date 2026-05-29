@@ -7,7 +7,7 @@ import { ADJUSTMENT_RANGES, ADJUSTMENT_REASONS, STYLE_PROFILES } from "./style-p
 
 // Bump this when the planner output shape or numeric weights change so cached
 // plans from older versions are invalidated cleanly.
-export const PLANNER_VERSION = 2
+export const PLANNER_VERSION = 3
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 

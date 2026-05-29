@@ -57,14 +57,19 @@ const buildStandardizedVisionUrl = (sourceUrl) => {
 }
 
 // Map of keywords → preferred target style for the keyword fallback.
+// Broad patterns so vague prompts like "old camera" or "moody look" still
+// resolve to a concrete style instead of falling through to "neutral".
 const KEYWORD_STYLE_HINTS = [
-    [/cinemat|movie|filmic/i, "cinematic"],
-    [/editorial|magazine/i, "editorial"],
-    [/vibrant|punchy|bold|pop/i, "vibrant"],
-    [/vintag|retro|film|analog/i, "vintage"],
-    [/studio|clean|product/i, "studio"],
-    [/portrait|skin|face|warm/i, "warm-portrait"],
-    [/black\s*and\s*white|monochrome|b&?w/i, "bw-classic"],
+    [/cinemat|movie|filmic|blockbust|hollywo/i, "cinematic"],
+    [/editorial|magazine|lookbook/i, "editorial"],
+    [/vibrant|punchy|bold|pop|vivid|colorful|colourful|neon/i, "vibrant"],
+    [/vintag|retro|film|analog|old\s*camera|old\s*school|nostalgi|faded|aged|grain|worn|sepia|70s|80s|90s|polaroid|disposable|kodak|fuji|vsco|hipster/i, "vintage"],
+    [/studio|clean|product|minimalist|commercial/i, "studio"],
+    [/portrait|skin|face|warm|golden\s*hour|sunset\s*glow|cozy|cosy/i, "warm-portrait"],
+    [/black\s*and\s*white|monochrome|b&?w|greyscale|grayscale|noir/i, "bw-classic"],
+    [/moo?dy|dark|dramatic|gritty|desaturat/i, "cinematic"],
+    [/dream|ethereal|soft\s*glow|pastel|hazy|misty/i, "vintage"],
+    [/instagram|influenc|aesthetic|vibe|premium|polished|professional/i, "editorial"],
 ]
 
 const KEYWORD_AI = [
@@ -251,43 +256,45 @@ Return STRICT JSON only, no prose, matching this schema exactly:
   "notes": "<one or two short sentences explaining what you saw and what you'd do>"
 }
 
-## Analysis Framework — follow these steps IN ORDER:
+## Two types of edits — handle them DIFFERENTLY:
 
-1. **Exposure check**: Is the image well-exposed? Look at overall brightness.
-   - Mean luminance 0.36–0.64 = good exposure, NO brightness adjustment needed.
-   - Only flag if clearly under/over-exposed.
+### Type A: CORRECTIONS ("make it brighter", "fix the exposure", "increase contrast")
+These are technical fixes. Only set gain>0 if the image actually needs the correction.
+If the image is already well-exposed and the user asks to brighten it, gain=0 is correct.
 
-2. **Contrast check**: Does the image have good tonal separation between shadows and highlights?
-   - If shadows are deep and highlights are clean, contrast is fine. Do NOT boost.
-   - Only boost contrast for flat, washed-out images.
+### Type B: CREATIVE STYLE CHANGES ("make it vintage", "cinematic look", "editorial", "black and white")
+These are INTENTIONAL RESTYLING. The user wants the image to look DIFFERENT.
+- A well-exposed photo asked to look "vintage" should get gain 0.5–0.8.
+- A bright colorful photo asked to be "cinematic" should get gain 0.6–0.9.
+- ONLY set alreadyMatchesTarget=true if the image ALREADY exhibits the target style
+  characteristics (e.g., a photo that already has lifted blacks, faded colors, and warm
+  tones when asked for "vintage").
+- Do NOT refuse creative restyling just because the image is technically good.
 
-3. **Color check**: Are the colors well-balanced and appropriate for the scene?
-   - If colors are already saturated and harmonious, do NOT increase saturation.
-   - If the image has intentional desaturation (e.g. moody, cinematic), respect it.
-
-4. **Style match**: Does the image already exhibit the characteristics of the target style?
-   - Cinematic = crushed blacks, slight desaturation, warm tones, subtle grain
-   - Editorial = crisp detail, slight contrast boost, vibrant but not oversaturated
-   - Vibrant = punchy colors, high saturation, bright
-   - If the image ALREADY has these characteristics, it ALREADY matches.
+## Style Characteristics:
+- Cinematic = crushed blacks, slight desaturation, warm/teal tones, subtle grain
+- Vintage = lifted shadows, faded contrast, warm color cast, reduced saturation, subtle grain
+- Editorial = crisp detail, punchy contrast, vibrant but controlled
+- Vibrant = punchy colors, high saturation, bright
+- Black & white = full desaturation, strong tonal contrast
 
 ## Critical Rules:
 
-- **DO NOT DOUBLE-PROCESS**: If the image already looks professionally edited,
-  set alreadyMatchesTarget=true and gain=0. A cinematic image asked to be "cinematic"
-  should get gain=0. An already-bright image asked to be "brighter" should get gain=0.
-- **If 3 or more of the 4 checks above pass**, the image is already good —
-  set alreadyMatchesTarget=true and gain=0.
-- **Repeatability**: If the same instruction is applied to an already-edited image,
-  ALWAYS return gain=0. Do not re-apply adjustments on top of existing ones.
-- **Be conservative**: Subtlety beats over-processing. When in doubt, use a LOWER gain.
+- **DO NOT DOUBLE-PROCESS**: Only set alreadyMatchesTarget=true when the image
+  ALREADY has the specific visual characteristics of the target style.
+  A "normal" well-exposed photo is NOT "already cinematic" or "already vintage".
+- **HONOR THE USER'S INTENT**: If the user asks for a style change, APPLY IT.
+  Good exposure/contrast does not mean the style already matches.
+- **Be proportional**: Use moderate gain (0.4–0.7) for style changes on well-edited
+  images. Use higher gain (0.7–1.0) for dramatic shifts. Use lower gain (0.1–0.3)
+  only when the image is genuinely close to the target style.
 
 ## Gain guidance:
-  - 0.0 = no change needed (image already looks right for the target style)
-  - 0.1–0.3 = subtle tweak (image is close but could use minor polish)
-  - 0.4–0.6 = moderate adjustment (image needs visible correction)
-  - 0.7–0.9 = strong change (image significantly differs from target)
-  - 1.0 = maximum (only for dramatic style shifts like color→B&W)
+  - 0.0 = image already exhibits the target style (same currentStyle as targetStyle)
+  - 0.1–0.3 = subtle tweak (image is close to the target but needs minor refinement)
+  - 0.4–0.6 = moderate style shift (typical for most creative style requests)
+  - 0.7–0.9 = strong change (image is very different from the target style)
+  - 1.0 = maximum (dramatic shifts like color→B&W)
 
 - Use the imagekitAi booleans ONLY when the user EXPLICITLY asks for that AI transform
   (e.g. "remove background" → bgRemove=true). Never set these speculatively.
@@ -394,38 +401,48 @@ const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null, prompt = ""
     const fit = features ? getStyleFit(features, targetStyle) : null
     const currentStyle = safeStyle(raw?.currentStyle) || fit?.currentStyle || "neutral"
     const forceRestyle = wantsForcedRestyle(prompt)
+    // Determine if this is a creative style change (vintage, cinematic, etc.)
+    // vs a generic correction. Creative changes should not be suppressed.
+    const isCreativeRestyle = targetStyle !== "neutral" && targetStyle !== currentStyle
     let alreadyMatchesTarget =
         !forceRestyle && (!!raw?.alreadyMatchesTarget || currentStyle === targetStyle)
     let gainRaw = Number(raw?.gain)
     let gain = Number.isFinite(gainRaw) ? Math.max(0, Math.min(1, gainRaw)) : 0.6
 
-    if (fit?.alreadyMatches && !forceRestyle) {
+    // Only use deterministic fit to block when the current style EXACTLY matches
+    // the target AND this is not a forced restyle. Don't rely on loose numeric
+    // thresholds — they were falsely marking normal photos as "already vintage", etc.
+    if (fit?.alreadyMatches && fit.currentStyle === targetStyle && !forceRestyle) {
         alreadyMatchesTarget = true
         gain = 0
     }
 
-    // If gain is near zero, force alreadyMatchesTarget to true for consistency
-    if (gain < 0.05) {
-        alreadyMatchesTarget = true
-        gain = 0
-    }
-
-    // If the deterministic calibration says the image is close to the requested
-    // style, cap the gain. This catches cases where the LLM misjudges a
-    // well-edited image without blocking explicit "make it stronger" prompts.
-    if (fit && !alreadyMatchesTarget && !forceRestyle) {
-        if (fit.score >= 0.8) {
-            gain = Math.min(gain, 0.18)
-        } else if (fit.score >= 0.65) {
-            gain = Math.min(gain, 0.32)
+    // ── CREATIVE RESTYLE OVERRIDE ──
+    // When the user asks for a style that differs from the current style,
+    // ALWAYS apply the change regardless of what the model says. A normal
+    // photo asked to look "vintage" or "cinematic" must get edited — the
+    // model's "alreadyMatchesTarget" verdict is unreliable for these.
+    if (isCreativeRestyle && !forceRestyle) {
+        // Don't let the model or deterministic fit block a creative restyle
+        if (currentStyle !== targetStyle) {
+            alreadyMatchesTarget = false
+        }
+        // Enforce a visible gain floor so the user sees a real style shift
+        if (gain < 0.35) {
+            gain = 0.45
         }
     }
 
-    // If the client-provided features show the image is already well-exposed
-    // and has decent contrast, bias the gain down to prevent over-processing.
-    // This catches broad "make it premium" prompts on images that already read
-    // as finished even if they don't fit a named preset exactly.
-    if (features && !alreadyMatchesTarget) {
+    // For non-creative prompts: if gain is near zero, mark as already matching
+    if (!isCreativeRestyle && gain < 0.05) {
+        alreadyMatchesTarget = true
+        gain = 0
+    }
+
+    // Only apply the "well-exposed" gain bias for neutral/correction prompts.
+    // Creative style changes (vintage, cinematic, etc.) should not be penalized
+    // for having good exposure — that's exactly why the user wants a restyle.
+    if (features && !alreadyMatchesTarget && !isCreativeRestyle) {
         const lum = features?.luminance?.mean
         const con = typeof features?.contrast === "number" ? features.contrast : null
         const isWellExposed = lum != null && lum >= 0.36 && lum <= 0.64
