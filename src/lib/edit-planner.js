@@ -7,7 +7,19 @@ import { ADJUSTMENT_RANGES, ADJUSTMENT_REASONS, STYLE_PROFILES } from "./style-p
 
 // Bump this when the planner output shape or numeric weights change so cached
 // plans from older versions are invalidated cleanly.
-export const PLANNER_VERSION = 3
+//
+// v4: expanded STYLE_PROFILES with film-stock and camera presets
+//     (kodachrome, kodak-portra, fuji-pro400h, cinestill-800t, polaroid,
+//     super8, bw-tri-x, red-cinema, arri-alexa, vhs-tape, golden-hour,
+//     faded-pastel). Old cached plans used the 8-style vocabulary and would
+//     misroute requests like "shot on RED camera" → "cinematic".
+// v5: +17 creative grades/moods (moody-dark, bright-airy, matte-film,
+//     hdr-clarity, teal-orange, neo-noir, sepia, cyberpunk, dreamy-glow,
+//     autumn, cold-winter, tropical, cross-process, bleach-bypass,
+//     technicolor, lomography, earthy-muted) AND a directAdjustments channel
+//     so explicit tonal requests ("30% brighter", "warmer", "add grain") apply
+//     even with no named style. Old caches lacked both.
+export const PLANNER_VERSION = 5
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
@@ -124,6 +136,19 @@ const enumerateEntries = (adjustments) =>
  * @param {object} [params.imagekitAi]      { retouch, bgRemove, upscale, sharpen, contrast }
  * @returns {object} Plan
  */
+const sanitizeDirectAdjustments = (raw) => {
+    const out = {}
+    if (!raw || typeof raw !== "object") return out
+    for (const [key, value] of Object.entries(raw)) {
+        const range = ADJUSTMENT_RANGES[key]
+        const num = Number(value)
+        if (!range || !Number.isFinite(num)) continue
+        const clamped = round(clamp(num, range.min, range.max))
+        if (isNonZero(key, clamped)) out[key] = clamped
+    }
+    return out
+}
+
 export const buildEditPlan = ({
     features = null,
     targetStyle = "neutral",
@@ -132,16 +157,23 @@ export const buildEditPlan = ({
     alreadyMatchesTarget = false,
     notes = "",
     imagekitAi = {},
+    directAdjustments = null,
 } = {}) => {
     const safeGain = alreadyMatchesTarget
         ? 0
         : clamp(Number.isFinite(gain) ? gain : 0.6, 0, 1)
 
-    // No-change guard: if the image already matches the target AND gain is 0,
-    // return a plan with zero adjustments. This guarantees idempotency —
-    // applying the same prompt to an already-edited image produces no changes.
-    // We also skip corrections because the image is already considered well-edited.
-    if (alreadyMatchesTarget && safeGain === 0) {
+    // Explicit, user-requested tonal moves ("warmer", "30% brighter", "add
+    // grain"). These are authoritative and apply regardless of style gain, so a
+    // bare "make it warmer" works even with no named style (targetStyle=neutral).
+    const directVec = sanitizeDirectAdjustments(directAdjustments)
+    const hasDirect = Object.keys(directVec).length > 0
+
+    // No-change guard: if the image already matches the target AND gain is 0 AND
+    // the user didn't ask for any explicit adjustment, return a zero-change plan.
+    // This guarantees idempotency for pure restyle prompts on already-styled
+    // images — but never suppresses an explicit direct adjustment.
+    if (alreadyMatchesTarget && safeGain === 0 && !hasDirect) {
         return {
             plannerVersion: PLANNER_VERSION,
             currentStyle,
@@ -165,8 +197,10 @@ export const buildEditPlan = ({
     const scaledStyle = applyGain(styleVec, safeGain)
     const corrections = computeCorrections(features)
 
-    // Corrections always apply (they fix objective problems), even when style gain is 0.
-    const merged = mergeAdjustments(scaledStyle, corrections)
+    // Layer order: style (gain-scaled) → objective corrections → explicit user
+    // adjustments last so a direct "make it warmer" is never overridden by the
+    // style/correction layers. Corrections always apply even when style gain is 0.
+    const merged = mergeAdjustments(mergeAdjustments(scaledStyle, corrections), directVec)
     const entries = enumerateEntries(merged)
 
     return {

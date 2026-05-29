@@ -19,7 +19,11 @@ import { getNeonAuthContext } from "@/lib/neon/auth"
 import { runNeonMutation, runNeonQuery } from "@/lib/neon/functions"
 import { buildEditPlan, PLANNER_VERSION } from "@/lib/edit-planner"
 import { getStyleFit } from "@/lib/image-features"
-import { STYLE_KEYS } from "@/lib/style-profiles"
+import {
+    KEYWORD_STYLE_ROUTES,
+    STYLE_DESCRIPTORS,
+    STYLE_KEYS,
+} from "@/lib/style-profiles"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
 
 // Model is configurable via env so we can pin to a specific snapshot (e.g.
@@ -56,21 +60,12 @@ const buildStandardizedVisionUrl = (sourceUrl) => {
     }
 }
 
-// Map of keywords → preferred target style for the keyword fallback.
-// Broad patterns so vague prompts like "old camera" or "moody look" still
-// resolve to a concrete style instead of falling through to "neutral".
-const KEYWORD_STYLE_HINTS = [
-    [/cinemat|movie|filmic|blockbust|hollywo/i, "cinematic"],
-    [/editorial|magazine|lookbook/i, "editorial"],
-    [/vibrant|punchy|bold|pop|vivid|colorful|colourful|neon/i, "vibrant"],
-    [/vintag|retro|film|analog|old\s*camera|old\s*school|nostalgi|faded|aged|grain|worn|sepia|70s|80s|90s|polaroid|disposable|kodak|fuji|vsco|hipster/i, "vintage"],
-    [/studio|clean|product|minimalist|commercial/i, "studio"],
-    [/portrait|skin|face|warm|golden\s*hour|sunset\s*glow|cozy|cosy/i, "warm-portrait"],
-    [/black\s*and\s*white|monochrome|b&?w|greyscale|grayscale|noir/i, "bw-classic"],
-    [/moo?dy|dark|dramatic|gritty|desaturat/i, "cinematic"],
-    [/dream|ethereal|soft\s*glow|pastel|hazy|misty/i, "vintage"],
-    [/instagram|influenc|aesthetic|vibe|premium|polished|professional/i, "editorial"],
-]
+// Keyword → target-style routing table. Sourced from style-profiles.js so that
+// adding a new film/camera preset updates BOTH the system prompt and this
+// deterministic fallback from one place. Order is significant — the FIRST
+// regex that matches wins, and specific film/camera names come before generic
+// fallbacks (e.g. "Portra" must beat the catch-all "vintage" entry).
+const KEYWORD_STYLE_HINTS = KEYWORD_STYLE_ROUTES
 
 const KEYWORD_AI = [
     [/remove\s+background|cut\s*out|no\s+background/i, "bgRemove"],
@@ -92,6 +87,52 @@ const inferKeywordIntent = (prompt) => {
         if (pattern.test(prompt)) intent.imagekitAi[key] = true
     }
     return intent
+}
+
+// Deterministic direct-adjustment parser. Extracts explicit tonal/technical
+// moves from the prompt ("warmer", "30% brighter", "add grain", "less saturated",
+// "sharper", "rotate the hue") into concrete adjustment values, so the agent
+// handles arbitrary corrections even with NO named style and even when the
+// vision model is unavailable. Values are in the same units as STYLE_PROFILES.
+const parseDirectAdjustments = (prompt) => {
+    const p = String(prompt || "").toLowerCase()
+    if (!p) return {}
+    const adj = {}
+
+    // Global intensity multiplier from modifier words.
+    let mult = 1
+    if (/\b(slight\w*|subtle|barely|gently|softly|a\s*(little|bit|touch|hair)|just\s*a\s*bit)\b/.test(p)) mult = 0.55
+    if (/\b(very|really|much|way|a\s*lot|lots|quite|noticeabl\w*)\b/.test(p)) mult = 1.6
+    if (/\b(super|extremely|insanely|drastically|heavil\w*|heavy|extreme|max(?:imum)?|crank\w*|blast|tons?\s*of)\b/.test(p)) mult = 2.3
+
+    // Optional explicit magnitude ("by 30%", "30%", "+20"). Applied to whichever
+    // directives are present (a reasonable approximation for single-knob asks).
+    const numMatch = p.match(/(?:by\s*)?([+-]?\d{1,3})\s*%?\b/)
+    const explicit = numMatch ? Math.min(100, Math.abs(parseInt(numMatch[1], 10))) : null
+    const amt = (base) => Math.round(explicit != null ? explicit : base * mult)
+
+    const has = (re) => re.test(p)
+
+    if (has(/\b(bright(?:er|en)?|lighter|too\s*dark|more\s*exposure|expose\s*up)\b/)) adj.brightness = amt(18)
+    else if (has(/\b(darker|darken|too\s*bright|less\s*exposure|underexpos\w*)\b/)) adj.brightness = -amt(18)
+
+    if (has(/\b(more\s*contrast|contrast(?:y|ier)?|punch(?:y|ier)?|add\s*contrast)\b/)) adj.contrast = amt(16)
+    else if (has(/\b(less\s*contrast|flat(?:ter)?|low\s*contrast|reduce\s*contrast)\b/)) adj.contrast = -amt(16)
+
+    if (has(/\b(more\s*satur\w*|more\s*colou?rs?|vivid\w*|pop\s*(?:the\s*)?colou?rs?|colou?r\s*pop)\b/)) adj.saturation = amt(18)
+    else if (has(/\b(desatur\w*|less\s*satur\w*|less\s*colou?rs?|muted?|drain\s*colou?r|wash\s*out\s*colou?r)\b/)) adj.saturation = -amt(18)
+
+    if (has(/\bvibran\w*\b/)) adj.vibrance = amt(16)
+
+    if (has(/\bwarm(?:er|th)?\b|warm\s*it|golden\s*warm|cozy\s*warm/)) adj.temperature = amt(18)
+    else if (has(/\bcool(?:er)?\b|cold(?:er)?\b|bluer|more\s*blue|icy\s*tone/)) adj.temperature = -amt(18)
+
+    if (has(/\bsharp(?:er|en)?\b|crisp(?:er)?\b|clearer|more\s*detail\b/)) adj.sharpness = amt(18)
+    if (has(/\bblur(?:ry|red)?\b|soften|softer\b|out\s*of\s*focus|bokeh|gaussian\s*blur/)) adj.blur = amt(14)
+    if (has(/\bgrain(?:y)?\b|film\s*grain|noise|noisy\b/)) adj.noise = amt(14)
+    if (has(/\b(rotate|shift|swap)\s*(?:the\s*)?(hue|colou?rs?|color\s*wheel)|hue\s*(shift|rotation|rotate)/)) adj.hue = amt(30)
+
+    return adj
 }
 
 const FORCE_RESTYLE_PATTERN =
@@ -244,6 +285,15 @@ const sanitizeTargeting = (raw, layerCount) => {
     }
 }
 
+// Build the per-style reference table from STYLE_DESCRIPTORS so adding a new
+// film/camera preset in style-profiles.js automatically updates the prompt.
+const STYLE_REFERENCE_TABLE = STYLE_KEYS
+    .map((key) => {
+        const d = STYLE_DESCRIPTORS[key] || {}
+        return `- ${key}\n    look: ${d.characteristics || "—"}\n    pick when: ${d.whenToPick || "—"}`
+    })
+    .join("\n")
+
 const GEMINI_SYSTEM_PROMPT = `You are a senior photo retoucher analyzing an image and a user instruction.
 Return STRICT JSON only, no prose, matching this schema exactly:
 
@@ -253,52 +303,107 @@ Return STRICT JSON only, no prose, matching this schema exactly:
   "alreadyMatchesTarget": true|false,
   "gain": 0.0,
   "imagekitAi": { "retouch": false, "bgRemove": false, "upscale": false, "sharpen": false, "contrast": false },
+  "adjustments": { },
   "notes": "<one or two short sentences explaining what you saw and what you'd do>"
 }
 
-## Two types of edits — handle them DIFFERENTLY:
+## Style reference — pick the MOST SPECIFIC matching key
 
-### Type A: CORRECTIONS ("make it brighter", "fix the exposure", "increase contrast")
-These are technical fixes. Only set gain>0 if the image actually needs the correction.
-If the image is already well-exposed and the user asks to brighten it, gain=0 is correct.
+${STYLE_REFERENCE_TABLE}
 
-### Type B: CREATIVE STYLE CHANGES ("make it vintage", "cinematic look", "editorial", "black and white")
-These are INTENTIONAL RESTYLING. The user wants the image to look DIFFERENT.
-- A well-exposed photo asked to look "vintage" should get gain 0.5–0.8.
-- A bright colorful photo asked to be "cinematic" should get gain 0.6–0.9.
-- ONLY set alreadyMatchesTarget=true if the image ALREADY exhibits the target style
-  characteristics (e.g., a photo that already has lifted blacks, faded colors, and warm
-  tones when asked for "vintage").
-- Do NOT refuse creative restyling just because the image is technically good.
+## Vague-prompt routing rules (CRITICAL — read carefully)
 
-## Style Characteristics:
-- Cinematic = crushed blacks, slight desaturation, warm/teal tones, subtle grain
-- Vintage = lifted shadows, faded contrast, warm color cast, reduced saturation, subtle grain
-- Editorial = crisp detail, punchy contrast, vibrant but controlled
-- Vibrant = punchy colors, high saturation, bright
-- Black & white = full desaturation, strong tonal contrast
+The user will often describe a look in vague language. Translate it to the most
+specific enum key that fits. Generic keys ("vintage", "cinematic") are LAST
+RESORTS — only use them when no specific film stock, camera, or mood key fits.
 
-## Critical Rules:
+Concrete routing:
+- "Shot on RED" / "RED camera" / "RED Dragon/Helium/Monstro/Komodo" / "IPP2" → red-cinema
+  (NOT cinematic. RED is a specific digital cinema look.)
+- "ARRI" / "Alexa" / "Log-C" → arri-alexa (NOT cinematic.)
+- "Portra" / "Kodak Portra" / "wedding film" → kodak-portra (NOT vintage or warm-portrait.)
+- "Fuji Pro 400H" / "Pro 400H" / "soft green pastel film" → fuji-pro400h
+- "CineStill" / "800T" / "halation" / "neon film" / "tungsten film" → cinestill-800t
+- "Kodachrome" / "National Geographic film" / "rich slide film" → kodachrome
+- "Polaroid" / "SX-70" / "Instax" / "instant film" → polaroid (NOT vintage.)
+- "Tri-X" / "pushed B&W" / "gritty grainy black and white" / "street B&W" → bw-tri-x
+- "Super 8" / "16mm" / "8mm film" / "old home movie" → super8
+- "VHS" / "camcorder" / "analog video" / "tracking lines" → vhs-tape
+- "Golden hour" / "magic hour" / "sunset glow" / "sun-soaked" → golden-hour
+- "Pastel" / "washed out" / "milky" / "IG aesthetic" → faded-pastel
 
-- **DO NOT DOUBLE-PROCESS**: Only set alreadyMatchesTarget=true when the image
-  ALREADY has the specific visual characteristics of the target style.
-  A "normal" well-exposed photo is NOT "already cinematic" or "already vintage".
-- **HONOR THE USER'S INTENT**: If the user asks for a style change, APPLY IT.
-  Good exposure/contrast does not mean the style already matches.
-- **Be proportional**: Use moderate gain (0.4–0.7) for style changes on well-edited
-  images. Use higher gain (0.7–1.0) for dramatic shifts. Use lower gain (0.1–0.3)
+Vague era-only prompts (no specific film named):
+- "Make it look like a vintage photo from an old camera" → super8 (for snapshot
+  / candid subjects) OR kodachrome (for landscapes / saturated scenes). Use the
+  image to decide which fits better.
+- "Old camera" / "old photo" / "old-fashioned" alone → super8 by default.
+- "70s photo" → kodachrome (slides) or super8 (home movies) — pick based on image.
+- Generic "vintage" with NOTHING specific → vintage (the catch-all).
+
+## Two types of edits — handle them DIFFERENTLY
+
+### Type A: CORRECTIONS ("brighter", "fix exposure", "more contrast")
+Technical fixes. Use targetStyle="neutral". Only set gain>0 if the image
+actually needs the correction. If well-exposed and user says "brighten",
+gain=0 is correct.
+
+### Type B: CREATIVE STYLE CHANGE
+The user wants the image to LOOK DIFFERENT.
+- A well-exposed photo asked to look "vintage" / "cinematic" / "shot on RED" /
+  "like a Polaroid" etc. should get gain 0.5–0.8.
+- ONLY set alreadyMatchesTarget=true if the image ALREADY has the SPECIFIC
+  visual characteristics of the target style — e.g. an image with lifted
+  blacks, faded colors and warm tones when asked for "vintage". A normal
+  well-exposed photo is NOT "already cinematic" or "already RED".
+- Do NOT refuse a creative restyle just because the image is technically good.
+
+## Critical Rules
+
+- DO NOT DOUBLE-PROCESS: alreadyMatchesTarget=true ONLY when the image already
+  exhibits the SPECIFIC characteristics listed above for the target key.
+- HONOR USER INTENT: if the user names a film stock or camera, route to its
+  specific key. Generic "cinematic" or "vintage" are last-resort fallbacks.
+- BE PROPORTIONAL: use moderate gain (0.4–0.7) for typical style shifts on
+  well-edited images; higher (0.7–1.0) for dramatic shifts; lower (0.1–0.3)
   only when the image is genuinely close to the target style.
 
-## Gain guidance:
-  - 0.0 = image already exhibits the target style (same currentStyle as targetStyle)
-  - 0.1–0.3 = subtle tweak (image is close to the target but needs minor refinement)
-  - 0.4–0.6 = moderate style shift (typical for most creative style requests)
-  - 0.7–0.9 = strong change (image is very different from the target style)
-  - 1.0 = maximum (dramatic shifts like color→B&W)
+## Gain guidance
 
-- Use the imagekitAi booleans ONLY when the user EXPLICITLY asks for that AI transform
-  (e.g. "remove background" → bgRemove=true). Never set these speculatively.
-- Output JSON only.`
+- 0.0 = image already exhibits the target style (currentStyle === targetStyle)
+- 0.1–0.3 = subtle refinement (image is close to target)
+- 0.4–0.6 = moderate style shift (typical for most creative requests)
+- 0.7–0.9 = strong change (image is far from target)
+- 1.0 = dramatic shift (e.g. color → B&W)
+
+## imagekitAi
+
+Set these booleans ONLY when the user EXPLICITLY asks for that AI transform
+("remove background" → bgRemove=true). Never speculative.
+
+## adjustments (direct tonal/technical moves — the catch-all for ANY edit)
+
+Use "adjustments" for explicit, concrete requests that a named style does not
+capture — this is how you handle arbitrary, "tough", or compound edits. Leave it
+{} when the user only asked for a named look.
+
+Keys + units (omit any you don't need; values are DELTAS from neutral except
+gamma which is absolute, neutral 100):
+- brightness/contrast/saturation/vibrance/temperature: -100..100
+- sharpness/blur/noise: 0..100
+- gamma: 20..220 (100 = neutral)
+- hue: -180..180
+
+Examples:
+- "make it 30% brighter and a bit warmer" → { "brightness": 30, "temperature": 12 }
+- "add heavy film grain and soften it" → { "noise": 28, "blur": 12 }
+- "less saturated, more contrast" → { "saturation": -22, "contrast": 18 }
+- "lift the shadows / fix crushed blacks" → { "gamma": 116 }
+- "shift the colors / rotate hue toward teal" → { "hue": -28 }
+
+You MAY combine adjustments WITH a named style (e.g. targetStyle="cinematic" plus
+adjustments {"noise": 20}). Be proportional — match the magnitude to the request.
+
+Output JSON only.`
 
 const STRICTER_RETRY_SUFFIX =
     "\n\nPrevious response was not valid JSON. YOU MUST RETURN VALID JSON. NO COMMENTS. NO MARKDOWN FENCES. NO PROSE. Only the object."
@@ -342,6 +447,21 @@ const callGeminiOnce = async ({ apiKey, model, prompt, imageBase64, mimeType, fe
                             upscale: { type: "BOOLEAN" },
                             sharpen: { type: "BOOLEAN" },
                             contrast: { type: "BOOLEAN" },
+                        },
+                    },
+                    adjustments: {
+                        type: "OBJECT",
+                        properties: {
+                            brightness: { type: "NUMBER" },
+                            contrast: { type: "NUMBER" },
+                            saturation: { type: "NUMBER" },
+                            vibrance: { type: "NUMBER" },
+                            temperature: { type: "NUMBER" },
+                            gamma: { type: "NUMBER" },
+                            sharpness: { type: "NUMBER" },
+                            blur: { type: "NUMBER" },
+                            noise: { type: "NUMBER" },
+                            hue: { type: "NUMBER" },
                         },
                     },
                     notes: { type: "STRING" },
@@ -463,10 +583,19 @@ const sanitizeGeminiVerdict = (raw, fallbackIntent, features = null, prompt = ""
         sharpen: !!(raw?.imagekitAi?.sharpen ?? fallbackIntent.imagekitAi.sharpen),
         contrast: !!(raw?.imagekitAi?.contrast ?? false),
     }
-    const notes = alreadyMatchesTarget && gain === 0
+    // Pass through any explicit adjustment deltas the model emitted. The planner
+    // re-clamps/filters these, so we only need to coerce to finite numbers here.
+    const adjustments = {}
+    if (raw?.adjustments && typeof raw.adjustments === "object") {
+        for (const [k, v] of Object.entries(raw.adjustments)) {
+            const n = Number(v)
+            if (Number.isFinite(n)) adjustments[k] = n
+        }
+    }
+    const notes = alreadyMatchesTarget && gain === 0 && Object.keys(adjustments).length === 0
         ? `Image already matches the ${targetStyle} look, so no automatic changes were applied.`
         : String(raw?.notes || "").slice(0, 240)
-    return { currentStyle, targetStyle, alreadyMatchesTarget, gain, imagekitAi, notes }
+    return { currentStyle, targetStyle, alreadyMatchesTarget, gain, imagekitAi, adjustments, notes }
 }
 
 const pHashBuckets = (pHash) => {
@@ -578,6 +707,9 @@ const computePlanForImage = async ({
             prompt,
         )
 
+    // Explicit user tonal moves win over the model's suggested deltas per key.
+    const directAdjustments = { ...(verdict.adjustments || {}), ...parseDirectAdjustments(prompt) }
+
     const plan = buildEditPlan({
         features,
         targetStyle: verdict.targetStyle,
@@ -586,6 +718,7 @@ const computePlanForImage = async ({
         alreadyMatchesTarget: verdict.alreadyMatchesTarget,
         notes: verdict.notes,
         imagekitAi: verdict.imagekitAi,
+        directAdjustments,
     })
 
     try {

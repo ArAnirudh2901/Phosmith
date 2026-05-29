@@ -294,6 +294,14 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                         type="text"
                                         value={projectTitle}
                                         onChange={(e) => setProjectTitle(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            // Enter submits the form when it's valid — no need to
+                                            // reach for the Create button.
+                                            if (e.key === 'Enter' && selectedFile && projectTitle.trim() && !isUploading) {
+                                                e.preventDefault()
+                                                handleCreateProject()
+                                            }
+                                        }}
                                         placeholder="Enter project name..."
                                         className={"bg-slate-700 border-white/20 text-white placeholder-white/50 focus:border-cyan-400 focus:ring-cyan-400"}
                                     >
