@@ -470,8 +470,11 @@ export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 
 /** Paint the red "hidden area" preview overlay from the mask. */
 export const paintOverlayFromMask = (maskCanvas, overlayCanvas, { threshold = 250 } = {}) => {
   if (!maskCanvas || !overlayCanvas) return
-  overlayCanvas.width = maskCanvas.width
-  overlayCanvas.height = maskCanvas.height
+  // Assigning width/height reallocates + clears the backing store, so only do it
+  // when the size actually changed (this runs once per brush frame). putImageData
+  // below overwrites the whole buffer regardless.
+  if (overlayCanvas.width !== maskCanvas.width) overlayCanvas.width = maskCanvas.width
+  if (overlayCanvas.height !== maskCanvas.height) overlayCanvas.height = maskCanvas.height
   const maskCtx = maskCanvas.getContext('2d')
   const overlayCtx = overlayCanvas.getContext('2d')
   const maskData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
