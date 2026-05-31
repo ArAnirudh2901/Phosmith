@@ -69,8 +69,12 @@ export function useStoreUser() {
                         ? error.message
                         : "Unable to sync your account right now.";
 
-                console.error("Failed to store signed-in user in Neon.", error);
-                toast.error(message);
+                if (error?.status === 401) {
+                    console.warn("Transient 401 storing signed-in user in Neon.", error.message);
+                } else {
+                    console.error("Failed to store signed-in user in Neon.", error);
+                    toast.error(message);
+                }
             }
         }
 

@@ -40,6 +40,7 @@ const usePlanAccess = () => {
         adjust: true,
         mask: true,
         erase: true,
+        collage: true,
 
         // Pro only tools
         text: isPro,

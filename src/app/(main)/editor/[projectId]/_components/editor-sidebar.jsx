@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react"
 import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
-import { Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text } from "lucide-react"
+import { Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
 // Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
 // they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
@@ -38,6 +38,7 @@ const AIEdits = lazyTool(() => import("./tools/ai-edit"))
 const ImageKitAgent = lazyTool(() => import("./tools/imagekit-agent"))
 const ImageManager = lazyTool(() => import("./tools/images"))
 const DrawControls = lazyTool(() => import("./tools/draw"))
+const CollageControls = lazyTool(() => import("./tools/collage"))
 
 const TOOL_CONFIGS = {
     resize: { title: "Resize", icon: Expand },
@@ -52,6 +53,7 @@ const TOOL_CONFIGS = {
     ai_extender: { title: "AI Extender", icon: Maximize2 },
     ai_edit: { title: "AI Edit", icon: Eye },
     ai_agent: { title: "ImageKit Agent", icon: Bot },
+    collage: { title: "Collage", icon: LayoutGrid },
 }
 
 export default function EditorSidebar({ project: projectProp, width }) {
@@ -104,6 +106,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "ai_extender": return project ? <AIExtender project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_edit": return project ? <AIEdits project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_agent": return project ? <ImageKitAgent project={project} {...colorProps} /> : <div>Loading...</div>
+            case "collage": return <CollageControls {...colorProps} />
             default: return <div>Tool not available</div>
         }
     }
