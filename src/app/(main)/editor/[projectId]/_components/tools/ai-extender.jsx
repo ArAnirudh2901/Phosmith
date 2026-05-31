@@ -522,8 +522,8 @@ const AIExtender = ({ project }) => {
 
             canvasEditor.remove(activeImage)
             canvasEditor.add(nextImage)
-            canvasEditor.setActiveObject(nextImage)
             nextImage.setCoords()
+            canvasEditor.discardActiveObject()
             canvasEditor.requestRenderAll()
 
             const outputW = nextImage.width || expansion.targetWidth

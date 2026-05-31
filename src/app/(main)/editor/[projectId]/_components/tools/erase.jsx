@@ -1,7 +1,7 @@
 "use client"
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Eraser, Loader2, MousePointerClick, Sparkles, Wand2 } from 'lucide-react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Eraser, Loader2, MousePointerClick, Sparkles, Wand2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { motion } from 'framer-motion'
 import { useCanvas } from '../../../../../../../context/context'
@@ -15,16 +15,26 @@ import {
     TipCard,
     ToolEmptyState,
 } from './_pixel-tool-ui'
+import { buildImageKitBackgroundRemovalUrls } from '@/lib/imagekit-ai'
+
 
 const MAX_BG_DIMENSION = 1600
 const PRO_BG_TOOL = 'ai_background'
 
-const buildBackgroundRemovalUrl = (project) => {
-    const imageUrl = project?.currentImageUrl || project?.originalImageUrl
-    if (!imageUrl?.includes('ik.imagekit.io')) return null
-    const width = Math.min(Math.max(Math.round(project?.width || MAX_BG_DIMENSION), 1), MAX_BG_DIMENSION)
-    const height = Math.min(Math.max(Math.round(project?.height || MAX_BG_DIMENSION), 1), MAX_BG_DIMENSION)
-    return `${imageUrl.split('?')[0]}?tr=w-${width},h-${height},c-at_max,e-bgremove`
+
+
+const buildBackgroundRemovalUrls = (project) => {
+    // Prefer originalImageUrl — currentImageUrl may already contain AI transforms
+    // (e-bgremove, e-upscale, e-genfill, etc.) that ImageKit rejects with a 400
+    // when chained with another e-bgremove. The original is always the clean source.
+    const original = project?.originalImageUrl
+    const current = project?.currentImageUrl
+    const imageUrl = (original?.includes('ik.imagekit.io') ? original : current) || original || current
+    return buildImageKitBackgroundRemovalUrls(imageUrl, {
+        width: project?.width,
+        height: project?.height,
+        maxDimension: MAX_BG_DIMENSION,
+    })
 }
 
 const loadImageElement = (src) =>
@@ -35,6 +45,15 @@ const loadImageElement = (src) =>
         img.onerror = () => reject(new Error('Failed to load processed image'))
         img.src = src
     })
+
+const getReadableResponseText = async (response) => {
+    const text = await response.text().catch(() => '')
+    return text
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 180)
+}
 
 // Poll ImageKit's bgremove endpoint. While the asset is still being prepared it
 // returns an intermediate (non-image) response; once ready it streams the PNG.
@@ -65,7 +84,8 @@ const fetchProcessedImage = async (url, { attempts = 7, signal, onStatus } = {})
             // "still preparing") fails fast — throwing OUTSIDE the try so it isn't
             // swallowed and retried for the full ~25s budget.
             if (!response.ok && response.status >= 400 && response.status !== 425 && response.status !== 202) {
-                throw new Error(`Background service error (${response.status})`)
+                const detail = await getReadableResponseText(response)
+                throw new Error(`Background service error (${response.status})${detail ? `: ${detail}` : ''}`)
             }
             // Otherwise it's an intermediate "still preparing" response — fall through and retry.
         }
@@ -83,12 +103,20 @@ const EraseControls = ({ project, dominantColor }) => {
     const { canvasEditor, processingMessage, setProcessingMessage } = useCanvas()
     const { hasAccess } = usePlanAccess()
 
-    const tool = usePixelMaskTool({ canvasEditor, defaultMode: 'erase', supportsMagic: true })
+    const tool = usePixelMaskTool({
+        canvasEditor,
+        defaultMode: 'erase',
+        supportsMagic: true,
+        deferApply: true,
+        inferRegion: false,
+    })
     const [isAutoErasing, setIsAutoErasing] = useState(false)
+    const [isCleaning, setIsCleaning] = useState(false)
     const abortRef = useRef(null)
+    const { setMagic, setMode } = tool
 
     const canUseAi = hasAccess(PRO_BG_TOOL)
-    const backgroundRemovalUrl = buildBackgroundRemovalUrl(project)
+    const backgroundRemovalUrls = useMemo(() => buildBackgroundRemovalUrls(project), [project])
 
     useEffect(() => () => abortRef.current?.abort(), [])
 
@@ -98,16 +126,16 @@ const EraseControls = ({ project, dominantColor }) => {
         const onSub = (event) => {
             const { toolId, subId } = event.detail || {}
             if (toolId !== 'erase' || !subId) return
-            if (subId === 'magic') tool.setMagic(true)
-            else if (subId === 'brush') { tool.setMagic(false); tool.setMode('erase') }
-            else if (subId === 'restore') { tool.setMagic(false); tool.setMode('restore') }
+            if (subId === 'magic') setMagic(true)
+            else if (subId === 'brush') { setMagic(false); setMode('erase') }
+            else if (subId === 'restore') { setMagic(false); setMode('restore') }
             else if (subId === 'auto') handleAutoEraseRef.current?.()
         }
         window.addEventListener('pixxel:tool-sub', onSub)
         return () => window.removeEventListener('pixxel:tool-sub', onSub)
         // setMagic/setMode are stable useState setters and handleAutoEraseRef is a
         // ref, so the listener binds once instead of re-binding every render.
-    }, [tool.setMagic, tool.setMode])
+    }, [setMagic, setMode])
 
     const handleAutoErase = useCallback(async () => {
         if (!canvasEditor || isAutoErasing) return
@@ -115,7 +143,7 @@ const EraseControls = ({ project, dominantColor }) => {
             toast.error('AI auto-erase is a Pro feature')
             return
         }
-        if (!backgroundRemovalUrl) {
+        if (!backgroundRemovalUrls.length) {
             toast.error('Auto-erase needs an ImageKit-hosted image')
             return
         }
@@ -128,10 +156,25 @@ const EraseControls = ({ project, dominantColor }) => {
         setProcessingMessage('AI is isolating the subject…')
         let objectUrl = null
         try {
-            objectUrl = await fetchProcessedImage(backgroundRemovalUrl, {
-                signal: controller.signal,
-                onStatus: setProcessingMessage,
-            })
+            let lastError = null
+            for (let index = 0; index < backgroundRemovalUrls.length; index += 1) {
+                try {
+                    objectUrl = await fetchProcessedImage(backgroundRemovalUrls[index], {
+                        signal: controller.signal,
+                        onStatus: setProcessingMessage,
+                    })
+                    break
+                } catch (error) {
+                    lastError = error
+                    if (error.name === 'AbortError') throw error
+                    const canTryFallback =
+                        index < backgroundRemovalUrls.length - 1 &&
+                        /Background service error \(400\)|rejected|400/i.test(error?.message || '')
+                    if (!canTryFallback) throw error
+                    setProcessingMessage('Retrying background removal…')
+                }
+            }
+            if (!objectUrl) throw lastError || new Error('Auto-erase failed')
             const imageEl = await loadImageElement(objectUrl)
             const applied = tool.applyAlphaMask(imageEl)
             if (applied) toast.success('Background erased — refine with the brush')
@@ -147,11 +190,42 @@ const EraseControls = ({ project, dominantColor }) => {
             setIsAutoErasing(false)
             if (abortRef.current === controller) abortRef.current = null
         }
-    }, [canvasEditor, isAutoErasing, canUseAi, backgroundRemovalUrl, setProcessingMessage, tool])
+    }, [canvasEditor, isAutoErasing, canUseAi, backgroundRemovalUrls, setProcessingMessage, tool])
 
     // Keep the ref pointing at the latest handler so the sub-action listener can
     // call it without re-binding on every dependency change.
     useEffect(() => { handleAutoEraseRef.current = handleAutoErase }, [handleAutoErase])
+
+    const handleEraseSelection = useCallback(async () => {
+        if (!canvasEditor || isCleaning) return
+
+        // Try client-side content-aware fill first
+        const cleanupCanvas = tool.createCleanupCanvas?.()
+        if (cleanupCanvas) {
+            setIsCleaning(true)
+            let objectUrl = null
+            try {
+                const blob = await new Promise((resolve, reject) => {
+                    cleanupCanvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png')
+                })
+                objectUrl = URL.createObjectURL(blob)
+                const applied = await tool.commitCleanupUrl?.(objectUrl)
+                if (applied) {
+                    toast.success('Selection erased')
+                    return
+                }
+            } catch (err) {
+                console.warn('[erase] content-aware fill failed:', err)
+            } finally {
+                if (objectUrl) URL.revokeObjectURL(objectUrl)
+                setIsCleaning(false)
+            }
+        }
+
+        // Final fallback — simple transparency cut
+        tool.commitErase()
+        toast.success('Selection erased')
+    }, [canvasEditor, isCleaning, tool])
 
     if (!canvasEditor) {
         return (
@@ -193,7 +267,7 @@ const EraseControls = ({ project, dominantColor }) => {
                         ⚠ Pro feature — upgrade to auto-erase backgrounds
                     </p>
                 )}
-                {canUseAi && !backgroundRemovalUrl && (
+                {canUseAi && !backgroundRemovalUrls.length && (
                     <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                         Needs an ImageKit-hosted image. You can still erase manually below.
                     </p>
@@ -258,6 +332,45 @@ const EraseControls = ({ project, dominantColor }) => {
                 <LabeledSlider label="Edge Feather" value={tool.feather} min={0} max={50} suffix="px" onChange={tool.setFeather} dominantColor={dominantColor} />
             </div>
 
+            {/* ─── Erase / Discard pending selection ─── */}
+            {tool.hasPending && (
+                <div className="space-y-1.5" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                    <label className="panel-label">Pending Selection</label>
+                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        Red overlay shows what will be erased. Click to confirm.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={handleEraseSelection}
+                        disabled={isCleaning}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-50"
+                        style={{
+                            background: 'var(--accent-primary)',
+                            color: '#03050A',
+                            border: 'none',
+                            boxShadow: 'var(--shadow-glow)',
+                        }}
+                    >
+                        {isCleaning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        {isCleaning ? 'Erasing…' : 'Erase Selection'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={tool.discardPending}
+                        disabled={isCleaning}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
+                        style={{
+                            background: 'rgba(239, 68, 68, 0.08)',
+                            color: '#f87171',
+                            border: '1px solid rgba(239, 68, 68, 0.2)',
+                        }}
+                    >
+                        <X className="h-3.5 w-3.5" />
+                        Discard Selection
+                    </button>
+                </div>
+            )}
+
             <MaskActionButtons
                 hasMask={tool.hasMask}
                 undoDepth={tool.undoDepth}
@@ -269,8 +382,9 @@ const EraseControls = ({ project, dominantColor }) => {
             />
 
             <TipCard>
-                <p>• <strong>Erase</strong> hides pixels — exports as transparent PNG</p>
-                <p>• <strong>Magic eraser</strong>: click a color region to remove it</p>
+                <p>• <strong>Paint</strong> over what you want to erase — red overlay previews the selection</p>
+                <p>• Click <strong>Erase Selection</strong> to AI-inpaint the region (falls back to transparency if unavailable)</p>
+                <p>• <strong>Magic eraser</strong>: click a color region to select it</p>
                 <p>• Hold <strong>Alt</strong> to temporarily switch Erase ↔ Restore</p>
                 <p>• <strong>[</strong> / <strong>]</strong> resize the brush; raise feather for soft edges</p>
             </TipCard>

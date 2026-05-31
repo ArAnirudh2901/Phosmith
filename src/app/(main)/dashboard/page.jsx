@@ -214,6 +214,9 @@ const Dashboard = () => {
     const isLoading = isAuthLoading || isProjectsLoading
     const projectCount = projects.length
     const hasProjects = projectCount > 0
+    const projectCountLabel = isLoading
+        ? "Loading projects"
+        : `${projectCount} ${projectCount === 1 ? "project" : "projects"}`
     const prevProjectIdsRef = useRef(null)
     const pixelControllersRef = useRef(new Map())
 
@@ -467,8 +470,12 @@ const Dashboard = () => {
                             </h1>
                             <div className="mt-1.5 flex items-center gap-4 text-sm text-[var(--text-muted)]">
                                 <span className="inline-flex items-center gap-1.5">
-                                    <ImageIcon className="h-3.5 w-3.5" />
-                                    {projectCount} {projectCount === 1 ? "project" : "projects"}
+                                    {isLoading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                        <ImageIcon className="h-3.5 w-3.5" />
+                                    )}
+                                    {projectCountLabel}
                                 </span>
                                 {hasProjects && (
                                     <span className="inline-flex items-center gap-1.5">
@@ -549,14 +556,22 @@ const Dashboard = () => {
                             {loadingCards.map((_, index) => (
                                 <div
                                     key={index}
-                                    className="overflow-hidden"
+                                    className="overflow-hidden rounded-lg border"
                                     style={{
-                                        border: "2px solid #F4F4F5",
-                                        boxShadow: "6px 6px 0 0 #F4F4F5",
-                                        background: "rgba(14,17,24,0.6)",
+                                        borderColor: "rgba(244,244,245,0.16)",
+                                        boxShadow: "0 18px 40px rgba(0,0,0,0.22)",
+                                        background: "rgba(14,17,24,0.42)",
                                     }}
                                 >
-                                    <div className="aspect-[16/10] animate-pulse bg-white/[0.04]" />
+                                    <div className="relative aspect-[16/10] overflow-hidden">
+                                        <div className="absolute inset-0 animate-pulse bg-white/[0.035]" />
+                                        <div
+                                            className="absolute inset-y-0 w-1/2 -translate-x-full animate-loading-bar-sweep"
+                                            style={{
+                                                background: "linear-gradient(90deg, transparent, rgba(83,216,255,0.08), transparent)",
+                                            }}
+                                        />
+                                    </div>
                                 </div>
                             ))}
                         </section>
