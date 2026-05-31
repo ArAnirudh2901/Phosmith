@@ -69,8 +69,18 @@ const commitMaskChange = (canvasEditor, img) => {
  *                                      applied until commitErase() is called.
  * @param {boolean} opts.inferRegion    Expand erase strokes into an image-aware
  *                                      region before preview/apply.
+ * @param {boolean} opts.showOverlay    Render the red mask overlay.
+ * @param {boolean} opts.livePreview    Refresh the overlay while a stroke is active.
  */
-export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', supportsMagic = false, deferApply = false, inferRegion = false }) {
+export default function usePixelMaskTool({
+    canvasEditor,
+    defaultMode = 'erase',
+    supportsMagic = false,
+    deferApply = false,
+    inferRegion = false,
+    showOverlay = true,
+    livePreview = true,
+}) {
     const [mode, setMode] = useState(defaultMode)
     const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE)
     const [hardness, setHardness] = useState(85)
@@ -88,6 +98,8 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
     const [hasPending, setHasPending] = useState(false)
     const deferApplyRef = useRef(deferApply)
     const inferRegionRef = useRef(inferRegion)
+    const showOverlayRef = useRef(showOverlay)
+    const livePreviewRef = useRef(livePreview)
 
     const modeRef = useRef(mode)
     const brushSizeRef = useRef(brushSize)
@@ -139,6 +151,8 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
     useEffect(() => { magicRef.current = magic }, [magic])
     useEffect(() => { deferApplyRef.current = deferApply }, [deferApply])
     useEffect(() => { inferRegionRef.current = inferRegion }, [inferRegion])
+    useEffect(() => { showOverlayRef.current = showOverlay }, [showOverlay])
+    useEffect(() => { livePreviewRef.current = livePreview }, [livePreview])
     useEffect(() => { toleranceRef.current = tolerance }, [tolerance])
 
     const effectiveMode = useCallback(() => {
@@ -239,7 +253,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         }
     }, [canvasEditor])
 
-    const syncMaskToImage = useCallback((img, { showOverlay = true, skipClip = false } = {}) => {
+    const syncMaskToImage = useCallback((img, { showOverlay: shouldShowOverlay = showOverlayRef.current, skipClip = false } = {}) => {
         if (!canvasEditor || !img) return
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
@@ -276,7 +290,8 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             img.setCoords?.()
         }
 
-        if (showOverlay) updateOverlay(img, maskCanvas)
+        if (shouldShowOverlay) updateOverlay(img, maskCanvas)
+        else removeOverlay({ render: false })
         canvasEditor.requestRenderAll()
     }, [canvasEditor, removeOverlay, updateOverlay])
 
@@ -897,6 +912,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
      * applied, so the image pixels remain fully visible beneath the red selection. */
     const liveSync = useCallback((img) => {
         if (!canvasEditor || !img) return
+        if (!livePreviewRef.current || !showOverlayRef.current) return
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
         // During an active stroke we SKIP the expensive clipPath rebuild

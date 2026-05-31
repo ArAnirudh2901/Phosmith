@@ -159,13 +159,20 @@ export const buildImageKitBackgroundRemovalUrls = (
     const safeMax = Math.max(1, Math.round(maxDimension || 1600))
     const safeWidth = Math.min(Math.max(Math.round(width || safeMax), 1), safeMax)
     const safeHeight = Math.min(Math.max(Math.round(height || safeMax), 1), safeMax)
+    const resized = `w-${safeWidth},h-${safeHeight},c-at_max`
     const candidates = [
+        // Resize before the async AI transform so large originals do not make the
+        // background-removal request fail before the output resize is reached.
         buildImageKitChainedTransformUrl(baseUrl, [
+            resized,
             'e-bgremove',
-            `w-${safeWidth},h-${safeHeight},c-at_max`,
+        ]),
+        buildImageKitChainedTransformUrl(baseUrl, [
+            resized,
+            'e-removedotbg',
         ]),
         `${baseUrl}?tr=e-bgremove`,
-        `${baseUrl}?tr=w-${safeWidth},h-${safeHeight},c-at_max,e-bgremove`,
+        `${baseUrl}?tr=e-removedotbg`,
     ]
 
     return [...new Set(candidates.filter(Boolean))]

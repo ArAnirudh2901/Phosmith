@@ -557,6 +557,19 @@ const CanvasEditor = ({ project }) => {
                     return
                 }
                 const wantsPan = isPanModifierActive()
+                if (
+                    canvas.__pixelToolActive ||
+                    activeToolRef.current === 'mask' ||
+                    activeToolRef.current === 'erase'
+                ) {
+                    const cursor = wantsPan ? 'grab' : 'crosshair'
+                    canvas.skipTargetFind = true
+                    canvas.defaultCursor = cursor
+                    canvas.hoverCursor = cursor
+                    canvas.moveCursor = cursor
+                    canvas.upperCanvasEl.style.cursor = cursor
+                    return
+                }
                 canvas.skipTargetFind = false
                 canvas.defaultCursor = wantsPan ? 'grab' : 'default'
                 canvas.hoverCursor = 'move'

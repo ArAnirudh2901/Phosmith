@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Eraser, Loader2, MousePointerClick, Sparkles, Wand2, X } from 'lucide-react'
+import { Eraser, Loader2, MousePointerClick, Sparkles, Wand2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { motion } from 'framer-motion'
 import { useCanvas } from '../../../../../../../context/context'
@@ -47,11 +47,15 @@ const loadImageElement = (src) =>
     })
 
 const getReadableResponseText = async (response) => {
+    const ikError = response.headers.get('ik-error') || ''
     const text = await response.text().catch(() => '')
-    return text
+    const body = text
         .replace(/<[^>]*>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
+    return [ikError, body]
+        .filter(Boolean)
+        .join(': ')
         .slice(0, 180)
 }
 
@@ -107,11 +111,12 @@ const EraseControls = ({ project, dominantColor }) => {
         canvasEditor,
         defaultMode: 'erase',
         supportsMagic: true,
-        deferApply: true,
+        deferApply: false,
         inferRegion: false,
+        showOverlay: false,
+        livePreview: false,
     })
     const [isAutoErasing, setIsAutoErasing] = useState(false)
-    const [isCleaning, setIsCleaning] = useState(false)
     const abortRef = useRef(null)
     const { setMagic, setMode } = tool
 
@@ -195,37 +200,6 @@ const EraseControls = ({ project, dominantColor }) => {
     // Keep the ref pointing at the latest handler so the sub-action listener can
     // call it without re-binding on every dependency change.
     useEffect(() => { handleAutoEraseRef.current = handleAutoErase }, [handleAutoErase])
-
-    const handleEraseSelection = useCallback(async () => {
-        if (!canvasEditor || isCleaning) return
-
-        // Try client-side content-aware fill first
-        const cleanupCanvas = tool.createCleanupCanvas?.()
-        if (cleanupCanvas) {
-            setIsCleaning(true)
-            let objectUrl = null
-            try {
-                const blob = await new Promise((resolve, reject) => {
-                    cleanupCanvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/png')
-                })
-                objectUrl = URL.createObjectURL(blob)
-                const applied = await tool.commitCleanupUrl?.(objectUrl)
-                if (applied) {
-                    toast.success('Selection erased')
-                    return
-                }
-            } catch (err) {
-                console.warn('[erase] content-aware fill failed:', err)
-            } finally {
-                if (objectUrl) URL.revokeObjectURL(objectUrl)
-                setIsCleaning(false)
-            }
-        }
-
-        // Final fallback — simple transparency cut
-        tool.commitErase()
-        toast.success('Selection erased')
-    }, [canvasEditor, isCleaning, tool])
 
     if (!canvasEditor) {
         return (
@@ -332,45 +306,6 @@ const EraseControls = ({ project, dominantColor }) => {
                 <LabeledSlider label="Edge Feather" value={tool.feather} min={0} max={50} suffix="px" onChange={tool.setFeather} dominantColor={dominantColor} />
             </div>
 
-            {/* ─── Erase / Discard pending selection ─── */}
-            {tool.hasPending && (
-                <div className="space-y-1.5" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                    <label className="panel-label">Pending Selection</label>
-                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                        Red overlay shows what will be erased. Click to confirm.
-                    </p>
-                    <button
-                        type="button"
-                        onClick={handleEraseSelection}
-                        disabled={isCleaning}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-50"
-                        style={{
-                            background: 'var(--accent-primary)',
-                            color: '#03050A',
-                            border: 'none',
-                            boxShadow: 'var(--shadow-glow)',
-                        }}
-                    >
-                        {isCleaning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                        {isCleaning ? 'Erasing…' : 'Erase Selection'}
-                    </button>
-                    <button
-                        type="button"
-                        onClick={tool.discardPending}
-                        disabled={isCleaning}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
-                        style={{
-                            background: 'rgba(239, 68, 68, 0.08)',
-                            color: '#f87171',
-                            border: '1px solid rgba(239, 68, 68, 0.2)',
-                        }}
-                    >
-                        <X className="h-3.5 w-3.5" />
-                        Discard Selection
-                    </button>
-                </div>
-            )}
-
             <MaskActionButtons
                 hasMask={tool.hasMask}
                 undoDepth={tool.undoDepth}
@@ -382,9 +317,8 @@ const EraseControls = ({ project, dominantColor }) => {
             />
 
             <TipCard>
-                <p>• <strong>Paint</strong> over what you want to erase — red overlay previews the selection</p>
-                <p>• Click <strong>Erase Selection</strong> to AI-inpaint the region (falls back to transparency if unavailable)</p>
-                <p>• <strong>Magic eraser</strong>: click a color region to select it</p>
+                <p>• <strong>Paint</strong> over what you want to erase — the exact stroke is removed when you release</p>
+                <p>• <strong>Magic eraser</strong>: click a contiguous color region to remove it</p>
                 <p>• Hold <strong>Alt</strong> to temporarily switch Erase ↔ Restore</p>
                 <p>• <strong>[</strong> / <strong>]</strong> resize the brush; raise feather for soft edges</p>
             </TipCard>

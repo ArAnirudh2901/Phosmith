@@ -102,6 +102,11 @@ export const serializeCanvasState = (canvas) => {
                     cleaned.pixxelImageKitAdjustValues = matchingObj.pixxelImageKitAdjustValues
                 }
 
+                if (matchingObj?.pixxelCollageSource || matchingObj?._pixxelCollageSource) {
+                    cleaned.pixxelCollageSource =
+                        matchingObj.pixxelCollageSource || matchingObj._pixxelCollageSource
+                }
+
                 const maskCanvas =
                     matchingObj?._pixxelMaskCanvas ||
                     (matchingObj?.clipPath

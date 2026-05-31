@@ -106,7 +106,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "ai_extender": return project ? <AIExtender project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_edit": return project ? <AIEdits project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_agent": return project ? <ImageKitAgent project={project} {...colorProps} /> : <div>Loading...</div>
-            case "collage": return <CollageControls {...colorProps} />
+            case "collage": return project ? <CollageControls project={project} {...colorProps} /> : <div>Loading...</div>
             default: return <div>Tool not available</div>
         }
     }
