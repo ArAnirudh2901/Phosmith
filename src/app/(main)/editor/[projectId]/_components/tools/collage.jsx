@@ -1,8 +1,11 @@
-import React, { useState, useCallback, useMemo } from 'react'
+"use client"
+
+import React, { useState, useCallback, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { LayoutGrid, Grid2X2, Columns, Rows, GripHorizontal, GripVertical, Check } from 'lucide-react'
-import * as fabric from 'fabric'
 import { useCanvas } from '../../../../../../../context/context'
+import { isPixxelMaskOverlay } from '@/lib/canvas-mask'
+import { toast } from 'sonner'
 
 const LAYOUTS = [
     { id: '2-split-h', label: '2 Columns', icon: Columns, cellCount: 2 },
@@ -51,28 +54,95 @@ const Section = ({ title, icon: Icon, children }) => (
     </div>
 )
 
-export default function CollageControls() {
+const isVisibleImage = (obj) =>
+    obj?.type?.toLowerCase() === 'image' &&
+    obj.visible !== false &&
+    !isPixxelMaskOverlay(obj)
+
+const getCollageSource = (image) => {
+    const stored = image.pixxelCollageSource || image._pixxelCollageSource
+    if (stored?.width && stored?.height) return stored
+
+    const source = {
+        width: Math.max(1, Number(image.width) || 1),
+        height: Math.max(1, Number(image.height) || 1),
+        cropX: Math.max(0, Number(image.cropX) || 0),
+        cropY: Math.max(0, Number(image.cropY) || 0),
+    }
+    image.pixxelCollageSource = source
+    image._pixxelCollageSource = source
+    return source
+}
+
+const fitImageToCell = (image, cell) => {
+    const source = getCollageSource(image)
+    const targetAspect = cell.w / cell.h
+    const sourceAspect = source.width / source.height
+    let cropWidth = source.width
+    let cropHeight = source.height
+    let cropX = source.cropX
+    let cropY = source.cropY
+
+    if (sourceAspect > targetAspect) {
+        cropWidth = source.height * targetAspect
+        cropX += (source.width - cropWidth) / 2
+    } else {
+        cropHeight = source.width / targetAspect
+        cropY += (source.height - cropHeight) / 2
+    }
+
+    image.set({
+        left: cell.x + cell.w / 2,
+        top: cell.y + cell.h / 2,
+        originX: 'center',
+        originY: 'center',
+        width: cropWidth,
+        height: cropHeight,
+        cropX,
+        cropY,
+        scaleX: cell.w / cropWidth,
+        scaleY: cell.h / cropHeight,
+        selectable: true,
+        evented: true,
+    })
+    image.setCoords()
+}
+
+export default function CollageControls({ project }) {
     const { canvasEditor } = useCanvas()
     const [selectedLayout, setSelectedLayout] = useState('2-split-h')
     const [gap, setGap] = useState(10)
     const [padding, setPadding] = useState(10)
+    const [imageCount, setImageCount] = useState(0)
+
+    const syncImageCount = useCallback(() => {
+        const images = canvasEditor?.getObjects?.().filter(isVisibleImage) || []
+        setImageCount(images.length)
+    }, [canvasEditor])
+
+    useEffect(() => {
+        if (!canvasEditor) return
+        syncImageCount()
+        const events = ['object:added', 'object:removed', 'object:modified']
+        events.forEach(event => canvasEditor.on(event, syncImageCount))
+        return () => events.forEach(event => canvasEditor.off(event, syncImageCount))
+    }, [canvasEditor, syncImageCount])
 
     const applyLayout = useCallback(() => {
-        if (!canvasEditor || !canvasEditor.canvas) return
+        if (!canvasEditor) return
 
-        const canvas = canvasEditor.canvas
-        const images = canvas.getObjects().filter(obj => obj.type === 'image')
-
-        if (images.length === 0) {
-            alert('No images on the canvas to collage!')
-            return
-        }
-
+        const images = canvasEditor.getObjects().filter(isVisibleImage)
         const layout = LAYOUTS.find(l => l.id === selectedLayout)
         if (!layout) return
 
-        const W = canvas.width
-        const H = canvas.height
+        if (images.length < layout.cellCount) {
+            const missing = layout.cellCount - images.length
+            toast.error(`Add ${missing} more image${missing === 1 ? '' : 's'} for this layout`)
+            return
+        }
+
+        const W = Math.max(1, Number(project?.width) || 1)
+        const H = Math.max(1, Number(project?.height) || 1)
         const aw = W - 2 * padding
         const ah = H - 2 * padding
 
@@ -106,81 +176,25 @@ export default function CollageControls() {
             cells.push({ x: padding + cw + gap, y: padding + ch + gap, w: cw, h: ch })
         }
 
-        // Apply
-        let cellIndex = 0
-        images.forEach(img => {
-            if (cellIndex >= cells.length) {
-                // If there are more images than cells, we hide them or just skip
-                // For now, let's just make them invisible or very small? No, let's just skip
-                img.set({ visible: false })
-                return
-            }
-            img.set({ visible: true })
-
-            const cell = cells[cellIndex]
-            cellIndex++
-
-            // Calculate scale to "cover" the cell
-            const imgW = img.width
-            const imgH = img.height
-            const scaleX = cell.w / imgW
-            const scaleY = cell.h / imgH
-            const scale = Math.max(scaleX, scaleY) // cover
-
-            // Target center in the cell
-            const centerX = cell.x + cell.w / 2
-            const centerY = cell.y + cell.h / 2
-
-            // Since image origin is typically left/top, adjust position so center matches
-            const currentOriginX = img.originX || 'left'
-            const currentOriginY = img.originY || 'top'
-
-            let left = centerX
-            let top = centerY
-
-            if (currentOriginX === 'left') {
-                left -= (imgW * scale) / 2
-            }
-            if (currentOriginY === 'top') {
-                top -= (imgH * scale) / 2
-            }
-
-            img.set({
-                scaleX: scale,
-                scaleY: scale,
-                left,
-                top
-            })
-
-            // Calculate ClipPath
-            // ClipPath needs to be the size of the cell / scale to counteract the image's scale
-            const clipW = cell.w / scale
-            const clipH = cell.h / scale
-
-            // ClipPath origin must match the image center
-            // If image is originX='left', image center in unscaled coords is width/2
-            let clipLeft = img.width / 2
-            let clipTop = img.height / 2
-            
-            if (currentOriginX === 'center') clipLeft = 0
-            if (currentOriginY === 'center') clipTop = 0
-
-            const clipRect = new fabric.Rect({
-                width: clipW,
-                height: clipH,
-                originX: 'center',
-                originY: 'center',
-                left: clipLeft,
-                top: clipTop
-            })
-
-            img.set({ clipPath: clipRect })
+        canvasEditor.discardActiveObject()
+        images.slice(0, cells.length).forEach((image, index) => {
+            fitImageToCell(image, cells[index])
+            canvasEditor.fire('object:modified', { target: image })
         })
 
-        canvas.renderAll()
-        canvasEditor.saveHistory?.()
+        canvasEditor.requestRenderAll()
+        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__saveCanvasState?.()
 
-    }, [canvasEditor, selectedLayout, gap, padding])
+        const extraCount = images.length - cells.length
+        toast.success(`${layout.label} applied to ${cells.length} images`)
+        if (extraCount > 0) {
+            toast.info(`${extraCount} extra layer${extraCount === 1 ? '' : 's'} left unchanged`)
+        }
+    }, [canvasEditor, selectedLayout, gap, padding, project?.width, project?.height])
+
+    const layout = LAYOUTS.find(item => item.id === selectedLayout)
+    const missingCount = Math.max(0, (layout?.cellCount || 0) - imageCount)
 
 
     return (
@@ -238,11 +252,15 @@ export default function CollageControls() {
             </Section>
 
             <div className="p-4 mt-auto" style={{ borderTop: '1px solid var(--border-subtle)' }}>
+                <p className="mb-2 text-[10px]" style={{ color: missingCount ? 'var(--text-muted)' : 'var(--text-secondary)' }}>
+                    {`${imageCount} visible image${imageCount === 1 ? '' : 's'}${missingCount > 0 ? ` · add ${missingCount} more for this layout` : ' · ready to arrange'}`}
+                </p>
                 <motion.button
                     type="button"
                     onClick={applyLayout}
+                    disabled={missingCount > 0}
                     whileTap={{ scale: 0.97 }}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-xs font-semibold shadow-sm"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-xs font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
                     style={{
                         background: 'var(--accent-primary)',
                         color: '#ffffff',
