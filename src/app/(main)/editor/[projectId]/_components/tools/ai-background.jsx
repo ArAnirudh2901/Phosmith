@@ -117,9 +117,11 @@ const waitForProcessedImage = async (url, onStatus, options = {}) => {
                     contentType.includes("text/html"))
 
             if (!response.ok) {
+                const ikError = response.headers.get('ik-error')
+                const errorDetail = ikError ? `${ikError} (${responseText})` : responseText
                 throw new FatalImageKitResponseError(
-                    responseText
-                        ? `ImageKit rejected: ${responseText}`
+                    errorDetail
+                        ? `ImageKit rejected: ${errorDetail}`
                         : "ImageKit rejected the request"
                 )
             }

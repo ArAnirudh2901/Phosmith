@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard } from 'lucide-react'
+import { Bot, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -45,6 +45,7 @@ const TOOLS = [
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
     { id: "ai_edit", label: "AI Edit", icon: Eye, proOnly: true },
     { id: "ai_agent", label: "Agent", icon: Bot },
+    { id: "collage", label: "Collage", icon: LayoutGrid },
 ]
 
 const isExportTransientObject = (obj) =>

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
-    Bot, Crop, Eraser, ImagePlus, Maximize2, MousePointer2, Palette, Pen, Scissors, Sliders, Sparkles, Type,
+    Bot, Crop, Eraser, ImagePlus, Maximize2, MousePointer2, Palette, Pen, Scissors, Sliders, Sparkles, Type, LayoutGrid
 } from "lucide-react"
 import { useCanvas } from "../../../../../../context/context"
 import usePlanAccess from "../../../../../../hooks/usePlanAccess"
@@ -70,6 +70,7 @@ const TOOLS = [
             { id: "studio",    label: "Studio" },
         ],
     },
+    { id: "collage", label: "Collage", icon: LayoutGrid, shortcut: "G" },
 ]
 
 // Radius constants

@@ -346,7 +346,11 @@ const CanvasEditor = ({ project }) => {
                 flusherRef.current?.schedule()
             }
         } catch (error) {
-            console.error("Error saving canvas state ", error)
+            if (error?.status === 401) {
+                console.warn("Transient 401 saving canvas state", error.message)
+            } else {
+                console.error("Error saving canvas state", error)
+            }
             // Best-effort recovery: try direct write before bubbling up.
             try { await writeDirect() } catch (fallbackError) {
                 if (rethrow) throw fallbackError
