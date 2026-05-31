@@ -149,6 +149,28 @@ export const buildImageKitChainedTransformUrl = (sourceUrl, transformSteps) => {
     return `${baseUrl}?tr=${chain}`
 }
 
+export const buildImageKitBackgroundRemovalUrls = (
+    imageUrl,
+    { width, height, maxDimension = 1600 } = {}
+) => {
+    if (!isImageKitUrl(imageUrl)) return []
+
+    const baseUrl = normalizeImageKitUrl(imageUrl)
+    const safeMax = Math.max(1, Math.round(maxDimension || 1600))
+    const safeWidth = Math.min(Math.max(Math.round(width || safeMax), 1), safeMax)
+    const safeHeight = Math.min(Math.max(Math.round(height || safeMax), 1), safeMax)
+    const candidates = [
+        buildImageKitChainedTransformUrl(baseUrl, [
+            'e-bgremove',
+            `w-${safeWidth},h-${safeHeight},c-at_max`,
+        ]),
+        `${baseUrl}?tr=e-bgremove`,
+        `${baseUrl}?tr=w-${safeWidth},h-${safeHeight},c-at_max,e-bgremove`,
+    ]
+
+    return [...new Set(candidates.filter(Boolean))]
+}
+
 export const buildImageKitAiTransformUrl = (
     sourceUrl,
     transformations,

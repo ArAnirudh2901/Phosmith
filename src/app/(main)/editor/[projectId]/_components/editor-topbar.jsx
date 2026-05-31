@@ -629,7 +629,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                 {(tool.id === 'erase' || tool.id === 'ai_background') && (
                                     <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
                                 )}
-                                <motion.button
+                                <button
                                     onClick={() => handleToolChange(tool.id)}
                                     data-tool-id={tool.id}
                                     className={`tool-btn ${isActive ? 'tool-btn--active' : ''} ${!hasToolAccess ? 'tool-btn--locked' : ''}`}
@@ -644,7 +644,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                         without crowding. Below that the rail stays clean and
                                         evenly spaced. */}
                                     <span className="hidden min-[2000px]:inline">{tool.label}</span>
-                                </motion.button>
+                                </button>
                             </React.Fragment>
                         )
                     })}

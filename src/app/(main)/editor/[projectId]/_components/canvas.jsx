@@ -935,6 +935,10 @@ const CanvasEditor = ({ project }) => {
         }
 
         const handleCanvasChange = (event) => {
+            // Guard: when restoring from undo/redo, canvas events fire (object:added,
+            // object:modified, etc.) but they must NOT push a new history entry —
+            // otherwise the redo stack is truncated immediately after an undo.
+            if (isRestoringRef.current) return
             if (isExpansionFrameLike(event?.target)) return
             if (isPixxelMaskOverlay(event?.target)) return
             // When "color grade background" is on, mirror the photo's grade onto the

@@ -421,6 +421,457 @@ export const strokeMaskSegment = (maskCanvas, x1, y1, x2, y2, brush) => {
   }
 }
 
+const clampInt = (value, min, max) =>
+  Math.min(max, Math.max(min, Math.round(value)))
+
+const markMaskPixel = (data, pixel, fill) => {
+  const i = pixel * 4
+  if (data[i] === fill) return false
+  data[i] = fill
+  data[i + 1] = fill
+  data[i + 2] = fill
+  data[i + 3] = 255
+  return true
+}
+
+/**
+ * Image-aware region grow from a freehand stroke. This keeps all work at the
+ * source bitmap/mask resolution: the user's stroke is treated as a hint, then a
+ * bounded flood grow expands it to the nearby region whose colours are
+ * consistent with the sampled stroke pixels. It gives cleanup-style "draw a
+ * line, define an erase region" behaviour without downscaling or sending pixels
+ * through a lossy external model.
+ */
+export const growMaskRegionFromStroke = (
+  maskCanvas,
+  sourceEl,
+  points,
+  { radius = 18, tolerance = 24, mode = 'erase' } = {},
+) => {
+  if (!maskCanvas || !sourceEl || !Array.isArray(points) || points.length === 0) return 0
+
+  const w = maskCanvas.width
+  const h = maskCanvas.height
+  if (w < 1 || h < 1) return 0
+
+  const r = Math.max(1, Number(radius) || 1)
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  let strokeLength = 0
+  let lastPoint = null
+
+  for (const point of points) {
+    if (!point) continue
+    if (lastPoint) {
+      const dx = point.x - lastPoint.x
+      const dy = point.y - lastPoint.y
+      strokeLength += Math.sqrt(dx * dx + dy * dy)
+    }
+    lastPoint = point
+    minX = Math.min(minX, point.x)
+    minY = Math.min(minY, point.y)
+    maxX = Math.max(maxX, point.x)
+    maxY = Math.max(maxY, point.y)
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return 0
+
+  const span = Math.max(maxX - minX, maxY - minY, strokeLength)
+  const requestedPad = Math.max(32, r * 7, span * 0.72, Math.min(w, h) * 0.08)
+  const pad = Math.min(requestedPad, Math.max(w, h) * 0.38)
+
+  const sx = clampInt(minX - pad, 0, w - 1)
+  const sy = clampInt(minY - pad, 0, h - 1)
+  const ex = clampInt(maxX + pad, 0, w - 1)
+  const ey = clampInt(maxY + pad, 0, h - 1)
+  const rw = Math.max(1, ex - sx + 1)
+  const rh = Math.max(1, ey - sy + 1)
+
+  const sample = document.createElement('canvas')
+  sample.width = rw
+  sample.height = rh
+  const sampleCtx = sample.getContext('2d', { willReadFrequently: true })
+  let src
+  try {
+    sampleCtx.drawImage(sourceEl, sx, sy, rw, rh, 0, 0, rw, rh)
+    src = sampleCtx.getImageData(0, 0, rw, rh).data
+  } catch {
+    return 0
+  }
+
+  const seedCanvas = document.createElement('canvas')
+  seedCanvas.width = rw
+  seedCanvas.height = rh
+  const seedCtx = seedCanvas.getContext('2d', { willReadFrequently: true })
+  seedCtx.lineCap = 'round'
+  seedCtx.lineJoin = 'round'
+  seedCtx.strokeStyle = '#fff'
+  seedCtx.fillStyle = '#fff'
+  seedCtx.lineWidth = Math.max(2, r * 1.45)
+
+  const first = points[0]
+  seedCtx.beginPath()
+  seedCtx.moveTo(first.x - sx, first.y - sy)
+  for (let i = 1; i < points.length; i += 1) {
+    seedCtx.lineTo(points[i].x - sx, points[i].y - sy)
+  }
+  seedCtx.stroke()
+  if (points.length === 1) {
+    seedCtx.beginPath()
+    seedCtx.arc(first.x - sx, first.y - sy, r * 0.72, 0, Math.PI * 2)
+    seedCtx.fill()
+  }
+
+  const seed = seedCtx.getImageData(0, 0, rw, rh).data
+  let count = 0
+  let sr = 0
+  let sg = 0
+  let sb = 0
+  let sl = 0
+  let minR = 255
+  let minG = 255
+  let minB = 255
+  let maxR = 0
+  let maxG = 0
+  let maxB = 0
+
+  for (let p = 0; p < rw * rh; p += 1) {
+    const i = p * 4
+    if (seed[i + 3] < 16) continue
+    const r0 = src[i]
+    const g0 = src[i + 1]
+    const b0 = src[i + 2]
+    sr += r0
+    sg += g0
+    sb += b0
+    sl += 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0
+    minR = Math.min(minR, r0); minG = Math.min(minG, g0); minB = Math.min(minB, b0)
+    maxR = Math.max(maxR, r0); maxG = Math.max(maxG, g0); maxB = Math.max(maxB, b0)
+    count += 1
+  }
+  if (!count) return 0
+
+  sr /= count
+  sg /= count
+  sb /= count
+  sl /= count
+
+  let variance = 0
+  for (let p = 0; p < rw * rh; p += 1) {
+    const i = p * 4
+    if (seed[i + 3] < 16) continue
+    const dr = src[i] - sr
+    const dg = src[i + 1] - sg
+    const db = src[i + 2] - sb
+    variance += dr * dr + dg * dg + db * db
+  }
+  const std = Math.sqrt(variance / Math.max(1, count))
+  const tol = Math.max(1, Math.min(100, tolerance))
+  const chan = Math.round((tol / 100) * 255)
+  const rangePad = Math.max(18, chan * 0.52 + std * 0.18)
+  const distLimit = Math.max(26, chan * 1.15 + std * 0.72)
+  const distLimitSq = distLimit * distLimit
+  const lumaPad = Math.max(18, chan * 0.62 + std * 0.16)
+
+  const matches = (p) => {
+    const i = p * 4
+    const r0 = src[i]
+    const g0 = src[i + 1]
+    const b0 = src[i + 2]
+    const l = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0
+    if (Math.abs(l - sl) > lumaPad) return false
+
+    const inRange =
+      r0 >= minR - rangePad && r0 <= maxR + rangePad &&
+      g0 >= minG - rangePad && g0 <= maxG + rangePad &&
+      b0 >= minB - rangePad && b0 <= maxB + rangePad
+    if (inRange) return true
+
+    const dr = r0 - sr
+    const dg = g0 - sg
+    const db = b0 - sb
+    return dr * dr + dg * dg + db * db <= distLimitSq
+  }
+
+  const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })
+  const maskImage = maskCtx.getImageData(sx, sy, rw, rh)
+  const mdata = maskImage.data
+  const fill = mode === 'erase' ? 0 : 255
+  const visited = new Uint8Array(rw * rh)
+  const stack = []
+
+  for (let p = 0; p < rw * rh; p += 1) {
+    if (seed[p * 4 + 3] >= 16 && matches(p)) stack.push(p)
+  }
+
+  let affected = 0
+  while (stack.length) {
+    const p = stack.pop()
+    if (visited[p]) continue
+    visited[p] = 1
+    if (!matches(p)) continue
+
+    if (markMaskPixel(mdata, p, fill)) affected += 1
+    const x = p % rw
+    const y = Math.floor(p / rw)
+    if (x > 0 && !visited[p - 1]) stack.push(p - 1)
+    if (x < rw - 1 && !visited[p + 1]) stack.push(p + 1)
+    if (y > 0 && !visited[p - rw]) stack.push(p - rw)
+    if (y < rh - 1 && !visited[p + rw]) stack.push(p + rw)
+    if (x > 0 && y > 0 && !visited[p - rw - 1]) stack.push(p - rw - 1)
+    if (x < rw - 1 && y > 0 && !visited[p - rw + 1]) stack.push(p - rw + 1)
+    if (x > 0 && y < rh - 1 && !visited[p + rw - 1]) stack.push(p + rw - 1)
+    if (x < rw - 1 && y < rh - 1 && !visited[p + rw + 1]) stack.push(p + rw + 1)
+  }
+
+  // The hint stroke itself is always part of the selected region, even if a few
+  // anti-aliased edge pixels failed the colour predicate.
+  for (let p = 0; p < rw * rh; p += 1) {
+    if (seed[p * 4 + 3] >= 16 && markMaskPixel(mdata, p, fill)) affected += 1
+  }
+
+  if (affected) maskCtx.putImageData(maskImage, sx, sy)
+  return affected
+}
+
+export const createContentAwareFillCanvas = (
+  sourceEl,
+  selectionMaskCanvas,
+  { threshold = 250, smoothingPasses = 3 } = {},
+) => {
+  if (!sourceEl || !selectionMaskCanvas) return null
+
+  const w = selectionMaskCanvas.width
+  const h = selectionMaskCanvas.height
+  const total = w * h
+  if (w < 1 || h < 1 || total < 1) return null
+
+  const sourceCanvas = document.createElement('canvas')
+  sourceCanvas.width = w
+  sourceCanvas.height = h
+  const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true })
+  let sourceImage
+  let maskImage
+  try {
+    sourceCtx.drawImage(sourceEl, 0, 0, w, h)
+    sourceImage = sourceCtx.getImageData(0, 0, w, h)
+    maskImage = selectionMaskCanvas
+      .getContext('2d', { willReadFrequently: true })
+      .getImageData(0, 0, w, h)
+  } catch {
+    return null
+  }
+
+  const src = sourceImage.data
+  const out = new Uint8ClampedArray(src)
+  const mask = maskImage.data
+  const selected = new Uint8Array(total)
+  const known = new Uint8Array(total)
+  const strength = new Float32Array(total)
+  const queue = []
+  const queued = new Uint8Array(total)
+  let selectedCount = 0
+  let minX = w
+  let minY = h
+  let maxX = -1
+  let maxY = -1
+
+  for (let p = 0; p < total; p += 1) {
+    const lum = mask[p * 4]
+    const s = Math.max(0, Math.min(1, (threshold - lum) / Math.max(1, threshold)))
+    if (lum < threshold && s > 0.01) {
+      selected[p] = 1
+      strength[p] = s
+      selectedCount += 1
+      const x = p % w
+      const y = Math.floor(p / w)
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+    } else {
+      known[p] = 1
+    }
+  }
+
+  if (!selectedCount) return null
+  if (selectedCount >= total) return null
+
+  const hasKnownNeighbor = (p) => {
+    const x = p % w
+    const y = Math.floor(p / w)
+    return (
+      (x > 0 && known[p - 1]) ||
+      (x < w - 1 && known[p + 1]) ||
+      (y > 0 && known[p - w]) ||
+      (y < h - 1 && known[p + w])
+    )
+  }
+
+  const enqueue = (p) => {
+    if (!selected[p] || known[p] || queued[p]) return
+    if (!hasKnownNeighbor(p)) return
+    queued[p] = 1
+    queue.push(p)
+  }
+
+  for (let p = 0; p < total; p += 1) enqueue(p)
+
+  const writeWeightedKnownAverage = (p) => {
+    const x = p % w
+    const y = Math.floor(p / w)
+    let wr = 0
+    let wg = 0
+    let wb = 0
+    let wa = 0
+    let weightSum = 0
+
+    for (let radius = 1; radius <= 10 && weightSum < 2.2; radius += 1) {
+      const y0 = Math.max(0, y - radius)
+      const y1 = Math.min(h - 1, y + radius)
+      const x0 = Math.max(0, x - radius)
+      const x1 = Math.min(w - 1, x + radius)
+
+      for (let yy = y0; yy <= y1; yy += 1) {
+        for (let xx = x0; xx <= x1; xx += 1) {
+          const np = yy * w + xx
+          if (!known[np]) continue
+          const dx = xx - x
+          const dy = yy - y
+          const distSq = dx * dx + dy * dy
+          if (distSq > radius * radius || distSq === 0) continue
+          const ni = np * 4
+          const weight = 1 / (distSq + 0.35)
+          wr += out[ni] * weight
+          wg += out[ni + 1] * weight
+          wb += out[ni + 2] * weight
+          wa += out[ni + 3] * weight
+          weightSum += weight
+        }
+      }
+    }
+
+    if (weightSum <= 0) return false
+
+    const i = p * 4
+    out[i] = Math.round(wr / weightSum)
+    out[i + 1] = Math.round(wg / weightSum)
+    out[i + 2] = Math.round(wb / weightSum)
+    out[i + 3] = Math.round(wa / weightSum)
+    return true
+  }
+
+  let filled = 0
+  for (let head = 0; head < queue.length; head += 1) {
+    const p = queue[head]
+    queued[p] = 0
+    if (known[p]) continue
+    if (!writeWeightedKnownAverage(p)) continue
+
+    known[p] = 1
+    filled += 1
+    const x = p % w
+    const y = Math.floor(p / w)
+    if (x > 0) enqueue(p - 1)
+    if (x < w - 1) enqueue(p + 1)
+    if (y > 0) enqueue(p - w)
+    if (y < h - 1) enqueue(p + w)
+  }
+
+  if (filled < selectedCount) {
+    let wr = 0
+    let wg = 0
+    let wb = 0
+    let wa = 0
+    let count = 0
+    for (let p = 0; p < total; p += 1) {
+      if (!known[p]) continue
+      const i = p * 4
+      wr += out[i]
+      wg += out[i + 1]
+      wb += out[i + 2]
+      wa += out[i + 3]
+      count += 1
+    }
+    const fallback = count
+      ? [Math.round(wr / count), Math.round(wg / count), Math.round(wb / count), Math.round(wa / count)]
+      : [0, 0, 0, 255]
+    for (let p = 0; p < total; p += 1) {
+      if (known[p]) continue
+      const i = p * 4
+      out[i] = fallback[0]
+      out[i + 1] = fallback[1]
+      out[i + 2] = fallback[2]
+      out[i + 3] = fallback[3]
+      known[p] = 1
+    }
+  }
+
+  const pad = Math.max(2, Math.ceil(Math.sqrt(selectedCount) * 0.04))
+  const rx0 = Math.max(0, minX - pad)
+  const ry0 = Math.max(0, minY - pad)
+  const rx1 = Math.min(w - 1, maxX + pad)
+  const ry1 = Math.min(h - 1, maxY + pad)
+  const passes = Math.max(0, Math.min(8, Math.round(smoothingPasses)))
+
+  for (let pass = 0; pass < passes; pass += 1) {
+    const prev = new Uint8ClampedArray(out)
+    for (let y = ry0; y <= ry1; y += 1) {
+      for (let x = rx0; x <= rx1; x += 1) {
+        const p = y * w + x
+        if (!selected[p]) continue
+        const i = p * 4
+        let wr = prev[i] * 2.2
+        let wg = prev[i + 1] * 2.2
+        let wb = prev[i + 2] * 2.2
+        let wa = prev[i + 3] * 2.2
+        let weightSum = 2.2
+
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) continue
+            const xx = x + dx
+            const yy = y + dy
+            if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue
+            const np = yy * w + xx
+            const ni = np * 4
+            const weight = selected[np] ? 0.9 : 0.45
+            wr += prev[ni] * weight
+            wg += prev[ni + 1] * weight
+            wb += prev[ni + 2] * weight
+            wa += prev[ni + 3] * weight
+            weightSum += weight
+          }
+        }
+
+        out[i] = Math.round(wr / weightSum)
+        out[i + 1] = Math.round(wg / weightSum)
+        out[i + 2] = Math.round(wb / weightSum)
+        out[i + 3] = Math.round(wa / weightSum)
+      }
+    }
+  }
+
+  for (let p = 0; p < total; p += 1) {
+    if (!selected[p]) continue
+    const i = p * 4
+    const s = Math.max(0, Math.min(1, strength[p]))
+    if (s >= 0.995) continue
+    out[i] = Math.round(src[i] * (1 - s) + out[i] * s)
+    out[i + 1] = Math.round(src[i + 1] * (1 - s) + out[i + 1] * s)
+    out[i + 2] = Math.round(src[i + 2] * (1 - s) + out[i + 2] * s)
+    out[i + 3] = Math.round(src[i + 3] * (1 - s) + out[i + 3] * s)
+  }
+
+  const result = document.createElement('canvas')
+  result.width = w
+  result.height = h
+  const resultCtx = result.getContext('2d')
+  resultCtx.putImageData(new ImageData(out, w, h), 0, 0)
+  return result
+}
+
 /**
  * Magic eraser: contiguous scanline flood from a seed point, matching pixels in
  * the source bitmap whose per-channel difference is within `tolerance` (0–100,

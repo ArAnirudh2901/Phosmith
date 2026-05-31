@@ -5,6 +5,7 @@ import { FabricImage } from 'fabric'
 import {
     PIXEL_MASK_OVERLAY_NAME,
     createMaskCanvas,
+    createContentAwareFillCanvas,
     createMaskClipPath,
     decodeMaskCanvas,
     encodeMaskCanvas,
@@ -12,6 +13,7 @@ import {
     getImageBitmapSize,
     getImageSourceElement,
     getMaskTargetImage,
+    growMaskRegionFromStroke,
     isMaskCanvasEmpty,
     isPixxelMaskOverlay,
     maskCanvasFromClipPath,
@@ -29,6 +31,7 @@ export const DEFAULT_BRUSH_SIZE = 36
 export const MASK_EMPTY_THRESHOLD = 250
 const MAX_HISTORY = 40
 const BRACKET_STEP = 4
+const DEFERRED_REGION_PREVIEW_MS = 90
 
 const isMaskOverlay = (obj) => isPixxelMaskOverlay(obj)
 
@@ -61,8 +64,13 @@ const commitMaskChange = (canvasEditor, img) => {
  * @param {any}     opts.canvasEditor   Fabric canvas instance.
  * @param {string}  opts.defaultMode    'erase' | 'restore'
  * @param {boolean} opts.supportsMagic  Enable click-to-flood (magic eraser).
+ * @param {boolean} opts.deferApply     When true, painting only updates the
+ *                                      overlay preview — the clipPath is NOT
+ *                                      applied until commitErase() is called.
+ * @param {boolean} opts.inferRegion    Expand erase strokes into an image-aware
+ *                                      region before preview/apply.
  */
-export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', supportsMagic = false }) {
+export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', supportsMagic = false, deferApply = false, inferRegion = false }) {
     const [mode, setMode] = useState(defaultMode)
     const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE)
     const [hardness, setHardness] = useState(85)
@@ -76,6 +84,10 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
     const [hasMask, setHasMask] = useState(false)
     const [undoDepth, setUndoDepth] = useState(0)
     const [redoDepth, setRedoDepth] = useState(0)
+    // deferApply: track whether the user has painted a selection that hasn't been committed yet
+    const [hasPending, setHasPending] = useState(false)
+    const deferApplyRef = useRef(deferApply)
+    const inferRegionRef = useRef(inferRegion)
 
     const modeRef = useRef(mode)
     const brushSizeRef = useRef(brushSize)
@@ -106,8 +118,16 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
     const featherFirstRef = useRef(true)
     const featherCommitTimerRef = useRef(null)
     const liveSyncRafRef = useRef(null)
+    const deferredLiveSyncTimerRef = useRef(null)
+    const lastDeferredLiveSyncRef = useRef(0)
     const reattachRafRef = useRef(null)
     const spaceRef = useRef(false)
+    const strokePointsRef = useRef([])
+    // Snapshot of the mask canvas before the current deferred painting session.
+    // Used by discardPending() to revert the mask when the user cancels.
+    const preCommitSnapshotRef = useRef(null)
+    const preCommitUndoDepthRef = useRef(null)
+    const preCommitRedoStackRef = useRef(null)
 
     useEffect(() => { readyRef.current = ready }, [ready])
     useEffect(() => { hasMaskRef.current = hasMask }, [hasMask])
@@ -117,6 +137,8 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
     useEffect(() => { flowRef.current = flow }, [flow])
     useEffect(() => { featherRef.current = feather }, [feather])
     useEffect(() => { magicRef.current = magic }, [magic])
+    useEffect(() => { deferApplyRef.current = deferApply }, [deferApply])
+    useEffect(() => { inferRegionRef.current = inferRegion }, [inferRegion])
     useEffect(() => { toleranceRef.current = tolerance }, [tolerance])
 
     const effectiveMode = useCallback(() => {
@@ -217,7 +239,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         }
     }, [canvasEditor])
 
-    const syncMaskToImage = useCallback((img, { showOverlay = true } = {}) => {
+    const syncMaskToImage = useCallback((img, { showOverlay = true, skipClip = false } = {}) => {
         if (!canvasEditor || !img) return
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
@@ -225,7 +247,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         const empty = isMaskCanvasEmpty(maskCanvas, MASK_EMPTY_THRESHOLD)
         setHasMask(!empty)
 
-        if (empty) {
+        if (empty && !skipClip) {
             img.clipPath = undefined
             img._pixxelHasMask = false
             img.pixxelHasMask = false
@@ -234,15 +256,25 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             return
         }
 
-        const clipImg = createMaskClipPath(FabricImage, maskCanvas, { feather: featherRef.current })
-        img.clipPath = clipImg
-        img._pixxelHasMask = true
-        img.pixxelHasMask = true
-        img._pixxelMaskCanvas = maskCanvas
-        img.pixxelMaskFeather = featherRef.current
-        img._pixxelMaskFeather = featherRef.current
-        img.set?.('dirty', true)
-        img.setCoords?.()
+        if (empty && skipClip) {
+            removeOverlay({ render: false })
+            canvasEditor.requestRenderAll()
+            return
+        }
+
+        // When skipClip is true (deferApply mode), only update the overlay preview
+        // without applying the clipPath — pixels stay visible under the red overlay.
+        if (!skipClip) {
+            const clipImg = createMaskClipPath(FabricImage, maskCanvas, { feather: featherRef.current })
+            img.clipPath = clipImg
+            img._pixxelHasMask = true
+            img.pixxelHasMask = true
+            img._pixxelMaskCanvas = maskCanvas
+            img.pixxelMaskFeather = featherRef.current
+            img._pixxelMaskFeather = featherRef.current
+            img.set?.('dirty', true)
+            img.setCoords?.()
+        }
 
         if (showOverlay) updateOverlay(img, maskCanvas)
         canvasEditor.requestRenderAll()
@@ -300,6 +332,52 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         }
     }, [])
 
+    const createPendingSelectionMask = useCallback(() => {
+        const maskCanvas = maskCanvasRef.current
+        if (!maskCanvas) return null
+
+        const w = maskCanvas.width
+        const h = maskCanvas.height
+        const currentData = maskCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data
+
+        let beforeCanvas = null
+        const snap = preCommitSnapshotRef.current
+        if (snap) {
+            beforeCanvas = snap.encoded ? decodeMaskCanvas(snap.encoded) : createMaskCanvas(w, h)
+            if (beforeCanvas && (beforeCanvas.width !== w || beforeCanvas.height !== h)) {
+                const scaled = createMaskCanvas(w, h)
+                scaled.getContext('2d').drawImage(beforeCanvas, 0, 0, w, h)
+                beforeCanvas = scaled
+            }
+        }
+
+        const beforeData = beforeCanvas
+            ? beforeCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h).data
+            : null
+        const selection = createMaskCanvas(w, h)
+        const selectionCtx = selection.getContext('2d')
+        const selectionImage = selectionCtx.createImageData(w, h)
+        const output = selectionImage.data
+        let affected = 0
+
+        for (let i = 0; i < currentData.length; i += 4) {
+            const currentLum = currentData[i]
+            const beforeLum = beforeData ? beforeData[i] : 255
+            const delta = Math.max(0, beforeLum - currentLum)
+            const selected = currentLum < MASK_EMPTY_THRESHOLD && (!beforeData || delta > 2)
+            const lum = selected ? Math.max(0, 255 - delta) : 255
+            output[i] = lum
+            output[i + 1] = lum
+            output[i + 2] = lum
+            output[i + 3] = 255
+            if (selected) affected += 1
+        }
+
+        if (!affected) return null
+        selectionCtx.putImageData(selectionImage, 0, 0)
+        return selection
+    }, [])
+
     const undo = useCallback(() => {
         if (undoStackRef.current.length === 0) return false
         const current = snapshot()
@@ -308,8 +386,16 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         applySnapshot(prev)
         setUndoDepth(undoStackRef.current.length)
         setRedoDepth(redoStackRef.current.length)
-        syncMaskToImage(targetImageRef.current)
-        commitMaskChange(canvasEditor, targetImageRef.current)
+        if (deferApplyRef.current && preCommitSnapshotRef.current) {
+            // Stay in preview mode — update overlay only, don't apply clipPath
+            syncMaskToImage(targetImageRef.current, { skipClip: true })
+            // If we've undone back to the pre-commit state, clear hasPending
+            const atPreCommit = undoStackRef.current.length <= (preCommitUndoDepthRef.current ?? 0)
+            setHasPending(!atPreCommit)
+        } else {
+            syncMaskToImage(targetImageRef.current)
+            commitMaskChange(canvasEditor, targetImageRef.current)
+        }
         return true
     }, [snapshot, applySnapshot, syncMaskToImage, canvasEditor])
 
@@ -321,8 +407,14 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         applySnapshot(next)
         setUndoDepth(undoStackRef.current.length)
         setRedoDepth(redoStackRef.current.length)
-        syncMaskToImage(targetImageRef.current)
-        commitMaskChange(canvasEditor, targetImageRef.current)
+        if (deferApplyRef.current && preCommitSnapshotRef.current) {
+            // Stay in preview mode — update overlay only, don't apply clipPath
+            syncMaskToImage(targetImageRef.current, { skipClip: true })
+            setHasPending(true)
+        } else {
+            syncMaskToImage(targetImageRef.current)
+            commitMaskChange(canvasEditor, targetImageRef.current)
+        }
         return true
     }, [snapshot, applySnapshot, syncMaskToImage, canvasEditor])
 
@@ -385,6 +477,326 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         commitMaskChange(canvasEditor, img)
         return true
     }, [pushUndo, syncMaskToImage, canvasEditor])
+
+    /**
+     * Apply an external mask from a PNG blob (e.g. AI segmentation result).
+     * White = keep, black = erase. The blob is loaded as an image, then drawn
+     * onto the mask canvas at the correct dimensions.
+     */
+    const applyExternalMaskBlob = useCallback(async (blob, { invert: invertMask = false } = {}) => {
+        const img = targetImageRef.current
+        const maskCanvas = maskCanvasRef.current
+        if (!img || !maskCanvas || !blob) return false
+
+        const objectUrl = URL.createObjectURL(blob)
+        try {
+            const el = await new Promise((resolve, reject) => {
+                const image = new Image()
+                image.crossOrigin = 'anonymous'
+                image.onload = () => resolve(image)
+                image.onerror = () => reject(new Error('Failed to load mask image'))
+                image.src = objectUrl
+            })
+
+            pushUndo()
+            const ctx = maskCanvas.getContext('2d')
+            ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height)
+            // Fill white first (keep all), then draw segmentation mask
+            ctx.fillStyle = '#ffffff'
+            ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height)
+            // Draw the AI mask — it's white for subject, black for background
+            // We want: subject = keep (white in mask), background = erase (black in mask)
+            // So we draw as-is. If invertMask, we invert afterward.
+            ctx.drawImage(el, 0, 0, maskCanvas.width, maskCanvas.height)
+
+            if (invertMask) {
+                const data = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
+                for (let i = 0; i < data.data.length; i += 4) {
+                    const v = 255 - data.data[i]
+                    data.data[i] = v
+                    data.data[i + 1] = v
+                    data.data[i + 2] = v
+                    data.data[i + 3] = 255
+                }
+                ctx.putImageData(data, 0, 0)
+            }
+
+            syncMaskToImage(img)
+            commitMaskChange(canvasEditor, img)
+            return true
+        } finally {
+            URL.revokeObjectURL(objectUrl)
+        }
+    }, [pushUndo, syncMaskToImage, canvasEditor])
+
+    /**
+     * Select all pixels within a color tolerance of the given RGB color.
+     * Entirely client-side — compares each pixel in the source image to
+     * the target color using Euclidean distance in RGB space.
+     */
+    const applyColorRangeMask = useCallback(({ r, g, b, tolerance = 30, additive = false } = {}) => {
+        const img = targetImageRef.current
+        const maskCanvas = maskCanvasRef.current
+        if (!img || !maskCanvas || r == null) return false
+
+        const sourceEl = getImageSourceElement(img)
+        if (!sourceEl) return false
+
+        const w = maskCanvas.width
+        const h = maskCanvas.height
+        const sample = document.createElement('canvas')
+        sample.width = w
+        sample.height = h
+        const sCtx = sample.getContext('2d', { willReadFrequently: true })
+        try {
+            sCtx.drawImage(sourceEl, 0, 0, w, h)
+        } catch { return false }
+
+        const src = sCtx.getImageData(0, 0, w, h).data
+        const tol = Math.max(1, tolerance)
+        const tolSq = tol * tol * 3 // scale by channels
+
+        pushUndo()
+        const ctx = maskCanvas.getContext('2d', { willReadFrequently: true })
+        const maskData = additive
+            ? ctx.getImageData(0, 0, w, h)
+            : ctx.createImageData(w, h)
+        const md = maskData.data
+
+        if (!additive) {
+            // Start with all-white (keep everything)
+            for (let i = 0; i < md.length; i += 4) {
+                md[i] = 255; md[i + 1] = 255; md[i + 2] = 255; md[i + 3] = 255
+            }
+        }
+
+        for (let i = 0; i < src.length; i += 4) {
+            const dr = src[i] - r
+            const dg = src[i + 1] - g
+            const db = src[i + 2] - b
+            const distSq = dr * dr + dg * dg + db * db
+            if (distSq <= tolSq) {
+                // This pixel matches the color → erase it (black in mask)
+                md[i] = 0; md[i + 1] = 0; md[i + 2] = 0; md[i + 3] = 255
+            }
+        }
+
+        ctx.putImageData(maskData, 0, 0)
+        syncMaskToImage(img)
+        commitMaskChange(canvasEditor, img)
+        return true
+    }, [pushUndo, syncMaskToImage, canvasEditor])
+
+    /**
+     * Select pixels by luminance (brightness) range.
+     * Pixels with luminance between minLuma and maxLuma are ERASED (black in mask).
+     */
+    const applyLuminanceRangeMask = useCallback(({ minLuma = 0, maxLuma = 128, additive = false } = {}) => {
+        const img = targetImageRef.current
+        const maskCanvas = maskCanvasRef.current
+        if (!img || !maskCanvas) return false
+
+        const sourceEl = getImageSourceElement(img)
+        if (!sourceEl) return false
+
+        const w = maskCanvas.width
+        const h = maskCanvas.height
+        const sample = document.createElement('canvas')
+        sample.width = w
+        sample.height = h
+        const sCtx = sample.getContext('2d', { willReadFrequently: true })
+        try {
+            sCtx.drawImage(sourceEl, 0, 0, w, h)
+        } catch { return false }
+
+        const src = sCtx.getImageData(0, 0, w, h).data
+
+        pushUndo()
+        const ctx = maskCanvas.getContext('2d', { willReadFrequently: true })
+        const maskData = additive
+            ? ctx.getImageData(0, 0, w, h)
+            : ctx.createImageData(w, h)
+        const md = maskData.data
+
+        if (!additive) {
+            for (let i = 0; i < md.length; i += 4) {
+                md[i] = 255; md[i + 1] = 255; md[i + 2] = 255; md[i + 3] = 255
+            }
+        }
+
+        for (let i = 0; i < src.length; i += 4) {
+            const luma = 0.2126 * src[i] + 0.7152 * src[i + 1] + 0.0722 * src[i + 2]
+            if (luma >= minLuma && luma <= maxLuma) {
+                md[i] = 0; md[i + 1] = 0; md[i + 2] = 0; md[i + 3] = 255
+            }
+        }
+
+        ctx.putImageData(maskData, 0, 0)
+        syncMaskToImage(img)
+        commitMaskChange(canvasEditor, img)
+        return true
+    }, [pushUndo, syncMaskToImage, canvasEditor])
+
+    /**
+     * Apply a linear gradient mask. Direction is one of:
+     * 'top', 'bottom', 'left', 'right', 'top-left', 'top-right', 'bottom-left', 'bottom-right'
+     * Position (0–100) controls where the gradient center is.
+     * Feather (0–100) controls how wide the transition zone is.
+     */
+    const applyLinearGradientMask = useCallback(({ direction = 'bottom', position = 50, featherPct = 30 } = {}) => {
+        const img = targetImageRef.current
+        const maskCanvas = maskCanvasRef.current
+        if (!img || !maskCanvas) return false
+
+        const w = maskCanvas.width
+        const h = maskCanvas.height
+
+        pushUndo()
+        const ctx = maskCanvas.getContext('2d')
+        ctx.clearRect(0, 0, w, h)
+
+        // Calculate gradient start and end points based on direction
+        let x0, y0, x1, y1
+        switch (direction) {
+            case 'top':       x0 = w / 2; y0 = 0; x1 = w / 2; y1 = h; break
+            case 'bottom':    x0 = w / 2; y0 = h; x1 = w / 2; y1 = 0; break
+            case 'left':      x0 = 0; y0 = h / 2; x1 = w; y1 = h / 2; break
+            case 'right':     x0 = w; y0 = h / 2; x1 = 0; y1 = h / 2; break
+            case 'top-left':  x0 = 0; y0 = 0; x1 = w; y1 = h; break
+            case 'top-right': x0 = w; y0 = 0; x1 = 0; y1 = h; break
+            case 'bottom-left':  x0 = 0; y0 = h; x1 = w; y1 = 0; break
+            case 'bottom-right': x0 = w; y0 = h; x1 = 0; y1 = 0; break
+            default:          x0 = w / 2; y0 = h; x1 = w / 2; y1 = 0; break
+        }
+
+        const pos = Math.max(0, Math.min(100, position)) / 100
+        const feath = Math.max(5, Math.min(100, featherPct)) / 100
+        // The gradient goes from black (erase) to white (keep).
+        // Position controls where the 50% point is; feather controls the ramp width.
+        const rampStart = Math.max(0, pos - feath / 2)
+        const rampEnd = Math.min(1, pos + feath / 2)
+
+        const grad = ctx.createLinearGradient(x0, y0, x1, y1)
+        grad.addColorStop(0, '#000000')                                  // fully erased
+        grad.addColorStop(Math.max(0, rampStart), '#000000')             // still erased
+        grad.addColorStop(Math.min(1, rampEnd), '#ffffff')               // fully kept
+        grad.addColorStop(1, '#ffffff')                                  // kept
+
+        ctx.fillStyle = grad
+        ctx.fillRect(0, 0, w, h)
+
+        syncMaskToImage(img)
+        commitMaskChange(canvasEditor, img)
+        return true
+    }, [pushUndo, syncMaskToImage, canvasEditor])
+
+    const createCleanupCanvas = useCallback(() => {
+        const img = targetImageRef.current
+        if (!img) return null
+        const sourceEl = getImageSourceElement(img)
+        if (!sourceEl) return null
+        const selectionMask = createPendingSelectionMask()
+        if (!selectionMask) return null
+        return createContentAwareFillCanvas(sourceEl, selectionMask, {
+            threshold: MASK_EMPTY_THRESHOLD,
+            smoothingPasses: 3,
+        })
+    }, [createPendingSelectionMask])
+
+    const createInpaintCanvases = useCallback(() => {
+        const img = targetImageRef.current
+        if (!img) return null
+        const sourceEl = getImageSourceElement(img)
+        if (!sourceEl) return null
+        const selectionMask = createPendingSelectionMask()
+        if (!selectionMask) return null
+
+        const w = selectionMask.width
+        const h = selectionMask.height
+        const imageCanvas = document.createElement('canvas')
+        imageCanvas.width = w
+        imageCanvas.height = h
+        const imageCtx = imageCanvas.getContext('2d')
+        try {
+            imageCtx.drawImage(sourceEl, 0, 0, w, h)
+        } catch {
+            return null
+        }
+
+        const sourceMask = selectionMask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h)
+        const maskCanvas = createMaskCanvas(w, h, '#000000')
+        const maskCtx = maskCanvas.getContext('2d')
+        const maskImage = maskCtx.createImageData(w, h)
+        const input = sourceMask.data
+        const output = maskImage.data
+
+        for (let i = 0; i < input.length; i += 4) {
+            const eraseStrength = Math.max(0, 255 - input[i])
+            const value = eraseStrength > 4 ? 255 : 0
+            output[i] = value
+            output[i + 1] = value
+            output[i + 2] = value
+            output[i + 3] = 255
+        }
+        maskCtx.putImageData(maskImage, 0, 0)
+
+        return { imageCanvas, maskCanvas }
+    }, [createPendingSelectionMask])
+
+    const commitCleanupUrl = useCallback(async (url) => {
+        const img = targetImageRef.current
+        if (!canvasEditor || !img || !url) return false
+
+        const geometry = {
+            left: img.left,
+            top: img.top,
+            scaleX: img.scaleX,
+            scaleY: img.scaleY,
+            angle: img.angle,
+            originX: img.originX,
+            originY: img.originY,
+            flipX: img.flipX,
+            flipY: img.flipY,
+            skewX: img.skewX,
+            skewY: img.skewY,
+            cropX: img.cropX,
+            cropY: img.cropY,
+        }
+
+        await img.setSrc(url, { crossOrigin: 'anonymous' })
+        img.set?.(geometry)
+
+        const previousMask = preCommitSnapshotRef.current
+        ensureMaskCanvas(img)
+        if (previousMask) {
+            applySnapshot(previousMask)
+        } else {
+            const maskCanvas = maskCanvasRef.current
+            const ctx = maskCanvas?.getContext('2d')
+            if (ctx) {
+                ctx.fillStyle = '#ffffff'
+                ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height)
+            }
+        }
+        if (typeof preCommitUndoDepthRef.current === 'number') {
+            undoStackRef.current = undoStackRef.current.slice(0, preCommitUndoDepthRef.current)
+        }
+        if (preCommitRedoStackRef.current) {
+            redoStackRef.current = preCommitRedoStackRef.current
+        }
+        setUndoDepth(undoStackRef.current.length)
+        setRedoDepth(redoStackRef.current.length)
+
+        preCommitSnapshotRef.current = null
+        preCommitUndoDepthRef.current = null
+        preCommitRedoStackRef.current = null
+        setHasPending(false)
+        syncMaskToImage(img, { showOverlay: false })
+        removeOverlay({ render: false })
+        img.setCoords?.()
+        commitMaskChange(canvasEditor, img)
+        return true
+    }, [canvasEditor, ensureMaskCanvas, applySnapshot, syncMaskToImage, removeOverlay])
 
     /* ─── live brush cursor ─── */
 
@@ -459,28 +871,59 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         })
     }, [effectiveMode])
 
+    const inferRegionFromCurrentStroke = useCallback(() => {
+        if (!inferRegionRef.current || effectiveMode() !== 'erase') return 0
+        const maskCanvas = maskCanvasRef.current
+        const img = targetImageRef.current
+        const points = strokePointsRef.current
+        if (!maskCanvas || !img || points.length === 0) return 0
+        const sourceEl = getImageSourceElement(img)
+        if (!sourceEl) return 0
+        return growMaskRegionFromStroke(maskCanvas, sourceEl, points, {
+            radius: Math.max(0.5, brushSizeRef.current / 2),
+            tolerance: toleranceRef.current,
+            mode: effectiveMode(),
+        })
+    }, [effectiveMode])
+
     /* ─── live (in-stroke) sync ───
      * During an active stroke we run a CHEAP rebuild, coalesced to one per animation
      * frame: a crisp (un-feathered) clip + overlay, skipping the full-image emptiness
      * scan and the Gaussian feather blur. The full sync (with feather + emptiness)
      * runs once on mouse:up. This keeps brushing smooth on large images where a full
-     * rebuild on every mouse:move was unusable. */
+     * rebuild on every mouse:move was unusable.
+     *
+     * When deferApply is true, we ONLY update the overlay preview — no clipPath is
+     * applied, so the image pixels remain fully visible beneath the red selection. */
     const liveSync = useCallback((img) => {
         if (!canvasEditor || !img) return
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
-        img.clipPath = createMaskClipPath(FabricImage, maskCanvas, { feather: 0 })
-        img._pixxelHasMask = true
-        img.pixxelHasMask = true
-        img._pixxelMaskCanvas = maskCanvas
-        img.set?.('dirty', true)
-        img.setCoords?.()
+        // During an active stroke we SKIP the expensive clipPath rebuild
+        // (buildMaskClipCanvas scans every pixel of the full-res mask) and only
+        // update the lightweight red overlay preview. The full clipPath is rebuilt
+        // once on mouse:up via syncMaskToImage(). This keeps the brush responsive
+        // on large images (e.g. 4K = ~12M pixels).
         if (!hasMaskRef.current) setHasMask(true)
         updateOverlay(img, maskCanvas)
         canvasEditor.requestRenderAll()
     }, [canvasEditor, updateOverlay])
 
     const scheduleLiveSync = useCallback((img) => {
+        if (deferApplyRef.current && inferRegionRef.current) {
+            const now = Date.now()
+            const elapsed = now - lastDeferredLiveSyncRef.current
+            if (elapsed < DEFERRED_REGION_PREVIEW_MS) {
+                if (deferredLiveSyncTimerRef.current) return
+                deferredLiveSyncTimerRef.current = setTimeout(() => {
+                    deferredLiveSyncTimerRef.current = null
+                    lastDeferredLiveSyncRef.current = Date.now()
+                    liveSync(img)
+                }, DEFERRED_REGION_PREVIEW_MS - elapsed)
+                return
+            }
+            lastDeferredLiveSyncRef.current = now
+        }
         if (liveSyncRafRef.current) return
         liveSyncRafRef.current = requestAnimationFrame(() => {
             liveSyncRafRef.current = null
@@ -688,6 +1131,13 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             if (!maskCanvas || !img) return
             const sourceEl = getImageSourceElement(img)
             if (!sourceEl) return
+            // Capture a pre-commit snapshot the FIRST time we paint in a deferred
+            // session, so discardPending() can revert to the pre-paint state.
+            if (deferApplyRef.current && !preCommitSnapshotRef.current) {
+                preCommitSnapshotRef.current = snapshot()
+                preCommitUndoDepthRef.current = undoStackRef.current.length
+                preCommitRedoStackRef.current = redoStackRef.current.slice()
+            }
             // Snapshot BEFORE mutating, but only commit it to the undo stack (and clear
             // redo) if the flood actually changed something — a no-op click must not
             // wipe the redo stack.
@@ -704,8 +1154,14 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
                     setUndoDepth(undoStackRef.current.length)
                     setRedoDepth(0)
                 }
-                syncMaskToImage(img)
-                commitMaskChange(canvasEditor, img)
+                if (deferApplyRef.current) {
+                    // Preview only — overlay shows the selection, clipPath is NOT applied.
+                    syncMaskToImage(img, { skipClip: true })
+                    setHasPending(true)
+                } else {
+                    syncMaskToImage(img)
+                    commitMaskChange(canvasEditor, img)
+                }
             }
         }
 
@@ -725,13 +1181,22 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             opt.e.stopPropagation?.()
 
             if (magicRef.current) {
+                strokePointsRef.current = []
                 doMagic(local)
                 return
             }
 
+            // Capture a pre-commit snapshot the FIRST time we paint in a deferred
+            // session, so discardPending() can revert to the pre-paint state.
+            if (deferApplyRef.current && !preCommitSnapshotRef.current) {
+                preCommitSnapshotRef.current = snapshot()
+                preCommitUndoDepthRef.current = undoStackRef.current.length
+                preCommitRedoStackRef.current = redoStackRef.current.slice()
+            }
             pushUndo()
             isDrawingRef.current = true
             lastPointRef.current = local
+            strokePointsRef.current = [local]
             brushAt(local.x, local.y)
             scheduleLiveSync(targetImageRef.current)
         }
@@ -755,6 +1220,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
                 brushAt(local.x, local.y)
             }
             lastPointRef.current = local
+            strokePointsRef.current.push(local)
             scheduleLiveSync(targetImageRef.current)
         }
 
@@ -768,8 +1234,22 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
                 cancelAnimationFrame(liveSyncRafRef.current)
                 liveSyncRafRef.current = null
             }
-            syncMaskToImage(targetImageRef.current)
-            commitMaskChange(canvasEditor, targetImageRef.current)
+            if (deferredLiveSyncTimerRef.current) {
+                clearTimeout(deferredLiveSyncTimerRef.current)
+                deferredLiveSyncTimerRef.current = null
+            }
+            // NOTE: inferRegionFromCurrentStroke() disabled — it runs a flood-fill
+            // over a large area on every mouse-up, freezing the screen on big images.
+            // The brush paints exactly what the user draws (standard behavior).
+            strokePointsRef.current = []
+            if (deferApplyRef.current) {
+                // Preview only — show overlay but don't apply clipPath or commit.
+                syncMaskToImage(targetImageRef.current, { skipClip: true })
+                setHasPending(true)
+            } else {
+                syncMaskToImage(targetImageRef.current)
+                commitMaskChange(canvasEditor, targetImageRef.current)
+            }
         }
 
         // Restore the system cursor when the pointer leaves the canvas by a path
@@ -852,6 +1332,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
             isDrawingRef.current = false
             lastPointRef.current = null
             if (liveSyncRafRef.current) { cancelAnimationFrame(liveSyncRafRef.current); liveSyncRafRef.current = null }
+            if (deferredLiveSyncTimerRef.current) { clearTimeout(deferredLiveSyncTimerRef.current); deferredLiveSyncTimerRef.current = null }
             if (reattachRafRef.current) { cancelAnimationFrame(reattachRafRef.current); reattachRafRef.current = null }
             // Stash the local undo/redo stacks on the image so re-entering the tool
             // (or switching Erase↔Mask) keeps the history.
@@ -899,6 +1380,7 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         getScenePoint,
         brushAt,
         strokeTo,
+        inferRegionFromCurrentStroke,
         pushUndo,
         snapshot,
         undo,
@@ -952,6 +1434,48 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
 
     const mainImage = targetImageRef.current
 
+    /* ─── deferApply: commit / discard ─── */
+
+    /** Apply the painted selection to the clipPath, actually hiding the pixels. */
+    const commitErase = useCallback(() => {
+        const img = targetImageRef.current
+        if (!img) return
+        // Apply the full mask (with feather) to the clipPath now, then clear the
+        // red preview so the user sees the committed transparency/result.
+        syncMaskToImage(img, { showOverlay: false })
+        removeOverlay({ render: false })
+        commitMaskChange(canvasEditor, img)
+        setHasPending(false)
+        preCommitSnapshotRef.current = null
+        preCommitUndoDepthRef.current = null
+        preCommitRedoStackRef.current = null
+    }, [syncMaskToImage, removeOverlay, canvasEditor])
+
+    /** Discard the pending selection, reverting the mask to its pre-paint state. */
+    const discardPending = useCallback(() => {
+        const img = targetImageRef.current
+        if (!img) return
+        const snap = preCommitSnapshotRef.current
+        if (snap) {
+            applySnapshot(snap)
+        }
+        if (typeof preCommitUndoDepthRef.current === 'number') {
+            undoStackRef.current = undoStackRef.current.slice(0, preCommitUndoDepthRef.current)
+        }
+        if (preCommitRedoStackRef.current) {
+            redoStackRef.current = preCommitRedoStackRef.current
+        }
+        setUndoDepth(undoStackRef.current.length)
+        setRedoDepth(redoStackRef.current.length)
+        preCommitSnapshotRef.current = null
+        preCommitUndoDepthRef.current = null
+        preCommitRedoStackRef.current = null
+        // Rebuild clipPath from the reverted mask (or remove it if empty)
+        syncMaskToImage(img, { showOverlay: false })
+        removeOverlay({ render: false })
+        setHasPending(false)
+    }, [applySnapshot, syncMaskToImage, removeOverlay])
+
     return {
         ready,
         mainImage,
@@ -965,6 +1489,10 @@ export default function usePixelMaskTool({ canvasEditor, defaultMode = 'erase', 
         altActive,
         hasMask, undoDepth, redoDepth,
         undo, redo, invert, clear, applyAlphaMask,
+        applyExternalMaskBlob, applyColorRangeMask, applyLuminanceRangeMask, applyLinearGradientMask,
+        createCleanupCanvas, createInpaintCanvases, commitCleanupUrl,
         supportsMagic,
+        // deferApply extras
+        hasPending, commitErase, discardPending,
     }
 }

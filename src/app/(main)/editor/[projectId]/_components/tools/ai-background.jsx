@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import { Download, ImageIcon, Layers, Loader2, Palette, Search, Sparkles, Trash2, Wand2 } from 'lucide-react'
@@ -19,6 +19,7 @@ import {
     mergeBackgroundWithImages,
     syncBackgroundGrade,
 } from '../../../../../../lib/canvas-background'
+import { buildImageKitBackgroundRemovalUrls } from '@/lib/imagekit-ai'
 
 const UNSPLASH_ACCESS_KEY = process.env.NEXT_PUBLIC_UNSPLASH_ACCESS_KEY
 const UNSPLASH_API_URL = "https://api.unsplash.com"
@@ -44,21 +45,19 @@ class FatalImageKitResponseError extends Error {
     }
 }
 
-const getBackgroundRemovalUrl = (project) => {
-    const imageUrl = project?.currentImageUrl || project?.originalImageUrl
+const getBackgroundRemovalUrls = (project) => {
+    // Prefer originalImageUrl — currentImageUrl may already contain AI transforms
+    // (e-bgremove, e-upscale, e-genfill, etc.) that ImageKit rejects with a 400
+    // when chained with another e-bgremove.
+    const original = project?.originalImageUrl
+    const current = project?.currentImageUrl
+    const imageUrl = (original?.includes('ik.imagekit.io') ? original : current) || original || current
 
-    if (!imageUrl?.includes("ik.imagekit.io")) return null
-
-    const width = Math.min(
-        Math.max(Math.round(project?.width || MAX_BACKGROUND_REMOVAL_DIMENSION), 1),
-        MAX_BACKGROUND_REMOVAL_DIMENSION
-    )
-    const height = Math.min(
-        Math.max(Math.round(project?.height || MAX_BACKGROUND_REMOVAL_DIMENSION), 1),
-        MAX_BACKGROUND_REMOVAL_DIMENSION
-    )
-
-    return `${imageUrl.split("?")[0]}?tr=w-${width},h-${height},c-at_max,e-bgremove`
+    return buildImageKitBackgroundRemovalUrls(imageUrl, {
+        width: project?.width,
+        height: project?.height,
+        maxDimension: MAX_BACKGROUND_REMOVAL_DIMENSION,
+    })
 }
 
 const getReadableResponseText = async (response) => {
@@ -211,7 +210,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
     const isGeneratingBackgroundRef = useRef(false)
     const generatedBackgroundObjectUrlRef = useRef(null)
 
-    const backgroundRemovalUrl = getBackgroundRemovalUrl(project)
+    const backgroundRemovalUrls = useMemo(() => getBackgroundRemovalUrls(project), [project])
     const mainImage = getMainImage(canvasEditor)
 
     // Cleanup all refs
@@ -224,12 +223,16 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         }
     }, [])
 
-    const ensureBackgroundRemovalReady = useCallback(async (url) => {
-        if (readyBackgroundUrlRef.current === url) {
-            return Promise.resolve(url)
+    const ensureBackgroundRemovalReady = useCallback(async (urls) => {
+        const candidates = Array.isArray(urls) ? urls.filter(Boolean) : [urls].filter(Boolean)
+        const cacheKey = candidates.join("|")
+        if (!cacheKey) throw new Error("Background removal URL is missing")
+
+        if (readyBackgroundUrlRef.current?.key === cacheKey) {
+            return Promise.resolve(readyBackgroundUrlRef.current.url)
         }
 
-        if (pendingBackgroundUrlRef.current === url && pendingBackgroundPromiseRef.current) {
+        if (pendingBackgroundUrlRef.current === cacheKey && pendingBackgroundPromiseRef.current) {
             return pendingBackgroundPromiseRef.current
         }
 
@@ -239,19 +242,35 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         }
         abortControllerRef.current = new AbortController()
 
-        pendingBackgroundUrlRef.current = url
+        pendingBackgroundUrlRef.current = cacheKey
         const controller = abortControllerRef.current
 
-        pendingBackgroundPromiseRef.current = waitForProcessedImage(url, (message) => {
-            statusUpdaterRef.current?.(message)
-        }, { signal: controller.signal }).then((readyUrl) => {
-            readyBackgroundUrlRef.current = readyUrl
+        pendingBackgroundPromiseRef.current = (async () => {
+            let lastError = null
+            for (let index = 0; index < candidates.length; index += 1) {
+                try {
+                    return await waitForProcessedImage(candidates[index], (message) => {
+                        statusUpdaterRef.current?.(message)
+                    }, { signal: controller.signal })
+                } catch (error) {
+                    lastError = error
+                    if (error.name === 'AbortError') throw error
+                    const canTryFallback =
+                        index < candidates.length - 1 &&
+                        /ImageKit rejected|400|Background service error/i.test(error?.message || '')
+                    if (!canTryFallback) throw error
+                    statusUpdaterRef.current?.("Retrying background removal...")
+                }
+            }
+            throw lastError || new Error("Background removal failed")
+        })().then((readyUrl) => {
+            readyBackgroundUrlRef.current = { key: cacheKey, url: readyUrl }
             return readyUrl
         }).catch((error) => {
             if (error.name === 'AbortError') {
                 throw error
             }
-            if (pendingBackgroundUrlRef.current === url) {
+            if (pendingBackgroundUrlRef.current === cacheKey) {
                 pendingBackgroundUrlRef.current = null
                 pendingBackgroundPromiseRef.current = null
             }
@@ -273,10 +292,10 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
 
     // Background removal effect - single active request
     useEffect(() => {
-        if (!backgroundRemovalUrl) return
+        if (!backgroundRemovalUrls.length) return
 
         let isActive = true
-        ensureBackgroundRemovalReady(backgroundRemovalUrl).catch((error) => {
+        ensureBackgroundRemovalReady(backgroundRemovalUrls).catch((error) => {
             if (isActive && error.name !== 'AbortError') {
                 console.warn("Background ready failed:", error)
             }
@@ -286,11 +305,11 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
             isActive = false
             abortControllerRef.current?.abort()
         }
-    }, [backgroundRemovalUrl, ensureBackgroundRemovalReady])
+    }, [backgroundRemovalUrls, ensureBackgroundRemovalReady])
 
     const handleBackgroundRemoval = async () => {
         const imageToReplace = getMainImage(canvasEditor)
-        if (!imageToReplace || !project || !backgroundRemovalUrl) {
+        if (!imageToReplace || !project || !backgroundRemovalUrls.length) {
             toast.error("Background removal only works with ImageKit images")
             return
         }
@@ -299,7 +318,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         statusUpdaterRef.current = setProcessingMessage
 
         try {
-            const readyImageUrl = await ensureBackgroundRemovalReady(backgroundRemovalUrl)
+            const readyImageUrl = await ensureBackgroundRemovalReady(backgroundRemovalUrls)
             setProcessingMessage("Applying background removal...")
 
             const processedImage = await FabricImage.fromURL(readyImageUrl, {

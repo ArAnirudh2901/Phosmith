@@ -27,6 +27,21 @@ export const useDatabaseQuery = (query, ...args) => {
     const [data, setData] = useState(undefined)
     const [isLoading, setIsLoading] = useState(!isSkipped)
     const [error, setError] = useState(null)
+    // Track whether we've ever successfully fetched data so we can distinguish
+    // "no data yet" (show skeleton) from "genuinely empty" (show empty state).
+    const hasFetchedRef = useRef(false)
+    const prevSkippedRef = useRef(isSkipped)
+
+    // When transitioning from skipped → active (e.g. auth completes),
+    // synchronously set isLoading = true so the very next render shows
+    // skeletons instead of a flash of the empty state.
+    if (prevSkippedRef.current && !isSkipped) {
+        prevSkippedRef.current = false
+        if (!isLoading) setIsLoading(true)
+    }
+    if (!prevSkippedRef.current && isSkipped) {
+        prevSkippedRef.current = true
+    }
 
     useEffect(() => {
         if (isSkipped || typeof window === "undefined") return undefined
@@ -40,7 +55,8 @@ export const useDatabaseQuery = (query, ...args) => {
 
         const runQuery = async () => {
             if (isSkipped) {
-                setData(undefined)
+                // Don't clear data when skipping — preserves stale data during
+                // brief auth re-checks so the UI doesn't flash empty.
                 setError(null)
                 setIsLoading(false)
                 lastErrorMessageRef.current = null
@@ -65,6 +81,7 @@ export const useDatabaseQuery = (query, ...args) => {
                 }
                 if (!cancelled) {
                     setData(body.data)
+                    hasFetchedRef.current = true
                     lastErrorMessageRef.current = null
                 }
             } catch (err) {
