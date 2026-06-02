@@ -15,10 +15,8 @@ import {
   Loader2,
   MessageSquare,
   Plus,
-  Redo2,
   RotateCcw,
   Send,
-  Undo2,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -2244,28 +2242,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           </p>
         </div>
         <div className="agent-header-actions">
-          <motion.button
-            type="button"
-            onClick={handleAgentUndo}
-            disabled={!canUndo && !livePreviewToken}
-            className="agent-icon-button disabled:opacity-35"
-            whileTap={{ scale: 0.94 }}
-            title="Undo the agent's last change (⌘Z)"
-            aria-label="Undo last change"
-          >
-            <Undo2 className="h-3.5 w-3.5" />
-          </motion.button>
-          <motion.button
-            type="button"
-            onClick={handleAgentRedo}
-            disabled={!canRedo}
-            className="agent-icon-button disabled:opacity-35"
-            whileTap={{ scale: 0.94 }}
-            title="Redo (⌘⇧Z)"
-            aria-label="Redo change"
-          >
-            <Redo2 className="h-3.5 w-3.5" />
-          </motion.button>
+          {/* Undo / redo buttons removed — the agent's per-step history
+              here only tracked a single most-recent change, which was
+              confusing next to the editor's global undo/redo (⌘Z / ⌘⇧Z).
+              Users can use the global shortcuts instead. */}
           <motion.button
             type="button"
             onClick={() => setAutoPreview((value) => !value)}

@@ -52,3 +52,6 @@ skills-lock.json
 
 # clerk configuration (can include secrets)
 /.clerk/
+
+# IDE configs
+.trae/

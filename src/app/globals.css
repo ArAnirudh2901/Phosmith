@@ -1240,6 +1240,47 @@ a:focus-visible,
   box-shadow: var(--editor-logo-edge-shadow);
 }
 
+/* ── Wordmark variant ──
+   The standard `.editor-logo-button` is a 2rem × 2rem square sized for the
+   icon-only mark. The wordmark variant (icon + "PIXXEL" text) widens to
+   hug its content, with internal padding for the gap. The cyan offset
+   shadow, white border, and dark background all carry over from the base
+   class — the wordmark shares its visual frame with the icon-only mark so
+   the topbar reads as one rhythm, not two different logos. */
+.editor-logo-button--wordmark {
+  width: auto;
+  height: 2rem;
+  padding-left: 0.45rem;
+  padding-right: 0.7rem;
+  gap: 0.5rem;
+  justify-content: flex-start;
+}
+
+@media (max-width: 1280px) {
+  .editor-logo-button--wordmark {
+    height: 1.75rem;
+    padding-left: 0.4rem;
+    padding-right: 0.6rem;
+    gap: 0.45rem;
+  }
+}
+
+@media (max-width: 1100px) {
+  .editor-logo-button--wordmark {
+    height: 1.625rem;
+    padding-left: 0.35rem;
+    padding-right: 0.5rem;
+    gap: 0.4rem;
+  }
+  /* On the tightest supported viewports the topbar is already crowded
+     (title, tool row, undo/redo, save, export). Hiding the wordmark text
+     falls back to the icon-only mark, which the existing 1.625rem
+     `.editor-logo-button` was sized for. */
+  .editor-logo-button--wordmark-text {
+    display: none;
+  }
+}
+
 .editor-workspace {
   background: #05070B;
 }

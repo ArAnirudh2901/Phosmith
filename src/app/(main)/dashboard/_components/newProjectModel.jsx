@@ -99,7 +99,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
     const [showUpgradeModel, setShowUpgradeModel] = useState(false)
     const router = useRouter()
 
-    const { isFree, canCreateProject } = usePlanAccess()
+    const { isFree, canCreateProject, isPro } = usePlanAccess()
     const canCreate = canCreateProject(currentProjectCount)
 
     const { mutate: createProject } = useDatabaseMutation(api.projects.create)
@@ -364,6 +364,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                 isOpen={showUpgradeModel}
                 onClose={() => { setShowUpgradeModel(false) }}
                 restrictedTool="projects"
+                isPro={isPro}
                 reason="Free plan is limited to 3 projects. Upgrade to Pro 
                 for unlimited projects and access to all AI editing tools."
             />

@@ -43,11 +43,19 @@ const collect = (names) => {
   return missing
 }
 
-let validated = false
+// Next.js dev mode evaluates this module in multiple runtimes (server bootstrap
+// + route handlers + proxy.ts), each with its own module instance. A plain
+// module-level `let validated = false` would log the warning once per instance.
+// Hoist the dedupe flag to `globalThis` so all instances share it.
+const VALIDATED_KEY = Symbol.for("pixxel.env.validated")
+const markValidated = () => {
+  globalThis[VALIDATED_KEY] = true
+}
+const isValidated = () => Boolean(globalThis[VALIDATED_KEY])
 
 export const validateEnv = ({ throwOnMissing = false } = {}) => {
-  if (validated) return { ok: true, missing: [] }
-  validated = true
+  if (isValidated()) return { ok: true, missing: [] }
+  markValidated()
 
   const isServer = typeof window === "undefined"
   const required = isServer ? [...REQUIRED_CLIENT, ...REQUIRED_SERVER] : REQUIRED_CLIENT

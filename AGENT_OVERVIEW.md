@@ -10,6 +10,8 @@ Welcome! This document provides an architectural overview of the **Pixxel GPT** 
 - **Temporary Cache**: Redis or Upstash Redis, with an in-memory development fallback.
 - **Styling**: Tailwind CSS v4, Framer Motion, and custom CSS (`animations.css`, `globals.css`)
 - **Canvas/Image Editor**: [Fabric.js](http://fabricjs.com/) (`fabric`) for the main editor canvas, [ImageKit](https://imagekit.io/) for transformations.
+- **Masking Engine**: A custom **megashader** — a single WebGL2 fragment shader that evaluates a chain of 7 mask kinds (linear, radial, luminance, color, smart-brush, semantic AI, depth) and boolean compositions (replace/add/subtract/intersect). Lives in `src/lib/megashader/`.
+- **AI Selection Service**: A local Python FastAPI service in `services/segment/` running `rembg` (BiRefNet for Select Subject), `facebook/sam2-hiera-small` (SAM 2 for click-to-select), and `depth-anything/Depth-Anything-V2-Small-hf` (Depth Anything V2 for whole-image depth maps). Reached via `MASK_SERVICE_URL=http://127.0.0.1:8001`.
 - **3D/Effects**: `@react-three/fiber`, Lenis (smooth scrolling).
 - **UI Components**: Shadcn UI (`src/components/ui`) & Radix UI.
 
@@ -19,12 +21,15 @@ Welcome! This document provides an architectural overview of the **Pixxel GPT** 
   - `/(auth)`: Clerk authentication pages.
   - `/(main)/dashboard`: User dashboard for managing projects.
   - `/(main)/editor`: The main Fabric.js canvas and AI image editor workspace.
+  - `/api/ai/{segment,sam2,depth}`: Next.js route proxies in front of the local Python mask service (BiRefNet / SAM 2 / Depth Anything V2).
 - `/src/components`: React components.
   - `/editor`: Editor-specific components (toolbar, canvas wrappers, layers).
   - `/ui`: Shadcn UI primitives.
+- `/src/lib/megashader`: The custom GLSL megashader engine — compiler, renderer, Fabric filter, mask-kind registry, GLSL fragment templates.
+- `/services/segment`: Local Python FastAPI mask service (BiRefNet + SAM 2 + Depth Anything V2). Started with `bun run mask:dev`.
 - `/prisma`: Prisma schema (`schema.prisma`) defining users, projects, revisions, agent edit sets, AI caches, ImageKit docs, and agent runs.
 - `/src/lib/neon`: Server-side database operations used by the app's API routes.
-- `/scripts`: Utility scripts (e.g., `ingest-imagekit-docs.mjs`).
+- `/scripts`: Utility scripts (e.g., `verify-megashader.mjs` for the 230 GLSL invariants; `verify-segment/semantic/depth.mjs` for end-to-end mask tests).
 
 ## Key Paradigms & Patterns
 

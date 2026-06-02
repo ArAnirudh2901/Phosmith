@@ -372,7 +372,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
         if (selectedText) { selectedText.set({ stroke: color, strokeWidth: width }); canvasEditor?.requestRenderAll() }
     }
 
-    const applyShadow = () => {
+    const applyShadow = useCallback(() => {
         if (!selectedText) return
         if (shadowEnabled) {
             selectedText.set('shadow', new Shadow({
@@ -382,8 +382,11 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
             selectedText.set('shadow', null)
         }
         canvasEditor?.requestRenderAll()
-    }
-    useEffect(() => { if (selectedText) applyShadow() }, [shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY])
+    }, [canvasEditor, selectedText, shadowEnabled, shadowColor, shadowBlur, shadowOffsetX, shadowOffsetY])
+
+    useEffect(() => {
+        applyShadow()
+    }, [applyShadow])
 
     const applyTextTransform = (transform) => {
         setTextTransform(transform)

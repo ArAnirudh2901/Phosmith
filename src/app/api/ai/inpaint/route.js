@@ -1,3 +1,23 @@
+// /api/ai/inpaint
+// ===============
+// ⚠️  WORK IN PROGRESS — NO FRONTEND CALLER
+// =========================================
+// This route is fully implemented (Hugging Face Stable Diffusion
+// inpainting, sharp pipeline, mask-bounds detection, edge-aware
+// composite) but no editor tool invokes it yet. The route builds
+// and deploys; calling it directly will incur a Hugging Face API
+// bill without producing any visible UI result.
+//
+// Audit (2025-06): no `fetch('/api/ai/inpaint')` in `src/` or
+// `hooks/`. The companion `/api/ai/outpaint` route does not exist;
+// "outpaint" is just a keyword in the ImageKit Agent's intent
+// parser (mapped to `/api/ai/extend`).
+//
+// Status: keep the route around as scaffolding for a future
+// inpaint tool. The build / lint / verify suites still pass.
+// See README.md "Scripts" → verify-inpaint (TODO) for the planned
+// end-to-end test.
+
 import { auth } from '@clerk/nextjs/server'
 import { NextResponse } from 'next/server'
 import sharp from 'sharp'

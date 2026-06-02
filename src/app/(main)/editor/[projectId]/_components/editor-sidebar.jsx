@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react"
 import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
-import { Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid } from "lucide-react"
+import { Bot, Beaker, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
 // Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
 // they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
@@ -40,6 +40,14 @@ const ImageManager = lazyTool(() => import("./tools/images"))
 const DrawControls = lazyTool(() => import("./tools/draw"))
 const CollageControls = lazyTool(() => import("./tools/collage"))
 
+// Dev-only: Megashader test panel. The dynamic import is gated by
+// NODE_ENV at the call site too, so production builds never request the
+// chunk. The cost in dev is one extra dynamic import (cached after first
+// mount) — negligible.
+const MegashaderTestPanel = process.env.NODE_ENV === 'production'
+    ? () => null
+    : lazyTool(() => import("./tools/_megashader-test-panel"))
+
 const TOOL_CONFIGS = {
     resize: { title: "Resize", icon: Expand },
     crop: { title: "Crop", icon: Crop },
@@ -55,6 +63,16 @@ const TOOL_CONFIGS = {
     ai_agent: { title: "ImageKit Agent", icon: Bot },
     collage: { title: "Collage", icon: LayoutGrid },
 }
+
+// Dev-only tool entry: the Megashader test panel. The icon is lazy-imported
+// via the topbar's DEV_ONLY_TOOLS list; here we only need a config entry to
+// route the activeTool into the right panel. Stays an empty object in
+// production so the topbar's never-evaluated branch can never hit the
+// `config` lookup below.
+const DEV_ONLY_TOOL_CONFIGS = process.env.NODE_ENV === 'production' ? {} : {
+    megashader_test: { title: "Megashader (Dev)", icon: Beaker, devOnly: true },
+}
+const ALL_TOOL_CONFIGS = { ...TOOL_CONFIGS, ...DEV_ONLY_TOOL_CONFIGS }
 
 export default function EditorSidebar({ project: projectProp, width }) {
     const { activeTool } = React.useContext(CanvasContext)
@@ -87,7 +105,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
         </div>
     )
 
-    const config = TOOL_CONFIGS[activeTool]
+    const config = ALL_TOOL_CONFIGS[activeTool]
     if (!config) return null
     const Icon = config.icon
 
@@ -107,6 +125,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "ai_edit": return project ? <AIEdits project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_agent": return project ? <ImageKitAgent project={project} {...colorProps} /> : <div>Loading...</div>
             case "collage": return project ? <CollageControls project={project} {...colorProps} /> : <div>Loading...</div>
+            case "megashader_test": return <MegashaderTestPanel />
             default: return <div>Tool not available</div>
         }
     }

@@ -9,26 +9,31 @@ export const runtime = 'nodejs'
 const MAX_INPUT_BYTES = 24 * 1024 * 1024
 const MAX_MODEL_SIDE = 1024
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * STRATEGY ORDER
+ *
+ * 1. Local Python service (`services/segment/`) — runs `rembg` (BiRefNet-
+ *    lite, MIT-licensed, SOTA quality). Free, no per-call cost.
+ *
+ * 2. HuggingFace semantic segmentation (segformer / detr). Last-resort
+ *    because the "largest non-background" heuristic misclassifies
+ *    leaves and other fine-grained subjects.
+ *
+ * Note: the previous HuggingFace RMBG-2.0 / RMBG-1.4 fallback was
+ * removed because neither model is deployed on the new
+ * `router.huggingface.co` inference API (returns HTTP 400 "Model not
+ * supported by provider hf-inference"), and the old
+ * `api-inference.huggingface.co` endpoint is deprecated. The retry loop
+ * cost 30-60s per request before failing, polluting the logs. If HF
+ * later adds RMBG support, the loop can be reintroduced here.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const MASK_SERVICE_URL = process.env.MASK_SERVICE_URL?.trim().replace(/\/+$/, '') || ''
 const HF_ENDPOINTS = [
   'https://router.huggingface.co/hf-inference/models',
   'https://api-inference.huggingface.co/models',
 ]
 
-/**
- * Background removal models — return a PNG with the subject preserved on a
- * transparent background. These produce pixel-accurate masks with clean edges,
- * far superior to semantic segmentation for "Select Subject".
- */
-const BG_REMOVAL_MODELS = [
-  'briaai/RMBG-1.4',
-  'schirrmacher/lraspp_mobilenet_v3_large',
-]
-
-/**
- * Fallback segmentation models (return JSON with per-category masks).
- * segformer → 150 ADE20K categories (wall, sky, person, tree…)
- * detr-panoptic → 133 COCO categories (LABEL_N format)
- */
 const SEGMENTATION_MODELS = [
   'nvidia/segformer-b0-finetuned-ade-512-512',
   'facebook/detr-resnet-50-panoptic',
@@ -72,14 +77,8 @@ const prepareImage = async (inputBuffer) => {
  *   4. Threshold    — re-binarises to a clean black/white mask
  * ═══════════════════════════════════════════════════════════════════════════ */
 const refineMaskEdges = async (greyBuffer, modelW, modelH, origW, origH) => {
-  // greyBuffer can be:
-  //   • a raw 1-channel pixel buffer (from alpha extraction)
-  //   • a PNG/JPEG buffer (from segmentation compositing)
-  // We normalise to greyscale first, then refine.
-
   let pipeline
 
-  // Detect if this is a raw pixel buffer (exactly w*h bytes) or an encoded image
   if (greyBuffer.length === modelW * modelH) {
     pipeline = sharp(greyBuffer, { raw: { width: modelW, height: modelH, channels: 1 } })
   } else {
@@ -87,127 +86,89 @@ const refineMaskEdges = async (greyBuffer, modelW, modelH, origW, origH) => {
   }
 
   return pipeline
-    .median(3)                    // 3×3 median filter: remove noise, preserve edges
-    .resize(origW, origH, {
-      fit: 'fill',
-      kernel: 'lanczos3',        // smooth interpolation (not blocky nearest-neighbor)
-    })
-    .blur(1.2)                   // slight Gaussian blur for anti-aliased edge transitions
-    .threshold(128)              // re-binarise to clean black/white mask
+    .median(3)
+    .resize(origW, origH, { fit: 'fill', kernel: 'lanczos3' })
+    .blur(1.2)
+    .threshold(128)
     .png()
     .toBuffer()
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * PRIMARY: BACKGROUND REMOVAL (RMBG)
+ * STRATEGY 1: LOCAL PYTHON MASK SERVICE
  *
- * These models return a PNG image with the subject opaque and background
- * transparent. The alpha channel IS our subject mask.
+ * The FastAPI service at `services/segment/` runs `rembg` (BiRefNet default)
+ * and returns a transparent-background PNG. The alpha channel IS the mask.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Send image to a background-removal model. Returns the result PNG buffer,
- * or null if all models fail.
- */
-const callBackgroundRemoval = async (imageBuffer) => {
-  const token = process.env.HUGGINGFACE_API_TOKEN?.trim()
-  if (!token) return null
+const callLocalMaskService = async (imageBuffer) => {
+  if (!MASK_SERVICE_URL) return null
 
-  for (const model of BG_REMOVAL_MODELS) {
-    for (const baseUrl of HF_ENDPOINTS) {
-      const endpoint = `${baseUrl}/${model}`
-      try {
-        console.info('[ai-segment] trying bg-removal:', endpoint)
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/octet-stream',
-          },
-          body: imageBuffer,
-          signal: AbortSignal.timeout(90_000),
-        })
+  const endpoint = `${MASK_SERVICE_URL}/segment`
+  try {
+    console.info('[ai-segment] trying local mask service:', endpoint)
+    const formData = new FormData()
+    formData.append('image', new Blob([imageBuffer], { type: 'image/jpeg' }), 'image.jpg')
 
-        // Model loading — wait and retry once
-        if (response.status === 503) {
-          const body = await response.json().catch(() => ({}))
-          const wait = Math.min(body.estimated_time || 20, 30)
-          console.info(`[ai-segment] bg-removal model loading, waiting ${wait}s…`)
-          await new Promise(r => setTimeout(r, wait * 1000))
-          const retry = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/octet-stream',
-            },
-            body: imageBuffer,
-            signal: AbortSignal.timeout(90_000),
-          })
-          if (retry.ok) {
-            const ct = retry.headers.get('content-type') || ''
-            if (ct.includes('image')) {
-              const buf = Buffer.from(await retry.arrayBuffer())
-              console.info('[ai-segment] ✓ bg-removal from', model, '→', buf.length, 'bytes')
-              return { buffer: buf, model }
-            }
-          }
-          continue
-        }
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      body: formData,
+      // BiRefNet-lite on CPU is the recommended default; on a 1024×1024
+      // image it takes ~50–60 s on a 2024 MacBook Air (Apple Silicon,
+      // CoreML disabled). 90 s was too tight under load — bump to 180 s
+      // to give it headroom. A faster model (`u2netp`, ~3 s) can be
+      // selected via `SEGMENT_MODEL` in services/segment/.env.
+      signal: AbortSignal.timeout(180_000),
+    })
 
-        if (!response.ok) {
-          const text = await response.text().catch(() => '')
-          console.warn('[ai-segment] bg-removal HTTP', response.status, text.slice(0, 200))
-          continue
-        }
-
-        const ct = response.headers.get('content-type') || ''
-        if (ct.includes('image')) {
-          const buf = Buffer.from(await response.arrayBuffer())
-          console.info('[ai-segment] ✓ bg-removal from', model, '→', buf.length, 'bytes')
-          return { buffer: buf, model }
-        }
-
-        // Some models return JSON with a mask — fall through to segmentation
-        console.warn('[ai-segment] bg-removal returned non-image:', ct.slice(0, 80))
-        continue
-      } catch (error) {
-        console.warn('[ai-segment] bg-removal failed:', model, error?.message)
-        continue
-      }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      console.warn('[ai-segment] local service HTTP', response.status, text.slice(0, 200))
+      return null
     }
-  }
 
-  return null
+    const buf = Buffer.from(await response.arrayBuffer())
+    const ct = response.headers.get('content-type') || ''
+    if (!ct.includes('image')) {
+      console.warn('[ai-segment] local service non-image response:', ct.slice(0, 80))
+      return null
+    }
+
+    const model = response.headers.get('x-model') || 'local-rembg'
+    console.info('[ai-segment] ✓ local service →', buf.length, 'bytes (model:', model + ')')
+    return { buffer: buf, model }
+  } catch (error) {
+    console.warn('[ai-segment] local service failed:', error?.message)
+    return null
+  }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * STRATEGY 2: HUGGINGFACE SEMANTIC SEGMENTATION (Segformer / DETR)
+ *
+ * Last-resort fallback. Returns JSON with per-category masks. We
+ * composite the largest single subject segment and run it through the
+ * same edge refinement pipeline.
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 /**
  * Extract the alpha channel from a background-removed PNG as a subject mask.
  * Alpha 255 = subject (keep → white), Alpha 0 = background (erase → black).
  */
 const buildMaskFromAlpha = async (pngBuffer, modelW, modelH, origW, origH) => {
-  // Decode to raw RGBA at model resolution
   const { data } = await sharp(pngBuffer, { failOn: 'none' })
     .resize(modelW, modelH, { fit: 'fill' })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true })
 
-  // Extract alpha channel as a 1-channel greyscale buffer
   const alphaBuffer = Buffer.alloc(modelW * modelH)
   for (let i = 0; i < modelW * modelH; i++) {
     alphaBuffer[i] = data[i * 4 + 3]
   }
 
-  // Run through the edge refinement pipeline
   return refineMaskEdges(alphaBuffer, modelW, modelH, origW, origH)
 }
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * FALLBACK: SEMANTIC SEGMENTATION (Segformer / DETR)
- *
- * Returns JSON with per-category masks. We composite subject segments and
- * run through the same edge refinement pipeline.
- * ═══════════════════════════════════════════════════════════════════════════ */
 
 const callSegmentation = async (imageBuffer) => {
   const token = process.env.HUGGINGFACE_API_TOKEN?.trim()
@@ -283,15 +244,18 @@ const callSegmentation = async (imageBuffer) => {
   throw lastError || new Error('All segmentation models failed')
 }
 
-/**
- * Background / "stuff" labels — EXCLUDED from the subject mask.
- */
+// Labels that are unambiguously *background* — wall, sky, floor, etc.
+// We deliberately do NOT include `plant`, `tree`, `flower`, `rock`,
+// `sculpture`, `vase`, `bannister`, `pot` here: those are ambiguous
+// (they're common *subject* labels in portrait / still-life / nature
+// photography) and were previously killing the leaf-on-vine test case
+// by filtering out the very segment that identified the subject.
 const BACKGROUND_LABELS = new Set([
-  // ADE20K stuff
-  'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road',
-  'grass', 'sidewalk', 'earth', 'mountain', 'plant', 'water', 'sea',
-  'field', 'fence', 'sand', 'path', 'river', 'bridge', 'flower',
-  'house', 'rock', 'hill', 'dirt', 'snow', 'stairway', 'runway',
+  // ADE20K stuff — pure scene/structure
+  'wall', 'building', 'sky', 'floor', 'ceiling', 'road',
+  'grass', 'sidewalk', 'earth', 'mountain', 'water', 'sea',
+  'field', 'fence', 'sand', 'path', 'river', 'bridge',
+  'house', 'hill', 'dirt', 'snow', 'stairway', 'runway',
   'swimming pool', 'lake', 'waterfall', 'land', 'curtain', 'pillow',
   'towel', 'rug', 'carpet', 'blanket', 'column', 'signboard',
   'streetlight', 'booth', 'stage', 'railing', 'escalator',
@@ -315,9 +279,6 @@ const decodeMaskBuffer = (mask) => {
   return null
 }
 
-/**
- * Decode a single segment mask PNG into an RGBA buffer at the target size.
- */
 const processSegmentMask = async (maskBuf, width, height) => {
   return sharp(maskBuf, { failOn: 'none' })
     .resize(width, height, { fit: 'fill', kernel: 'nearest' })
@@ -327,23 +288,16 @@ const processSegmentMask = async (maskBuf, width, height) => {
     .toBuffer()
 }
 
-/**
- * Build a subject mask from segmentation results, then run it through
- * the edge refinement pipeline.
- */
 const buildSubjectMask = async (segments, width, height, origWidth, origHeight) => {
   if (!Array.isArray(segments) || segments.length === 0) {
     throw new Error('No segments detected. Try a different image with a clearer subject.')
   }
 
-  // Strategy 1: Exclude known background labels, composite the rest
   const subjectSegs = segments.filter(seg => {
     const label = (seg.label || '').toLowerCase()
     return !BACKGROUND_LABELS.has(label) && decodeMaskBuffer(seg.mask) !== null
   })
 
-  // Strategy 2: If all segments are "background" or LABEL_N format,
-  // use the LARGEST segment as background and invert
   const useInversion = subjectSegs.length === 0 || (
     subjectSegs.length === segments.length && segments.every(s => /^LABEL_/i.test(s.label || ''))
   )
@@ -365,7 +319,6 @@ const buildSubjectMask = async (segments, width, height, origWidth, origHeight) 
       const buf = decodeMaskBuffer(largestSeg.mask)
       const processed = await processSegmentMask(buf, width, height)
 
-      // White canvas + background overlay → negate = subject=white, bg=black
       const rawMask = await sharp({
         create: { width, height, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
       })
@@ -375,39 +328,46 @@ const buildSubjectMask = async (segments, width, height, origWidth, origHeight) 
         .raw()
         .toBuffer()
 
-      // Apply edge refinement pipeline (replaces old nearest-neighbor upscale)
       return refineMaskEdges(rawMask, width, height, origWidth, origHeight)
     }
   }
 
-  // Normal path: composite subject segments onto a black canvas
-  console.info('[ai-segment] using label-based strategy, subject segments:', subjectSegs.length)
-  const composites = []
+  console.info('[ai-segment] using largest-segment strategy, candidates:', subjectSegs.length)
 
-  for (const seg of (subjectSegs.length > 0 ? subjectSegs : segments)) {
+  // Previous behaviour was to UNION every non-background segment, which
+  // produced a "covers-the-whole-image" mask whenever the model split
+  // the scene into many small labels (a leaf in a still-life gets
+  // classified as `plant`+`tree`+`sculpture`+`vase` etc., and the union
+  // fills the frame). Picking the LARGEST single segment instead gives
+  // a tight mask focused on the dominant foreground object.
+  const candidates = subjectSegs.length > 0 ? subjectSegs : segments
+  let bestSeg = null
+  let bestSize = 0
+  for (const seg of candidates) {
     const buf = decodeMaskBuffer(seg.mask)
     if (!buf) continue
-    try {
-      const processed = await processSegmentMask(buf, width, height)
-      composites.push({ input: processed, blend: 'over' })
-    } catch (err) {
-      console.warn('[ai-segment] mask decode failed for:', seg.label, err?.message)
+    if (buf.length > bestSize) {
+      bestSize = buf.length
+      bestSeg = seg
     }
   }
 
-  if (composites.length === 0) {
+  if (!bestSeg) {
     throw new Error('Could not process segment masks. Try a different image.')
   }
+  console.info('[ai-segment] selected largest segment:', bestSeg.label,
+    `(${(bestSize / 1024).toFixed(1)}KB)`)
+
+  const processed = await processSegmentMask(decodeMaskBuffer(bestSeg.mask), width, height)
 
   const rawMask = await sharp({
     create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 1 } },
   })
-    .composite(composites)
+    .composite([{ input: processed, blend: 'over' }])
     .greyscale()
     .raw()
     .toBuffer()
 
-  // Apply edge refinement pipeline (replaces old nearest-neighbor upscale)
   return refineMaskEdges(rawMask, width, height, origWidth, origHeight)
 }
 
@@ -425,6 +385,23 @@ export async function POST(request) {
     const limited = rateLimitResponse(await enforceRateLimit('ai-segment', userId))
     if (limited) return limited
 
+    // Pre-check the Content-Length header BEFORE parsing the multipart
+    // body. Next.js's request.formData() is streaming but it still
+    // allocates a Buffer for the whole body in some cases; a 1GB upload
+    // from a malicious client would otherwise be parsed before our
+    // per-file `fileToBuffer` size check runs. Mirrors the same check
+    // in /api/ai/depth.
+    const contentLength = request.headers.get('content-length')
+    if (contentLength) {
+      const cl = Number.parseInt(contentLength, 10)
+      if (Number.isFinite(cl) && cl > MAX_INPUT_BYTES) {
+        return NextResponse.json(
+          { error: `request body too large (${(cl / 1024 / 1024).toFixed(1)}MB > ${MAX_INPUT_BYTES / 1024 / 1024}MB)` },
+          { status: 413 },
+        )
+      }
+    }
+
     const formData = await request.formData()
     const imageBuffer = await fileToBuffer(formData.get('image'), 'image')
 
@@ -433,25 +410,34 @@ export async function POST(request) {
       '→ orig:', prepared.origWidth, 'x', prepared.origHeight)
 
     let maskBuffer = null
+    let usedModel = null
 
-    // ── 1. Try background removal (RMBG) — pixel-accurate alpha masks ──
-    const bgResult = await callBackgroundRemoval(prepared.buffer)
-    if (bgResult) {
-      console.info('[ai-segment] building mask from', bgResult.model, 'alpha channel')
+    // ── 1. Local Python service (BiRefNet / rembg) ──
+    const localResult = await callLocalMaskService(prepared.buffer)
+    if (localResult) {
       try {
         maskBuffer = await buildMaskFromAlpha(
-          bgResult.buffer,
+          localResult.buffer,
           prepared.width,
           prepared.height,
           prepared.origWidth,
           prepared.origHeight,
         )
+        usedModel = localResult.model
       } catch (err) {
-        console.warn('[ai-segment] alpha extraction failed, falling back:', err?.message)
+        console.warn('[ai-segment] local alpha extraction failed, falling back:', err?.message)
       }
     }
 
-    // ── 2. Fallback: semantic segmentation (segformer / detr) ──
+    // ── 2. HuggingFace background removal (RMBG-2.0 → RMBG-1.4) was
+    //      here; the models are not deployed on the new router API
+    //      (HTTP 400 "Model not supported by provider hf-inference")
+    //      so the fallback is removed. The semantic-seg fallback below
+    //      takes over directly. ──
+
+    // ── 3. Semantic segmentation (segformer / detr) — last resort ──
+
+    // ── 3. Semantic segmentation (segformer / detr) — last resort ──
     if (!maskBuffer) {
       console.info('[ai-segment] falling back to semantic segmentation')
       const segments = await callSegmentation(prepared.buffer)
@@ -462,15 +448,17 @@ export async function POST(request) {
         prepared.origWidth,
         prepared.origHeight,
       )
+      usedModel = 'semantic-seg'
     }
 
-    console.info('[ai-segment] ✓ mask:', maskBuffer.length, 'bytes')
+    console.info('[ai-segment] ✓ mask:', maskBuffer.length, 'bytes (model:', usedModel + ')')
 
     return new NextResponse(maskBuffer, {
       status: 200,
       headers: {
         'Content-Type': 'image/png',
         'Cache-Control': 'no-store',
+        'X-Model': usedModel || 'unknown',
       },
     })
   } catch (error) {
