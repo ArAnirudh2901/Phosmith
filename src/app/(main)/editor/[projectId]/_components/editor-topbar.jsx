@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid } from 'lucide-react'
+import { Bot, Beaker, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -10,7 +10,7 @@ import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
 import { addImageFilesToCanvas } from '@/lib/canvas-images'
 import ProBadge from '@/components/pro-badge'
-import InkDropLogo from '@/components/ink-drop-logo'
+import PixxelWordmark from '@/components/pixxel-wordmark'
 import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
 import { motion, AnimatePresence } from 'framer-motion'
 import { isPixxelMaskOverlay } from '@/lib/canvas-mask'
@@ -47,6 +47,17 @@ const TOOLS = [
     { id: "ai_agent", label: "Agent", icon: Bot },
     { id: "collage", label: "Collage", icon: LayoutGrid },
 ]
+
+// Dev-only tools are appended in `next.config.mjs`-stripped builds via a
+// NODE_ENV check. These IDs map 1:1 to entries in `TOOL_CONFIGS` in
+// `editor-sidebar.jsx`. Production trees never see them.
+const DEV_ONLY_TOOLS = process.env.NODE_ENV === 'production' ? [] : [
+    { id: "megashader_test", label: "Megashader", icon: Beaker, devOnly: true },
+]
+
+// The combined list is what the topbar iterates over. Order is preserved so
+// the Megashader button sits at the end of the bar (visually separated).
+const ALL_TOOLS = [...TOOLS, ...DEV_ONLY_TOOLS]
 
 const isExportTransientObject = (obj) =>
     obj?.excludeFromExport ||
@@ -146,7 +157,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
     }, [triggerAddImage])
 
     const { canvasEditor, activeTool, onToolChange } = useCanvas()
-    const { hasAccess } = usePlanAccess()
+    const { hasAccess, isPro, isPlanReady } = usePlanAccess()
     const { accentRgb } = useDynamicAccent()
 
     const exportResolutionLabel = useMemo(() => {
@@ -272,7 +283,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
     }
 
     const handleToolChange = (toolId) => {
-        if (!hasAccess(toolId)) {
+        if (isPlanReady && !isPro && !hasAccess(toolId)) {
             setRestrictedTool(toolId)
             setShowUpgradeModel(true)
             return
@@ -568,11 +579,11 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
 
                     <Link
                         href="/dashboard"
-                        className="editor-logo-button flex items-center justify-center flex-none"
+                        className="editor-logo-button editor-logo-button--wordmark flex items-center flex-none"
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
-                        <InkDropLogo />
+                        <PixxelWordmark />
                     </Link>
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).
@@ -619,7 +630,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     className="editor-topbar-tools flex flex-1 min-w-0 items-center justify-start gap-1 lg:gap-1.5 xl:gap-2 min-[1700px]:gap-2.5 min-[2000px]:gap-3 overflow-x-auto scrollbar-hide"
                     ref={toolsScrollRef}
                 >
-                    {TOOLS.map((tool) => {
+                    {ALL_TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
                         const hasToolAccess = hasAccess(tool.id)
@@ -1112,6 +1123,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     setRestrictedTool(null)
                 }}
                 restrictedTool={restrictedTool}
+                isPro={isPro}
                 reason={
                     restrictedTool === "export"
                         ? "Free plan is limited to 20 exports per month. Upgrade to Pro for unlimited exports"

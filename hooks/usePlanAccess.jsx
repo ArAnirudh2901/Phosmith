@@ -18,11 +18,11 @@ const hasActiveProSubscription = (subscription) => {
 const usePlanAccess = () => {
 
     const { isLoaded, isSignedIn, has } = useAuth()
-    const { data: subscription } = useSubscription({
+    const { data: subscription, isLoading: isSubscriptionLoading } = useSubscription({
         enabled: Boolean(isLoaded && isSignedIn),
         keepPreviousData: true,
     })
-    const { data: currentUser } = useDatabaseQuery(
+    const { data: currentUser, isLoading: isUserLoading } = useDatabaseQuery(
         api.users.getCurrentUser,
         isLoaded && isSignedIn ? {} : "skip"
     )
@@ -32,6 +32,8 @@ const usePlanAccess = () => {
         currentUser?.plan === PRO_PLAN_SLUG ||
         hasActiveProSubscription(subscription)
     const isFree = !isPro
+
+    const isPlanReady = isLoaded && isSignedIn && !isUserLoading && !isSubscriptionLoading
 
     const planAccess = {
         // Free Plan tools list
@@ -79,6 +81,7 @@ const usePlanAccess = () => {
           userPlan: isPro ? "pro" : "free",
         isPro,
         isFree,
+        isPlanReady,
         hasAccess,
         planAccess,
         getRestrictedTools,

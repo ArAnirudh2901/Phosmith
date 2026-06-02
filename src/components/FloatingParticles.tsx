@@ -133,7 +133,7 @@ function ConnectionLines({ orbs }) {
               }
             }
             return arr
-          }, [])}
+          }, [orbs])}
           itemSize={3}
         />
       </bufferGeometry>

@@ -71,6 +71,7 @@ const MAX_PREVIEW_ZOOM_PERCENT = 300
 const PREVIEW_ZOOM_STEP_PERCENT = 1
 const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
+const MIN_PERSISTED_HISTORY_ENTRIES = 3
 const MAX_NEON_STATE_CHARS = 900_000
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
@@ -162,30 +163,30 @@ const CanvasEditor = ({ project }) => {
         return { width: containerRef.current.clientWidth, height: containerRef.current.clientHeight }
     }
 
-    const getViewportState = (canvas) => {
+    const getViewportState = useCallback((canvas) => {
         const viewportTransform = canvas.viewportTransform || [1, 0, 0, 1, 0, 0]
         const zoom = viewportTransform[0] || 1
         return {
             zoom,
             center: { x: (canvas.getWidth() / 2 - viewportTransform[4]) / zoom, y: (canvas.getHeight() / 2 - viewportTransform[5]) / zoom },
         }
-    }
+    }, [])
 
-    const setViewportState = (canvas, viewportState, fallbackCenter) => {
+    const setViewportState = useCallback((canvas, viewportState, fallbackCenter) => {
         const zoom = clamp(viewportState?.zoom || 1, MIN_ZOOM, MAX_ZOOM)
         const center = viewportState?.center || fallbackCenter
         if (!center) return
         canvas.setViewportTransform([zoom, 0, 0, zoom, canvas.getWidth() / 2 - center.x * zoom, canvas.getHeight() / 2 - center.y * zoom])
-    }
+    }, [])
 
-    const syncPreviewZoomState = (canvas) => {
+    const syncPreviewZoomState = useCallback((canvas) => {
         const nextPercent = readPreviewZoomPercent(canvas)
         if (previewZoomPercentRef.current === nextPercent) return
         previewZoomPercentRef.current = nextPercent
         setPreviewZoomPercent(nextPercent)
-    }
+    }, [])
 
-    const setCanvasPreviewZoom = (canvas, percent) => {
+    const setCanvasPreviewZoom = useCallback((canvas, percent) => {
         if (!canvas) return
         const viewportState = getViewportState(canvas)
         setViewportState(canvas, {
@@ -195,13 +196,14 @@ const CanvasEditor = ({ project }) => {
         canvas.calcOffset()
         canvas.requestRenderAll()
         syncPreviewZoomState(canvas)
-    }
+    }, [getViewportState, setViewportState, syncPreviewZoomState])
 
-    const fitProjectToViewport = (canvas, size = project) => {
+    const fitProjectToViewport = useCallback((canvas, size) => {
         const canvasW = canvas.getWidth()
         const canvasH = canvas.getHeight()
-        const projectW = Math.max(1, size?.width || project?.width || 1)
-        const projectH = Math.max(1, size?.height || project?.height || 1)
+        const proj = size || projectRef.current
+        const projectW = Math.max(1, proj?.width || 1)
+        const projectH = Math.max(1, proj?.height || 1)
         if (!canvasW || !canvasH || !projectW || !projectH) return
 
         // Use 92% of canvas area as the safe zone. This gives a tighter fit
@@ -214,9 +216,9 @@ const CanvasEditor = ({ project }) => {
             zoom: clamp(fitZoom || 1, MIN_ZOOM, MAX_ZOOM),
             center: { x: projectW / 2, y: projectH / 2 },
         })
-    }
+    }, [setViewportState])
 
-    const createInitialViewport = (canvas) => fitProjectToViewport(canvas)
+    const createInitialViewport = useCallback((canvas) => fitProjectToViewport(canvas), [fitProjectToViewport])
 
     const emitHistoryChange = (canvas) => {
         if (!canvas) return
@@ -261,7 +263,7 @@ const CanvasEditor = ({ project }) => {
             isRestoringRef.current = false
             emitHistoryChange(canvas)
         }
-    }, [])
+    }, [setViewportState])
 
     const undoCanvasState = useCallback(async () => {
         const canvas = canvasInstanceRef.current
@@ -297,11 +299,36 @@ const CanvasEditor = ({ project }) => {
             history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
             historyIndex: historyIndexRef.current,
         }
+        // Large projects (lots of objects + many history entries) can push the
+        // serialized JSON over MAX_NEON_STATE_CHARS, which would make Neon
+        // reject the write. Trim history with a sliding window — drop the
+        // OLDEST entries — until the JSON fits. We always keep at least
+        // MIN_PERSISTED_HISTORY_ENTRIES so the user can still undo a few steps
+        // even on a very large project.
+        //
+        // Previously this branch wiped the entire history (history: [],
+        // historyIndex: -1), which left the user with no undo at all after the
+        // first save of a large project. See Bug G.
         if (fullState.history.length > 0 && JSON.stringify(fullState).length > MAX_NEON_STATE_CHARS) {
+            const originalHistoryLength = fullState.history.length
+            let persistedHistory = fullState.history
+            while (
+                persistedHistory.length > MIN_PERSISTED_HISTORY_ENTRIES
+                && JSON.stringify({ ...fullState, history: persistedHistory }).length > MAX_NEON_STATE_CHARS
+            ) {
+                persistedHistory = persistedHistory.slice(1)
+            }
+            const droppedCount = originalHistoryLength - persistedHistory.length
+            if (droppedCount > 0) {
+                console.warn(
+                    `[canvas] History trimmed for storage: dropped ${droppedCount} oldest entries ` +
+                    `(${originalHistoryLength} → ${persistedHistory.length}) to fit within ` +
+                    `${MAX_NEON_STATE_CHARS} chars. The in-memory undo stack is unaffected.`
+                )
+            }
             fullState = {
-                ...canvasJSON,
-                history: [],
-                historyIndex: -1,
+                ...fullState,
+                history: persistedHistory,
             }
         }
 
@@ -372,7 +399,7 @@ const CanvasEditor = ({ project }) => {
             flusher.flushNow()
             if (flusherRef.current === flusher) flusherRef.current = null
         }
-    }, [project?._id])
+    }, [getViewportState, project?._id, setViewportState, syncPreviewZoomState])
 
     // beforeunload + pagehide: force-flush the cache to Neon before the user
     // navigates away. `keepalive` lets the fetch survive the page unloading.
@@ -391,10 +418,10 @@ const CanvasEditor = ({ project }) => {
             window.removeEventListener("beforeunload", handler)
             window.removeEventListener("pagehide", handler)
         }
-    }, [project?._id])
+    }, [getViewportState, project?._id, setViewportState, syncPreviewZoomState])
 
     useEffect(() => {
-        if (!canvasRef.current || !project) return
+        if (!canvasRef.current || !projectRef.current) return
 
         const initGen = ++initGenerationRef.current
         let mounted = true
@@ -407,12 +434,14 @@ const CanvasEditor = ({ project }) => {
             if (initGen !== initGenerationRef.current || !mounted) return
 
             setIsLoading(true)
+            const proj = projectRef.current
+            if (!proj) return
             const { width, height } = getContainerSize()
             const el = canvasRef.current
             if (!el) return
 
             const canvas = new Canvas(el, {
-                width: width || project.width, height: height || project.height,
+                width: width || proj.width, height: height || proj.height,
                 backgroundColor: "transparent",
                 preserveObjectStacking: true, controlsAboveOverlay: true, selection: true,
                 hoverCursor: "move", moveCursor: "move", defaultCursor: "default",
@@ -425,18 +454,18 @@ const CanvasEditor = ({ project }) => {
             }
 
             canvasInstanceRef.current = canvas
-            canvas.setDimensions({ width: width || project.width, height: height || project.height }, { backstoreOnly: false })
+            canvas.setDimensions({ width: width || proj.width, height: height || proj.height }, { backstoreOnly: false })
 
             // Read-through: if the server cache has a newer snapshot than what's
             // in Neon (because a previous session ended with pending debounced
             // writes that haven't been flushed yet), prefer that. Otherwise the
             // user would see an old version of their work after a reload.
-            let rawCanvasState = project.canvasState
-            let effectiveCurrentImageUrl = project.currentImageUrl
+            let rawCanvasState = proj.canvasState
+            let effectiveCurrentImageUrl = proj.currentImageUrl
             try {
-                const cachedSnapshot = await fetchCachedSnapshot(project._id)
+                const cachedSnapshot = await fetchCachedSnapshot(proj._id)
                 if (cachedSnapshot?.canvasState) {
-                    const projectUpdatedAt = Number(project.updatedAt) || 0
+                    const projectUpdatedAt = Number(proj.updatedAt) || 0
                     const cachedUpdatedAt = Number(cachedSnapshot.updatedAt) || 0
                     if (cachedUpdatedAt > projectUpdatedAt) {
                         rawCanvasState = cachedSnapshot.canvasState
@@ -453,11 +482,11 @@ const CanvasEditor = ({ project }) => {
             const persistedHistory = Array.isArray(rawCanvasState?.history) ? rawCanvasState.history : null
             let hasRestoredViewport = false
 
-            if (!canvasState && (effectiveCurrentImageUrl || project.originalImageUrl)) {
+            if (!canvasState && (effectiveCurrentImageUrl || proj.originalImageUrl)) {
                 try {
-                    const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
+                    const imageUrl = effectiveCurrentImageUrl || proj.originalImageUrl
                     const fabricImage = await FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" })
-                    fitImageInsideProject(fabricImage, project)
+                    fitImageInsideProject(fabricImage, proj)
                     canvas.add(fabricImage)
                 } catch (error) { console.error("Error loading project image:", error) }
             }
@@ -469,11 +498,11 @@ const CanvasEditor = ({ project }) => {
                     // Restore the "grade background" intent so it keeps tracking after reload.
                     canvas.__pixxelGradeBackground = Boolean(canvasState.gradeBackground)
                     removeExpansionFramesFromCanvas(canvas)
-                    if (canvasState.viewport) { setViewportState(canvas, canvasState.viewport, { x: project.width / 2, y: project.height / 2 }); hasRestoredViewport = true }
-                    const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
+                    if (canvasState.viewport) { setViewportState(canvas, canvasState.viewport, { x: proj.width / 2, y: proj.height / 2 }); hasRestoredViewport = true }
+                    const imageUrl = effectiveCurrentImageUrl || proj.originalImageUrl
                     await hydrateCanvasImages(canvas, imageUrl, {
                         forcePrimaryImageUrl: true,
-                        canvasSize: { width: project.width, height: project.height },
+                        canvasSize: { width: proj.width, height: proj.height },
                     })
                     for (const obj of canvas.getObjects()) {
                         if (obj?.type?.toLowerCase() === 'image' && obj.filters?.length) {
@@ -495,11 +524,11 @@ const CanvasEditor = ({ project }) => {
                 // saved filter type Fabric can no longer enliven), still show the project
                 // image so the user doesn't stare at a blank canvas.
                 if (!loadedFromState) {
-                    const imageUrl = effectiveCurrentImageUrl || project.originalImageUrl
+                    const imageUrl = effectiveCurrentImageUrl || proj.originalImageUrl
                     if (imageUrl && canvas.getObjects().length === 0) {
                         try {
                             const fallbackImage = await FabricImage.fromURL(imageUrl, { crossOrigin: "anonymous" })
-                            fitImageInsideProject(fallbackImage, project)
+                            fitImageInsideProject(fallbackImage, proj)
                             canvas.add(fallbackImage)
                             canvas.requestRenderAll()
                         } catch (error) { console.error("Fallback image load failed:", error) }
@@ -765,7 +794,20 @@ const CanvasEditor = ({ project }) => {
             initGenerationRef.current += 1
             disposeCanvasInstance()
         }
-    }, [project?._id, disposeCanvasInstance])
+    }, [
+        project?._id,
+        createInitialViewport,
+        disposeCanvasInstance,
+        fitProjectToViewport,
+        pushHistoryState,
+        redoCanvasState,
+        saveCanvasState,
+        setCanvasEditor,
+        setCanvasPreviewZoom,
+        setViewportState,
+        syncPreviewZoomState,
+        undoCanvasState,
+    ])
 
     useEffect(() => {
         const canvas = canvasInstanceRef.current
@@ -779,6 +821,110 @@ const CanvasEditor = ({ project }) => {
             canRedo: historyIndexRef.current < historyRef.current.length - 1,
         })
     }, [canvasEditor, undoCanvasState, redoCanvasState, pushHistoryState, saveCanvasState])
+
+    // ─── Megashader filter wiring ────────────────────────────────────────────
+    // The megashader is a stateful pipeline shared via the window event bus
+    // (see useMaskLayers in /hooks). Whenever the mask layer stack changes,
+    // we find the primary Fabric image on the canvas and install/update the
+    // MegashaderFilter. The filter itself is a 2D passthrough that delegates
+    // to a private WebGL2 context (see src/lib/megashader/), so installing it
+    // doesn't disturb Fabric's filter chain for the curves/grade filters.
+    //
+    // BOTH refs are component-level so they survive `useEffect` re-runs
+    // (which happen when `canvasEditor` changes). Pre-fix, the
+    // `getLastAppliedStackRef` was a plain object declared INSIDE the
+    // effect, so each re-run created a fresh one starting at `{ chain: [] }`
+    // — the first `handleGlobalAlpha` after a re-run would re-apply with
+    // an empty stack and silently drop the megashader. The component-level
+    // `useRef` keeps the value stable across the effect's re-mounts.
+    //
+    // Step 10.2 — `recompileTimerRef` is a component-level `useRef`
+    // holding the debounce timer for `handleLayersChanged`. Without
+    // this, dragging a slider (e.g. per-layer exposure) fires
+    // `pixxel:mask-layers-changed` on every step; the GLSL compiler
+    // (50-200 ms for a complex chain) re-runs for every step, blocking
+    // the main thread. The 150 ms debounce coalesces a rapid burst
+    // into one recompile after the user pauses.
+    const megashaderAlphaRef = useRef(1)
+    const getLastAppliedStackRef = useRef(/** @type {import('@/lib/megashader/mask-types').MaskStack} */ ({ chain: [] }))
+    const recompileTimerRef = useRef(/** @type {ReturnType<typeof setTimeout> | null} */ (null))
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined
+
+        const findPrimaryImage = () => {
+            const canvas = canvasInstanceRef.current
+            if (!canvas) return null
+            const objects = canvas.getObjects?.() || []
+            return objects.find(
+                (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPixxelMaskOverlay(obj)
+            ) || null
+        }
+
+        // The actual recompile — factored out so the debounced wrapper
+        // and `handleGlobalAlpha` both call the same code path.
+        const doApply = (stack) => {
+            const image = findPrimaryImage()
+            if (!image) return
+            // Lazy-load the megashader module so the production editor bundle
+            // never pulls in the GLSL compiler unless the dev test panel
+            // (or a Step 2+ tool) actually subscribes.
+            import('@/lib/megashader').then((mod) => {
+                mod.applyMegashaderFilter(image, stack, {
+                    globalMaskAlpha: megashaderAlphaRef.current,
+                })
+                canvasInstanceRef.current?.requestRenderAll?.()
+            }).catch(() => { /* noop — module not available in non-test paths */ })
+        }
+
+        // Step 10.2: debounced entry point. Cancels any pending
+        // recompile and schedules a new one 150 ms out. The 150 ms
+        // window is short enough to feel instant on slider release
+        // but long enough to coalesce a fast slider drag into a
+        // single recompile.
+        const RECOMPILE_DEBOUNCE_MS = 150
+        const handleLayersChanged = (event) => {
+            const stack = event?.detail?.stack
+            if (recompileTimerRef.current !== null) {
+                clearTimeout(recompileTimerRef.current)
+            }
+            recompileTimerRef.current = setTimeout(() => {
+                recompileTimerRef.current = null
+                doApply(stack)
+            }, RECOMPILE_DEBOUNCE_MS)
+        }
+
+        const handleGlobalAlpha = (event) => {
+            const value = event?.detail?.value
+            if (typeof value !== 'number') return
+            megashaderAlphaRef.current = Math.max(0, Math.min(1, value))
+            // Alpha is a uniform, not a shader-struct change — skip
+            // the debounce so the slider feels live. The shader
+            // recompile is gated on the LRU cache, so if the program
+            // was already compiled for this exact stack, the second
+            // call is just a `applyFilters` re-run.
+            doApply(getLastAppliedStackRef.current)
+        }
+
+        const wrapped = (event) => {
+            getLastAppliedStackRef.current = event?.detail?.stack || { chain: [] }
+            handleLayersChanged(event)
+        }
+
+        window.addEventListener('pixxel:mask-layers-changed', wrapped)
+        window.addEventListener('pixxel:mask-global-alpha', handleGlobalAlpha)
+
+        return () => {
+            window.removeEventListener('pixxel:mask-layers-changed', wrapped)
+            window.removeEventListener('pixxel:mask-global-alpha', handleGlobalAlpha)
+            // Step 10.2: clear any pending debounced recompile so a
+            // canvasEditor change mid-debounce doesn't fire a stale
+            // apply against a torn-down renderer.
+            if (recompileTimerRef.current !== null) {
+                clearTimeout(recompileTimerRef.current)
+                recompileTimerRef.current = null
+            }
+        }
+    }, [canvasEditor])
 
     // Track the last-hydrated URL so we skip redundant re-hydrations when
     // the parent re-renders (e.g. during sidebar resize) without the image
@@ -930,7 +1076,9 @@ const CanvasEditor = ({ project }) => {
             const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'))
             if (files.length === 0) return
 
-            await addImageFilesToCanvas(canvas, files, project)
+            // Use a ref so this handler always sees the latest project, even if the
+            // effect isn't re-bound (e.g. switching projects with same dimensions).
+            await addImageFilesToCanvas(canvas, files, projectRef.current)
         }
 
         container.addEventListener('dragover', handleDragOver)
@@ -986,7 +1134,7 @@ const CanvasEditor = ({ project }) => {
             canvasEditor.off("object:removed", handleCanvasChange)
             canvasEditor.off("text:changed", handleCanvasChange)
         }
-    }, [canvasEditor, project?._id, pushHistoryState])
+    }, [canvasEditor, project?._id, pushHistoryState, saveCanvasState])
 
     useEffect(() => {
         const handleResize = () => {
@@ -994,7 +1142,8 @@ const CanvasEditor = ({ project }) => {
             resizeFrameRef.current = requestAnimationFrame(() => {
                 resizeFrameRef.current = null
                 const canvas = canvasInstanceRef.current
-                if (!canvas || !project || !containerRef.current) return
+                const proj = projectRef.current
+                if (!canvas || !proj || !containerRef.current) return
 
                 const prevWidth = canvas.getWidth()
                 const prevHeight = canvas.getHeight()
@@ -1055,15 +1204,16 @@ const CanvasEditor = ({ project }) => {
             if (resizeFrameRef.current) cancelAnimationFrame(resizeFrameRef.current)
             resizeFrameRef.current = null
         }
-    }, [project?.width, project?.height])
+    }, [getViewportState, project?._id, setViewportState, syncPreviewZoomState])
 
     useEffect(() => {
         const canvas = canvasInstanceRef.current
-        if (!canvas || !project?.width || !project?.height) return
-        fitProjectToViewport(canvas)
+        const proj = projectRef.current
+        if (!canvas || !proj?.width || !proj?.height) return
+        fitProjectToViewport(canvas, proj)
         canvas.calcOffset()
         canvas.requestRenderAll()
-    }, [project?.width, project?.height])
+    }, [fitProjectToViewport, project?._id, project?.width, project?.height])
 
     const previewSliderValue = clamp(previewZoomPercent, MIN_PREVIEW_ZOOM_PERCENT, MAX_PREVIEW_ZOOM_PERCENT)
     const canAdjustPreview = Boolean(canvasEditor)

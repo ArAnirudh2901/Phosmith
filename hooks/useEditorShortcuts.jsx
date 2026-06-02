@@ -251,7 +251,6 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                     const currentWidth = canvasEditor.freeDrawingBrush.width || 10
                     const delta = key === "[" ? -BRUSH_STEP : BRUSH_STEP
                     // Fabric brushes are mutable editor objects; update the live brush in place.
-                    // eslint-disable-next-line react-hooks/immutability
                     canvasEditor.freeDrawingBrush.width = Math.max(
                         MIN_BRUSH_WIDTH,
                         Math.min(MAX_BRUSH_WIDTH, currentWidth + delta)

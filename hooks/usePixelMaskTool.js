@@ -71,6 +71,14 @@ const commitMaskChange = (canvasEditor, img) => {
  *                                      region before preview/apply.
  * @param {boolean} opts.showOverlay    Render the red mask overlay.
  * @param {boolean} opts.livePreview    Refresh the overlay while a stroke is active.
+ * @param {boolean} opts.disabled       When true, skip all pointer-event
+ *                                      handling so another brush (e.g. the
+ *                                      smart brush in `tools/mask.jsx`) can
+ *                                      take over without conflict. Undo/redo
+ *                                      and the mode toggle remain active —
+ *                                      only the canvas pointer handlers are
+ *                                      suppressed. The underlying mask
+ *                                      canvas + overlay are also detached.
  */
 export default function usePixelMaskTool({
     canvasEditor,
@@ -80,6 +88,7 @@ export default function usePixelMaskTool({
     inferRegion = false,
     showOverlay = true,
     livePreview = true,
+    disabled = false,
 }) {
     const [mode, setMode] = useState(defaultMode)
     const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE)
@@ -100,6 +109,7 @@ export default function usePixelMaskTool({
     const inferRegionRef = useRef(inferRegion)
     const showOverlayRef = useRef(showOverlay)
     const livePreviewRef = useRef(livePreview)
+    const disabledRef = useRef(disabled)
 
     const modeRef = useRef(mode)
     const brushSizeRef = useRef(brushSize)
@@ -153,6 +163,7 @@ export default function usePixelMaskTool({
     useEffect(() => { inferRegionRef.current = inferRegion }, [inferRegion])
     useEffect(() => { showOverlayRef.current = showOverlay }, [showOverlay])
     useEffect(() => { livePreviewRef.current = livePreview }, [livePreview])
+    useEffect(() => { disabledRef.current = disabled }, [disabled])
     useEffect(() => { toleranceRef.current = tolerance }, [tolerance])
 
     const effectiveMode = useCallback(() => {
@@ -1185,6 +1196,12 @@ export default function usePixelMaskTool({
 
         const onMouseDown = (opt) => {
             if (!opt?.e) return
+            // When another tool (e.g. the smart brush) has taken over the
+            // canvas, the pixel tool is a passive observer — it stays
+            // mounted so its undo/redo + brush-size UI keep working, but
+            // its pointer handlers do nothing. Without this gate, two
+            // brushes would fire on the same click.
+            if (disabledRef.current) return
             // Let Space / middle-button pan the canvas without painting (Photoshop-style).
             if (spaceRef.current || opt.e.button === 1 || opt.e.buttons === 4) return
             if (opt.e.button != null && opt.e.button !== 0) return

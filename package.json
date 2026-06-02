@@ -4,6 +4,7 @@
   "private": true,
   "packageManager": "bun@1.3.11",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -11,7 +12,14 @@
     "imagekit:docs": "node scripts/ingest-imagekit-docs.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "db:push": "prisma db push"
+    "db:push": "prisma db push",
+    "verify": "bun scripts/verify-megashader.mjs",
+    "verify:segment": "bun scripts/verify-segment.mjs",
+    "verify:semantic": "bun scripts/verify-semantic.mjs",
+    "verify:depth": "bun scripts/verify-depth.mjs",
+    "verify:depth:full": "bun scripts/verify-depth-comprehensive.mjs",
+    "mask:install": "pip install -r services/segment/requirements.txt",
+    "mask:dev": "python services/segment/main.py"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.0.6",
@@ -32,11 +40,11 @@
     "lottie-react": "^2.4.1",
     "lucide": "^1.0.0-rc.1",
     "lucide-react": "^1.0.1",
-    "next": "16.2.6",
+    "next": "16.2.7",
     "next-themes": "1.0.0-beta.0",
     "radix-ui": "^1.4.3",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
     "react-dropzone": "^15.0.0",
     "redis": "^5.12.1",
     "shadcn": "^4.0.8",
@@ -50,7 +58,7 @@
     "@tailwindcss/postcss": "^4",
     "babel-plugin-react-compiler": "1.0.0",
     "eslint": "^9",
-    "eslint-config-next": "16.2.6",
+    "eslint-config-next": "16.2.7",
     "prisma": "^7.8.0",
     "tailwindcss": "^4"
   },

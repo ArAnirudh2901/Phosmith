@@ -27,6 +27,23 @@ bun run prisma:generate
 bun run db:push
 ```
 
+### Local mask service (AI selection tools)
+
+The editor's **Select Subject** (BiRefNet), **SAM 2 click-to-select**, and **Depth Anything V2** tools depend on a local Python service. Add `MASK_SERVICE_URL` to `.env.local`:
+
+```env
+MASK_SERVICE_URL=http://127.0.0.1:8001
+```
+
+Then start the service in a second terminal:
+
+```bash
+bun run mask:install    # one-time: install rembg + transformers + torch
+bun run mask:dev        # run the FastAPI service on :8001
+```
+
+Without it, SAM 2 and Depth return 501 and the corresponding tools in the editor are non-functional. The Select Subject tool still works (falls back to HuggingFace). See `services/segment/.env.example` for the service's own env template and model choices.
+
 ## Scripts
 
 | Command | Description |
@@ -39,6 +56,12 @@ bun run db:push
 | `bun run prisma:generate` | Generate Prisma Client |
 | `bun run prisma:migrate` | Apply Postgres schema changes with Prisma |
 | `bun run db:push` | Push the Prisma schema to Neon/Postgres |
+| `bun run mask:install` | Install Python deps for the local mask service |
+| `bun run mask:dev` | Start the FastAPI mask service on :8001 |
+| `bun run verify` | Run all 230 megashader GLSL invariants |
+| `bun run verify:segment` | End-to-end test for `/api/ai/segment` |
+| `bun run verify:semantic` | End-to-end test for `/api/ai/sam2` |
+| `bun run verify:depth` | End-to-end test for `/api/ai/depth` |
 
 ## ImageKit Agent
 

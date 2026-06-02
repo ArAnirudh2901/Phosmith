@@ -977,7 +977,23 @@ export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 
 }
 
 /** Paint the red "hidden area" preview overlay from the mask. */
-export const paintOverlayFromMask = (maskCanvas, overlayCanvas, { threshold = 250 } = {}) => {
+export const paintOverlayFromMask = (
+  maskCanvas,
+  overlayCanvas,
+  {
+    threshold = 250,
+    // Default tint: a softer "lighter red" (pinkish coral) instead of the
+    // hard crimson (220, 40, 60) the original used, so the overlay reads
+    // as a non-destructive preview and not a selection highlight.
+    tintR = 255,
+    tintG = 140,
+    tintB = 140,
+    // Max alpha at fully-masked pixels. 0.2 == 80% transparent — the
+    // overlay is now a faint tint over the source, not a solid fill.
+    // Multiply by (255 - lum) to keep a soft inner-to-outer falloff.
+    maxAlpha = 0.2,
+  } = {},
+) => {
   if (!maskCanvas || !overlayCanvas) return
   // Assigning width/height reallocates + clears the backing store, so only do it
   // when the size actually changed (this runs once per brush frame). putImageData
@@ -992,10 +1008,10 @@ export const paintOverlayFromMask = (maskCanvas, overlayCanvas, { threshold = 25
   for (let i = 0; i < maskData.data.length; i += 4) {
     const lum = maskData.data[i]
     if (lum < threshold) {
-      overlayData.data[i] = 220
-      overlayData.data[i + 1] = 40
-      overlayData.data[i + 2] = 60
-      overlayData.data[i + 3] = Math.round((255 - lum) * 0.45)
+      overlayData.data[i] = tintR
+      overlayData.data[i + 1] = tintG
+      overlayData.data[i + 2] = tintB
+      overlayData.data[i + 3] = Math.round((255 - lum) * maxAlpha)
     }
   }
   overlayCtx.putImageData(overlayData, 0, 0)
