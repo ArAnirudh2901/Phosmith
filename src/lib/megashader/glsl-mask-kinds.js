@@ -192,6 +192,31 @@ export const SMART_BRUSH_SCHEMA = {
 }
 
 /**
+ * Lasso mask (freehand / polygonal selection).
+ *
+ * The closed selection polygon is rasterised client-side to an offscreen
+ * alpha canvas (white inside, transparent outside) and uploaded by the
+ * renderer as a per-layer sampler2D, exactly like the semantic mask. The
+ * R channel carries the 0..1 selection. `feather` softens the edge via a
+ * smoothstep around 0.5 — 0 gives the Canvas2D anti-aliased edge, larger
+ * values widen the transition band (Photoshop "Feather" on a selection).
+ *
+ * Because the texture is uploaded with UNPACK_FLIP_Y_WEBGL like every
+ * other texture-backed kind, the lasso polygon must be rasterised in
+ * canvas-Y-down image space — the upload flip cancels, so it lines up
+ * with the photo (this sidesteps the linear/radial Y-flip concern).
+ */
+export const LASSO_SCHEMA = {
+    kind: 'lasso',
+    uniforms: [
+        { name: 'feather', glsl: 'uLayer_<S>_kind_lasso_feather', type: 'float', min: 0, max: 1, default: 0.05 },
+    ],
+    samplers: [
+        { name: 'mask', glsl: 'uLayer_<S>_kind_lasso_mask' },
+    ],
+}
+
+/**
  * Step 4 stub kind. Empty schema (no uniforms, no samplers) and a
  * builder that returns 0.0 — kept for any kind we want to revert to a
  * no-op in a hotfix. The compiler and renderer treat stubs identically
@@ -207,6 +232,7 @@ export const KIND_SCHEMAS = {
     smartBrush: SMART_BRUSH_SCHEMA,
     semantic:   SEMANTIC_SCHEMA,
     depth:      DEPTH_SCHEMA,
+    lasso:      LASSO_SCHEMA,
 }
 
 /* ─── GLSL Body Builders ───────────────────────────────────────────────── */
@@ -304,7 +330,11 @@ export const buildLinear = (slot) => /* glsl */ `
         uniform float uLayer_${slot}_kind_linear_feather;
 
         float evalLayer_${slot}_body() {
-            vec2 pixelPos = vTextureCoord * uImageSize;
+            // Y-flip: the source texture is uploaded with UNPACK_FLIP_Y_WEBGL,
+            // so vTextureCoord is GL-Y-up, but p1/p2 are authored in canvas-
+            // Y-down image space. Flip Y here so the gradient lands where the
+            // user dragged instead of vertically mirrored.
+            vec2 pixelPos = vec2(vTextureCoord.x, 1.0 - vTextureCoord.y) * uImageSize;
             vec2 p1 = uLayer_${slot}_kind_linear_p1;
             vec2 p2 = uLayer_${slot}_kind_linear_p2;
             vec2 d = p2 - p1;
@@ -340,7 +370,9 @@ export const buildRadial = (slot) => /* glsl */ `
         uniform float uLayer_${slot}_kind_radial_feather;
 
         float evalLayer_${slot}_body() {
-            vec2 pixelPos = vTextureCoord * uImageSize;
+            // Y-flip: see buildLinear — center/rotation are authored in
+            // canvas-Y-down image space, vTextureCoord is GL-Y-up.
+            vec2 pixelPos = vec2(vTextureCoord.x, 1.0 - vTextureCoord.y) * uImageSize;
             vec2 c = uLayer_${slot}_kind_radial_center;
             float rot = uLayer_${slot}_kind_radial_rotation;
             vec2 r = uLayer_${slot}_kind_radial_radius;
@@ -541,6 +573,28 @@ export const buildSmartBrush = (slot) => /* glsl */ `
     `
 
 /**
+ * Build the GLSL body for a lasso (freehand/polygonal) selection layer.
+ * Samples the rasterised polygon alpha texture at the current pixel's UV
+ * and returns 0..1, softened by `feather` around the 0.5 threshold. White
+ * inside the selection (1.0), transparent outside (0.0).
+ *
+ * @param {number} slot    The layer slot index (0..7).
+ * @returns {string}       A complete `float evalLayer_<slot>_body()` GLSL function.
+ */
+export const buildLasso = (slot) => /* glsl */ `
+        uniform sampler2D uLayer_${slot}_kind_lasso_mask;
+        uniform float uLayer_${slot}_kind_lasso_feather;
+
+        float evalLayer_${slot}_body() {
+            float raw = texture2D(uLayer_${slot}_kind_lasso_mask, vTextureCoord).r;
+            float feather = max(uLayer_${slot}_kind_lasso_feather, 0.001);
+            // raw ~1 inside the polygon, ~0 outside. Smoothstep around 0.5
+            // widens the (already anti-aliased) edge when feather > 0.
+            return smoothstep(0.5 - feather, 0.5 + feather, raw);
+        }
+    `
+
+/**
  * Build a stub GLSL body for kinds not yet implemented (Steps 4-6).
  * Returns 0.0 — the layer contributes no alpha, same as Step 1.
  *
@@ -572,6 +626,7 @@ export const KIND_BUILDERS = {
     semantic:   buildSemantic,
     depth:      buildDepth,
     smartBrush: buildSmartBrush,
+    lasso:      buildLasso,
 }
 
 /**

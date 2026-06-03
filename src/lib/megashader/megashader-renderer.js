@@ -27,7 +27,7 @@
 
 import { compileMegashader } from './megashader-compiler'
 import { getKindSchema, normaliseUniformValue } from './glsl-mask-kinds'
-import { getMaskTexture, isAdjustmentsIdentity } from './mask-types'
+import { getMaskTexture, stackHasNoVisibleEffect, fillModeToFloat } from './mask-types'
 
 const MAX_PROGRAM_CACHE = 64
 
@@ -351,7 +351,18 @@ const writeKindUniforms = (gl, program, layer, slotIndex) => {
         const glslName = field.glsl.replace('<S>', String(slotIndex))
         const loc = gl.getUniformLocation(program, glslName)
         if (!loc) continue
-        const value = normaliseUniformValue(layer[field.name], field)
+        // Bug #4: the color factory stores the picked colour nested as
+        // `target: { h, s, b }`, but COLOR_SCHEMA declares flat
+        // `targetH/targetS/targetB`. Without this remap, layer.targetH is
+        // undefined → the schema default (H=0/red) is used → every colour
+        // mask matched pure red regardless of the eyedropper pick.
+        let raw = layer[field.name]
+        if (layer.kind === 'color' && raw === undefined && layer.target && typeof layer.target === 'object') {
+            if (field.name === 'targetH') raw = layer.target.h
+            else if (field.name === 'targetS') raw = layer.target.s
+            else if (field.name === 'targetB') raw = layer.target.b
+        }
+        const value = normaliseUniformValue(raw, field)
         if (field.type === 'float' && typeof value === 'number') {
             gl.uniform1f(loc, value)
         } else if (field.type === 'vec2' && Array.isArray(value) && value.length === 2) {
@@ -414,10 +425,48 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
             : 0
         gl.uniform1f(loc, value)
     }
-    set('exposure',   layer.exposure,   -3,   3)
-    set('contrast',   layer.contrast,   -100, 100)
-    set('saturation', layer.saturation, -100, 100)
-    set('brightness', layer.brightness, -100, 100)
+    set('exposure',    layer.exposure,    -3,   3)
+    set('contrast',    layer.contrast,    -100, 100)
+    set('saturation',  layer.saturation,  -100, 100)
+    set('brightness',  layer.brightness,  -100, 100)
+    // Pro-parity tonal + white-balance adjustments (all default to 0).
+    set('highlights',  layer.highlights,  -100, 100)
+    set('shadows',     layer.shadows,     -100, 100)
+    set('whites',      layer.whites,      -100, 100)
+    set('blacks',      layer.blacks,      -100, 100)
+    set('temperature', layer.temperature, -100, 100)
+    set('tint',        layer.tint,        -100, 100)
+}
+
+/**
+ * Root-cause #1 — Write the per-layer fill-output uniforms: fillMode
+ * (0 adjust / 1 fill / 2 erase), fillColor (vec3 0..1), fillStrength
+ * (0..1). Declared by `buildLayerAdjustFunction` for every layer. A layer
+ * that doesn't set these defaults to adjust mode (0) so behaviour is
+ * unchanged from the pre-fillMode era.
+ *
+ * @param {WebGL2RenderingContext} gl
+ * @param {WebGLProgram} program
+ * @param {object} layer
+ * @param {number} slotIndex
+ */
+const writeLayerFillUniforms = (gl, program, layer, slotIndex) => {
+    const prefix = `uLayer_${slotIndex}_`
+    const modeLoc = gl.getUniformLocation(program, `${prefix}fillMode`)
+    if (modeLoc) gl.uniform1f(modeLoc, fillModeToFloat(layer.fillMode))
+    const colorLoc = gl.getUniformLocation(program, `${prefix}fillColor`)
+    if (colorLoc) {
+        const c = layer.fillColor || { r: 1, g: 0, b: 0.6 }
+        const ch = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : fb)
+        gl.uniform3f(colorLoc, ch(c.r, 1), ch(c.g, 0), ch(c.b, 0.6))
+    }
+    const strengthLoc = gl.getUniformLocation(program, `${prefix}fillStrength`)
+    if (strengthLoc) {
+        const s = (typeof layer.fillStrength === 'number' && Number.isFinite(layer.fillStrength))
+            ? Math.max(0, Math.min(1, layer.fillStrength))
+            : 0.5
+        gl.uniform1f(strengthLoc, s)
+    }
 }
 
 /**
@@ -446,7 +495,8 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
  * @param {{ width: number, height: number }} imageSize
  * @param {{ kindUnits: Map<number, number> }} textureBindings
  */
-const writeUniforms = (gl, program, stack, globalMaskAlpha, imageSize, textureBindings) => {
+const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBindings) => {
+    const { globalMaskAlpha, globalInvert, maskOverlay, overlayColor } = renderOpts || {}
     // Chain-wide uniforms.
     const sizeLoc = gl.getUniformLocation(program, 'uImageSize')
     if (sizeLoc) gl.uniform2f(sizeLoc, imageSize.width, imageSize.height)
@@ -456,6 +506,16 @@ const writeUniforms = (gl, program, stack, globalMaskAlpha, imageSize, textureBi
             ? Math.max(0, Math.min(1, globalMaskAlpha))
             : 1
         gl.uniform1f(maskAlphaLoc, a)
+    }
+    const invertLoc = gl.getUniformLocation(program, 'uGlobalInvert')
+    if (invertLoc) gl.uniform1f(invertLoc, globalInvert ? 1.0 : 0.0)
+    const overlayLoc = gl.getUniformLocation(program, 'uMaskOverlay')
+    if (overlayLoc) gl.uniform1f(overlayLoc, maskOverlay ? 1.0 : 0.0)
+    const overlayColLoc = gl.getUniformLocation(program, 'uMaskOverlayColor')
+    if (overlayColLoc) {
+        const c = overlayColor || { r: 1, g: 0, b: 0.25 }
+        const ch = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : fb)
+        gl.uniform3f(overlayColLoc, ch(c.r, 1), ch(c.g, 0), ch(c.b, 0.25))
     }
 
     // Per-layer uniforms. Skip layers that aren't in the chain (the
@@ -469,6 +529,7 @@ const writeUniforms = (gl, program, stack, globalMaskAlpha, imageSize, textureBi
         writeLayerCommonUniforms(gl, program, layer, i)
         writeKindUniforms(gl, program, layer, i)
         writeLayerAdjustUniforms(gl, program, layer, i)
+        writeLayerFillUniforms(gl, program, layer, i)
         writeKindSamplers(gl, program, layer, i, textureBindings)
     }
 }
@@ -506,6 +567,35 @@ const bindKindTextures = (gl, stack) => {
     const ownedTextures = []
     const kindUnits = new Map()
     let nextUnit = 1  // 0 is the source image
+    let nullUnit = -1 // lazily-allocated 1×1 transparent texture unit
+
+    // Bug #8: a texture-backed layer whose texture is MISSING (cache miss
+    // after reload, malformed data, or no key) must NOT leave its sampler
+    // bound to unit 0 — that's the source photo, and the layer would sample
+    // the photo's luminance as its "mask", corrupting the whole composite.
+    // Instead we bind a shared 1×1 transparent (alpha-0) texture so the
+    // layer reads 0 and contributes nothing. Allocated once per draw and
+    // reused for every miss.
+    const ensureNullUnit = () => {
+        if (nullUnit >= 0) return nullUnit
+        if (nextUnit >= 16) return -1
+        const tex = gl.createTexture()
+        if (!tex) return -1
+        const unit = nextUnit
+        nextUnit += 1
+        gl.activeTexture(gl.TEXTURE0 + unit)
+        gl.bindTexture(gl.TEXTURE_2D, tex)
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]))
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        ownedTextures.push(tex)
+        nullUnit = unit
+        return unit
+    }
 
     if (!stack || !Array.isArray(stack.chain)) {
         return { kindUnits, ownedTextures }
@@ -525,14 +615,26 @@ const bindKindTextures = (gl, stack) => {
             cacheKey = layer.brushTextureKey
         } else if (layer.kind === 'depth') {
             cacheKey = layer.depthMapKey
+        } else if (layer.kind === 'lasso') {
+            cacheKey = layer.maskTextureKey
         } else {
             continue
         }
-        if (typeof cacheKey !== 'string' || !cacheKey) continue
-        const data = getMaskTexture(cacheKey)
-        if (!data) continue
+        const data = (typeof cacheKey === 'string' && cacheKey) ? getMaskTexture(cacheKey) : undefined
+        if (!data) {
+            // Bug #8: missing texture → bind the shared null texture so this
+            // layer reads alpha 0 instead of corrupting the composite with
+            // the source photo on unit 0.
+            const u = ensureNullUnit()
+            if (u >= 0) kindUnits.set(i, u)
+            continue
+        }
         const tex = gl.createTexture()
-        if (!tex) continue
+        if (!tex) {
+            const u = ensureNullUnit()
+            if (u >= 0) kindUnits.set(i, u)
+            continue
+        }
         gl.activeTexture(gl.TEXTURE0 + nextUnit)
         gl.bindTexture(gl.TEXTURE_2D, tex)
         // Y-flip kind textures on upload. The source image is uploaded with
@@ -556,10 +658,12 @@ const bindKindTextures = (gl, stack) => {
             )
         } catch {
             // texImage2D can throw on malformed data (e.g. ImageBitmap
-            // without the right colour space). Drop the texture and
-            // skip this layer — the layer is still in the stack so
-            // the chain math still works, just with a no-op alpha.
+            // without the right colour space). Drop the texture and bind
+            // the null texture so the layer reads alpha 0 (Bug #8) rather
+            // than sampling the source image on unit 0.
             gl.deleteTexture(tex)
+            const u = ensureNullUnit()
+            if (u >= 0) kindUnits.set(i, u)
             continue
         }
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
@@ -579,6 +683,65 @@ const bindKindTextures = (gl, stack) => {
         }
     }
     return { kindUnits, ownedTextures }
+}
+
+/**
+ * Lazily create the fullscreen-quad VBO + VAO used by every megashader
+ * draw. Two triangles covering clip space [-1, 1]², with `aPosition`
+ * pinned to attribute location 0 (see `bindAttribLocation` in
+ * `getOrCreateProgram`) so the same VAO binds to any compiled program.
+ *
+ * Bug history: this function was REFERENCED at the draw site
+ * (`const { vao } = ensureQuadBuffers(gl)`) but never defined, so the
+ * very first real GL draw threw `ReferenceError: ensureQuadBuffers is
+ * not defined`. That error propagated out of `applyTo`, was swallowed by
+ * the try/catch in `apply-megashader.js`, and the megashader silently
+ * rendered nothing — the single biggest reason "masking filters don't
+ * work". The identity short-circuit hid it for all-zero-adjustment
+ * stacks (which never reached the draw); any real effect crashed here.
+ *
+ * @param {WebGL2RenderingContext} gl
+ * @returns {{ vao: WebGLVertexArrayObject | null, vbo: WebGLBuffer | null }}
+ */
+const ensureQuadBuffers = (gl) => {
+    if (quadVao && quadVbo) return { vao: quadVao, vbo: quadVbo }
+    // WebGL1 fallback contexts lack VAOs; the rest of the renderer assumes
+    // WebGL2 (it calls gl.bindVertexArray unconditionally), so we guard and
+    // bail to the CPU path if VAOs are unavailable.
+    if (typeof gl.createVertexArray !== 'function') {
+        return { vao: null, vbo: null }
+    }
+    // Ensure a linked program exists so attribute location 0 is valid for
+    // the VAO's vertexAttribPointer call.
+    getQuadProgram(gl)
+
+    const verts = new Float32Array([
+        -1, -1,
+         1, -1,
+        -1,  1,
+        -1,  1,
+         1, -1,
+         1,  1,
+    ])
+    const vbo = gl.createBuffer()
+    if (!vbo) return { vao: null, vbo: null }
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW)
+
+    const vao = gl.createVertexArray()
+    if (!vao) {
+        gl.deleteBuffer(vbo)
+        return { vao: null, vbo: null }
+    }
+    gl.bindVertexArray(vao)
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+    gl.bindVertexArray(null)
+    gl.bindBuffer(gl.ARRAY_BUFFER, null)
+
+    quadVbo = vbo
+    quadVao = vao
+    return { vao: quadVao, vbo: quadVbo }
 }
 
 /**
@@ -614,7 +777,15 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
     // identically `srcRgb`, the final `mix(srcRgb, srcRgb, runningAlpha *
     // uMaskAlpha) = srcRgb` regardless of alpha. The mask's strength is
     // a no-op when the colour it would mix in equals the source.
-    if (compiled.passthrough || isAdjustmentsIdentity(stack)) {
+    const overlayOn = options.maskOverlay === true
+    if (compiled.passthrough || (!overlayOn && stackHasNoVisibleEffect(stack))) {
+        // Root-cause #1: short-circuit only when the stack has NO visible
+        // effect at all — no non-zero adjustment, no fill, no erase. A
+        // freshly-added selection layer (fill mode) now fails this check
+        // and actually renders, instead of returning the untouched source.
+        // The "show mask" overlay must visualise the selection even for an
+        // all-adjust-zero chain, so it bypasses this short-circuit (unless
+        // the chain is genuinely empty → compiled.passthrough).
         // Step 10.3: count identity short-circuits. Distinct from
         // the `compiled.passthrough` branch (empty chain) — both
         // bypass the GL pipeline, so we count them together.
@@ -677,7 +848,12 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
         gl,
         program,
         stack || { chain: [] },
-        options.globalMaskAlpha ?? 1,
+        {
+            globalMaskAlpha: options.globalMaskAlpha ?? 1,
+            globalInvert: options.globalInvert === true,
+            maskOverlay: options.maskOverlay === true,
+            overlayColor: options.overlayColor,
+        },
         imageSize,
         { kindUnits },
     )

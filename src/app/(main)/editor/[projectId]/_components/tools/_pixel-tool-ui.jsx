@@ -3,7 +3,7 @@
 import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    ChevronDown, ChevronUp, Eye, EyeOff, Minus, Plus,
+    ChevronDown, ChevronUp, Eye, EyeOff, Lock, LockOpen, Minus, Plus,
     Eraser, Paintbrush, RotateCcw, Redo2, Trash2, Undo2,
 } from 'lucide-react'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
@@ -213,6 +213,7 @@ const KIND_META = {
     smartBrush: { label: 'Smart Brush', color: '#34d399', step: 4 },
     semantic:   { label: 'AI Subject', color: '#f472b6', step: 5 },
     depth:      { label: 'Depth Map', color: '#60a5fa', step: 6 },
+    lasso:      { label: 'Lasso',     color: '#06b8d4', step: null },
 }
 
 export const getKindMeta = (kind) => KIND_META[kind] || { label: kind, color: '#94a3b8', step: null }
@@ -221,7 +222,34 @@ const OPS = [
     { id: 'add', label: 'Add' },
     { id: 'subtract', label: 'Subtract' },
     { id: 'intersect', label: 'Intersect' },
+    // Photoshop-parity blend modes (all compile to real GLSL now).
+    { id: 'screen', label: 'Screen' },
+    { id: 'lighten', label: 'Lighten' },
+    { id: 'darken', label: 'Darken' },
+    { id: 'overlay', label: 'Overlay' },
 ]
+
+// Per-layer output modes (root-cause #1). Matches FILL_MODES in mask-types.
+const FILL_MODE_OPTIONS = [
+    { id: 'fill', label: 'Fill' },
+    { id: 'adjust', label: 'Adjust' },
+    { id: 'erase', label: 'Erase' },
+]
+
+// Convert a {r,g,b} (0..1) fill colour to a #rrggbb hex string for the
+// native colour input, and back.
+const fillColorToHex = (c) => {
+    const ch = (v) => Math.max(0, Math.min(255, Math.round((typeof v === 'number' ? v : 0) * 255)))
+    const h = (n) => n.toString(16).padStart(2, '0')
+    const col = c || { r: 1, g: 0, b: 0.6 }
+    return `#${h(ch(col.r))}${h(ch(col.g))}${h(ch(col.b))}`
+}
+const hexToFillColor = (hex) => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '')
+    if (!m) return { r: 1, g: 0, b: 0.6 }
+    const n = parseInt(m[1], 16)
+    return { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255 }
+}
 
 /**
  * Step 8 — Universal per-layer image-adjustment editor. Renders the four
@@ -235,8 +263,15 @@ const OPS = [
  * one click — common workflow when iterating on adjustments.
  */
 function LayerAdjustEditor({ layer, onUpdate, dominantColor }) {
-    const reset = () => onUpdate({ exposure: 0, contrast: 0, saturation: 0, brightness: 0 })
-    const anyActive = (layer.exposure || layer.contrast || layer.saturation || layer.brightness)
+    const reset = () => onUpdate({
+        exposure: 0, contrast: 0, saturation: 0, brightness: 0,
+        highlights: 0, shadows: 0, whites: 0, blacks: 0, temperature: 0, tint: 0,
+    })
+    const anyActive = (
+        layer.exposure || layer.contrast || layer.saturation || layer.brightness
+        || layer.highlights || layer.shadows || layer.whites || layer.blacks
+        || layer.temperature || layer.tint
+    )
     return (
         <div className="space-y-2 pt-2" style={{ borderTop: '1px dashed var(--border-subtle)' }}>
             <div className="flex items-center justify-between">
@@ -286,6 +321,52 @@ function LayerAdjustEditor({ layer, onUpdate, dominantColor }) {
                 value={Math.round(layer.brightness ?? 0)}
                 min={-100} max={100} step={1} suffix="%"
                 onChange={(v) => onUpdate({ brightness: v })}
+                dominantColor={dominantColor}
+            />
+
+            <div className="text-[8px] font-bold uppercase tracking-wider pt-1" style={{ color: 'var(--text-muted)' }}>Tone</div>
+            <LabeledSlider
+                label="Highlights"
+                value={Math.round(layer.highlights ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ highlights: v })}
+                dominantColor={dominantColor}
+            />
+            <LabeledSlider
+                label="Shadows"
+                value={Math.round(layer.shadows ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ shadows: v })}
+                dominantColor={dominantColor}
+            />
+            <LabeledSlider
+                label="Whites"
+                value={Math.round(layer.whites ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ whites: v })}
+                dominantColor={dominantColor}
+            />
+            <LabeledSlider
+                label="Blacks"
+                value={Math.round(layer.blacks ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ blacks: v })}
+                dominantColor={dominantColor}
+            />
+
+            <div className="text-[8px] font-bold uppercase tracking-wider pt-1" style={{ color: 'var(--text-muted)' }}>White Balance</div>
+            <LabeledSlider
+                label="Temperature"
+                value={Math.round(layer.temperature ?? 0)}
+                min={-100} max={100} step={1} suffix=""
+                onChange={(v) => onUpdate({ temperature: v })}
+                dominantColor={dominantColor}
+            />
+            <LabeledSlider
+                label="Tint"
+                value={Math.round(layer.tint ?? 0)}
+                min={-100} max={100} step={1} suffix=""
+                onChange={(v) => onUpdate({ tint: v })}
                 dominantColor={dominantColor}
             />
         </div>
@@ -577,12 +658,18 @@ export function KindParamEditor({ layer, onUpdate, dominantColor, imageSize }) {
  */
 export function MaskChainCard({
     entry, index, total, isFirst,
-    onUpdate, onRemove, onMove, onSetOp,
+    onUpdate, onRemove, onMove, onSetOp, onSetFillMode,
+    selected, onSelect,
     dominantColor, imageSize,
 }) {
     const layer = entry.layer
     const meta = getKindMeta(layer.kind)
-    const [expanded, setExpanded] = useState(false)
+    const locked = !!layer.lock
+    const fillMode = layer.fillMode || 'adjust'
+    // New selection layers default to 'fill' and start expanded so the user
+    // immediately sees the fill controls (rather than a collapsed, dead-
+    // looking card — the original "I added a mask and nothing happened" UX).
+    const [expanded, setExpanded] = useState(fillMode !== 'adjust')
 
     return (
         <motion.div
@@ -591,8 +678,12 @@ export function MaskChainCard({
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.18 }}
+            onClick={() => onSelect?.(layer.id)}
             className="rounded-md p-2"
-            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
+            style={{
+                background: selected ? 'rgba(6,184,212,0.06)' : 'var(--bg-elevated)',
+                border: `1px solid ${selected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+            }}
         >
             <div className="flex items-center gap-1.5">
                 <span
@@ -654,6 +745,16 @@ export function MaskChainCard({
                 </button>
                 <button
                     type="button"
+                    onClick={() => onUpdate({ lock: !locked })}
+                    className="p-0.5"
+                    title={locked ? 'Unlock layer' : 'Lock layer (freeze params)'}
+                >
+                    {locked
+                        ? <Lock className="h-3 w-3" style={{ color: 'var(--accent-primary)' }} />
+                        : <LockOpen className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />}
+                </button>
+                <button
+                    type="button"
                     onClick={() => onRemove(layer.id)}
                     className="p-0.5"
                     title="Remove layer"
@@ -665,8 +766,9 @@ export function MaskChainCard({
             {!isFirst && (
                 <select
                     value={entry.op}
+                    disabled={locked}
                     onChange={(e) => onSetOp(layer.id, e.target.value)}
-                    className="w-full text-[10px] px-1.5 py-0.5 rounded mt-1.5"
+                    className="w-full text-[10px] px-1.5 py-0.5 rounded mt-1.5 disabled:opacity-50"
                     style={{
                         background: 'var(--bg-base)',
                         border: '1px solid var(--border-subtle)',
@@ -679,16 +781,69 @@ export function MaskChainCard({
                 </select>
             )}
 
+            {/* Output mode: fill (visible selection) / adjust (recolour) /
+                erase (cut). Root-cause #1 — a 'fill' layer is visible without
+                any adjustment. */}
+            <div className="grid grid-cols-3 gap-1 mt-1.5">
+                {FILL_MODE_OPTIONS.map((m) => {
+                    const active = fillMode === m.id
+                    return (
+                        <button
+                            key={m.id}
+                            type="button"
+                            disabled={locked}
+                            onClick={() => (onSetFillMode ? onSetFillMode(layer.id, m.id) : onUpdate({ fillMode: m.id }))}
+                            className="text-[9px] py-1 rounded editor-interactive disabled:opacity-50"
+                            style={{
+                                background: active ? 'rgba(6,184,212,0.14)' : 'var(--bg-base)',
+                                border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
+                            }}
+                        >
+                            {m.label}
+                        </button>
+                    )
+                })}
+            </div>
+
+            {fillMode === 'fill' && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                    <span className="text-[9px]" style={{ color: 'var(--text-muted)' }}>Tint</span>
+                    <input
+                        type="color"
+                        disabled={locked}
+                        value={fillColorToHex(layer.fillColor)}
+                        onChange={(e) => onUpdate({ fillColor: hexToFillColor(e.target.value) })}
+                        className="w-6 h-5 rounded disabled:opacity-50"
+                        style={{ background: 'transparent', border: '1px solid var(--border-subtle)' }}
+                        title="Fill colour"
+                    />
+                    <span className="text-[9px]" style={{ color: 'var(--text-muted)' }}>Strength</span>
+                    <input
+                        type="range"
+                        min="0" max="100"
+                        disabled={locked}
+                        value={Math.round((layer.fillStrength ?? 0.5) * 100)}
+                        onChange={(e) => onUpdate({ fillStrength: Number(e.target.value) / 100 })}
+                        className="flex-1 disabled:opacity-50"
+                    />
+                    <span className="text-[9px] w-6 text-right" style={{ color: 'var(--text-secondary)' }}>
+                        {Math.round((layer.fillStrength ?? 0.5) * 100)}
+                    </span>
+                </div>
+            )}
+
             <div className="flex items-center gap-1.5 mt-1.5">
-                <span className="text-[9px] flex-1" style={{ color: 'var(--text-muted)' }}>
-                    Opacity
+                <span className="text-[9px] flex-1" style={{ color: 'var(--text-muted)' }} title="Overall strength of this mask (Lightroom 'Density')">
+                    Density
                 </span>
                 <input
                     type="range"
                     min="0" max="100"
+                    disabled={locked}
                     value={Math.round((layer.opacity ?? 1) * 100)}
                     onChange={(e) => onUpdate({ opacity: Number(e.target.value) / 100 })}
-                    className="flex-1"
+                    className="flex-1 disabled:opacity-50"
                 />
                 <span className="text-[9px] w-6 text-right" style={{ color: 'var(--text-secondary)' }}>
                     {Math.round((layer.opacity ?? 1) * 100)}
@@ -698,6 +853,7 @@ export function MaskChainCard({
                 <input
                     type="checkbox"
                     checked={!!layer.inverted}
+                    disabled={locked}
                     onChange={(e) => onUpdate({ inverted: e.target.checked })}
                 />
                 Invert
@@ -711,6 +867,7 @@ export function MaskChainCard({
                         exit={{ height: 0, opacity: 0 }}
                         transition={{ duration: 0.18 }}
                         className="overflow-hidden"
+                        style={{ pointerEvents: locked ? 'none' : 'auto', opacity: locked ? 0.5 : 1 }}
                     >
                         <KindParamEditor layer={layer} onUpdate={onUpdate} dominantColor={dominantColor} imageSize={imageSize} />
                     </motion.div>

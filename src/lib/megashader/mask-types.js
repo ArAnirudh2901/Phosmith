@@ -289,7 +289,59 @@ export const MASK_KINDS = /** @type {const} */ ([
     'smartBrush',
     'semantic',
     'depth',
+    'lasso',
 ])
+
+/**
+ * Per-layer output modes (root-cause #1 fix). A mask layer SELECTS a
+ * region; `fillMode` decides what visible effect that selection has:
+ *
+ * - `adjust`: recolour the masked region via the per-layer exposure /
+ *             contrast / saturation / brightness adjustments. A layer with
+ *             all-zero adjustments is colour-identity (invisible) — this is
+ *             the historical behaviour, now opt-in.
+ * - `fill`:   tint/overlay the masked region with `fillColor` at
+ *             `fillStrength`. Makes a pure selection ALWAYS visible without
+ *             dragging an adjustment slider (Quick-Mask style). The default
+ *             for freshly-added selection layers and the lasso.
+ * - `erase`:  knock the masked region out of the image (alpha → 0). The
+ *             "cut" half of the lasso's cut/erase mode.
+ *
+ * @typedef {'adjust' | 'fill' | 'erase'} FillMode
+ */
+export const FILL_MODES = /** @type {const} */ (['adjust', 'fill', 'erase'])
+
+/** Default selection tint (magenta) used by `fill` mode. RGB 0..1. */
+export const DEFAULT_FILL_COLOR = { r: 1, g: 0, b: 0.6 }
+
+/**
+ * Map a `FillMode` string to the float the shader's `uLayer_<slot>_fillMode`
+ * uniform expects: adjust → 0, fill → 1, erase → 2.
+ *
+ * @param {string} mode
+ * @returns {number}
+ */
+export const fillModeToFloat = (mode) => (mode === 'fill' ? 1 : (mode === 'erase' ? 2 : 0))
+
+/**
+ * Coerce a partial layer's fill fields into the canonical shape. Used by
+ * `sanitiseLayer` and the layer factories so every layer carries a valid
+ * `fillMode` / `fillColor` / `fillStrength` regardless of where it came
+ * from (factory, deserialised project state, or a raw `addLayer` patch).
+ *
+ * @param {{ fillMode?: string, fillColor?: {r:number,g:number,b:number}, fillStrength?: number }} layer
+ * @returns {{ fillMode: string, fillColor: {r:number,g:number,b:number}, fillStrength: number }}
+ */
+export const sanitiseFill = (layer = {}) => {
+    const fillMode = FILL_MODES.includes(/** @type {any} */ (layer.fillMode)) ? layer.fillMode : 'adjust'
+    const c = layer.fillColor || DEFAULT_FILL_COLOR
+    const ch = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : fb)
+    return {
+        fillMode,
+        fillColor: { r: ch(c.r, DEFAULT_FILL_COLOR.r), g: ch(c.g, DEFAULT_FILL_COLOR.g), b: ch(c.b, DEFAULT_FILL_COLOR.b) },
+        fillStrength: ch(layer.fillStrength, 0.5),
+    }
+}
 
 /**
  * Step 9 — Identity fast-path detection. Returns `true` if the stack's
@@ -317,13 +369,58 @@ export const MASK_KINDS = /** @type {const} */ ([
  * @param {import('./mask-types').MaskStack | null | undefined} stack
  * @returns {boolean}
  */
+/**
+ * Every per-layer image-adjustment field. The original four plus the
+ * pro-parity tonal + white-balance set. Used by the identity/visibility
+ * predicates and the sanitiser so adding a field is a one-line change.
+ */
+export const ADJUST_FIELDS = /** @type {const} */ ([
+    'exposure', 'contrast', 'saturation', 'brightness',
+    'highlights', 'shadows', 'whites', 'blacks', 'temperature', 'tint',
+])
+
+/** True if any adjustment field on the layer is non-zero. */
+const layerHasAdjustment = (l) => ADJUST_FIELDS.some((f) => l && l[f])
+
 export const isAdjustmentsIdentity = (stack) => {
     if (!stack || !Array.isArray(stack.chain)) return true
     for (const entry of stack.chain) {
         if (!entry || !entry.layer) continue
-        const l = entry.layer
-        if (l.exposure || l.contrast || l.saturation || l.brightness) {
-            return false
+        if (layerHasAdjustment(entry.layer)) return false
+    }
+    return true
+}
+
+/**
+ * Root-cause #1 fix — the real "is this stack a no-op?" predicate that
+ * replaces `isAdjustmentsIdentity` at the render/apply short-circuits.
+ *
+ * Unlike `isAdjustmentsIdentity` (which only checks colour math), this
+ * returns `false` whenever ANY visible layer produces an output:
+ *   - a non-zero per-layer adjustment (recolour), OR
+ *   - `fillMode === 'fill'` with a non-zero `fillStrength` (tint), OR
+ *   - `fillMode === 'erase'` (alpha knockout).
+ *
+ * Invisible layers (`visible === false`) and zero-opacity layers
+ * contribute nothing, so they don't count. An empty chain is a no-op.
+ * This is why a freshly-added selection (fill mode, default strength)
+ * now renders instead of short-circuiting to the untouched source.
+ *
+ * @param {import('./mask-types').MaskStack | null | undefined} stack
+ * @returns {boolean}
+ */
+export const stackHasNoVisibleEffect = (stack) => {
+    if (!stack || !Array.isArray(stack.chain) || stack.chain.length === 0) return true
+    for (const entry of stack.chain) {
+        const l = entry && entry.layer
+        if (!l) continue
+        if (l.visible === false) continue
+        if (typeof l.opacity === 'number' && l.opacity <= 0) continue
+        if (layerHasAdjustment(l)) return false
+        if (l.fillMode === 'erase') return false
+        if (l.fillMode === 'fill') {
+            const strength = typeof l.fillStrength === 'number' ? l.fillStrength : 0.5
+            if (strength > 0) return false
         }
     }
     return true
@@ -418,6 +515,16 @@ export const sanitiseLayer = (layer) => {
         contrast: clampFinite(layer.contrast, -100, 100, 0),
         saturation: clampFinite(layer.saturation, -100, 100, 0),
         brightness: clampFinite(layer.brightness, -100, 100, 0),
+        // Pro-parity tonal + white-balance adjustments (default identity).
+        highlights: clampFinite(layer.highlights, -100, 100, 0),
+        shadows: clampFinite(layer.shadows, -100, 100, 0),
+        whites: clampFinite(layer.whites, -100, 100, 0),
+        blacks: clampFinite(layer.blacks, -100, 100, 0),
+        temperature: clampFinite(layer.temperature, -100, 100, 0),
+        tint: clampFinite(layer.tint, -100, 100, 0),
+        lock: layer.lock === true,
+        // Per-layer output mode (fill/adjust/erase) + fill colour/strength.
+        ...sanitiseFill(layer),
     })
 }
 
@@ -676,6 +783,47 @@ export const semanticLayer = ({ maskTextureKey, feather = 0.1, label } = {}) => 
         maskTextureKey,
         feather: clampFinite(feather, 0, 1),
     })
+}
+
+/* ─── Lasso selection (freehand / polygonal) ──────────────────────────── */
+
+/**
+ * Build a fully-formed lasso selection layer. Like the semantic layer it's
+ * a thin handle into the module-scoped texture cache (`maskTextureKey`),
+ * resolved to a sampler2D at draw time. The closed polygon is rasterised
+ * to an alpha canvas by the caller (white inside, transparent outside) and
+ * stored with `setMaskTexture(maskTextureKey, canvas)` BEFORE the layer is
+ * added, so the renderer never samples a missing texture.
+ *
+ * Defaults to `fillMode: 'fill'` so the selection is visible the instant
+ * it's created (root-cause #1) — the lasso tool switches it to `erase` for
+ * the cut/erase sink.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.maskTextureKey]   Required — opaque cache handle.
+ * @param {number} [opts.feather=0.05]    0..1 — soft-edge width.
+ * @param {string} [opts.label]
+ * @param {string} [opts.fillMode='fill']  'fill' | 'adjust' | 'erase'.
+ * @param {{r:number,g:number,b:number}} [opts.fillColor]
+ * @param {number} [opts.fillStrength=0.5]
+ * @returns {object}
+ */
+export const lassoLayer = ({ maskTextureKey, feather = 0.05, label, fillMode = 'fill', fillColor, fillStrength = 0.5 } = {}) => {
+    if (typeof maskTextureKey !== 'string' || !maskTextureKey) {
+        throw new Error('[megashader] lassoLayer: `maskTextureKey` is required')
+    }
+    return {
+        kind: 'lasso',
+        id: `las-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        label: label || 'Lasso selection',
+        opacity: 1,
+        visible: true,
+        lock: false,
+        inverted: false,
+        maskTextureKey,
+        feather: clampFinite(feather, 0, 1),
+        ...sanitiseFill({ fillMode, fillColor, fillStrength }),
+    }
 }
 
 /* ─── Depth map (Step 6) ────────────────────────────────────────────────── */
