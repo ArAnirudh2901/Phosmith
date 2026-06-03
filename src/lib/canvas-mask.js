@@ -446,7 +446,7 @@ export const growMaskRegionFromStroke = (
   maskCanvas,
   sourceEl,
   points,
-  { radius = 18, tolerance = 24, mode = 'erase' } = {},
+  { radius = 18, tolerance = 24, mode = 'erase', cropX = 0, cropY = 0 } = {},
 ) => {
   if (!maskCanvas || !sourceEl || !Array.isArray(points) || points.length === 0) return 0
 
@@ -494,7 +494,10 @@ export const growMaskRegionFromStroke = (
   const sampleCtx = sample.getContext('2d', { willReadFrequently: true })
   let src
   try {
-    sampleCtx.drawImage(sourceEl, sx, sy, rw, rh, 0, 0, rw, rh)
+    // Bug #6: offset the source-rect by the crop origin so the sampled
+    // region lines up with the mask grid (cropped space). cropX/cropY are 0
+    // for uncropped images, preserving the original behaviour.
+    sampleCtx.drawImage(sourceEl, sx + cropX, sy + cropY, rw, rh, 0, 0, rw, rh)
     src = sampleCtx.getImageData(0, 0, rw, rh).data
   } catch {
     return 0
@@ -638,7 +641,7 @@ export const growMaskRegionFromStroke = (
 export const createContentAwareFillCanvas = (
   sourceEl,
   selectionMaskCanvas,
-  { threshold = 250, smoothingPasses = 3 } = {},
+  { threshold = 250, smoothingPasses = 3, cropX = 0, cropY = 0 } = {},
 ) => {
   if (!sourceEl || !selectionMaskCanvas) return null
 
@@ -654,7 +657,9 @@ export const createContentAwareFillCanvas = (
   let sourceImage
   let maskImage
   try {
-    sourceCtx.drawImage(sourceEl, 0, 0, w, h)
+    // Bug #6: sample only the crop region so the fill source aligns with the
+    // cropped mask grid (cropX/cropY default 0 for uncropped images).
+    sourceCtx.drawImage(sourceEl, cropX, cropY, w, h, 0, 0, w, h)
     sourceImage = sourceCtx.getImageData(0, 0, w, h)
     maskImage = selectionMaskCanvas
       .getContext('2d', { willReadFrequently: true })
@@ -878,7 +883,7 @@ export const createContentAwareFillCanvas = (
  * ≈ Photoshop's tolerance). Matched pixels are set to hidden (erase) or visible
  * (restore) in the mask. Returns the number of pixels affected.
  */
-export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 24, mode = 'erase' } = {}) => {
+export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 24, mode = 'erase', cropX = 0, cropY = 0 } = {}) => {
   if (!maskCanvas || !sourceEl) return 0
   const w = maskCanvas.width
   const h = maskCanvas.height
@@ -893,7 +898,12 @@ export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 
   const sampleCtx = sample.getContext('2d', { willReadFrequently: true })
   let src
   try {
-    sampleCtx.drawImage(sourceEl, 0, 0, w, h)
+    // Bug #6: the mask grid (w×h) is the CROPPED display size, but the
+    // source element is the full natural bitmap. Sampling the whole source
+    // into the cropped grid would stretch/shift colours so the flood seed
+    // lands on the wrong pixel. Blit only the crop region [cropX, cropY, w, h]
+    // 1:1 into the grid (cropX/cropY default 0 → unchanged for uncropped images).
+    sampleCtx.drawImage(sourceEl, cropX, cropY, w, h, 0, 0, w, h)
     src = sampleCtx.getImageData(0, 0, w, h).data
   } catch {
     // Tainted canvas (image lacked CORS headers) — magic erase isn't possible.

@@ -4,11 +4,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
     ArrowDown, ArrowDownLeft, ArrowDownRight, ArrowLeft, ArrowRight,
     ArrowUp, ArrowUpLeft, ArrowUpRight,
-    Blend, ChevronDown, ChevronRight, Circle, Crosshair, Layers,
-    Loader2, Mountain, MousePointer, Palette, Paintbrush, Plus, RotateCcw, Scissors, Sparkles, Sun, Wand2, X,
+    Blend, ChevronDown, ChevronRight, Circle, Contrast, Crosshair, Eye, Layers,
+    Lasso, Loader2, Minus, Mountain, MousePointer, Palette, Paintbrush, Plus, RotateCcw, Scissors, Spline, Sparkles, Sun, Wand2, X,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Circle as FabricCircle, Ellipse, FabricImage, Line } from 'fabric'
+import { Circle as FabricCircle, Ellipse, FabricImage, Line, Polyline } from 'fabric'
 import { toast } from 'sonner'
 import { useCanvas } from '../../../../../../../context/context'
 import usePixelMaskTool, { MIN_BRUSH, MAX_BRUSH } from '../../../../../../../hooks/usePixelMaskTool'
@@ -147,8 +147,35 @@ const MaskControls = ({ dominantColor }) => {
     const chain = useMaskLayers()
     const {
         stack, addLayer: addChainLayer, removeLayer, updateLayer,
-        setLayerOp, moveLayer, clearAll,
+        setLayerOp, setFillMode, moveLayer, clearAll,
+        showMaskOverlay, setShowMaskOverlay, globalInvert, setGlobalInvert,
+        selectedLayerId, selectLayer,
+        undo: undoChain, redo: redoChain, canUndo, canRedo, setChain,
     } = chain
+
+    // Persistence rehydrate: if the primary image already carries a persisted
+    // MegashaderFilter (restored from project state by loadFromJSON, with its
+    // textures re-registered by MegashaderFilter.fromObject), seed the Mask
+    // Layers UI from it once so the panel reflects the saved chain.
+    const chainHydratedRef = useRef(false)
+    useEffect(() => {
+        if (chainHydratedRef.current) return
+        const img = tool.mainImage
+        if (!img || !Array.isArray(img.filters)) return
+        const mega = img.filters.find((f) => f && f.type === 'Megashader')
+        const persisted = mega?.stack?.chain
+        if (Array.isArray(persisted) && persisted.length > 0 && stack.chain.length === 0) {
+            setChain(persisted)
+            chainHydratedRef.current = true
+        }
+    }, [tool.mainImage, stack.chain.length, setChain])
+
+    // Selected layer — drives the re-editable gradient-handle gizmo (linear/
+    // radial) and the brush pointer-arbitration (handles must suppress the
+    // pixel brush so clicking the image doesn't paint while editing a gradient).
+    const selectedLayer = stack.chain.find((e) => e.layer.id === selectedLayerId)?.layer || null
+    const selKind = selectedLayer?.kind
+    const isGradientSelected = selKind === 'linear' || selKind === 'radial'
 
     // Lightroom-style histogram for the luminance panel. Computed lazily on
     // the next tick after mainImage changes (the source <img> must be
@@ -252,7 +279,7 @@ const MaskControls = ({ dominantColor }) => {
     // and prepares the dragStateRef for the move handler.
     const handleSpatialDragStart = useCallback((e) => {
         if (!activeDraft) return
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         const pos = pointerToImage(fabricCanvas, e)
         if (!pos) return
@@ -275,7 +302,7 @@ const MaskControls = ({ dominantColor }) => {
     // (half the drag distance per axis) + rotation (atan2 of the drag).
     const handleSpatialDragMove = useCallback((e) => {
         if (!activeDraft || !dragStateRef.current) return
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         const pos = pointerToImage(fabricCanvas, e)
         if (!pos) return
@@ -325,7 +352,7 @@ const MaskControls = ({ dominantColor }) => {
     // window-level mousemove/mouseup (added in a separate effect) so
     // drags that escape the canvas still finalise.
     useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas || !activeDraft) return
         fabricCanvas.defaultCursor = 'crosshair'
         fabricCanvas.selection = false
@@ -400,7 +427,7 @@ const MaskControls = ({ dominantColor }) => {
 
     const handleSemanticClick = useCallback((e) => {
         if (!semanticActive || !tool.mainImage) return
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         const pos = pointerToImage(fabricCanvas, e)
         if (!pos) return
@@ -425,7 +452,7 @@ const MaskControls = ({ dominantColor }) => {
     // The cleanup is critical — without it, a leaked mouse:down handler
     // would keep capturing clicks after the user leaves the tool.
     useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         if (!semanticActive) return
         fabricCanvas.defaultCursor = 'crosshair'
@@ -441,7 +468,7 @@ const MaskControls = ({ dominantColor }) => {
     // (include), red = negative (exclude). Mirrors the click list so
     // removing a click from the list removes its marker too.
     useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas || !tool.mainImage) return
         for (const m of semanticMarkerRefs.current) {
             try { fabricCanvas.remove(m) } catch { /* canvas gone */ }
@@ -560,13 +587,21 @@ const MaskControls = ({ dominantColor }) => {
                 c.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85)
             })
 
-            // The route expects clicks in *original* image-pixel space;
-            // it scales them to the prepared (resized) image internally
-            // and returns a mask at original resolution. So we just send
-            // the raw click coords.
+            // Bug #10: clicks are captured in TRUE-natural image space, but
+            // the route derives "original" dims from the (already downscaled
+            // ≤1024) upload and validates/scales clicks against THAT. Sending
+            // raw natural coords for any >1024px source either 400s
+            // (out-of-bounds) or selects the wrong subject (off by
+            // ~natural/1024). Scale the clicks into the uploaded blob's space
+            // here so both ends agree on one reference frame.
+            const scaledClicks = semanticClicks.map(([x, y, l]) => [
+                Math.round(x * scale * 100) / 100,
+                Math.round(y * scale * 100) / 100,
+                l,
+            ])
             const form = new FormData()
             form.append('image', blob, 'image.jpg')
-            form.append('clicks', JSON.stringify(semanticClicks))
+            form.append('clicks', JSON.stringify(scaledClicks))
 
             const resp = await fetch('/api/ai/sam2', { method: 'POST', body: form, signal: abortController.signal })
             if (!resp.ok) {
@@ -774,6 +809,28 @@ const MaskControls = ({ dominantColor }) => {
     // via the chain card's `KindParamEditor` (already supports per-layer
     // params via the smartBrushLayer factory's clamps).
 
+    /* ─── Lasso selection (freehand + polygonal) ─── */
+    // The lasso captures a closed polygon and turns it into a megashader
+    // 'lasso' layer (Bug #12 kind). `lassoSink` picks the layer's output:
+    // 'select' → fill mode (visible selection), 'erase' → erase mode (cut).
+    // `lassoModifier` maps Shift/Alt + the modifier buttons to the chain
+    // blend op so a second lasso can add/subtract/intersect with the first.
+    const [lassoActive, setLassoActive] = useState(false)
+    const [lassoMode, setLassoMode] = useState('freehand') // 'freehand' | 'polygonal'
+    const [lassoSink, setLassoSink] = useState('select')   // 'select' | 'erase'
+    const [lassoModifier, setLassoModifier] = useState('new') // new|add|subtract|intersect
+    const [lassoFeather, setLassoFeather] = useState(0.04)
+    const [lassoVertexCount, setLassoVertexCount] = useState(0)
+    const lassoPointsRef = useRef(/** @type {Array<{x:number,y:number}>} */ ([]))
+    const lassoDrawingRef = useRef(false)
+    const lassoCursorRef = useRef(/** @type {{x:number,y:number}|null} */ (null))
+    const lassoOverlayRef = useRef(/** @type {any} */ (null))
+    const lassoMarkerRefs = useRef(/** @type {Array<any>} */ ([]))
+    const lassoModeRef = useRef(lassoMode)
+    const lassoModifierRef = useRef(lassoModifier)
+    useEffect(() => { lassoModeRef.current = lassoMode }, [lassoMode])
+    useEffect(() => { lassoModifierRef.current = lassoModifier }, [lassoModifier])
+
     const [brushActive, setBrushActive] = useState(false)
     const [brushSize, setBrushSize] = useState(40)
     const [brushHardness, setBrushHardness] = useState(0.8)
@@ -827,7 +884,15 @@ const MaskControls = ({ dominantColor }) => {
     // `useState` is intentional: it satisfies the temporal-dead-zone
     // rule (the variable is in scope on this line of source) and the
     // effect itself just runs once on mount with the current value.
-    useEffect(() => { setPixelToolDisabled(brushActive) }, [brushActive])
+    // Bug #9 — central pointer arbitration. The pixel brush binds its own
+    // mouse:down and paints a clipPath dab on every in-image click; it is
+    // suppressed ONLY by this flag. Any other click-capturing mode (smart
+    // brush, colour eyedropper, SAM2 click, spatial gradient draft, lasso)
+    // MUST drive it true, or a single click would fire BOTH that mode's
+    // handler AND the brush — placing a layer while painting a stray dab.
+    useEffect(() => {
+        setPixelToolDisabled(brushActive || colorPickerActive || semanticActive || lassoActive || !!activeDraft || isGradientSelected)
+    }, [brushActive, colorPickerActive, semanticActive, lassoActive, activeDraft, isGradientSelected])
 
     // Allocate a fresh brush canvas, capped to BRUSH_CANVAS_MAX_DIM on
     // the long edge. Called both on entering brush mode (if the image
@@ -922,7 +987,7 @@ const MaskControls = ({ dominantColor }) => {
 
     const handleBrushDown = useCallback((e) => {
         if (!brushActive || !imageSize) return
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         const pos = pointerToImage(fabricCanvas, e)
         if (!pos) return
@@ -953,7 +1018,7 @@ const MaskControls = ({ dominantColor }) => {
 
     const handleBrushMove = useCallback((e) => {
         if (!isPaintingRef.current || !brushActive) return
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         const pos = pointerToImage(fabricCanvas, e)
         if (!pos) return
@@ -996,7 +1061,7 @@ const MaskControls = ({ dominantColor }) => {
     // Wire the pointer events when brush mode is active. Window-level
     // move + up so a drag that escapes the canvas still finalises.
     useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas || !brushActive) return
         fabricCanvas.defaultCursor = 'crosshair'
         fabricCanvas.hoverCursor = 'crosshair'
@@ -1024,7 +1089,7 @@ const MaskControls = ({ dominantColor }) => {
     // The overlay shares the brush canvas as its `_element` — any draw
     // to the canvas is visible on the next render with no extra sync.
     useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas || !tool.mainImage) return
         if (!brushActive) {
             if (brushOverlayRef.current) {
@@ -1093,13 +1158,13 @@ const MaskControls = ({ dominantColor }) => {
     const imgAngle = img?.angle ?? 0
     const imgFlipX = !!img?.flipX
     const imgFlipY = !!img?.flipY
-    const fabricViewport = canvasEditor?.canvas?.viewportTransform
+    const fabricViewport = canvasEditor?.viewportTransform
     const panX = fabricViewport?.[4] ?? 0
     const panY = fabricViewport?.[5] ?? 0
     useEffect(() => {
         const overlay = brushOverlayRef.current
         const liveImg = tool.mainImage
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!overlay || !liveImg || !fabricCanvas) return
         overlay.set({
             left: liveImg.left,
@@ -1117,7 +1182,7 @@ const MaskControls = ({ dominantColor }) => {
     }, [
         tool.mainImage,
         brushActive,
-        canvasEditor?.canvas,
+        canvasEditor,
         // Image transform fields — cover zoom, rotate, flip, move
         imgLeft, imgTop, imgScaleX, imgScaleY, imgAngle, imgFlipX, imgFlipY,
         // Viewport translate — covers pure pan (image not moving)
@@ -1163,7 +1228,7 @@ const MaskControls = ({ dominantColor }) => {
         setBrushHasContent(false)
         if (brushOverlayRef.current) {
             brushOverlayRef.current.set('dirty', true)
-            canvasEditor?.canvas?.requestRenderAll?.()
+            canvasEditor?.requestRenderAll?.()
         }
     }, [canvasEditor])
 
@@ -1224,11 +1289,457 @@ const MaskControls = ({ dominantColor }) => {
         }
     }, [addChainLayer, filterRadius, sigmaColor, sigmaSpace])
 
+    /* ─── Lasso handlers ─── */
+
+    // Remove the live lasso overlay (dashed polyline + vertex markers).
+    const clearLassoOverlay = useCallback(() => {
+        const fabricCanvas = canvasEditor
+        if (!fabricCanvas) return
+        if (lassoOverlayRef.current) {
+            try { fabricCanvas.remove(lassoOverlayRef.current) } catch { /* canvas gone */ }
+            lassoOverlayRef.current = null
+        }
+        for (const m of lassoMarkerRefs.current) {
+            try { fabricCanvas.remove(m) } catch { /* canvas gone */ }
+        }
+        lassoMarkerRefs.current = []
+    }, [canvasEditor])
+
+    // Rebuild the dashed-polyline preview from the current points (plus a
+    // rubber-band segment to the cursor in polygonal mode), and the vertex
+    // markers. Recreated each redraw so Fabric positions the polyline at the
+    // absolute point coords (mutating .points drifts the offset).
+    const redrawLassoOverlay = useCallback(() => {
+        const fabricCanvas = canvasEditor
+        if (!fabricCanvas) return
+        clearLassoOverlay()
+        const pts = lassoPointsRef.current
+        const disp = (pts || []).map((p) => imageToDisplay(p.x, p.y)).filter(Boolean)
+        const linePts = disp.slice()
+        if (lassoModeRef.current === 'polygonal' && lassoCursorRef.current && disp.length > 0) {
+            const c = imageToDisplay(lassoCursorRef.current.x, lassoCursorRef.current.y)
+            if (c) linePts.push(c)
+        }
+        if (linePts.length >= 2) {
+            const poly = new Polyline(linePts, {
+                stroke: '#06b8d4',
+                strokeWidth: 1.5,
+                strokeDashArray: [4, 4],
+                fill: 'rgba(6,184,212,0.10)',
+                selectable: false,
+                evented: false,
+                excludeFromExport: true,
+                objectCaching: false,
+            })
+            fabricCanvas.add(poly)
+            lassoOverlayRef.current = poly
+        }
+        if (lassoModeRef.current === 'polygonal') {
+            for (const d of disp) {
+                const marker = new FabricCircle({
+                    left: d.x, top: d.y, radius: 4,
+                    fill: '#06b8d4', stroke: '#ffffff', strokeWidth: 1,
+                    originX: 'center', originY: 'center',
+                    selectable: false, evented: false, excludeFromExport: true,
+                })
+                fabricCanvas.add(marker)
+                lassoMarkerRefs.current.push(marker)
+            }
+        }
+        fabricCanvas.requestRenderAll()
+    }, [canvasEditor, imageToDisplay, clearLassoOverlay])
+
+    // Clear the in-progress path (points + overlay + cursor) but keep the
+    // tool active so the user can draw another selection.
+    const resetLassoPath = useCallback(() => {
+        lassoPointsRef.current = []
+        lassoCursorRef.current = null
+        lassoDrawingRef.current = false
+        setLassoVertexCount(0)
+        clearLassoOverlay()
+        canvasEditor?.requestRenderAll?.()
+    }, [clearLassoOverlay, canvasEditor])
+
+    // Rasterise the closed polygon to an offscreen alpha canvas (white
+    // inside on opaque black, so Canvas2D anti-aliasing lands in the R
+    // channel the lasso GLSL samples). Capped to BRUSH_CANVAS_MAX_DIM like
+    // the smart brush; the GLSL samples by normalised UV so the cap is free.
+    const rasterizeLasso = useCallback((points) => {
+        if (!imageSize || !points || points.length < 3) return null
+        const longEdge = Math.max(imageSize.width, imageSize.height)
+        const scale = longEdge > BRUSH_CANVAS_MAX_DIM ? BRUSH_CANVAS_MAX_DIM / longEdge : 1
+        const W = Math.max(1, Math.round(imageSize.width * scale))
+        const H = Math.max(1, Math.round(imageSize.height * scale))
+        const c = document.createElement('canvas')
+        c.width = W
+        c.height = H
+        const ctx = c.getContext('2d')
+        if (!ctx) return null
+        ctx.fillStyle = '#000000'
+        ctx.fillRect(0, 0, W, H)
+        ctx.fillStyle = '#ffffff'
+        ctx.beginPath()
+        ctx.moveTo(points[0].x * scale, points[0].y * scale)
+        for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x * scale, points[i].y * scale)
+        ctx.closePath()
+        ctx.fill('evenodd')
+        return c
+    }, [imageSize])
+
+    // Resolve the chain blend op from Shift/Alt on the closing event, or
+    // (when no modifier is held) the modifier-button state.
+    const resolveLassoModifier = useCallback((rawEvent) => {
+        const shift = rawEvent?.shiftKey || rawEvent?.e?.shiftKey
+        const alt = rawEvent?.altKey || rawEvent?.e?.altKey
+        if (shift && alt) return 'intersect'
+        if (shift) return 'add'
+        if (alt) return 'subtract'
+        return lassoModifierRef.current
+    }, [])
+
+    // Commit the current polygon → a megashader 'lasso' layer. `select`
+    // sink uses fill mode (visible selection); `erase` uses erase mode
+    // (cuts the region). The modifier maps to the chain blend op so a
+    // second lasso composes with the first.
+    const finishLassoSelection = useCallback((rawEvent) => {
+        const pts = lassoPointsRef.current
+        if (!pts || pts.length < 3) { resetLassoPath(); return }
+        const canvas = rasterizeLasso(pts)
+        if (!canvas) { resetLassoPath(); return }
+        const key = `lasso-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+        setMaskTexture(key, canvas)
+        const id = addChainLayer('lasso', {
+            maskTextureKey: key,
+            feather: lassoFeather,
+            fillMode: lassoSink === 'erase' ? 'erase' : 'fill',
+            label: lassoSink === 'erase' ? 'Lasso cut' : 'Lasso selection',
+        })
+        if (id) {
+            const mod = resolveLassoModifier(rawEvent)
+            // 'new' leaves the default op (replace for the first layer, add
+            // otherwise). add/subtract/intersect only apply to non-first
+            // layers (setLayerOp is a no-op on slot 0).
+            if (mod === 'add' || mod === 'subtract' || mod === 'intersect') {
+                setLayerOp(id, mod)
+            }
+            toast.success(lassoSink === 'erase' ? 'Lasso cut added to layers' : 'Lasso selection added to layers')
+        }
+        resetLassoPath()
+    }, [rasterizeLasso, addChainLayer, setLayerOp, lassoFeather, lassoSink, resolveLassoModifier, resetLassoPath])
+
+    const removeLastLassoVertex = useCallback(() => {
+        if (lassoPointsRef.current.length === 0) return
+        lassoPointsRef.current = lassoPointsRef.current.slice(0, -1)
+        setLassoVertexCount(lassoPointsRef.current.length)
+        redrawLassoOverlay()
+    }, [redrawLassoOverlay])
+
+    // Distance (image px) under which a polygonal click snaps to the first
+    // vertex to close the loop — ~8 display px regardless of zoom.
+    const lassoCloseThreshold = useCallback(() => {
+        const sx = tool.mainImage?.scaleX || 1
+        return 8 / (sx || 1)
+    }, [tool.mainImage])
+
+    const handleLassoDown = useCallback((e) => {
+        if (!lassoActive || !imageSize) return
+        const pos = pointerToImage(canvasEditor, e)
+        if (!pos) return
+        if (lassoModeRef.current === 'freehand') {
+            lassoDrawingRef.current = true
+            lassoPointsRef.current = [{ x: pos.x, y: pos.y }]
+            setLassoVertexCount(1)
+            redrawLassoOverlay()
+            return
+        }
+        // polygonal: clicking near the first vertex (with ≥3 points) closes.
+        const pts = lassoPointsRef.current
+        if (pts.length >= 3) {
+            const first = pts[0]
+            const dx = pos.x - first.x
+            const dy = pos.y - first.y
+            if (Math.sqrt(dx * dx + dy * dy) <= lassoCloseThreshold()) {
+                finishLassoSelection(e)
+                return
+            }
+        }
+        lassoPointsRef.current = [...pts, { x: pos.x, y: pos.y }]
+        setLassoVertexCount(lassoPointsRef.current.length)
+        redrawLassoOverlay()
+    }, [lassoActive, imageSize, pointerToImage, canvasEditor, redrawLassoOverlay, lassoCloseThreshold, finishLassoSelection])
+
+    const handleLassoMove = useCallback((e) => {
+        if (!lassoActive) return
+        const pos = pointerToImage(canvasEditor, e)
+        if (!pos) return
+        if (lassoModeRef.current === 'freehand') {
+            if (!lassoDrawingRef.current) return
+            const pts = lassoPointsRef.current
+            const last = pts[pts.length - 1]
+            if (last) {
+                const dx = pos.x - last.x
+                const dy = pos.y - last.y
+                if (dx * dx + dy * dy < 4) return // min 2px image-space spacing
+            }
+            lassoPointsRef.current = [...pts, { x: pos.x, y: pos.y }]
+            // Avoid a setState per sampled point on long strokes — only the
+            // overlay needs updating live; the count is cosmetic.
+            redrawLassoOverlay()
+            return
+        }
+        // polygonal: rubber-band the segment to the cursor.
+        lassoCursorRef.current = { x: pos.x, y: pos.y }
+        if (lassoPointsRef.current.length > 0) redrawLassoOverlay()
+    }, [lassoActive, pointerToImage, canvasEditor, redrawLassoOverlay])
+
+    const handleLassoUp = useCallback((rawEvent) => {
+        if (!lassoActive) return
+        if (lassoModeRef.current !== 'freehand') return
+        if (!lassoDrawingRef.current) return
+        lassoDrawingRef.current = false
+        finishLassoSelection(rawEvent)
+    }, [lassoActive, finishLassoSelection])
+
+    // Wire fabric mouse:down + dblclick (canvas) and window move/up + keys
+    // while the lasso is active.
+    useEffect(() => {
+        const fabricCanvas = canvasEditor
+        if (!fabricCanvas || !lassoActive) return undefined
+        fabricCanvas.defaultCursor = 'crosshair'
+        fabricCanvas.hoverCursor = 'crosshair'
+        fabricCanvas.selection = false
+        const onDown = (opt) => handleLassoDown(opt)
+        const onDbl = () => finishLassoSelection(null) // polygonal close
+        const onMove = (ev) => handleLassoMove({ e: ev })
+        const onUp = (ev) => handleLassoUp(ev)
+        const onKey = (ev) => {
+            if (ev.key === 'Escape') { resetLassoPath() }
+            else if (ev.key === 'Enter') { finishLassoSelection(ev) }
+            else if (ev.key === 'Backspace') { ev.preventDefault(); removeLastLassoVertex() }
+        }
+        fabricCanvas.on('mouse:down', onDown)
+        fabricCanvas.on('mouse:dblclick', onDbl)
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            fabricCanvas.defaultCursor = 'default'
+            fabricCanvas.hoverCursor = 'move'
+            fabricCanvas.selection = true
+            fabricCanvas.off('mouse:down', onDown)
+            fabricCanvas.off('mouse:dblclick', onDbl)
+            window.removeEventListener('mousemove', onMove)
+            window.removeEventListener('mouseup', onUp)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [lassoActive, canvasEditor, handleLassoDown, handleLassoMove, handleLassoUp, finishLassoSelection, resetLassoPath, removeLastLassoVertex])
+
+    // Re-draw the lasso overlay when the image transform changes (pan/zoom)
+    // so the in-progress selection stays glued to the photo.
+    useEffect(() => {
+        if (!lassoActive) return
+        if (lassoPointsRef.current.length > 0) redrawLassoOverlay()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [imgLeft, imgTop, imgScaleX, imgScaleY, imgAngle, imgFlipX, imgFlipY, panX, panY])
+
+    const handleStartLasso = useCallback(() => {
+        if (!imageSize) { toast.error('Image not ready yet'); return }
+        if (activeDraft) { toast('Finish or cancel the current draft first', { icon: 'ℹ️' }); return }
+        // Cancel any other click-mode so handlers don't fight over the click.
+        setColorPickerActive(false)
+        setSemanticActive(false)
+        handleSemanticStop()
+        setBrushActive(false)
+        resetLassoPath()
+        setLassoActive(true)
+        toast(lassoMode === 'freehand'
+            ? 'Drag to draw a freehand selection'
+            : 'Click to add points, double-click or Enter to close')
+    }, [imageSize, activeDraft, handleSemanticStop, resetLassoPath, lassoMode])
+
+    const handleStopLasso = useCallback(() => {
+        setLassoActive(false)
+        resetLassoPath()
+    }, [resetLassoPath])
+
+    // Remove any stray lasso overlay objects when the canvas changes or the
+    // tool unmounts (the wiring effect only restores the cursor + listeners).
+    useEffect(() => () => { clearLassoOverlay() }, [clearLassoOverlay])
+
+    /* ─── Re-editable gradient handles (linear / radial) ─── */
+
+    // Point-based inverse of imageToDisplay — converts a scene/display point
+    // back to image-pixel space for handle drags.
+    const displayToImage = useCallback((x, y) => {
+        const img = tool.mainImage
+        if (!img) return null
+        return {
+            x: (x - (img.left || 0)) / (img.scaleX || 1),
+            y: (y - (img.top || 0)) / (img.scaleY || 1),
+        }
+    }, [tool.mainImage])
+
+    // Latest selected layer, read inside drag handlers via a ref so the
+    // handle-build effect does NOT depend on geometry (which would tear down
+    // and rebuild the handles mid-drag). `selectedLayer`/`selKind`/
+    // `isGradientSelected` are computed once near the top of the component.
+    const selectedLayerRef = useRef(selectedLayer)
+    selectedLayerRef.current = selectedLayer
+    const gradientHandlesRef = useRef(/** @type {Array<any>} */ ([]))
+    const draggingHandleRef = useRef(false)
+    const [handleTick, setHandleTick] = useState(0)
+
+    const clearGradientHandles = useCallback(() => {
+        const c = canvasEditor
+        for (const o of gradientHandlesRef.current) {
+            try { c?.remove(o) } catch { /* canvas gone */ }
+        }
+        gradientHandlesRef.current = []
+    }, [canvasEditor])
+
+    const captureActive = brushActive || colorPickerActive || semanticActive || lassoActive || !!activeDraft
+
+    useEffect(() => {
+        const fabricCanvas = canvasEditor
+        clearGradientHandles()
+        if (!fabricCanvas || !tool.mainImage) return undefined
+        if (!isGradientSelected || captureActive) return undefined
+        const layer = selectedLayerRef.current
+        if (!layer) return undefined
+
+        const sx = tool.mainImage.scaleX || 1
+        const sy = tool.mainImage.scaleY || 1
+
+        const makeHandle = (imgPt, onDrag) => {
+            const d = imageToDisplay(imgPt.x, imgPt.y)
+            if (!d) return null
+            const h = new FabricCircle({
+                left: d.x, top: d.y, radius: 7,
+                fill: 'rgba(6,184,212,0.95)', stroke: '#ffffff', strokeWidth: 2,
+                originX: 'center', originY: 'center',
+                hasControls: false, hasBorders: false, selectable: true, evented: true,
+                hoverCursor: 'grab', moveCursor: 'grabbing',
+                excludeFromExport: true, objectCaching: false,
+            })
+            h.on('mousedown', () => { draggingHandleRef.current = true })
+            h.on('moving', () => {
+                const p = displayToImage(h.left, h.top)
+                if (p) onDrag(p)
+            })
+            fabricCanvas.add(h)
+            gradientHandlesRef.current.push(h)
+            return h
+        }
+
+        if (layer.kind === 'linear' && layer.p1 && layer.p2) {
+            const p1d = imageToDisplay(layer.p1.x, layer.p1.y)
+            const p2d = imageToDisplay(layer.p2.x, layer.p2.y)
+            let line = null
+            let h1 = null
+            let h2 = null
+            const reflowLine = () => {
+                if (line && h1 && h2) {
+                    line.set({ x1: h1.left, y1: h1.top, x2: h2.left, y2: h2.top })
+                    line.setCoords?.()
+                }
+            }
+            if (p1d && p2d) {
+                line = new Line([p1d.x, p1d.y, p2d.x, p2d.y], {
+                    stroke: '#06b8d4', strokeWidth: 1.5, strokeDashArray: [5, 5],
+                    selectable: false, evented: false, excludeFromExport: true, objectCaching: false,
+                })
+                fabricCanvas.add(line)
+                gradientHandlesRef.current.push(line)
+            }
+            h1 = makeHandle(layer.p1, (p) => { updateLayer(layer.id, { p1: { x: p.x, y: p.y } }); reflowLine() })
+            h2 = makeHandle(layer.p2, (p) => { updateLayer(layer.id, { p2: { x: p.x, y: p.y } }); reflowLine() })
+        } else if (layer.kind === 'radial' && layer.center && layer.radius) {
+            let ell = null
+            let cH = null
+            let rxH = null
+            let ryH = null
+            // Reposition the outline + all handles from the latest layer.
+            // For the handle being dragged this is a round-trip identity
+            // (its position defines the geometry), so it never fights the drag.
+            const reflow = () => {
+                const l = selectedLayerRef.current
+                if (!l || !l.center || !l.radius) return
+                const rot = l.rotation || 0
+                const co = Math.cos(rot)
+                const si = Math.sin(rot)
+                const cc = imageToDisplay(l.center.x, l.center.y)
+                if (ell && cc) { ell.set({ left: cc.x, top: cc.y, rx: Math.max(1, l.radius.x * sx), ry: Math.max(1, l.radius.y * sy), angle: rot * 180 / Math.PI }); ell.setCoords?.() }
+                if (cH && cc) { cH.set({ left: cc.x, top: cc.y }); cH.setCoords?.() }
+                const rp = imageToDisplay(l.center.x + co * l.radius.x, l.center.y + si * l.radius.x)
+                if (rxH && rp) { rxH.set({ left: rp.x, top: rp.y }); rxH.setCoords?.() }
+                const yp = imageToDisplay(l.center.x - si * l.radius.y, l.center.y + co * l.radius.y)
+                if (ryH && yp) { ryH.set({ left: yp.x, top: yp.y }); ryH.setCoords?.() }
+            }
+            const center = layer.center
+            const radius = layer.radius
+            const rotation = layer.rotation || 0
+            const cd = imageToDisplay(center.x, center.y)
+            if (cd) {
+                ell = new Ellipse({
+                    left: cd.x, top: cd.y,
+                    rx: Math.max(1, radius.x * sx), ry: Math.max(1, radius.y * sy),
+                    angle: rotation * 180 / Math.PI,
+                    fill: 'rgba(6,184,212,0.08)', stroke: '#06b8d4', strokeWidth: 1.5, strokeDashArray: [5, 5],
+                    originX: 'center', originY: 'center',
+                    selectable: false, evented: false, excludeFromExport: true, objectCaching: false,
+                })
+                fabricCanvas.add(ell)
+                gradientHandlesRef.current.push(ell)
+            }
+            const co0 = Math.cos(rotation)
+            const si0 = Math.sin(rotation)
+            cH = makeHandle(center, (p) => {
+                updateLayer(layer.id, { center: { x: p.x, y: p.y } })
+                reflow()
+            })
+            rxH = makeHandle({ x: center.x + co0 * radius.x, y: center.y + si0 * radius.x }, (p) => {
+                const l = selectedLayerRef.current
+                const dx = p.x - l.center.x
+                const dy = p.y - l.center.y
+                updateLayer(layer.id, { radius: { x: Math.max(2, Math.hypot(dx, dy)), y: l.radius.y }, rotation: Math.atan2(dy, dx) })
+                reflow()
+            })
+            ryH = makeHandle({ x: center.x - si0 * radius.y, y: center.y + co0 * radius.y }, (p) => {
+                const l = selectedLayerRef.current
+                const rot = l.rotation || 0
+                const dx = p.x - l.center.x
+                const dy = p.y - l.center.y
+                const newRy = Math.max(2, Math.abs(-Math.sin(rot) * dx + Math.cos(rot) * dy))
+                updateLayer(layer.id, { radius: { x: l.radius.x, y: newRy } })
+                reflow()
+            })
+        }
+
+        // On drag end, snap the gizmo to the final geometry with a clean
+        // rebuild (and re-enable normal interaction).
+        const onUp = () => {
+            if (draggingHandleRef.current) {
+                draggingHandleRef.current = false
+                setHandleTick((t) => t + 1)
+            }
+        }
+        fabricCanvas.on('mouse:up', onUp)
+        fabricCanvas.requestRenderAll()
+        return () => {
+            fabricCanvas.off('mouse:up', onUp)
+            clearGradientHandles()
+        }
+        // Geometry is intentionally NOT a dependency (drag handlers reposition
+        // imperatively); the image transform + handleTick drive rebuilds.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedLayerId, selKind, isGradientSelected, captureActive, canvasEditor, tool.mainImage,
+        imgLeft, imgTop, imgScaleX, imgScaleY, imgAngle, handleTick])
+
     // Live preview overlay: a thin dashed line/ellipse on the canvas
     // that tracks the layer's current geometry. Re-rendered on every
     // stack change so the user sees the preview update mid-drag.
     useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         if (overlayRef.current) {
             fabricCanvas.remove(overlayRef.current)
@@ -1354,7 +1865,7 @@ const MaskControls = ({ dominantColor }) => {
     const handleColorPick = useCallback((e) => {
         if (!colorPickerActive || !tool.mainImage) return
 
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
 
         // Get the pixel color at click position from the canvas
@@ -1394,7 +1905,7 @@ const MaskControls = ({ dominantColor }) => {
 
     // Attach/detach canvas click listener for color picker
     React.useEffect(() => {
-        const fabricCanvas = canvasEditor?.canvas
+        const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
 
         if (colorPickerActive) {
@@ -1830,6 +2341,162 @@ const MaskControls = ({ dominantColor }) => {
                 </div>
             </Section>
 
+            {/* ────────── Lasso (freehand + polygonal) ────────── */}
+            <Section title="Lasso Select" icon={Lasso} badge="NEW" defaultOpen={true}>
+                <div className="space-y-2">
+                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                        Draw a selection. <strong>Freehand</strong> = drag;{' '}
+                        <strong>Polygonal</strong> = click points, double-click or{' '}
+                        <kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Enter</kbd>{' '}
+                        to close (<kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Backspace</kbd> undoes a point).
+                    </p>
+
+                    {/* Mode: freehand / polygonal */}
+                    <div className="grid grid-cols-2 gap-1.5">
+                        {[
+                            { id: 'freehand', label: 'Freehand', icon: Lasso },
+                            { id: 'polygonal', label: 'Polygonal', icon: Spline },
+                        ].map((m) => {
+                            const MIcon = m.icon
+                            const active = lassoMode === m.id
+                            return (
+                                <button
+                                    key={m.id}
+                                    type="button"
+                                    onClick={() => setLassoMode(m.id)}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
+                                    style={{
+                                        background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
+                                        border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                        color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                    }}
+                                >
+                                    <MIcon className="h-3.5 w-3.5" />
+                                    {m.label}
+                                </button>
+                            )
+                        })}
+                    </div>
+
+                    {/* Output: select (fill) vs erase (cut) */}
+                    <div className="grid grid-cols-2 gap-1.5">
+                        {[
+                            { id: 'select', label: 'Select', icon: Layers, hint: 'visible selection layer' },
+                            { id: 'erase', label: 'Erase / Cut', icon: Scissors, hint: 'cut the region out' },
+                        ].map((s) => {
+                            const SIcon = s.icon
+                            const active = lassoSink === s.id
+                            return (
+                                <button
+                                    key={s.id}
+                                    type="button"
+                                    onClick={() => setLassoSink(s.id)}
+                                    title={s.hint}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
+                                    style={{
+                                        background: active ? 'rgba(124,58,237,0.10)' : 'var(--bg-elevated)',
+                                        border: `1px solid ${active ? 'rgba(124,58,237,0.35)' : 'var(--border-subtle)'}`,
+                                        color: active ? '#A78BFA' : 'var(--text-secondary)',
+                                    }}
+                                >
+                                    <SIcon className="h-3.5 w-3.5" />
+                                    {s.label}
+                                </button>
+                            )
+                        })}
+                    </div>
+
+                    {/* Boolean modifier — how this selection combines with the chain */}
+                    <div>
+                        <label className="text-[10px] block mb-1" style={{ color: 'var(--text-muted)' }}>
+                            Combine (Shift = add, Alt = subtract)
+                        </label>
+                        <div className="grid grid-cols-4 gap-1">
+                            {[
+                                { id: 'new', label: 'New', icon: Circle },
+                                { id: 'add', label: 'Add', icon: Plus },
+                                { id: 'subtract', label: 'Sub', icon: Minus },
+                                { id: 'intersect', label: 'Int', icon: Crosshair },
+                            ].map((m) => {
+                                const MIcon = m.icon
+                                const active = lassoModifier === m.id
+                                return (
+                                    <button
+                                        key={m.id}
+                                        type="button"
+                                        onClick={() => setLassoModifier(m.id)}
+                                        title={m.label}
+                                        className="flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-[10px] font-medium editor-interactive"
+                                        style={{
+                                            background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
+                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
+                                        }}
+                                    >
+                                        <MIcon className="h-3 w-3" />
+                                        {m.label}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                    </div>
+
+                    <LabeledSlider
+                        label="Feather"
+                        value={Math.round(lassoFeather * 100)}
+                        min={0}
+                        max={40}
+                        suffix="%"
+                        onChange={(v) => setLassoFeather(Math.max(0, Math.min(0.4, v / 100)))}
+                        dominantColor={dominantColor}
+                    />
+
+                    <div className="flex items-center gap-1.5">
+                        {!lassoActive ? (
+                            <motion.button
+                                type="button"
+                                onClick={handleStartLasso}
+                                whileTap={{ scale: 0.97 }}
+                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-semibold editor-interactive"
+                                style={{
+                                    background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(124,58,237,0.18) 100%)',
+                                    border: '1px solid rgba(6,184,212,0.35)',
+                                    color: 'var(--accent-primary)',
+                                }}
+                            >
+                                <Lasso className="h-3.5 w-3.5" />
+                                Start Lasso
+                            </motion.button>
+                        ) : (
+                            <>
+                                {lassoMode === 'polygonal' && lassoVertexCount >= 3 && (
+                                    <motion.button
+                                        type="button"
+                                        onClick={() => finishLassoSelection(null)}
+                                        whileTap={{ scale: 0.97 }}
+                                        className="flex items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
+                                        style={{ background: 'rgba(6,184,212,0.12)', border: '1px solid var(--accent-primary)', color: 'var(--accent-primary)' }}
+                                        title="Close the polygon"
+                                    >
+                                        <Plus className="h-3.5 w-3.5" /> Close
+                                    </motion.button>
+                                )}
+                                <motion.button
+                                    type="button"
+                                    onClick={handleStopLasso}
+                                    whileTap={{ scale: 0.97 }}
+                                    className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
+                                    style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.30)', color: '#FCA5A5' }}
+                                >
+                                    <X className="h-3.5 w-3.5" />
+                                    Stop{lassoVertexCount > 0 ? ` (${lassoVertexCount})` : ''}
+                                </motion.button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            </Section>
+
             {/* ────────── Depth Range (Depth Anything V2) ────────── */}
             <Section title="Depth Range" icon={Mountain} badge="STEP 6">
                 <div className="space-y-2">
@@ -1959,6 +2626,64 @@ const MaskControls = ({ dominantColor }) => {
                 badge={stack.chain.length > 0 ? `${stack.chain.length}` : null}
             >
                 <div className="space-y-1.5">
+                    {stack.chain.length > 0 && (
+                        <div className="flex items-center gap-1.5 pb-1">
+                            <button
+                                type="button"
+                                onClick={() => setShowMaskOverlay(!showMaskOverlay)}
+                                aria-pressed={showMaskOverlay}
+                                title="Show the selected area as a red overlay"
+                                className="flex-1 flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-medium editor-interactive"
+                                style={{
+                                    background: showMaskOverlay ? 'rgba(239,68,68,0.14)' : 'var(--bg-elevated)',
+                                    border: `1px solid ${showMaskOverlay ? 'rgba(239,68,68,0.45)' : 'var(--border-subtle)'}`,
+                                    color: showMaskOverlay ? '#FCA5A5' : 'var(--text-secondary)',
+                                }}
+                            >
+                                <Eye className="h-3 w-3" />
+                                Show mask
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setGlobalInvert(!globalInvert)}
+                                aria-pressed={globalInvert}
+                                title="Invert the whole mask"
+                                className="flex-1 flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-medium editor-interactive"
+                                style={{
+                                    background: globalInvert ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
+                                    border: `1px solid ${globalInvert ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                    color: globalInvert ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                }}
+                            >
+                                <Contrast className="h-3 w-3" />
+                                Invert
+                            </button>
+                        </div>
+                    )}
+                    {stack.chain.length > 0 && (
+                        <div className="flex items-center justify-end gap-1 pb-1">
+                            <button
+                                type="button"
+                                onClick={undoChain}
+                                disabled={!canUndo}
+                                title="Undo layer change"
+                                className="p-1 rounded editor-interactive disabled:opacity-30"
+                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                            >
+                                <RotateCcw className="h-3 w-3" />
+                            </button>
+                            <button
+                                type="button"
+                                onClick={redoChain}
+                                disabled={!canRedo}
+                                title="Redo layer change"
+                                className="p-1 rounded editor-interactive disabled:opacity-30"
+                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transform: 'scaleX(-1)' }}
+                            >
+                                <RotateCcw className="h-3 w-3" />
+                            </button>
+                        </div>
+                    )}
                     <AnimatePresence>
                         {stack.chain.map((entry, i) => (
                             <MaskChainCard
@@ -1968,10 +2693,13 @@ const MaskControls = ({ dominantColor }) => {
                                 total={stack.chain.length}
                                 isFirst={i === 0}
                                 imageSize={imageSize}
+                                selected={selectedLayerId === entry.layer.id}
+                                onSelect={selectLayer}
                                 onUpdate={(patch) => updateLayer(entry.layer.id, patch)}
                                 onRemove={removeLayer}
                                 onMove={moveLayer}
                                 onSetOp={setLayerOp}
+                                onSetFillMode={setFillMode}
                                 dominantColor={dominantColor}
                             />
                         ))}

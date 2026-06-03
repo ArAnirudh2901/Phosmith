@@ -726,6 +726,8 @@ export default function usePixelMaskTool({
         return createContentAwareFillCanvas(sourceEl, selectionMask, {
             threshold: MASK_EMPTY_THRESHOLD,
             smoothingPasses: 3,
+            cropX: img.cropX || 0,
+            cropY: img.cropY || 0,
         })
     }, [createPendingSelectionMask])
 
@@ -909,6 +911,8 @@ export default function usePixelMaskTool({
             radius: Math.max(0.5, brushSizeRef.current / 2),
             tolerance: toleranceRef.current,
             mode: effectiveMode(),
+            cropX: img.cropX || 0,
+            cropY: img.cropY || 0,
         })
     }, [effectiveMode])
 
@@ -1172,6 +1176,8 @@ export default function usePixelMaskTool({
             const affected = floodFillMask(maskCanvas, sourceEl, local.x, local.y, {
                 tolerance: toleranceRef.current,
                 mode: effectiveMode(),
+                cropX: img.cropX || 0,
+                cropY: img.cropY || 0,
             })
             if (affected > 0) {
                 if (before) {

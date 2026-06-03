@@ -29,8 +29,71 @@
 
 import { filters, classRegistry } from 'fabric'
 import { renderMegashader, disposeRenderer } from './megashader-renderer'
+import { getMaskTexture, setMaskTexture } from './mask-types'
 
 const MEGASHADER_FILTER_TYPE = 'Megashader'
+
+// Field names that carry an opaque mask-texture-cache key, by kind. Used to
+// serialise/restore the per-layer textures (semantic / depth / smartBrush /
+// lasso) so a persisted chain survives save → reload.
+const TEXTURE_KEY_FIELDS = ['maskTextureKey', 'brushTextureKey', 'depthMapKey']
+
+/**
+ * Convert a cached texture (ImageData | HTMLCanvasElement | HTMLImageElement |
+ * ImageBitmap) to a PNG data URL for persistence. Returns null if it can't be
+ * rasterised (non-browser, tainted canvas, zero-size).
+ */
+const textureToDataUrl = (data) => {
+    try {
+        if (!data || typeof document === 'undefined') return null
+        let canvas
+        if (typeof HTMLCanvasElement !== 'undefined' && data instanceof HTMLCanvasElement) {
+            canvas = data
+        } else if (typeof ImageData !== 'undefined' && data instanceof ImageData) {
+            canvas = document.createElement('canvas')
+            canvas.width = data.width
+            canvas.height = data.height
+            canvas.getContext('2d')?.putImageData(data, 0, 0)
+        } else {
+            const w = data.width || data.naturalWidth || 0
+            const h = data.height || data.naturalHeight || 0
+            if (!w || !h) return null
+            canvas = document.createElement('canvas')
+            canvas.width = w
+            canvas.height = h
+            canvas.getContext('2d')?.drawImage(data, 0, 0)
+        }
+        return canvas.toDataURL('image/png')
+    } catch {
+        return null
+    }
+}
+
+/**
+ * Decode a PNG data URL back into the texture cache under `key`. Resolves
+ * once the texture is registered (or on error) so callers can await it BEFORE
+ * the filter renders (otherwise the layer would sample the null texture).
+ */
+const restoreTexture = (key, dataUrl) => new Promise((resolve) => {
+    try {
+        if (typeof document === 'undefined' || !dataUrl) { resolve(); return }
+        const img = new Image()
+        img.onload = () => {
+            try {
+                const c = document.createElement('canvas')
+                c.width = img.naturalWidth || img.width
+                c.height = img.naturalHeight || img.height
+                c.getContext('2d')?.drawImage(img, 0, 0)
+                setMaskTexture(key, c)
+            } catch { /* ignore */ }
+            resolve()
+        }
+        img.onerror = () => resolve()
+        img.src = dataUrl
+    } catch {
+        resolve()
+    }
+})
 
 /**
  * @typedef {Object} MegashaderFilterOptions
@@ -55,6 +118,11 @@ export class MegashaderFilter extends filters.BaseFilter {
         this.stack = options.stack || { chain: [] }
         this.globalMaskAlpha = typeof options.globalMaskAlpha === 'number' ? options.globalMaskAlpha : 1
         this.enabled = options.enabled !== false
+        // Chain-wide render options. globalInvert is persisted (a real mask
+        // property); maskOverlay/overlayColor are transient view state.
+        this.globalInvert = options.globalInvert === true
+        this.maskOverlay = options.maskOverlay === true
+        this.overlayColor = options.overlayColor || null
     }
 
     /**
@@ -69,12 +137,25 @@ export class MegashaderFilter extends filters.BaseFilter {
             targetCtx.drawImage(sourceCanvas, 0, 0)
             return
         }
-        const result = renderMegashader(sourceCanvas, this.stack, {
-            globalMaskAlpha: this.globalMaskAlpha,
-        })
+        // Bug #3 hardening: a bad stack (unknown kind/op, GL link failure,
+        // readback error) must degrade to a passthrough — drawing the
+        // untouched source — instead of throwing out of Fabric's filter
+        // loop and leaving the image canvas blank.
+        let result
+        try {
+            result = renderMegashader(sourceCanvas, this.stack, {
+                globalMaskAlpha: this.globalMaskAlpha,
+                globalInvert: this.globalInvert,
+                maskOverlay: this.maskOverlay,
+                overlayColor: this.overlayColor,
+            })
+        } catch (e) {
+            console.warn('[megashader] render failed, passing through source:', e)
+            result = sourceCanvas
+        }
         targetCtx.save()
         targetCtx.globalCompositeOperation = 'source-over'
-        targetCtx.drawImage(result, 0, 0)
+        targetCtx.drawImage(result || sourceCanvas, 0, 0)
         targetCtx.restore()
     }
 
@@ -99,31 +180,59 @@ export class MegashaderFilter extends filters.BaseFilter {
      * @returns {object}
      */
     toObject() {
-        return {
+        // Serialise every texture-backed layer's texture (semantic / depth /
+        // smartBrush / lasso) as a PNG data URL keyed by its cache key, so a
+        // reloaded project re-registers them and the selection survives.
+        const textures = {}
+        const chain = (this.stack && Array.isArray(this.stack.chain)) ? this.stack.chain : []
+        for (const entry of chain) {
+            const layer = entry && entry.layer
+            if (!layer) continue
+            for (const field of TEXTURE_KEY_FIELDS) {
+                const key = layer[field]
+                if (typeof key === 'string' && key && !textures[key]) {
+                    const url = textureToDataUrl(getMaskTexture(key))
+                    if (url) textures[key] = url
+                }
+            }
+        }
+        const out = {
             ...super.toObject(),
             type: MEGASHADER_FILTER_TYPE,
             stack: this.stack,
             globalMaskAlpha: this.globalMaskAlpha,
+            globalInvert: this.globalInvert,
             enabled: this.enabled,
         }
+        if (Object.keys(textures).length > 0) out.textures = textures
+        return out
     }
 
     /**
      * Inverse of `toObject`. Fabric's `loadFromJSON` calls this on the
-     * registered class.
+     * registered class. We restore the persisted textures into the cache
+     * BEFORE resolving the filter, so the first render samples real masks
+     * instead of the null texture.
      *
      * @param {object} [object]
      * @param {{ target: any }} [options]
      */
-    static fromObject(object, options = {}) {
+    static async fromObject(object, options = {}) {
+        const textures = object && object.textures
+        if (textures && typeof textures === 'object') {
+            await Promise.all(
+                Object.entries(textures).map(([key, url]) => restoreTexture(key, url)),
+            )
+        }
         const filter = new MegashaderFilter({
             stack: object?.stack,
             globalMaskAlpha: object?.globalMaskAlpha,
+            globalInvert: object?.globalInvert,
             enabled: object?.enabled,
         })
         const target = options?.target
         if (target) filter.target = target
-        return Promise.resolve(filter)
+        return filter
     }
 }
 
