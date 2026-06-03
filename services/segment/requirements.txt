@@ -26,3 +26,12 @@ transformers>=4.45.0
 # Small is ~100 MB; HF also publishes Base (~340 MB) and Large (~1.3 GB).
 # (transformers / torch are already pulled in by the SAM 2 block above.)
 
+# Semantic subject detection for /segment ("Select Subject").
+# YOLO11n-seg gives tiny (~6 MB) person/animal INSTANCE masks so the subject is
+# isolated semantically (not just by saliency), group photos keep every subject,
+# and prominent non-subject objects are excluded. Refined by the BiRefNet matte
+# for clean edges; falls back to saliency when absent (set SUBJECT_DETECT=0).
+# LICENSE: ultralytics is AGPL-3.0 — fine for an open-source project.
+# (torch / torchvision are already pulled in by the SAM 2 block above.)
+ultralytics>=8.3.0
+

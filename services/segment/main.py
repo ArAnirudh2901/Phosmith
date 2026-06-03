@@ -27,7 +27,7 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, UnidentifiedImageError
 from rembg import new_session, remove
 from starlette.concurrency import run_in_threadpool
 
@@ -61,6 +61,29 @@ DEPTH_CACHE_MAX_PIXELS = int(os.getenv("DEPTH_CACHE_MAX_PIXELS", str(2048 * 2048
 DEPTH_MAX_SIDE = int(os.getenv("DEPTH_MAX_SIDE", "2048").strip())
 PORT = int(os.getenv("PORT", "8001").strip())
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "24").strip())
+
+# ─── Semantic subject detection (/segment "Select Subject") ──────────────────
+# YOLO11n-seg (ultralytics) gives tiny (~6 MB) person/animal INSTANCE masks so
+# "Select Subject" can semantically isolate the photo's subject(s) —
+# differentiating people/animals from background objects, and covering every
+# subject in a group photo — then the BiRefNet saliency matte refines the
+# union for clean hair/fur edges. Falls back to pure saliency when YOLO is
+# unavailable or finds no subject (e.g. a product/object photo).
+#
+# NOTE: ultralytics is AGPL-3.0. Acceptable here because the project is being
+# open-sourced; swap SUBJECT_MODEL / set SUBJECT_DETECT=0 to disable.
+SUBJECT_MODEL = os.getenv("SUBJECT_MODEL", "yolo11n-seg.pt").strip()
+SUBJECT_DETECT = os.getenv("SUBJECT_DETECT", "1").strip() not in ("0", "false", "False", "")
+SUBJECT_CONF = float(os.getenv("SUBJECT_CONF", "0.25").strip())
+# Refine the YOLO union with the BiRefNet matte for soft edges (2 inferences).
+SUBJECT_REFINE = os.getenv("SUBJECT_REFINE", "1").strip() not in ("0", "false", "False", "")
+# COCO subject class ids: person(0) + animals(14..23: bird,cat,dog,horse,
+# sheep,cow,elephant,bear,zebra,giraffe). Override with a CSV to broaden.
+_DEFAULT_SUBJECT_CLASSES = "0,14,15,16,17,18,19,20,21,22,23"
+SUBJECT_CLASSES = {
+    int(x) for x in os.getenv("SUBJECT_CLASSES", _DEFAULT_SUBJECT_CLASSES).split(",")
+    if x.strip().lstrip("-").isdigit()
+}
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
@@ -243,6 +266,77 @@ def _depth_predict(app, img: Image.Image) -> np.ndarray:
 
 # ─── App lifecycle ───────────────────────────────────────────────────────────
 
+def _subject_union_mask(app, pil_img: "Image.Image"):
+    """Detect person/animal INSTANCES with YOLO-seg and return
+    `(union_mask uint8 0/255, instance_count)`, or `(None, 0)` if YOLO is
+    unavailable or no subject is found.
+
+    The union of every subject instance handles group photos (all subjects in
+    one mask) while the class filter (`SUBJECT_CLASSES`) is what differentiates
+    subjects from background objects.
+
+    Takes the PIL (RGB) image — NOT a raw numpy array — because ultralytics
+    treats bare ndarrays as BGR (cv2 convention) and would swap R/B channels,
+    degrading detection. PIL input goes through ultralytics' correct RGB path.
+    """
+    model = getattr(app.state, "yolo", None)
+    if model is None:
+        return None, 0
+    w, h = pil_img.size  # PIL size is (width, height)
+    try:
+        # retina_masks=True yields full-resolution instance masks.
+        results = model.predict(pil_img, verbose=False, conf=SUBJECT_CONF, retina_masks=True)
+    except Exception:
+        log.exception("YOLO predict failed")
+        return None, 0
+    if not results:
+        return None, 0
+    r = results[0]
+    if getattr(r, "masks", None) is None or getattr(r, "boxes", None) is None:
+        return None, 0
+    try:
+        cls = r.boxes.cls.cpu().numpy().astype(int)
+        masks = r.masks.data.cpu().numpy()  # (N, mh, mw) in 0..1
+    except Exception:
+        log.exception("YOLO mask extraction failed")
+        return None, 0
+
+    union = np.zeros((h, w), dtype=np.uint8)
+    count = 0
+    for i, c in enumerate(cls):
+        if int(c) not in SUBJECT_CLASSES:
+            continue
+        m = masks[i]
+        if m.shape != (h, w):
+            # Resize via PIL (avoids a hard cv2 dependency).
+            m_img = Image.fromarray((np.clip(m, 0.0, 1.0) * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)
+            m = np.asarray(m_img, dtype=np.float32) / 255.0
+        union[m > 0.5] = 255
+        count += 1
+    if count == 0:
+        return None, 0
+    return union, count
+
+
+def _compose_subject_alpha(matte: np.ndarray, subject: np.ndarray) -> np.ndarray:
+    """Combine the semantic subject union with the saliency matte into a final
+    alpha: clean matte edges where the subject is salient, full coverage for
+    non-salient subjects, and nothing outside the subject region (so prominent
+    non-subject objects are excluded).
+    """
+    subj_img = Image.fromarray(subject, "L")
+    # Dilate the subject a little so the matte can supply soft edges just
+    # outside the YOLO boundary (hair/fur). MaxFilter kernel must be odd.
+    dil = np.asarray(subj_img.filter(ImageFilter.MaxFilter(15)))
+    if SUBJECT_REFINE and matte is not None:
+        combined = np.where(dil > 0, np.maximum(matte, subject), 0).astype(np.uint8)
+    else:
+        combined = subject
+    # Feather the result for anti-aliased edges.
+    combined = np.asarray(Image.fromarray(combined, "L").filter(ImageFilter.GaussianBlur(1.2)), dtype=np.uint8)
+    return combined
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("loading rembg model %r ...", MODEL_NAME)
@@ -261,6 +355,26 @@ async def lifespan(app: FastAPI):
         app.state.session = new_session("u2net", providers=["CPUExecutionProvider"])
         app.state.model_name = "u2net"
         app.state.providers = ["CPUExecutionProvider"]
+
+    # Optional: YOLO-seg semantic subject detection for /segment. When
+    # available, "Select Subject" returns the union of person/animal instances
+    # (refined by the matte); otherwise it falls back to pure saliency.
+    app.state.yolo = None
+    app.state.yolo_available = False
+    if SUBJECT_DETECT:
+        try:
+            from ultralytics import YOLO  # type: ignore
+
+            ty = time.perf_counter()
+            app.state.yolo = YOLO(SUBJECT_MODEL)
+            app.state.yolo_available = True
+            log.info("YOLO subject model %r ready in %.1fs", SUBJECT_MODEL, time.perf_counter() - ty)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning(
+                "YOLO subject detection unavailable (%s); /segment uses saliency only. "
+                "Install with: pip install ultralytics",
+                e,
+            )
 
     # Optional: SAM 2 (Step 5 click-to-select).
     app.state.sam2_available = False
@@ -403,6 +517,8 @@ async def health() -> dict:
         "model": app.state.model_name,
         "providers": app.state.providers,
         "max_upload_mb": MAX_UPLOAD_MB,
+        "subject_detect": getattr(app.state, "yolo_available", False),
+        "subject_model": SUBJECT_MODEL if getattr(app.state, "yolo_available", False) else None,
         "sam2_available": app.state.sam2_available,
         "sam2_model": app.state.sam2_model_id,
         "depth_available": app.state.depth_available,
@@ -434,24 +550,46 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
     if img.mode not in ("RGB", "RGBA", "L"):
         img = img.convert("RGB")
 
+    img_rgb = img.convert("RGB")
+    np_rgb = np.asarray(img_rgb)
+
+    # 1) Saliency matte (clean edges) from rembg — the alpha channel only.
     try:
-        out = remove(img, session=app.state.session, only_mask=False)
+        matte_img = remove(img, session=app.state.session, only_mask=True)
     except Exception as e:
         log.exception("rembg.remove failed")
         raise HTTPException(500, f"segmentation failed: {e}")
+    matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
 
-    if out.mode != "RGBA":
-        out = out.convert("RGBA")
+    # 2) Semantic subject union (person/animal instances) from YOLO-seg.
+    subject_mode = "saliency"
+    subjects = 0
+    final_alpha = matte
+    if getattr(app.state, "yolo_available", False):
+        try:
+            subject, subjects = await run_in_threadpool(_subject_union_mask, app, img_rgb)
+        except Exception:
+            log.exception("subject detection failed; using saliency")
+            subject, subjects = None, 0
+        if subject is not None and subject.any():
+            final_alpha = _compose_subject_alpha(matte, subject)
+            subject_mode = "yolo+matte" if SUBJECT_REFINE else "yolo"
+
+    # 3) Compose RGBA: original colours with the computed subject alpha.
+    rgba = np.dstack([np_rgb, final_alpha]).astype(np.uint8)
+    out = Image.fromarray(rgba, "RGBA")
 
     buf = io.BytesIO()
     out.save(buf, format="PNG", optimize=True)
     elapsed = time.perf_counter() - t0
     log.info(
-        "segmented %s (%dx%d, %dKB) in %.2fs -> %dKB",
+        "segmented %s (%dx%d, %dKB) mode=%s subjects=%d in %.2fs -> %dKB",
         image.filename or "<unnamed>",
         img.width,
         img.height,
         len(contents) // 1024,
+        subject_mode,
+        subjects,
         elapsed,
         buf.tell() // 1024,
     )
@@ -462,6 +600,8 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
         headers={
             "Cache-Control": "no-store",
             "X-Model": app.state.model_name,
+            "X-Subject-Mode": subject_mode,
+            "X-Subjects": str(subjects),
             "X-Elapsed-Ms": str(int(elapsed * 1000)),
         },
     )
