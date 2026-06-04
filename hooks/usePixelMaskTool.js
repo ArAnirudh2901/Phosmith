@@ -166,6 +166,17 @@ export default function usePixelMaskTool({
     useEffect(() => { disabledRef.current = disabled }, [disabled])
     useEffect(() => { toleranceRef.current = tolerance }, [tolerance])
 
+    // Mirror the per-stroke stack depth onto the canvas + broadcast it, so the
+    // topbar Undo/Redo buttons can reflect THIS stack (not just the global
+    // history) while the tool is mounted. Without this the Redo button stays
+    // disabled after a mask-stack undo even though a mask redo is available.
+    useEffect(() => {
+        if (!canvasEditor) return
+        canvasEditor.__maskCanUndo = undoDepth > 0
+        canvasEditor.__maskCanRedo = redoDepth > 0
+        try { window.dispatchEvent(new CustomEvent('pixxel:mask-history-changed')) } catch { /* SSR */ }
+    }, [canvasEditor, undoDepth, redoDepth])
+
     const effectiveMode = useCallback(() => {
         const base = modeRef.current
         if (!altRef.current) return base
@@ -1348,6 +1359,17 @@ export default function usePixelMaskTool({
             else canvasEditor.__redoCanvasState?.()
         }
 
+        // Expose the mask-aware undo/redo so the TOPBAR's Undo/Redo buttons
+        // (which otherwise always hit the global canvas history) route through
+        // the SAME per-stroke stack as Cmd+Z while this tool is mounted. Without
+        // this, the ⌘Z path and the toolbar button gave two different results
+        // for one visible action — e.g. after "Select Subject" the button hit
+        // global history while the real undo state lived on the mask stack, so
+        // the image wouldn't come back. Cleared on unmount so other tools fall
+        // back to the global history.
+        canvasEditor.__maskToolUndo = onMaskUndo
+        canvasEditor.__maskToolRedo = onMaskRedo
+
         canvasEditor.on('mouse:down', onMouseDown)
         canvasEditor.on('mouse:move', onMouseMove)
         canvasEditor.on('mouse:up', onMouseUp)
@@ -1401,6 +1423,15 @@ export default function usePixelMaskTool({
             document.removeEventListener('visibilitychange', onVisibilityChange)
             window.removeEventListener('pixxel:mask-undo', onMaskUndo)
             window.removeEventListener('pixxel:mask-redo', onMaskRedo)
+            // Only relinquish the topbar routing if it's still ours (guards the
+            // rare Mask↔Erase remount overlap from deleting the new handler).
+            if (canvasEditor.__maskToolUndo === onMaskUndo) delete canvasEditor.__maskToolUndo
+            if (canvasEditor.__maskToolRedo === onMaskRedo) delete canvasEditor.__maskToolRedo
+            // Drop the mask-stack availability flags so the topbar buttons fall
+            // back to the global history once no pixel tool is mounted.
+            delete canvasEditor.__maskCanUndo
+            delete canvasEditor.__maskCanRedo
+            try { window.dispatchEvent(new CustomEvent('pixxel:mask-history-changed')) } catch { /* SSR */ }
             removeOverlay({ render: false })
             unlockCanvas(canvasEditor)
             if (cursorElRef.current?.parentNode) cursorElRef.current.parentNode.removeChild(cursorElRef.current)
