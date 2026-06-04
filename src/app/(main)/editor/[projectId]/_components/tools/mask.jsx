@@ -1821,15 +1821,19 @@ const MaskControls = ({ dominantColor }) => {
             const c = document.createElement('canvas')
             const origW = sourceEl.naturalWidth || sourceEl.width || fabricObj.width
             const origH = sourceEl.naturalHeight || sourceEl.height || fabricObj.height
-            // Cap to 1024 for upload size
-            const scale = Math.min(1, 1024 / Math.max(origW, origH))
+            // Cap the longest side to 2048 before upload. BiRefNet runs at a
+            // fixed 1024² internally so this doesn't change matte detail, but it
+            // gives the service's YOLO pass enough resolution to find small /
+            // distant subjects in group photos (and a crisper mask upscale).
+            // JPEG q=0.92 keeps a 2048-side frame well under the 24 MB cap.
+            const scale = Math.min(1, 2048 / Math.max(origW, origH))
             c.width = Math.round(origW * scale)
             c.height = Math.round(origH * scale)
             const ctx = c.getContext('2d')
             ctx.drawImage(sourceEl, 0, 0, c.width, c.height)
 
             const blob = await new Promise((resolve, reject) => {
-                c.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.85)
+                c.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.92)
             })
 
             const form = new FormData()
