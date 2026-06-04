@@ -13,21 +13,37 @@ both MIT / Apache 2.0 and free for any use.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
 import logging
 import math
 import os
+import threading
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import numpy as np
+
+# OpenCV + SciPy power the saliency-matte cleanup (hole-fill, speck removal,
+# morphological close, distance transform). Both are hard deps of the listed
+# requirements, but degrade gracefully: if either is missing, clean_matte()
+# returns the matte untouched rather than crashing the request.
+try:
+    import cv2  # type: ignore
+    from scipy import ndimage  # type: ignore
+    _MATTE_CLEANUP = True
+except Exception:  # pragma: no cover - optional accel
+    cv2 = None  # type: ignore
+    ndimage = None  # type: ignore
+    _MATTE_CLEANUP = False
+
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, UnidentifiedImageError
 from rembg import new_session, remove
 from starlette.concurrency import run_in_threadpool
 
@@ -37,9 +53,19 @@ logging.basicConfig(
 )
 log = logging.getLogger("mask-service")
 
+# Load a local services/segment/.env (if present) BEFORE reading any config, so
+# `bun run mask:dev` can be configured without exporting shell vars. Best-effort:
+# python-dotenv is an indirect dep; absence just means env comes from the shell.
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except Exception:  # pragma: no cover - optional
+    pass
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-MODEL_NAME = os.getenv("SEGMENT_MODEL", "birefnet-general-lite").strip()
+MODEL_NAME = os.getenv("SEGMENT_MODEL", "birefnet-general").strip()
 SAM2_MODEL_ID = os.getenv("SAM2_MODEL_ID", "facebook/sam2-hiera-small").strip()
 SAM2_CACHE_MAX = int(os.getenv("SAM2_CACHE_MAX", "20").strip())
 SAM2_MAX_CLICKS = int(os.getenv("SAM2_MAX_CLICKS", "50").strip())
@@ -61,6 +87,92 @@ DEPTH_CACHE_MAX_PIXELS = int(os.getenv("DEPTH_CACHE_MAX_PIXELS", str(2048 * 2048
 DEPTH_MAX_SIDE = int(os.getenv("DEPTH_MAX_SIDE", "2048").strip())
 PORT = int(os.getenv("PORT", "8001").strip())
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "24").strip())
+# Reject /segment inputs whose longest side exceeds this (defense-in-depth vs
+# direct curls that bypass the Node route's MAX_MODEL_SIDE cap). BiRefNet runs
+# at a fixed 1024² internally, so a 12K image only wastes resize/YOLO work.
+# Mirrors the /depth handler's DEPTH_MAX_SIDE.
+SEGMENT_MAX_SIDE = int(os.getenv("SEGMENT_MAX_SIDE", "2048").strip())
+
+# By default, SAM 2 and Depth Anything (the heavy torch models behind the
+# /sam2 and /depth endpoints) are loaded LAZILY — on first use of their
+# endpoint — instead of at startup. This keeps the resident footprint small
+# (~500-800 MB: just rembg + YOLO + onnxruntime) so the service fits a small
+# free-tier host; the core "Select Subject" (/segment) path never needs them.
+# Set SEGMENT_EAGER_MODELS=1 to preload everything at startup (lowest
+# first-request latency, ~1.5-2.5 GB resident).
+SEGMENT_EAGER_MODELS = os.getenv("SEGMENT_EAGER_MODELS", "0").strip() not in ("0", "false", "False", "")
+
+# ─── Semantic subject detection (/segment "Select Subject") ──────────────────
+# YOLO11n-seg (ultralytics) gives tiny (~6 MB) person/animal INSTANCE masks so
+# "Select Subject" can semantically isolate the photo's subject(s) —
+# differentiating people/animals from background objects, and covering every
+# subject in a group photo — then the BiRefNet saliency matte refines the
+# union for clean hair/fur edges. Falls back to pure saliency when YOLO is
+# unavailable or finds no subject (e.g. a product/object photo).
+#
+# NOTE: ultralytics is AGPL-3.0. Acceptable here because the project is being
+# open-sourced; swap SUBJECT_MODEL / set SUBJECT_DETECT=0 to disable.
+# YOLO26n-seg (Jan 2026) is the default: ~6 MB / 2.7M params, NMS-free
+# (native end-to-end head), and up to ~43% faster CPU ONNX inference than
+# YOLO11n — ideal for free-tier CPU hosts. Because it's NMS-free, the IOU /
+# AGNOSTIC_NMS / MAX_DET knobs below are no-ops for it (they still apply if you
+# switch SUBJECT_MODEL back to a yolo11*-seg model). Needs ultralytics >= 8.4.
+SUBJECT_MODEL = os.getenv("SUBJECT_MODEL", "yolo26n-seg.pt").strip()
+SUBJECT_DETECT = os.getenv("SUBJECT_DETECT", "1").strip() not in ("0", "false", "False", "")
+# conf=0.20 admits faint/occluded subjects in group photos. We UNION every
+# instance and then gate it against the BiRefNet saliency matte, so a low conf
+# floods nothing — spurious low-conf boxes that aren't salient are dropped.
+SUBJECT_CONF = float(os.getenv("SUBJECT_CONF", "0.20").strip())
+# imgsz is the single biggest recall lever for small/distant people in group
+# photos (ultralytics letterboxes the input to this size before inference, so
+# more pixels land on each far-away face). 1280 costs ~120ms extra on CPU.
+SUBJECT_IMGSZ = int(os.getenv("SUBJECT_IMGSZ", "1280").strip())
+# NMS IoU. Keep HIGH (0.7) so legitimately-overlapping people in a crowd are
+# NOT merged/suppressed into one box. Lowering this loses subjects.
+SUBJECT_IOU = float(os.getenv("SUBJECT_IOU", "0.7").strip())
+# Cap on detected instances (large group photos can have many people).
+SUBJECT_MAX_DET = int(os.getenv("SUBJECT_MAX_DET", "300").strip())
+# Class-aware NMS (False) so a person overlapping a dog/horse isn't suppressed.
+SUBJECT_AGNOSTIC_NMS = os.getenv("SUBJECT_AGNOSTIC_NMS", "0").strip() not in ("0", "false", "False", "")
+# Refine the YOLO union with the BiRefNet matte for soft edges (2 inferences).
+SUBJECT_REFINE = os.getenv("SUBJECT_REFINE", "1").strip() not in ("0", "false", "False", "")
+# Extend "subject" beyond person/animal to generic multi-subject photos: include
+# ANY detected instance whose own mask is mostly salient (per the BiRefNet matte)
+# and large enough. Zero extra inference — pure numpy AND/area math per instance.
+SUBJECT_SALIENT_INCLUDE = os.getenv("SUBJECT_SALIENT_INCLUDE", "1").strip() not in ("0", "false", "False", "")
+# An instance counts as a subject if >= this fraction of ITS OWN pixels are
+# salient (matte>127). The denominator is the instance area (not the image), so
+# a big background object that merely clips the foreground fails the test.
+SUBJECT_SALIENT_OVERLAP = float(os.getenv("SUBJECT_SALIENT_OVERLAP", "0.60").strip())
+# ... and its mask must cover at least this fraction of the frame (drops noise).
+SUBJECT_SALIENT_AREA_FRAC = float(os.getenv("SUBJECT_SALIENT_AREA_FRAC", "0.005").strip())
+# An instance whose mask covers MORE than this fraction of the frame is treated
+# as scene/background (a couch/wall the subject sits in front of), not a
+# subject, so the salient-include rule won't union it in.
+SUBJECT_SALIENT_AREA_MAX_FRAC = float(os.getenv("SUBJECT_SALIENT_AREA_MAX_FRAC", "0.55").strip())
+
+# ─── Matte-cleanup tuning ────────────────────────────────────────────────────
+# Only fill interior holes SMALLER than this fraction of the subject's area —
+# those are model drop-outs (a leaf's dropped veins/center). Larger holes are
+# GENUINE see-through gaps (a donut/ring, eyeglass lens, the gap between an arm
+# and the torso) and must stay transparent.
+MATTE_HOLE_FILL_MAX_FRAC = float(os.getenv("MATTE_HOLE_FILL_MAX_FRAC", "0.02").strip())
+# Recover (solidify) only DEEP-interior pixels whose alpha is at or below this —
+# i.e. regions the model essentially dropped. Genuinely semi-transparent pixels
+# above it (frosted glass, smoke, a soft hair gradient) are LEFT soft.
+MATTE_FAINT_RECOVER_MAX = int(os.getenv("MATTE_FAINT_RECOVER_MAX", "96").strip())
+# ...and only when the subject has a confidently-solid CORE at least this big a
+# fraction of its area. A subject that is mostly faint IS translucent — recover
+# nothing, keep its alpha as-is.
+MATTE_FAINT_MIN_SOLID_FRAC = float(os.getenv("MATTE_FAINT_MIN_SOLID_FRAC", "0.50").strip())
+# COCO subject class ids: person(0) + animals(14..23: bird,cat,dog,horse,
+# sheep,cow,elephant,bear,zebra,giraffe). Always included regardless of the
+# salient-instance gates above. Override with a CSV to broaden.
+_DEFAULT_SUBJECT_CLASSES = "0,14,15,16,17,18,19,20,21,22,23"
+SUBJECT_CLASSES = {
+    int(x) for x in os.getenv("SUBJECT_CLASSES", _DEFAULT_SUBJECT_CLASSES).split(",")
+    if x.strip().lstrip("-").isdigit()
+}
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
@@ -91,10 +203,22 @@ if MODEL_NAME not in ALLOWED_MODELS:
 
 # ─── Execution-provider auto-detect (ONNX / rembg) ──────────────────────────
 
+# CoreML reliably JITs the small/lite BiRefNet graphs, but compiling the heavy
+# Swin-Large exports (birefnet-general / -massive) can take many minutes on
+# first run and has been observed to deadlock the Apple ANE service at session
+# init. For those models we skip CoreML and run on CPU (~30 s/inference,
+# rock-solid) unless the user opts back in. CUDA is unaffected — it's preferred
+# over CoreML and is the fast path for the heavy models in production.
+_COREML_UNSTABLE_MODELS = {"birefnet-general", "birefnet-massive"}
+SEGMENT_ALLOW_COREML_HEAVY = os.getenv("SEGMENT_ALLOW_COREML_HEAVY", "0").strip() not in ("0", "false", "False", "")
+
+
 def detect_providers() -> List[str]:
     """Pick the best ONNX Runtime execution providers for this machine.
 
-    Order of preference: CUDA (NVIDIA) > CoreML (Apple Silicon) > CPU.
+    Order of preference: CUDA (NVIDIA) > CoreML (Apple Silicon) > CPU. CoreML is
+    skipped for the heavy Swin-Large models (see `_COREML_UNSTABLE_MODELS`)
+    unless `SEGMENT_ALLOW_COREML_HEAVY=1`.
     """
     override = os.getenv("SEGMENT_PROVIDERS", "").strip()
     if override:
@@ -108,8 +232,16 @@ def detect_providers() -> List[str]:
             providers.insert(0, "CUDAExecutionProvider")
             log.info("ONNX CUDA execution provider detected (NVIDIA GPU)")
         elif "CoreMLExecutionProvider" in available:
-            providers.insert(0, "CoreMLExecutionProvider")
-            log.info("ONNX CoreML execution provider detected (Apple Silicon GPU)")
+            if MODEL_NAME in _COREML_UNSTABLE_MODELS and not SEGMENT_ALLOW_COREML_HEAVY:
+                log.info(
+                    "CoreML available but skipped for heavy model %r (slow/unstable "
+                    "Swin-Large compile); using CPU. Set SEGMENT_ALLOW_COREML_HEAVY=1 "
+                    "to force CoreML, or SEGMENT_PROVIDERS to override.",
+                    MODEL_NAME,
+                )
+            else:
+                providers.insert(0, "CoreMLExecutionProvider")
+                log.info("ONNX CoreML execution provider detected (Apple Silicon GPU)")
     except Exception as e:  # pragma: no cover - best effort
         log.debug("onnxruntime provider probe failed: %s", e)
     return providers
@@ -241,7 +373,349 @@ def _depth_predict(app, img: Image.Image) -> np.ndarray:
     return normalised
 
 
+# ─── Saliency-matte cleanup ──────────────────────────────────────────────────
+
+def clean_matte(matte_u8: np.ndarray, rgb: "np.ndarray | None" = None) -> np.ndarray:
+    """Clean a saliency matte into a complete, solid subject mask while
+    preserving soft edges.
+
+    This is the fix for under-segmented subjects (e.g. a backlit fig leaf whose
+    translucent lobes/veins the model drops, leaving Swiss-cheese holes and
+    floating specks). Strategy:
+
+      1. LOW threshold (alpha>24) -> binary capturing faint/semi-opaque regions.
+      2. binary_fill_holes -> fill interior translucent holes (veins/center).
+      3. small morphological CLOSE -> bridge tiny gaps without swallowing real
+         concavities (leaf lobes must stay separated).
+      4. connected-component speck removal by ABSOLUTE+RELATIVE area floor —
+         keeps legitimately-detached real fragments, drops detection noise.
+         (NOT largest-only: a leaf can have separated tip pieces.)
+      5. gate the ORIGINAL soft matte by the dilated cleaned binary (WHERE),
+         then solidify ONLY genuine interior holes (geometry-exact, from
+         fill_holes) and faint DEEP-interior pixels (distance-transform gated)
+         to 255 — so anti-aliased edges survive verbatim; the binary decides
+         WHERE, the soft matte decides the edge profile.
+
+    HxW uint8 in -> HxW uint8 out. ~240 ms at 2048² on a single CPU core.
+    Returns the input untouched if OpenCV/SciPy are unavailable.
+    """
+    if not _MATTE_CLEANUP:
+        return matte_u8
+    if matte_u8.ndim != 2:
+        matte_u8 = matte_u8[..., 0]
+    h, w = matte_u8.shape
+    matte = matte_u8  # keep original soft matte untouched
+
+    # Kernel size scales with the image so behaviour is resolution-independent.
+    # ~0.35% of the smaller side, clamped to [3, 9] and forced odd. At 1024 ->
+    # 5px: bridges 1-2px sampling gaps but is far smaller than a leaf-lobe gap
+    # (tens of px), so genuine concavities between lobes survive.
+    k = int(round(min(h, w) * 0.0035))
+    k = max(3, min(9, k))
+    if k % 2 == 0:
+        k += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+
+    # 1. LOW threshold so faint/semi-opaque halo regions are captured.
+    binary = (matte > 24).astype(np.uint8)
+    if not binary.any():
+        return matte  # nothing salient — leave as-is (empty stays empty)
+
+    # 2. Bridge tiny outline gaps (CLOSE = dilate then erode -> no net growth,
+    #    so concave gaps wider than the kernel are NOT bridged). Holes stay open.
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # 3. Connected-component speck removal -> the subject CORE (holes still
+    #    open). Floor = max(0.05% of image, 64px): the relative term scales with
+    #    resolution, the absolute floor keeps the threshold sane on tiny images.
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    min_area = max(int(0.0005 * h * w), 64)
+    keep = np.zeros(num, dtype=bool)
+    keep[0] = False  # background label 0 is never kept
+    areas = stats[:, cv2.CC_STAT_AREA]
+    keep[1:] = areas[1:] >= min_area
+    core = keep[labels].astype(np.uint8)
+    if not core.any():
+        # Every component fell below the floor (tiny subject). Fall back to the
+        # threshold binary so we never return an empty mask for a real subject.
+        core = binary
+
+    # 4. The subject's solid extent = core with interior holes filled. This is
+    #    the WHERE region (and the basis for distance/depth). The holes it adds
+    #    over `core` are the interior holes — but we only FILL the SMALL ones
+    #    (model drop-outs); large holes are GENUINE see-through gaps (donut/ring,
+    #    eyeglass lens, the gap between an arm and the torso) and stay transparent.
+    clean_bin = ndimage.binary_fill_holes(core).astype(np.uint8)
+    subject_area = int(clean_bin.sum()) or 1
+    holes = ((clean_bin > 0) & (core == 0)).astype(np.uint8)
+    small_holes = np.zeros((h, w), dtype=bool)
+    if holes.any():
+        hn, hlabels, hstats, _ = cv2.connectedComponentsWithStats(holes, connectivity=8)
+        max_hole_area = MATTE_HOLE_FILL_MAX_FRAC * subject_area
+        small_ids = [i for i in range(1, hn) if hstats[i, cv2.CC_STAT_AREA] <= max_hole_area]
+        if small_ids:
+            small_holes = np.isin(hlabels, small_ids)
+
+    # 5. Composite. WHERE from clean_bin; EDGE PROFILE from the soft matte. A
+    #    genuine large hole keeps matte~0 (gated below) and is never solidified.
+    region = cv2.dilate(clean_bin, kernel, iterations=1)
+    gated = np.where(region > 0, matte, 0).astype(np.uint8)
+    out = gated.copy()
+    out[small_holes] = 255  # fill small model drop-outs only
+
+    # Faint recovery: only when the subject is mostly solid (so a translucent
+    # subject is left alone), and only for DEEP near-dropped pixels (alpha in
+    # (24, FAINT_MAX]) — so genuine mid/low-alpha translucency is preserved and
+    # a fully-zero genuine hole (alpha 0, fails matte>24) is never touched.
+    solid_frac = float(((matte >= 128) & (clean_bin > 0)).sum()) / subject_area
+    if solid_frac >= MATTE_FAINT_MIN_SOLID_FRAC:
+        dist = cv2.distanceTransform(clean_bin, cv2.DIST_L2, 3)
+        deep = dist > (3.0 * k)  # covers a Gaussian rim up to sigma~k
+        faint_core = deep & (matte > 24) & (matte <= MATTE_FAINT_RECOVER_MAX)
+        out[faint_core] = 255
+    return out
+
+
 # ─── App lifecycle ───────────────────────────────────────────────────────────
+
+def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" = None):
+    """Detect person/animal INSTANCES with YOLO-seg and return
+    `(union_mask uint8 0/255, instance_count)`, or `(None, 0)` if YOLO is
+    unavailable or no subject is found.
+
+    The union of every subject instance handles group photos (all subjects in
+    one mask). Person/animal classes (`SUBJECT_CLASSES`) are always included.
+    When `matte` (the BiRefNet saliency map) is supplied and
+    `SUBJECT_SALIENT_INCLUDE` is on, ANY other detected instance whose own mask
+    is mostly salient and large enough is ALSO included — so multi-subject
+    photos that aren't people (products, multiple objects) keep every subject —
+    while prominent background objects (sky/walls/furniture) score ~0 saliency
+    and are excluded.
+
+    Detection recall on small/distant/occluded subjects is driven by
+    `SUBJECT_IMGSZ` (letterbox size), `SUBJECT_CONF`, and `SUBJECT_IOU` (kept
+    high so overlapping people in a crowd aren't merged). `classes=` filters
+    inside NMS rather than post-hoc, so the `max_det` budget isn't spent on
+    background classes when only person/animal subjects are wanted.
+
+    Takes the PIL (RGB) image — NOT a raw numpy array — because ultralytics
+    treats bare ndarrays as BGR (cv2 convention) and would swap R/B channels,
+    degrading detection. PIL input goes through ultralytics' correct RGB path.
+    """
+    model = getattr(app.state, "yolo", None)
+    if model is None:
+        return None, 0
+    w, h = pil_img.size  # PIL size is (width, height)
+
+    # When salient-instance inclusion is on we must SEE every class (so a
+    # non-person subject can be tested against the matte), so we don't pass
+    # `classes=` to NMS; the per-instance gate below does the filtering. When
+    # it's off, filter inside NMS to save the max_det budget.
+    use_salient = SUBJECT_SALIENT_INCLUDE and matte is not None
+    predict_kwargs = dict(
+        verbose=False,
+        imgsz=SUBJECT_IMGSZ,
+        conf=SUBJECT_CONF,
+        iou=SUBJECT_IOU,
+        max_det=SUBJECT_MAX_DET,
+        agnostic_nms=SUBJECT_AGNOSTIC_NMS,
+        retina_masks=True,  # full-resolution instance masks
+    )
+    if not use_salient:
+        predict_kwargs["classes"] = sorted(SUBJECT_CLASSES) or None
+    try:
+        results = model.predict(pil_img, **predict_kwargs)
+    except Exception:
+        log.exception("YOLO predict failed")
+        return None, 0
+    if not results:
+        return None, 0
+    r = results[0]
+    if getattr(r, "masks", None) is None or getattr(r, "boxes", None) is None:
+        return None, 0
+    try:
+        cls = r.boxes.cls.cpu().numpy().astype(int)
+        masks = r.masks.data.cpu().numpy()  # (N, mh, mw) in 0..1
+    except Exception:
+        log.exception("YOLO mask extraction failed")
+        return None, 0
+
+    # Resolve every instance mask to a full-res boolean once.
+    instances = []  # (class_id, bool_mask, area)
+    for i, c in enumerate(cls):
+        m = masks[i]
+        if m.shape != (h, w):
+            # Resize via PIL (avoids a hard cv2 dependency).
+            m_img = Image.fromarray((np.clip(m, 0.0, 1.0) * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)
+            m = np.asarray(m_img, dtype=np.float32) / 255.0
+        mb = m > 0.5
+        instances.append((int(c), mb, int(mb.sum())))
+
+    union = np.zeros((h, w), dtype=np.uint8)
+    count = 0
+
+    # Pass 1: person/animal subjects are ALWAYS included. Track the largest so
+    # the salient pass can tell props from scenery.
+    max_subj_area = 0
+    for c, mb, area in instances:
+        if c in SUBJECT_CLASSES:
+            union[mb] = 255
+            count += 1
+            max_subj_area = max(max_subj_area, area)
+
+    # Pass 2: generic salient instances (multi-object photos). A salient object
+    # whose OWN pixels are mostly salient counts as a subject — UNLESS the scene
+    # is person-centric and the object is bigger than the largest person, in
+    # which case it's scene/background (a bus, couch, or wall behind the people)
+    # and is excluded. With no person/animal present, allow up to the frame cap.
+    salient = (matte > 127) if (use_salient and matte is not None) else None
+    if salient is not None:
+        frame_area = float(w * h)
+        min_inst_area = SUBJECT_SALIENT_AREA_FRAC * frame_area
+        max_inst_area = SUBJECT_SALIENT_AREA_MAX_FRAC * frame_area
+        salient_cap = max_inst_area if max_subj_area == 0 else min(max_inst_area, 1.5 * max_subj_area)
+        for c, mb, area in instances:
+            if c in SUBJECT_CLASSES:
+                continue
+            if not (min_inst_area <= area <= salient_cap):
+                continue
+            overlap = float((mb & salient).sum()) / float(area or 1)
+            if overlap >= SUBJECT_SALIENT_OVERLAP:
+                union[mb] = 255
+                count += 1
+
+    if count == 0:
+        return None, 0
+    return union, count
+
+
+def _compose_subject_alpha(matte: np.ndarray, subject: np.ndarray) -> np.ndarray:
+    """Combine the semantic subject union with the saliency matte into a final
+    alpha: clean matte edges where the subject is salient, full coverage for
+    non-salient subjects, and nothing outside the subject region (so prominent
+    non-subject objects are excluded).
+    """
+    subj_img = Image.fromarray(subject, "L")
+    # Dilate the subject a little so the matte can supply soft edges just
+    # outside the YOLO boundary (hair/fur). MaxFilter kernel must be odd.
+    dil = np.asarray(subj_img.filter(ImageFilter.MaxFilter(15)))
+    if SUBJECT_REFINE and matte is not None:
+        combined = np.where(dil > 0, np.maximum(matte, subject), 0).astype(np.uint8)
+    else:
+        combined = subject
+    # Feather the result for anti-aliased edges.
+    combined = np.asarray(Image.fromarray(combined, "L").filter(ImageFilter.GaussianBlur(1.2)), dtype=np.uint8)
+    return combined
+
+
+# ─── Lazy model loaders (SAM 2 / Depth) ──────────────────────────────────────
+# These hold the heavy torch models. By default they load on first use so the
+# resident footprint stays small. Loads are serialised per-model with a lock so
+# two concurrent first-requests don't both load. A permanent failure (e.g. torch
+# not installed) is remembered so we don't retry the heavy load on every request.
+
+_SAM2_LOCK = threading.Lock()
+_DEPTH_LOCK = threading.Lock()
+
+
+def _torch_stack_loadable() -> bool:
+    """Cheap capability probe: are torch + transformers importable WITHOUT
+    actually importing them (the import is the heavy ~200 MB+ cost)?"""
+    try:
+        return bool(
+            importlib.util.find_spec("torch") and importlib.util.find_spec("transformers")
+        )
+    except Exception:  # pragma: no cover - find_spec on a broken install
+        return False
+
+
+def _load_sam2(app: FastAPI) -> bool:
+    """Load SAM 2 into app.state (blocking). Caller holds _SAM2_LOCK."""
+    try:
+        import torch  # type: ignore  # noqa: F401
+        from transformers import Sam2Model, Sam2Processor  # type: ignore
+
+        device, device_label = detect_torch_device()
+        if device is None:
+            raise ImportError("torch not available")
+
+        log.info("loading SAM 2 model %r onto %s ...", SAM2_MODEL_ID, device_label)
+        t1 = time.perf_counter()
+        app.state.sam2_processor = Sam2Processor.from_pretrained(SAM2_MODEL_ID)
+        app.state.sam2_model = Sam2Model.from_pretrained(SAM2_MODEL_ID).to(device)
+        app.state.sam2_model.eval()
+        app.state.sam2_device = device
+        app.state.sam2_model_id = SAM2_MODEL_ID
+        app.state.sam2_available = True
+        log.info("SAM 2 ready in %.1fs on %s", time.perf_counter() - t1, device_label)
+        return True
+    except ImportError:
+        log.warning("torch / transformers not installed; /sam2/click disabled.")
+        app.state.sam2_load_failed = True
+        return False
+    except Exception as e:  # pragma: no cover - defensive
+        log.exception("failed to load SAM 2: %s", e)
+        app.state.sam2_load_failed = True
+        return False
+
+
+def _ensure_sam2(app: FastAPI) -> bool:
+    """Lazily load SAM 2; return True if it's ready to use."""
+    if app.state.sam2_available:
+        return True
+    if getattr(app.state, "sam2_load_failed", False):
+        return False
+    with _SAM2_LOCK:
+        if app.state.sam2_available:
+            return True
+        if getattr(app.state, "sam2_load_failed", False):
+            return False
+        return _load_sam2(app)
+
+
+def _load_depth(app: FastAPI) -> bool:
+    """Load Depth Anything V2 into app.state (blocking). Caller holds _DEPTH_LOCK."""
+    try:
+        import torch  # type: ignore  # noqa: F401
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation  # type: ignore
+
+        device, device_label = detect_torch_device()
+        if device is None:
+            raise ImportError("torch not available")
+
+        log.info("loading Depth model %r onto %s ...", DEPTH_MODEL_ID, device_label)
+        t2 = time.perf_counter()
+        app.state.depth_processor = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
+        app.state.depth_model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID).to(device)
+        app.state.depth_model.eval()
+        app.state.depth_device = device
+        app.state.depth_model_id = DEPTH_MODEL_ID
+        app.state.depth_available = True
+        log.info("Depth ready in %.1fs on %s", time.perf_counter() - t2, device_label)
+        return True
+    except ImportError:
+        log.warning("torch / transformers not installed; /depth disabled.")
+        app.state.depth_load_failed = True
+        return False
+    except Exception as e:  # pragma: no cover - defensive
+        log.exception("failed to load Depth model: %s", e)
+        app.state.depth_load_failed = True
+        return False
+
+
+def _ensure_depth(app: FastAPI) -> bool:
+    """Lazily load Depth Anything V2; return True if it's ready to use."""
+    if app.state.depth_available:
+        return True
+    if getattr(app.state, "depth_load_failed", False):
+        return False
+    with _DEPTH_LOCK:
+        if app.state.depth_available:
+            return True
+        if getattr(app.state, "depth_load_failed", False):
+            return False
+        return _load_depth(app)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -262,69 +736,45 @@ async def lifespan(app: FastAPI):
         app.state.model_name = "u2net"
         app.state.providers = ["CPUExecutionProvider"]
 
-    # Optional: SAM 2 (Step 5 click-to-select).
+    # Optional: YOLO-seg semantic subject detection for /segment. When
+    # available, "Select Subject" returns the union of person/animal instances
+    # (refined by the matte); otherwise it falls back to pure saliency.
+    app.state.yolo = None
+    app.state.yolo_available = False
+    if SUBJECT_DETECT:
+        try:
+            from ultralytics import YOLO  # type: ignore
+
+            ty = time.perf_counter()
+            app.state.yolo = YOLO(SUBJECT_MODEL)
+            app.state.yolo_available = True
+            log.info("YOLO subject model %r ready in %.1fs", SUBJECT_MODEL, time.perf_counter() - ty)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning(
+                "YOLO subject detection unavailable (%s); /segment uses saliency only. "
+                "Install with: pip install ultralytics",
+                e,
+            )
+
+    # SAM 2 (Step 5 click-to-select) + Depth Anything V2 (Step 6) are the heavy
+    # torch models. By default they load LAZILY on first use (small footprint);
+    # set SEGMENT_EAGER_MODELS=1 to preload them now. The configured model ids
+    # are recorded up front so /health and response headers can report them.
     app.state.sam2_available = False
-    app.state.sam2_model_id = None
-    try:
-        import torch  # type: ignore  # noqa: F401
-        from transformers import Sam2Model, Sam2Processor  # type: ignore
-
-        device, device_label = detect_torch_device()
-        if device is None:
-            raise ImportError("torch not available")
-
-        log.info("loading SAM 2 model %r onto %s ...", SAM2_MODEL_ID, device_label)
-        t1 = time.perf_counter()
-        app.state.sam2_processor = Sam2Processor.from_pretrained(SAM2_MODEL_ID)
-        app.state.sam2_model = Sam2Model.from_pretrained(SAM2_MODEL_ID).to(device)
-        app.state.sam2_model.eval()
-        app.state.sam2_device = device
-        app.state.sam2_model_id = SAM2_MODEL_ID
-        app.state.sam2_available = True
-        log.info(
-            "SAM 2 ready in %.1fs on %s",
-            time.perf_counter() - t1,
-            device_label,
-        )
-    except ImportError:
-        log.warning(
-            "torch / transformers not installed; /sam2/click disabled. "
-            "Install with: pip install -r requirements.txt"
-        )
-    except Exception as e:  # pragma: no cover - defensive
-        log.exception("failed to load SAM 2: %s", e)
-
-    # Optional: Depth Anything V2 (Step 6 depth-based masking).
+    app.state.sam2_load_failed = False
+    app.state.sam2_model_id = SAM2_MODEL_ID
     app.state.depth_available = False
-    app.state.depth_model_id = None
-    try:
-        import torch  # type: ignore  # noqa: F401
-        from transformers import AutoImageProcessor, AutoModelForDepthEstimation  # type: ignore
+    app.state.depth_load_failed = False
+    app.state.depth_model_id = DEPTH_MODEL_ID
 
-        device, device_label = detect_torch_device()
-        if device is None:
-            raise ImportError("torch not available")
-
-        log.info("loading Depth model %r onto %s ...", DEPTH_MODEL_ID, device_label)
-        t2 = time.perf_counter()
-        app.state.depth_processor = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
-        app.state.depth_model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID).to(device)
-        app.state.depth_model.eval()
-        app.state.depth_device = device
-        app.state.depth_model_id = DEPTH_MODEL_ID
-        app.state.depth_available = True
+    if SEGMENT_EAGER_MODELS:
+        await run_in_threadpool(_ensure_sam2, app)
+        await run_in_threadpool(_ensure_depth, app)
+    else:
         log.info(
-            "Depth ready in %.1fs on %s",
-            time.perf_counter() - t2,
-            device_label,
+            "SAM 2 + Depth will load lazily on first /sam2 or /depth call "
+            "(set SEGMENT_EAGER_MODELS=1 to preload at startup)."
         )
-    except ImportError:
-        log.warning(
-            "torch / transformers not installed; /depth disabled. "
-            "Install with: pip install -r requirements.txt"
-        )
-    except Exception as e:  # pragma: no cover - defensive
-        log.exception("failed to load Depth model: %s", e)
 
     yield
 
@@ -403,9 +853,22 @@ async def health() -> dict:
         "model": app.state.model_name,
         "providers": app.state.providers,
         "max_upload_mb": MAX_UPLOAD_MB,
-        "sam2_available": app.state.sam2_available,
+        "subject_detect": getattr(app.state, "yolo_available", False),
+        "subject_model": SUBJECT_MODEL if getattr(app.state, "yolo_available", False) else None,
+        "subject_imgsz": SUBJECT_IMGSZ,
+        "subject_conf": SUBJECT_CONF,
+        "subject_salient_include": SUBJECT_SALIENT_INCLUDE,
+        "matte_cleanup": _MATTE_CLEANUP,
+        "lazy_models": not SEGMENT_EAGER_MODELS,
+        # `*_available` = CAPABLE of serving the endpoint (already loaded, or
+        # loadable on first use). `*_loaded` = the heavy model is resident now.
+        "sam2_available": app.state.sam2_available
+        or (_torch_stack_loadable() and not app.state.sam2_load_failed),
+        "sam2_loaded": app.state.sam2_available,
         "sam2_model": app.state.sam2_model_id,
-        "depth_available": app.state.depth_available,
+        "depth_available": app.state.depth_available
+        or (_torch_stack_loadable() and not app.state.depth_load_failed),
+        "depth_loaded": app.state.depth_available,
         "depth_model": app.state.depth_model_id,
     }
 
@@ -434,24 +897,63 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
     if img.mode not in ("RGB", "RGBA", "L"):
         img = img.convert("RGB")
 
+    # Reject pathologically large inputs (defense-in-depth vs direct curls that
+    # bypass the Node route's MAX_MODEL_SIDE). BiRefNet runs at a fixed 1024²,
+    # so anything past SEGMENT_MAX_SIDE only wastes resize/YOLO work.
+    if max(img.width, img.height) > SEGMENT_MAX_SIDE:
+        raise HTTPException(
+            413,
+            f"image too large ({img.width}x{img.height}); "
+            f"max longest side is {SEGMENT_MAX_SIDE}px",
+        )
+
+    img_rgb = img.convert("RGB")
+    np_rgb = np.asarray(img_rgb)
+
+    # 1) Saliency matte (soft 0..255 alpha) from rembg, then clean it: fill
+    #    interior holes, drop stray specks, recover faint/translucent regions —
+    #    while preserving the model's anti-aliased edges. This is what makes a
+    #    backlit leaf (or any under-segmented subject) come back solid and
+    #    complete instead of Swiss-cheesed.
     try:
-        out = remove(img, session=app.state.session, only_mask=False)
+        matte_img = remove(img, session=app.state.session, only_mask=True)
     except Exception as e:
         log.exception("rembg.remove failed")
         raise HTTPException(500, f"segmentation failed: {e}")
+    raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
+    matte = await run_in_threadpool(clean_matte, raw_matte)
 
-    if out.mode != "RGBA":
-        out = out.convert("RGBA")
+    # 2) Semantic subject union (person/animal + salient instances) from
+    #    YOLO-seg. The cleaned matte is threaded in so YOLO's salient-instance
+    #    gate (and edge refinement) work off the completed subject region.
+    subject_mode = "saliency"
+    subjects = 0
+    final_alpha = matte
+    if getattr(app.state, "yolo_available", False):
+        try:
+            subject, subjects = await run_in_threadpool(_subject_union_mask, app, img_rgb, matte)
+        except Exception:
+            log.exception("subject detection failed; using saliency")
+            subject, subjects = None, 0
+        if subject is not None and subject.any():
+            final_alpha = _compose_subject_alpha(matte, subject)
+            subject_mode = "yolo+matte" if SUBJECT_REFINE else "yolo"
+
+    # 3) Compose RGBA: original colours with the computed subject alpha.
+    rgba = np.dstack([np_rgb, final_alpha]).astype(np.uint8)
+    out = Image.fromarray(rgba, "RGBA")
 
     buf = io.BytesIO()
     out.save(buf, format="PNG", optimize=True)
     elapsed = time.perf_counter() - t0
     log.info(
-        "segmented %s (%dx%d, %dKB) in %.2fs -> %dKB",
+        "segmented %s (%dx%d, %dKB) mode=%s subjects=%d in %.2fs -> %dKB",
         image.filename or "<unnamed>",
         img.width,
         img.height,
         len(contents) // 1024,
+        subject_mode,
+        subjects,
         elapsed,
         buf.tell() // 1024,
     )
@@ -462,6 +964,8 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
         headers={
             "Cache-Control": "no-store",
             "X-Model": app.state.model_name,
+            "X-Subject-Mode": subject_mode,
+            "X-Subjects": str(subjects),
             "X-Elapsed-Ms": str(int(elapsed * 1000)),
         },
     )
@@ -481,7 +985,8 @@ async def sam2_click(
 
     Returns a greyscale PNG mask: white = include, black = exclude.
     """
-    if not app.state.sam2_available:
+    # Lazily load SAM 2 on first use (no-op once loaded).
+    if not await run_in_threadpool(_ensure_sam2, app):
         raise HTTPException(
             501,
             "SAM 2 not available on this server. "
@@ -611,7 +1116,8 @@ async def depth(image: UploadFile = File(..., alias="image")) -> Response:
     entries); repeats against the same image return the cached result
     in milliseconds.
     """
-    if not app.state.depth_available:
+    # Lazily load Depth Anything V2 on first use (no-op once loaded).
+    if not await run_in_threadpool(_ensure_depth, app):
         raise HTTPException(
             501,
             "Depth Anything V2 not available on this server. "

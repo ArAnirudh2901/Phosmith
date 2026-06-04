@@ -28,7 +28,7 @@
  */
 
 import { compileMegashader, computeCacheKey, MAX_LAYERS } from '../src/lib/megashader/megashader-compiler.js'
-import { createEmptyStack, sanitiseLayer, isAdjustmentsIdentity, isBlendOp, BLEND_OPS, luminanceLayer, colorLayer, linearLayer, radialLayer, smartBrushLayer, semanticLayer, depthLayer, setMaskTexture, getMaskTexture, clearMaskTexture } from '../src/lib/megashader/mask-types.js'
+import { createEmptyStack, sanitiseLayer, isAdjustmentsIdentity, stackHasNoVisibleEffect, isBlendOp, BLEND_OPS, luminanceLayer, colorLayer, linearLayer, radialLayer, smartBrushLayer, semanticLayer, depthLayer, lassoLayer, setMaskTexture, getMaskTexture, clearMaskTexture } from '../src/lib/megashader/mask-types.js'
 import { KIND_SCHEMAS, getKindBuilder, getKindSchema, normaliseUniformValue } from '../src/lib/megashader/glsl-mask-kinds.js'
 
 let failures = 0
@@ -187,9 +187,10 @@ const log = (ok, name, detail) => {
 
 // 10. Blend op type guard
 {
-    log(isBlendOp('add') && isBlendOp('subtract') && isBlendOp('intersect') && isBlendOp('replace'), 'isBlendOp accepts all four ops')
+    log(isBlendOp('add') && isBlendOp('subtract') && isBlendOp('intersect') && isBlendOp('replace'), 'isBlendOp accepts all four boolean ops')
+    log(isBlendOp('screen') && isBlendOp('lighten') && isBlendOp('darken') && isBlendOp('overlay'), 'isBlendOp accepts the four Photoshop-parity ops')
     log(!isBlendOp('foo') && !isBlendOp(null) && !isBlendOp(42), 'isBlendOp rejects non-ops')
-    log(BLEND_OPS.length === 4, 'BLEND_OPS is exactly 4 entries')
+    log(BLEND_OPS.length === 8, 'BLEND_OPS is exactly 8 entries (4 boolean + 4 Photoshop)')
 }
 
 // 11. The compiled fragment shader contains the standard Fabric varyings
@@ -577,7 +578,7 @@ const log = (ok, name, detail) => {
     // for-loop's closing brace), so any assertion past that needs to match
     // against the whole fragment. The normalisation guard and UV clamp
     // both live near the bottom of the body.
-    log(c.frag.includes('sumWeight > 0.0'), 'smartBrush body guards the normalisation divisor')
+    log(c.frag.includes('sumWeight > 1e-6'), 'smartBrush body guards the normalisation divisor')
     log(c.frag.includes('clamp(sampleUV'), 'smartBrush body clamps sampleUV to [0,1]')
 }
 
@@ -651,7 +652,7 @@ const log = (ok, name, detail) => {
     const c = compileMegashader({ chain: [{ layer: luminanceLayer(), op: 'replace' }] })
     log(c.frag.includes('vec3 runningColor = c_0;'), 'chain starts with runningColor = c_0')
     log(c.frag.includes('float runningAlpha = a_0;'), 'chain starts with runningAlpha = a_0')
-    log(c.frag.includes('gl_FragColor = vec4(mix(srcRgb, runningColor, a)'), 'final fragment writes mix(srcRgb, runningColor, a)')
+    log(c.frag.includes('vec3 outRgb = mix(srcRgb, runningColor, a)'), 'final fragment writes mix(srcRgb, runningColor, a)')
     // The legacy global uAdjust* uniforms are GONE — the per-layer design
     // means the only adjustment uniforms in the shader are the
     // `uLayer_<slot>_adjust_*` family.
@@ -1450,6 +1451,81 @@ const log = (ok, name, detail) => {
     const leaksIdentity = /\bhandleSpatialCancel\b/.test(deps)
     log(effectMatch && !leaksIdentity,
         'Esc-cancel effect dep array does NOT list handleSpatialCancel (ref decouples identity churn)')
+}
+
+// ─── Fill / Erase output modes (root-cause #1) ───────────────────────────────
+{
+    const c = compileMegashader({ chain: [{ layer: luminanceLayer(), op: 'replace' }] })
+    log(c.frag.includes('float eraseAlpha = 0.0;'), 'chain declares the erase-alpha channel')
+    log(c.frag.includes('uniform float uLayer_0_fillMode;'), 'layer emits fillMode uniform')
+    log(c.frag.includes('uniform vec3  uLayer_0_fillColor;'), 'layer emits fillColor uniform')
+    log(c.frag.includes('uniform float uLayer_0_fillStrength;'), 'layer emits fillStrength uniform')
+    log(c.frag.includes('vec3 layerColor_0(vec3 rgb)'), 'layer emits layerColor helper')
+    log(c.frag.includes('step(1.5, uLayer_0_fillMode)'), 'chain routes erase mode (fillMode==2) to eraseAlpha')
+    log(c.frag.includes('float outA = src.a * (1.0 - eraseFactor);'), 'main applies erase knockout to output alpha')
+    // stackHasNoVisibleEffect: empty + all-adjust-zero are no-ops; a fill
+    // layer or an erase layer is NOT a no-op (so it renders).
+    log(stackHasNoVisibleEffect({ chain: [] }) === true, 'empty stack has no visible effect')
+    log(stackHasNoVisibleEffect({ chain: [{ layer: luminanceLayer(), op: 'replace' }] }) === true,
+        'adjust-mode zero-adjustment layer has no visible effect (short-circuits)')
+    log(stackHasNoVisibleEffect({ chain: [{ layer: { ...luminanceLayer(), fillMode: 'fill', fillStrength: 0.5 }, op: 'replace' }] }) === false,
+        'fill-mode layer DOES have a visible effect (renders)')
+    log(stackHasNoVisibleEffect({ chain: [{ layer: { ...luminanceLayer(), fillMode: 'erase' }, op: 'replace' }] }) === false,
+        'erase-mode layer DOES have a visible effect (renders)')
+}
+
+// ─── Photoshop blend-op GLSL (Bug #3) ────────────────────────────────────────
+{
+    const mk = (op) => compileMegashader({
+        chain: [
+            { layer: luminanceLayer(), op: 'replace' },
+            { layer: colorLayer(), op },
+        ],
+    }).frag
+    log(mk('screen').includes('1.0 - (1.0 - runningAlpha) * (1.0 - a_1)'), 'screen op emits its GLSL formula')
+    log(mk('lighten').includes('max(runningAlpha, a_1)'), 'lighten op emits max()')
+    log(mk('darken').includes('min(runningAlpha, a_1)'), 'darken op emits min()')
+    log(mk('overlay').includes('2.0 * runningAlpha * a_1'), 'overlay op emits its GLSL formula')
+    // The compiler no longer throws on the four Photoshop ops.
+    let threw = false
+    try { compileMegashader({ chain: [{ layer: luminanceLayer(), op: 'replace' }, { layer: colorLayer(), op: 'screen' }] }) } catch { threw = true }
+    log(!threw, 'compiler accepts screen/lighten/darken/overlay without throwing')
+}
+
+// ─── Lasso kind registration (Bug #12) ───────────────────────────────────────
+{
+    setMaskTexture('lasso-test-key', { width: 1, height: 1 })
+    const lasso = lassoLayer({ maskTextureKey: 'lasso-test-key' })
+    const c = compileMegashader({ chain: [{ layer: lasso, op: 'replace' }] })
+    log(lasso.kind === 'lasso', 'lassoLayer factory produces a lasso layer')
+    log(lasso.fillMode === 'fill', 'lasso defaults to fill mode (visible selection)')
+    log(c.frag.includes('uLayer_0_kind_lasso_mask'), 'lasso kind emits its mask sampler')
+    log(c.frag.includes('smoothstep(0.5 - feather, 0.5 + feather, raw)'), 'lasso body smoothsteps the polygon alpha')
+    clearMaskTexture('lasso-test-key')
+}
+
+// ─── Show-mask overlay + global invert (pro-parity) ──────────────────────────
+{
+    const c = compileMegashader({ chain: [{ layer: luminanceLayer(), op: 'replace' }] })
+    log(c.frag.includes('uniform float uMaskOverlay;'), 'frag declares uMaskOverlay uniform')
+    log(c.frag.includes('uniform vec3 uMaskOverlayColor;'), 'frag declares uMaskOverlayColor uniform')
+    log(c.frag.includes('uniform float uGlobalInvert;'), 'frag declares uGlobalInvert uniform')
+    log(c.frag.includes('if (uMaskOverlay > 0.5)'), 'main() has the show-mask overlay branch')
+    log(c.frag.includes('mix(runningAlpha, 1.0 - runningAlpha, uGlobalInvert)'), 'main() applies global invert to runningAlpha')
+}
+
+// ─── Richer per-mask adjustments (highlights/shadows/whites/blacks/temp/tint) ─
+{
+    const c = compileMegashader({ chain: [{ layer: luminanceLayer(), op: 'replace' }] })
+    for (const f of ['highlights', 'shadows', 'whites', 'blacks', 'temperature', 'tint']) {
+        log(c.frag.includes(`uLayer_0_adjust_${f}`), `layer emits adjust uniform: ${f}`)
+    }
+    log(isAdjustmentsIdentity({ chain: [{ layer: { ...luminanceLayer(), temperature: 20 }, op: 'replace' }] }) === false,
+        'isAdjustmentsIdentity false for a temperature-only layer')
+    log(stackHasNoVisibleEffect({ chain: [{ layer: { ...luminanceLayer(), highlights: 30 }, op: 'replace' }] }) === false,
+        'stackHasNoVisibleEffect false for a highlights-only layer')
+    log(isAdjustmentsIdentity({ chain: [{ layer: luminanceLayer(), op: 'replace' }] }) === true,
+        'isAdjustmentsIdentity still true for an all-zero-adjustment layer')
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────
