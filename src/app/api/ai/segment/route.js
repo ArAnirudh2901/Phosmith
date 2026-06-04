@@ -7,7 +7,12 @@ export const maxDuration = 120
 export const runtime = 'nodejs'
 
 const MAX_INPUT_BYTES = 24 * 1024 * 1024
-const MAX_MODEL_SIDE = 1024
+// BiRefNet runs at a fixed 1024² internally, so a larger side does NOT add
+// matte detail — but it (a) feeds the local service's YOLO a higher-resolution
+// image so small/distant people in group photos are detected, and (b) gives a
+// crisper Lanczos upscale of the mask back to the true source resolution.
+// 2048 matches the depth service's cap; JPEG keeps the upload well under 24MB.
+const MAX_MODEL_SIDE = 2048
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * STRATEGY ORDER
@@ -74,9 +79,17 @@ const prepareImage = async (inputBuffer) => {
  *   1. Median(3)   — removes isolated noise pixels, preserves edges
  *   2. Lanczos3    — smooth upscale (replaces blocky nearest-neighbor)
  *   3. Blur(1.2)   — anti-aliases the transition zone
- *   4. Threshold    — re-binarises to a clean black/white mask
+ *   4. Threshold   — re-binarises to a clean black/white mask (OPT-IN)
+ *
+ * `binarize` defaults to FALSE. The local BiRefNet service returns a SOFT
+ * 0..255 saliency matte (translucent/backlit edges, hair, the shadowed lobes
+ * of a leaf). A hard threshold(128) would drop every semi-opaque pixel below
+ * 128 — exactly the regions we want to keep — so the local path keeps the soft
+ * alpha (the downstream canvas maps mask luminance directly to clip alpha).
+ * The HuggingFace semantic-seg fallback feeds genuinely-binary segment masks,
+ * so it opts INTO binarize:true to stay crisp.
  * ═══════════════════════════════════════════════════════════════════════════ */
-const refineMaskEdges = async (greyBuffer, modelW, modelH, origW, origH) => {
+const refineMaskEdges = async (greyBuffer, modelW, modelH, origW, origH, { binarize = false } = {}) => {
   let pipeline
 
   if (greyBuffer.length === modelW * modelH) {
@@ -85,13 +98,14 @@ const refineMaskEdges = async (greyBuffer, modelW, modelH, origW, origH) => {
     pipeline = sharp(greyBuffer, { failOn: 'none' }).greyscale()
   }
 
-  return pipeline
+  pipeline = pipeline
     .median(3)
     .resize(origW, origH, { fit: 'fill', kernel: 'lanczos3' })
     .blur(1.2)
-    .threshold(128)
-    .png()
-    .toBuffer()
+
+  if (binarize) pipeline = pipeline.threshold(128)
+
+  return pipeline.png().toBuffer()
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -113,11 +127,12 @@ const callLocalMaskService = async (imageBuffer) => {
     const response = await fetch(endpoint, {
       method: 'POST',
       body: formData,
-      // BiRefNet-lite on CPU is the recommended default; on a 1024×1024
-      // image it takes ~50–60 s on a 2024 MacBook Air (Apple Silicon,
-      // CoreML disabled). 90 s was too tight under load — bump to 180 s
-      // to give it headroom. A faster model (`u2netp`, ~3 s) can be
-      // selected via `SEGMENT_MODEL` in services/segment/.env.
+      // The service now defaults to BiRefNet-general (Swin-Large) for the most
+      // complete matte; it's ~3-5× slower than the lite model on CPU but runs
+      // in a few seconds on Apple-Silicon CoreML / CUDA. 180 s leaves ample
+      // headroom for a cold CPU run (and the one-time ~930 MB model download on
+      // first use). A faster model (`birefnet-general-lite`, or `u2netp` ~3 s)
+      // can be selected via `SEGMENT_MODEL` in services/segment/.env.
       signal: AbortSignal.timeout(180_000),
     })
 
@@ -328,7 +343,8 @@ const buildSubjectMask = async (segments, width, height, origWidth, origHeight) 
         .raw()
         .toBuffer()
 
-      return refineMaskEdges(rawMask, width, height, origWidth, origHeight)
+      // HF semantic-seg masks are genuinely binary — keep them crisp.
+      return refineMaskEdges(rawMask, width, height, origWidth, origHeight, { binarize: true })
     }
   }
 
@@ -368,7 +384,8 @@ const buildSubjectMask = async (segments, width, height, origWidth, origHeight) 
     .raw()
     .toBuffer()
 
-  return refineMaskEdges(rawMask, width, height, origWidth, origHeight)
+  // HF semantic-seg masks are genuinely binary — keep them crisp.
+  return refineMaskEdges(rawMask, width, height, origWidth, origHeight, { binarize: true })
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
