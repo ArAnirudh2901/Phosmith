@@ -22,10 +22,17 @@ and `/api/ai/depth` over HTTP.
   label-stripping heuristics needed.
 - HuggingFace inference API caps model size; running locally is free
   and removes the cap.
-- Default is `birefnet-general-lite` (~215 MB) — SOTA quality, fits
-  in free-tier hosts (Render 2 GB, HF Spaces 16 GB). Switch to
-  `birefnet-general` (973 MB) on hosts with more RAM for the highest
-  quality.
+- Default is `birefnet-general` (973 MB, Swin-Large) — the most
+  COMPLETE matte. The lite (Swin-Tiny) variant under-segments fine /
+  translucent / backlit subjects (e.g. a fig leaf), leaving holes and
+  dropped lobes; the full model fills them. Every BiRefNet variant in
+  rembg runs at a **fixed 1024² input**, so the gain is backbone
+  capacity, not resolution. On a low-RAM / CPU-only free tier, set
+  `SEGMENT_MODEL=birefnet-general-lite` (~215 MB) for speed.
+- The returned saliency matte is then **cleaned** (`clean_matte` in
+  `main.py`): interior holes filled, stray specks removed, faint/
+  translucent regions recovered — while the soft anti-aliased edges are
+  preserved (no hard binarization anywhere in the pipeline).
 
 ## Quick start (local dev)
 
@@ -89,7 +96,17 @@ Detection is automatic on startup. Force a specific provider chain with
 
 | Variable               | Default                                  | Purpose                              |
 | ---------------------- | ---------------------------------------- | ------------------------------------ |
-| `SEGMENT_MODEL`        | `birefnet-general-lite`                  | rembg model name                     |
+| `SEGMENT_MODEL`        | `birefnet-general`                       | rembg model name (most complete matte) |
+| `SEGMENT_MAX_SIDE`     | `2048`                                   | Reject /segment inputs longer than this |
+| `SEGMENT_EAGER_MODELS` | `0`                                      | Preload SAM 2 + Depth at startup (1) vs lazy (0) |
+| `SUBJECT_MODEL`        | `yolo26n-seg.pt`                         | YOLO seg weights (NMS-free; needs ultralytics ≥ 8.4) |
+| `SUBJECT_IMGSZ`        | `1280`                                   | YOLO letterbox size (small-subject recall) |
+| `SUBJECT_CONF`         | `0.20`                                   | YOLO detection confidence floor      |
+| `SUBJECT_IOU`          | `0.7`                                    | YOLO NMS IoU (keep high for crowds)  |
+| `SUBJECT_MAX_DET`      | `300`                                    | Max instances per image (group photos) |
+| `SUBJECT_SALIENT_INCLUDE` | `1`                                   | Include salient non-person instances |
+| `SUBJECT_SALIENT_OVERLAP` | `0.50`                                | Min self-saliency for a salient instance |
+| `SUBJECT_SALIENT_AREA_FRAC` | `0.005`                             | Min frame-area for a salient instance |
 | `SAM2_MODEL_ID`        | `facebook/sam2-hiera-small`              | HF SAM 2 checkpoint                  |
 | `SAM2_CACHE_MAX`       | `20`                                     | LRU image-embedding cache size       |
 | `SAM2_MAX_CLICKS`      | `50`                                     | Max clicks per `/sam2/click` request |
@@ -111,8 +128,8 @@ rest are tuned for narrower use cases.
 
 | Model                    | License  | Size      | Use case                          |
 | ------------------------ | -------- | --------- | --------------------------------- |
-| `birefnet-general-lite`  | MIT      | ~215 MB   | **Default** — SOTA, free-tier fit |
-| `birefnet-general`       | MIT      | ~973 MB   | Highest quality, large hosts      |
+| `birefnet-general`       | MIT      | ~973 MB   | **Default** — most complete matte |
+| `birefnet-general-lite`  | MIT      | ~215 MB   | Fast/low-RAM fallback (under-segments) |
 | `birefnet-portrait`      | MIT      | ~215 MB   | Portraits                         |
 | `isnet-general-use`      | MIT      | ~168 MB   | Strong edges                      |
 | `u2net`                  | MIT      | ~176 MB   | Original rembg default            |
@@ -121,6 +138,33 @@ rest are tuned for narrower use cases.
 | `u2net_cloth_seg`        | MIT      | ~176 MB   | Clothing / fashion                |
 | `silueta`                | MIT      | ~43 MB    | Balanced small                    |
 | `bria-rmbg`              | CC BY-NC | ~176 MB   | BRIA RMBG-1.4 (non-commercial)    |
+
+## Free-tier / low-RAM deployment
+
+The **matte model dominates RAM** (BiRefNet-general is ~1 GB resident; torch —
+pulled in by YOLO — adds ~300 MB). SAM 2 + Depth now load **lazily** on first
+use of their endpoint (`SEGMENT_EAGER_MODELS=0`, the default), so the core
+"Select Subject" path stays light. To fit a small host:
+
+```env
+# ≈512 MB–1 GB host: lite matte + lazy heavy models
+SEGMENT_MODEL=birefnet-general-lite   # ~215 MB (vs ~973 MB for -general)
+SEGMENT_EAGER_MODELS=0
+# Go smaller still by dropping YOLO (also drops the torch import, ~300 MB):
+SUBJECT_DETECT=0                       # saliency-only Select Subject
+```
+
+The `clean_matte` cleanup (hole-fill, speck removal, soft edges) runs regardless
+of model, so the lite matte still looks good. Even smaller rembg mattes:
+`isnet-general-use` (~168 MB), `silueta` (~43 MB), `u2netp` (~4.7 MB).
+
+**Subject detector:** the default is **YOLO26n-seg** (~6 MB, NMS-free, ~43%
+faster CPU ONNX than YOLO11n) — set `SUBJECT_MODEL=yolo11n-seg.pt` to use the
+older one. (A lighter/better MIT matte, **BEN2** ~220 MB, is a good future swap
+but needs a small custom ONNX backend — not wired in yet.)
+
+**Host:** Hugging Face Spaces (16 GB RAM free) fits the **full** stack as-is.
+Render / Google Cloud Run free tiers need the lite recipe above.
 
 ## Deployment (free tier)
 

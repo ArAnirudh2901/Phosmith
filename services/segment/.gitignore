@@ -11,3 +11,8 @@ env/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Model weights (auto-downloaded on first run — never commit)
+*.pt
+*.onnx
+runs/

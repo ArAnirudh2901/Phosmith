@@ -27,6 +27,7 @@ import {
     buildBooleanChain,
     buildEvalDispatcher,
 } from './glsl-fragments'
+import { BLEND_OPS, MASK_KINDS } from './mask-types'
 
 /** Hard cap so the megashader doesn't grow unbounded. 8 layers × 5 bytes
  *  per op is well under any GPU's uniform array limit. */
@@ -54,13 +55,19 @@ const normaliseStack = (stack) => {
         }
         // Validate kind here so callers don't have to remember to call
         // sanitiseLayer first. The full sanitiser (defaults + clamping) is
-        // optional and lives in mask-types.js.
-        const knownKinds = ['linear', 'radial', 'luminance', 'color', 'smartBrush', 'semantic', 'depth']
-        if (!knownKinds.includes(layer.kind)) {
+        // optional and lives in mask-types.js. MASK_KINDS is the single
+        // source of truth, so a new kind (e.g. 'lasso') is accepted here
+        // automatically once it's registered there.
+        if (!MASK_KINDS.includes(layer.kind)) {
             throw new Error(`[megashader] normaliseStack: chain[${i}].layer.kind "${layer.kind}" is not a known mask kind`)
         }
         const op = i === 0 ? 'replace' : (entry.op || 'add')
-        if (op !== 'replace' && op !== 'add' && op !== 'subtract' && op !== 'intersect') {
+        // BLEND_OPS is the single source of truth shared with the layer
+        // panel (mask-types.js) and the GLSL `buildBooleanChain`. Validating
+        // against it here means picking a Photoshop blend mode (screen /
+        // lighten / darken / overlay) no longer throws and silently blanks
+        // the whole filter — it compiles to its real GLSL case.
+        if (!BLEND_OPS.includes(op)) {
             throw new Error(`[megashader] normaliseStack: chain[${i}].op "${op}" is not a valid BlendOp`)
         }
         return { layer, op }
@@ -109,7 +116,7 @@ export const compileMegashader = (rawStack) => {
                 .replace('{{MASK_FUNCTIONS}}', '// passthrough — no layers')
                 .replace('{{ADJUST_FUNCTIONS}}', '// passthrough — no adjustments')
                 .replace('{{EVAL_DISPATCHER}}', 'float evalLayer(int idx) { return 0.0; }')
-                .replace('{{BOOLEAN_CHAIN}}', 'vec3 runningColor = srcRgb;\n        float runningAlpha = 0.0;'),
+                .replace('{{BOOLEAN_CHAIN}}', 'vec3 runningColor = srcRgb;\n        float runningAlpha = 0.0;\n        float eraseAlpha = 0.0;'),
             vert,
             cacheKey,
             passthrough: true,

@@ -1,7 +1,7 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react"
-import { luminanceLayer, colorLayer, linearLayer, radialLayer, semanticLayer, depthLayer, smartBrushLayer, clearMaskTexture, BLEND_OPS } from "@/lib/megashader"
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
+import { luminanceLayer, colorLayer, linearLayer, radialLayer, semanticLayer, depthLayer, smartBrushLayer, lassoLayer, BLEND_OPS, FILL_MODES, sanitiseFill } from "@/lib/megashader"
 
 /**
  * useMaskLayers
@@ -36,23 +36,63 @@ import { luminanceLayer, colorLayer, linearLayer, radialLayer, semanticLayer, de
  *
  * @returns {object}
  */
+const MAX_STACK_HISTORY = 50
+
 export const useMaskLayers = () => {
     const initial = useMemo(() => ({ chain: [] }), [])
     const [stack, dispatch] = useReducer(reducer, initial)
     const isReady = true
     const lastSignatureRef = useRef(null)
 
-    // Notify subscribers when the structural signature changes. We use a
-    // custom event on `window` (matching the codebase's pixxel:* convention
-    // — see `page.jsx`'s use of "pixxel:tool-sub" for the same pattern).
-    useEffect(() => {
-        const next = computeSignature(stack)
-        if (next !== lastSignatureRef.current) {
-            lastSignatureRef.current = next
-            try {
-                window.dispatchEvent(new CustomEvent('pixxel:mask-layers-changed', { detail: { stack } }))
-            } catch { /* SSR safe */ }
+    // Currently-selected layer (the "active" layer a brush/lasso edits and
+    // the UI highlights). Separate from the reducer state so selection
+    // changes don't churn the megashader filter.
+    const [selectedLayerId, setSelectedLayerId] = useState(null)
+
+    // Stack-level undo/redo. We snapshot the chain on STRUCTURAL mutations
+    // (add / remove / reorder / op / fillMode / clear) into a past ring;
+    // param slider edits (updateLayer) are intentionally NOT snapshotted so
+    // dragging a slider doesn't flood the history. Textures are NOT freed on
+    // remove (so undo can restore a removed texture-backed layer); the
+    // module-scoped texture cache lives for the editor session and is freed
+    // on full page reload, while persistence round-trips textures through the
+    // on-image MegashaderFilter (see fabric-megashader-filter.js).
+    const stackRef = useRef(stack)
+    const pastRef = useRef([])
+    const futureRef = useRef([])
+    useEffect(() => { stackRef.current = stack }, [stack])
+
+    const snapshot = useCallback(() => {
+        const chain = stackRef.current?.chain || []
+        // structuredClone keeps the snapshot independent of later mutations;
+        // textures live in the module cache keyed by string, so cloning the
+        // chain (which only holds the key strings) is sufficient.
+        try {
+            pastRef.current.push(structuredClone(chain))
+        } catch {
+            pastRef.current.push(chain.map((e) => ({ op: e.op, layer: { ...e.layer } })))
         }
+        if (pastRef.current.length > MAX_STACK_HISTORY) pastRef.current.shift()
+        futureRef.current = []
+    }, [])
+
+    // Notify subscribers on EVERY stack change. We use a custom event on
+    // `window` (matching the codebase's pixxel:* convention — see page.jsx's
+    // "pixxel:tool-sub").
+    //
+    // We deliberately do NOT gate on `computeSignature` here. The signature
+    // only tracks structural fields (kind/op/inverted/visible/lock), so a
+    // uniform-only change — a per-layer adjustment slider, or the new
+    // fillMode / fillColor / fillStrength — would never reach the canvas and
+    // the edit would silently not render. The canvas effect debounces these
+    // events (150 ms) and the compiled program is LRU-cached, so firing on
+    // every change is cheap; the signature is still used elsewhere for
+    // coarse change detection.
+    useEffect(() => {
+        lastSignatureRef.current = computeSignature(stack)
+        try {
+            window.dispatchEvent(new CustomEvent('pixxel:mask-layers-changed', { detail: { stack } }))
+        } catch { /* SSR safe */ }
     }, [stack])
 
     const addLayer = useCallback((kind, params = {}) => {
@@ -78,6 +118,8 @@ export const useMaskLayers = () => {
             layer = semanticLayer(params)
         } else if (kind === 'depth') {
             layer = depthLayer(params)
+        } else if (kind === 'lasso') {
+            layer = lassoLayer(params)
         } else {
             // Unknown / future kind: build a minimal layer from `params`
             // (the compiler's stub bodies don't care about field shape).
@@ -108,40 +150,49 @@ export const useMaskLayers = () => {
                 layer.lock = false
             }
         }
+        // Root-cause #1: new layers default to 'fill' mode so the selection
+        // is visible the instant it's added (no slider drag required). The
+        // factory default is 'adjust'; we override here unless the caller
+        // explicitly asked for a mode via params. The lasso factory already
+        // defaults to 'fill', so this is a no-op for it.
+        const fillSeed = {
+            fillMode: params.fillMode || layer.fillMode || 'fill',
+            fillColor: params.fillColor || layer.fillColor,
+            fillStrength: typeof params.fillStrength === 'number' ? params.fillStrength : layer.fillStrength,
+        }
+        layer = { ...layer, ...sanitiseFill(fillSeed) }
+        snapshot()
         dispatch({ type: 'add', layer })
+        setSelectedLayerId(layer.id)
         return layer.id
-    }, [])
+    }, [snapshot])
 
     const removeLayer = useCallback((id) => {
-        // Free the texture cache entry for kinds that ship a per-layer
-        // image (semantic, smartBrush, depth). The lookup needs the layer
-        // object, so we read it from the *current* stack before dispatching
-        // — `remove` would drop the entry from the chain. The callback
-        // closes over `stack`, but the dispatch is async-ish (the new
-        // state is rendered on the next tick), so reading from the
-        // current state is still safe.
-        const entry = stack.chain.find((e) => e.layer.id === id)
-        if (entry && entry.layer) {
-            const l = entry.layer
-            // semantic / smartBrush use `maskTextureKey` / `brushTextureKey`;
-            // depth uses `depthMapKey` — same underlying cache, different
-            // field names per kind. All three can coexist in the cache.
-            if (typeof l.maskTextureKey === 'string') {
-                try { clearMaskTexture(l.maskTextureKey) } catch { /* SSR safe */ }
-            }
-            if (typeof l.brushTextureKey === 'string') {
-                try { clearMaskTexture(l.brushTextureKey) } catch { /* SSR safe */ }
-            }
-            if (typeof l.depthMapKey === 'string') {
-                try { clearMaskTexture(l.depthMapKey) } catch { /* SSR safe */ }
-            }
-        }
+        // NOTE: we intentionally do NOT free the texture cache entry here.
+        // Undo can restore a removed texture-backed layer, and the cache is
+        // keyed by an opaque string the restored layer still references. The
+        // cache lives for the editor session and is freed on full reload; the
+        // on-image filter also keeps the chain (and its textures) alive across
+        // tool switches.
+        snapshot()
         dispatch({ type: 'remove', id })
-    }, [stack])
+        setSelectedLayerId((cur) => (cur === id ? null : cur))
+    }, [snapshot])
 
     const updateLayer = useCallback((id, patch) => {
+        // Param edits (slider drags) are not snapshotted — they'd flood the
+        // undo ring. Structural changes (add/remove/move/op/fillMode/clear)
+        // each take their own snapshot.
         dispatch({ type: 'update', id, patch })
     }, [])
+
+    // Root-cause #1: change a layer's output mode (adjust/fill/erase). This
+    // IS snapshotted (it's a meaningful, undoable change, unlike a slider).
+    const setFillMode = useCallback((id, mode) => {
+        if (!FILL_MODES.includes(mode)) return
+        snapshot()
+        dispatch({ type: 'update', id, patch: { fillMode: mode } })
+    }, [snapshot])
 
     const setLayerOp = useCallback((id, op) => {
         // Sub-task 1 — `BLEND_OPS` now includes the four Photoshop-parity
@@ -156,8 +207,9 @@ export const useMaskLayers = () => {
             }
             return
         }
+        snapshot()
         dispatch({ type: 'setOp', id, op })
-    }, [])
+    }, [snapshot])
 
     const moveLayer = useCallback((id, direction) => {
         // Sub-task 1 — accept 'up' | 'down' (legacy) and 'top' | 'bottom'
@@ -170,12 +222,66 @@ export const useMaskLayers = () => {
             }
             return
         }
+        snapshot()
         dispatch({ type: 'move', id, direction })
-    }, [])
+    }, [snapshot])
 
     const clearAll = useCallback(() => {
+        snapshot()
         dispatch({ type: 'clear' })
+        setSelectedLayerId(null)
+    }, [snapshot])
+
+    const selectLayer = useCallback((id) => setSelectedLayerId(id), [])
+
+    // Undo/redo the STACK structure. Dispatches a wholesale `set` of the
+    // chain; the canvas effect re-applies the megashader on the resulting
+    // change. Bound to the same pixxel:mask-undo/redo events below so the
+    // global Ctrl+Z path can drive them when the Mask tool owns undo.
+    const undo = useCallback(() => {
+        if (pastRef.current.length === 0) return false
+        const prev = pastRef.current.pop()
+        try { futureRef.current.push(structuredClone(stackRef.current.chain)) }
+        catch { futureRef.current.push(stackRef.current.chain.map((e) => ({ op: e.op, layer: { ...e.layer } }))) }
+        dispatch({ type: 'set', chain: prev })
+        return true
     }, [])
+
+    const redo = useCallback(() => {
+        if (futureRef.current.length === 0) return false
+        const next = futureRef.current.pop()
+        try { pastRef.current.push(structuredClone(stackRef.current.chain)) }
+        catch { pastRef.current.push(stackRef.current.chain.map((e) => ({ op: e.op, layer: { ...e.layer } }))) }
+        dispatch({ type: 'set', chain: next })
+        return true
+    }, [])
+
+    const canUndo = pastRef.current.length > 0
+    const canRedo = futureRef.current.length > 0
+
+    // Hydrate the whole chain from persisted project state (textures must be
+    // re-registered via setMaskTexture by the caller BEFORE calling this so
+    // the renderer doesn't sample a missing texture). Resets history.
+    const setChain = useCallback((chain) => {
+        const safe = Array.isArray(chain) ? chain : []
+        pastRef.current = []
+        futureRef.current = []
+        dispatch({ type: 'set', chain: safe })
+    }, [])
+
+    // Reconcile with the agent command layer: when an agent (or any non-UI
+    // caller) mutates the chain on the image via src/lib/agent/mask-commands,
+    // it dispatches `pixxel:mask-chain-replaced` so this panel re-syncs. The
+    // dispatch is distinct from `pixxel:mask-layers-changed` (which WE emit),
+    // so there's no feedback loop.
+    useEffect(() => {
+        const onReplaced = (e) => {
+            const chain = e?.detail?.stack?.chain
+            if (Array.isArray(chain)) setChain(chain)
+        }
+        try { window.addEventListener('pixxel:mask-chain-replaced', onReplaced) } catch { /* SSR */ }
+        return () => { try { window.removeEventListener('pixxel:mask-chain-replaced', onReplaced) } catch { /* SSR */ } }
+    }, [setChain])
 
     const setGlobalAlpha = useCallback((value) => {
         // The global alpha is NOT part of MaskStack — it's a separate UI
@@ -188,15 +294,44 @@ export const useMaskLayers = () => {
         } catch { /* SSR safe */ }
     }, [])
 
+    // "Show mask" overlay (view mode) + global invert. Like globalAlpha,
+    // these are chain-wide render options the canvas reads via window events
+    // (the canvas re-applies the megashader immediately). Local state mirrors
+    // them so the UI toggles reflect the current value.
+    const [showMaskOverlay, setShowMaskOverlayState] = useState(false)
+    const [globalInvert, setGlobalInvertState] = useState(false)
+    const setShowMaskOverlay = useCallback((value) => {
+        const v = !!value
+        setShowMaskOverlayState(v)
+        try { window.dispatchEvent(new CustomEvent('pixxel:mask-overlay', { detail: { value: v } })) } catch { /* SSR safe */ }
+    }, [])
+    const setGlobalInvert = useCallback((value) => {
+        const v = !!value
+        setGlobalInvertState(v)
+        try { window.dispatchEvent(new CustomEvent('pixxel:mask-invert', { detail: { value: v } })) } catch { /* SSR safe */ }
+    }, [])
+
     return {
         stack,
         addLayer,
         removeLayer,
         updateLayer,
         setLayerOp,
+        setFillMode,
         moveLayer,
         clearAll,
         setGlobalAlpha,
+        showMaskOverlay,
+        setShowMaskOverlay,
+        globalInvert,
+        setGlobalInvert,
+        selectedLayerId,
+        selectLayer,
+        undo,
+        redo,
+        canUndo,
+        canRedo,
+        setChain,
         isReady,
     }
 }
@@ -226,31 +361,30 @@ const reducer = (state, action) => {
             chain.push({ layer, op })
             return { ...state, chain }
         }
+        case 'set': {
+            // Wholesale replacement of the chain (undo/redo, hydrate from
+            // persisted state). Re-pin slot 0 to 'replace' and demote any
+            // stray 'replace' elsewhere (see the 'move' case for why).
+            const chain = (Array.isArray(action.chain) ? action.chain : []).map((e, i) => {
+                if (i === 0) return e.op === 'replace' ? e : { ...e, op: 'replace' }
+                return e.op === 'replace' ? { ...e, op: 'add' } : e
+            })
+            return { ...state, chain }
+        }
         case 'remove': {
             const chain = state.chain.filter((e) => e.layer.id !== action.id)
-            // The first entry's op must stay 'replace' after removal.
-            if (chain.length > 0 && chain[0].op !== 'replace') {
-                chain[0] = { ...chain[0], op: 'replace' }
+            // The first entry's op must stay 'replace' after removal; and a
+            // formerly-first entry that carried 'replace' must be demoted to
+            // 'add' if it is no longer at slot 0.
+            for (let i = 0; i < chain.length; i += 1) {
+                if (i === 0 && chain[0].op !== 'replace') chain[0] = { ...chain[0], op: 'replace' }
+                if (i > 0 && chain[i].op === 'replace') chain[i] = { ...chain[i], op: 'add' }
             }
             return { ...state, chain }
         }
         case 'clear': {
-            // Free every semantic / smartBrush / depth texture before
-            // dropping the chain — the cache is module-scoped so the
-            // entries would otherwise live on until the next reload.
-            for (const entry of state.chain) {
-                if (!entry?.layer) continue
-                const l = entry.layer
-                if (typeof l.maskTextureKey === 'string') {
-                    try { clearMaskTexture(l.maskTextureKey) } catch { /* SSR safe */ }
-                }
-                if (typeof l.brushTextureKey === 'string') {
-                    try { clearMaskTexture(l.brushTextureKey) } catch { /* SSR safe */ }
-                }
-                if (typeof l.depthMapKey === 'string') {
-                    try { clearMaskTexture(l.depthMapKey) } catch { /* SSR safe */ }
-                }
-            }
+            // Textures are NOT freed here (undo can restore a cleared chain);
+            // the cache is released on full page reload.
             return { ...state, chain: [] }
         }
         case 'update': {
@@ -282,9 +416,14 @@ const reducer = (state, action) => {
             const chain = state.chain.slice()
             const [moved] = chain.splice(idx, 1)
             chain.splice(swap, 0, moved)
-            // After reordering, the first entry's op must be 'replace'.
-            if (chain.length > 0 && chain[0].op !== 'replace') {
-                chain[0] = { ...chain[0], op: 'replace' }
+            // After reordering, slot 0 must be 'replace' and NO other slot
+            // may be 'replace' — otherwise the compiler treats a stray
+            // mid-chain 'replace' as a wholesale overwrite, wiping every
+            // layer below it. (This happens when the original slot-0 entry,
+            // which carries 'replace', is moved down.)
+            for (let i = 0; i < chain.length; i += 1) {
+                if (i === 0 && chain[0].op !== 'replace') chain[0] = { ...chain[0], op: 'replace' }
+                if (i > 0 && chain[i].op === 'replace') chain[i] = { ...chain[i], op: 'add' }
             }
             return { ...state, chain }
         }

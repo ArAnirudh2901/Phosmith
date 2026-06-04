@@ -15,6 +15,12 @@ import {
 // Side-effect import: registers PixxelCurves filter in Fabric's classRegistry so
 // loadFromJSON can rehydrate saved canvas state that contains it.
 import "../../../../../lib/curves-filter"
+// Eagerly register the MegashaderFilter class with Fabric's classRegistry at
+// module load. Without this, a project saved with a persisted megashader mask
+// chain would have its `type: "Megashader"` filter silently dropped by
+// loadFromJSON (the class wouldn't be registered yet — it was previously only
+// imported lazily when the mask tool fired its first change event).
+import "@/lib/megashader/fabric-megashader-filter"
 
 // Force the Canvas2D filter backend instead of WebGL. The custom curves LUT filter
 // has a WebGL fragment-shader path that worked in isolation but had subtle issues
@@ -846,6 +852,10 @@ const CanvasEditor = ({ project }) => {
     // the main thread. The 150 ms debounce coalesces a rapid burst
     // into one recompile after the user pauses.
     const megashaderAlphaRef = useRef(1)
+    // "Show mask" overlay + global invert — chain-wide render options driven
+    // by the Mask tool via window events; mirror globalAlpha's ref pattern.
+    const megashaderOverlayRef = useRef(false)
+    const megashaderInvertRef = useRef(false)
     const getLastAppliedStackRef = useRef(/** @type {import('@/lib/megashader/mask-types').MaskStack} */ ({ chain: [] }))
     const recompileTimerRef = useRef(/** @type {ReturnType<typeof setTimeout> | null} */ (null))
     useEffect(() => {
@@ -871,6 +881,8 @@ const CanvasEditor = ({ project }) => {
             import('@/lib/megashader').then((mod) => {
                 mod.applyMegashaderFilter(image, stack, {
                     globalMaskAlpha: megashaderAlphaRef.current,
+                    globalInvert: megashaderInvertRef.current,
+                    maskOverlay: megashaderOverlayRef.current,
                 })
                 canvasInstanceRef.current?.requestRenderAll?.()
             }).catch(() => { /* noop — module not available in non-test paths */ })
@@ -905,6 +917,18 @@ const CanvasEditor = ({ project }) => {
             doApply(getLastAppliedStackRef.current)
         }
 
+        // "Show mask" overlay + global invert — chain-wide render options.
+        // Like alpha, they're uniforms (no recompile), so re-apply live
+        // against the last-applied stack.
+        const handleOverlay = (event) => {
+            megashaderOverlayRef.current = Boolean(event?.detail?.value)
+            doApply(getLastAppliedStackRef.current)
+        }
+        const handleInvert = (event) => {
+            megashaderInvertRef.current = Boolean(event?.detail?.value)
+            doApply(getLastAppliedStackRef.current)
+        }
+
         const wrapped = (event) => {
             getLastAppliedStackRef.current = event?.detail?.stack || { chain: [] }
             handleLayersChanged(event)
@@ -912,10 +936,14 @@ const CanvasEditor = ({ project }) => {
 
         window.addEventListener('pixxel:mask-layers-changed', wrapped)
         window.addEventListener('pixxel:mask-global-alpha', handleGlobalAlpha)
+        window.addEventListener('pixxel:mask-overlay', handleOverlay)
+        window.addEventListener('pixxel:mask-invert', handleInvert)
 
         return () => {
             window.removeEventListener('pixxel:mask-layers-changed', wrapped)
             window.removeEventListener('pixxel:mask-global-alpha', handleGlobalAlpha)
+            window.removeEventListener('pixxel:mask-overlay', handleOverlay)
+            window.removeEventListener('pixxel:mask-invert', handleInvert)
             // Step 10.2: clear any pending debounced recompile so a
             // canvasEditor change mid-debounce doesn't fire a stale
             // apply against a torn-down renderer.
@@ -925,6 +953,31 @@ const CanvasEditor = ({ project }) => {
             }
         }
     }, [canvasEditor])
+
+    // Register the UI-decoupled mask command surface so the in-app agent can
+    // drive masking headlessly (NOT wired to any agent yet — see
+    // src/lib/agent/). Resolves the active primary image from the live canvas
+    // on each call so commands always target the current image.
+    useEffect(() => {
+        let unregister = () => {}
+        let cancelled = false
+        Promise.all([
+            import('@/lib/agent/command-registry'),
+            import('@/lib/agent/mask-commands'),
+        ]).then(([reg, mask]) => {
+            if (cancelled) return
+            const getPrimaryImage = () => {
+                const canvas = canvasInstanceRef.current
+                if (!canvas) return null
+                const objects = canvas.getObjects?.() || []
+                return objects.find(
+                    (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPixxelMaskOverlay(obj)
+                ) || null
+            }
+            unregister = reg.registerDomain('mask', mask.createMaskCommands({ getPrimaryImage }))
+        }).catch(() => { /* agent layer optional */ })
+        return () => { cancelled = true; unregister() }
+    }, [])
 
     // Track the last-hydrated URL so we skip redundant re-hydrations when
     // the parent re-renders (e.g. during sidebar resize) without the image

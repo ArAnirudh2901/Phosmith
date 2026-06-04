@@ -228,18 +228,36 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
 
         const syncHistory = () => {
             const state = canvasEditor.__getHistoryState?.()
-            if (state) {
-                setCanUndo(state.canUndo)
-                setCanRedo(state.canRedo)
-            }
+            // OR in the Mask/Erase tool's per-stroke stack so the buttons stay
+            // enabled while it owns undo/redo (its handlers fall back to the
+            // global history when its own stack is empty). Fixes the Redo button
+            // staying disabled after a mask-stack undo.
+            const maskUndo = Boolean(canvasEditor.__maskCanUndo)
+            const maskRedo = Boolean(canvasEditor.__maskCanRedo)
+            setCanUndo(Boolean(state?.canUndo) || maskUndo)
+            setCanRedo(Boolean(state?.canRedo) || maskRedo)
         }
 
         syncHistory()
         canvasEditor.on('history:changed', syncHistory)
-        return () => canvasEditor.off('history:changed', syncHistory)
+        window.addEventListener('pixxel:mask-history-changed', syncHistory)
+        return () => {
+            canvasEditor.off('history:changed', syncHistory)
+            window.removeEventListener('pixxel:mask-history-changed', syncHistory)
+        }
     }, [canvasEditor])
 
     const handleUndo = async () => {
+        // When the Mask/Erase tool is mounted it owns a per-stroke undo stack and
+        // exposes __maskToolUndo (the same path as ⌘Z). Route the button through
+        // it so a one-shot action like "Select Subject" is reverted by the SAME
+        // stack the keyboard undo uses — it falls back to the global canvas
+        // history once the local stack is empty.
+        if (canvasEditor?.__maskToolUndo) {
+            canvasEditor.__maskToolUndo()
+            await canvasEditor.__saveCanvasState?.()
+            return
+        }
         if (!canvasEditor?.__undoCanvasState) return
         const didUndo = await canvasEditor.__undoCanvasState()
         if (!didUndo) toast.message('Nothing to undo')
@@ -247,6 +265,11 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
     }
 
     const handleRedo = async () => {
+        if (canvasEditor?.__maskToolRedo) {
+            canvasEditor.__maskToolRedo()
+            await canvasEditor.__saveCanvasState?.()
+            return
+        }
         if (!canvasEditor?.__redoCanvasState) return
         const didRedo = await canvasEditor.__redoCanvasState()
         if (!didRedo) toast.message('Nothing to redo')

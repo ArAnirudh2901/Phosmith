@@ -16,7 +16,7 @@
 
 import { MegashaderFilter } from './fabric-megashader-filter'
 import { hasWebGL2, disposeRenderer } from './megashader-renderer'
-import { isAdjustmentsIdentity } from './mask-types'
+import { stackHasNoVisibleEffect } from './mask-types'
 
 /**
  * Returns true if the runtime has WebGL2 (or WebGL1, as a degraded
@@ -94,16 +94,21 @@ const stripExistingMegashaderFilters = (image) => {
 export const applyMegashaderFilter = (image, stack, options = {}) => {
     if (!isFabricImage(image)) return null
     const globalMaskAlpha = typeof options.globalMaskAlpha === 'number' ? options.globalMaskAlpha : 1
+    const globalInvert = options.globalInvert === true
+    const maskOverlay = options.maskOverlay === true
+    const overlayColor = options.overlayColor || null
 
     stripExistingMegashaderFilters(image)
 
+    // Root-cause #1: only skip installing the filter when the stack has NO
+    // visible effect (empty, or every visible layer is adjust-mode with
+    // zero adjustments and no fill/erase). A fill/erase selection or any
+    // non-zero adjustment installs the filter and renders.
+    // Exception: the "show mask" overlay must render the selection even for
+    // an all-adjust-zero chain, so it installs whenever the chain is
+    // non-empty.
     const isEmpty = !stack || !Array.isArray(stack.chain) || stack.chain.length === 0
-    // Step 9: identity stacks (chain non-empty but all adjustments 0) are
-    // mathematically equivalent to the empty case at the colour level, so
-    // they take the same no-op path. The chain's boolean composition still
-    // produces a non-trivial alpha, but the colour it would mix in is
-    // always srcRgb, so `mix(src, src, x) = src` regardless of x.
-    if ((isEmpty || isAdjustmentsIdentity(stack)) && globalMaskAlpha === 1) {
+    if (isEmpty || (stackHasNoVisibleEffect(stack) && !maskOverlay)) {
         // No filter to install. Re-run the chain in case a previous filter
         // was removed, so the image re-renders without the megashader.
         try {
@@ -115,7 +120,7 @@ export const applyMegashaderFilter = (image, stack, options = {}) => {
         return null
     }
 
-    const filter = new MegashaderFilter({ stack, globalMaskAlpha })
+    const filter = new MegashaderFilter({ stack, globalMaskAlpha, globalInvert, maskOverlay, overlayColor })
     image.filters.push(filter)
     try {
         image.applyFilters()
