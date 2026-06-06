@@ -217,6 +217,24 @@ export const LASSO_SCHEMA = {
 }
 
 /**
+ * Plain selection Brush mask (non-destructive, Photoshop-style).
+ *
+ * Unlike `smartBrush` (which runs an edge-preserving bilateral filter), the
+ * plain brush samples the painted alpha texture verbatim — what you paint is
+ * what you select. The soft falloff lives in the texture's ALPHA channel (the
+ * R channel is a flat 1.0 wherever the brush touched), so the GLSL samples
+ * `.a`. The renderer uploads it like every other texture-backed kind
+ * (`uLayer_<slot>_kind_brush_mask`), keyed by the layer's `maskTextureKey`.
+ */
+export const BRUSH_SCHEMA = {
+    kind: 'brush',
+    uniforms: [],
+    samplers: [
+        { name: 'mask', glsl: 'uLayer_<S>_kind_brush_mask' },
+    ],
+}
+
+/**
  * Step 4 stub kind. Empty schema (no uniforms, no samplers) and a
  * builder that returns 0.0 — kept for any kind we want to revert to a
  * no-op in a hotfix. The compiler and renderer treat stubs identically
@@ -233,6 +251,7 @@ export const KIND_SCHEMAS = {
     semantic:   SEMANTIC_SCHEMA,
     depth:      DEPTH_SCHEMA,
     lasso:      LASSO_SCHEMA,
+    brush:      BRUSH_SCHEMA,
 }
 
 /* ─── GLSL Body Builders ───────────────────────────────────────────────── */
@@ -595,6 +614,25 @@ export const buildLasso = (slot) => /* glsl */ `
     `
 
 /**
+ * Build the GLSL body for a plain (non-edge-snapping) brush selection layer.
+ * Samples the painted alpha texture's A channel directly so the brush's soft
+ * hardness falloff is preserved (the R channel is a flat 1.0 wherever the
+ * brush touched and would lose the softness). White (1) = selected.
+ *
+ * @param {number} slot    The layer slot index (0..7).
+ * @returns {string}       A complete `float evalLayer_<slot>_body()` GLSL function.
+ */
+export const buildBrush = (slot) => /* glsl */ `
+        uniform sampler2D uLayer_${slot}_kind_brush_mask;
+
+        float evalLayer_${slot}_body() {
+            // The painted brush alpha carries the soft falloff in the A
+            // channel; clamp for safety on mediump hardware.
+            return clamp(texture2D(uLayer_${slot}_kind_brush_mask, vTextureCoord).a, 0.0, 1.0);
+        }
+    `
+
+/**
  * Build a stub GLSL body for kinds not yet implemented (Steps 4-6).
  * Returns 0.0 — the layer contributes no alpha, same as Step 1.
  *
@@ -627,6 +665,7 @@ export const KIND_BUILDERS = {
     depth:      buildDepth,
     smartBrush: buildSmartBrush,
     lasso:      buildLasso,
+    brush:      buildBrush,
 }
 
 /**

@@ -290,6 +290,7 @@ export const MASK_KINDS = /** @type {const} */ ([
     'semantic',
     'depth',
     'lasso',
+    'brush',
 ])
 
 /**
@@ -822,6 +823,39 @@ export const lassoLayer = ({ maskTextureKey, feather = 0.05, label, fillMode = '
         inverted: false,
         maskTextureKey,
         feather: clampFinite(feather, 0, 1),
+        ...sanitiseFill({ fillMode, fillColor, fillStrength }),
+    }
+}
+
+/**
+ * Build a fully-formed plain Brush selection layer. Like the lasso it's a thin
+ * handle into the module-scoped texture cache (`maskTextureKey`) — the caller
+ * paints an alpha canvas, registers it with `setMaskTexture(maskTextureKey,
+ * canvas)`, then pushes this layer. The GLSL samples the painted alpha verbatim
+ * (no bilateral filter; use `smartBrushLayer` for edge-snapping). Defaults to
+ * `fill` mode so the painted selection is visible the instant it's added.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.maskTextureKey]   Required — opaque cache handle.
+ * @param {string} [opts.label]
+ * @param {string} [opts.fillMode='fill']  'fill' | 'adjust' | 'erase'.
+ * @param {{r:number,g:number,b:number}} [opts.fillColor]
+ * @param {number} [opts.fillStrength=0.5]
+ * @returns {object}
+ */
+export const brushLayer = ({ maskTextureKey, label, fillMode = 'fill', fillColor, fillStrength = 0.5 } = {}) => {
+    if (typeof maskTextureKey !== 'string' || !maskTextureKey) {
+        throw new Error('[megashader] brushLayer: `maskTextureKey` is required')
+    }
+    return {
+        kind: 'brush',
+        id: `brush-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        label: label || 'Brush selection',
+        opacity: 1,
+        visible: true,
+        lock: false,
+        inverted: false,
+        maskTextureKey,
         ...sanitiseFill({ fillMode, fillColor, fillStrength }),
     }
 }
