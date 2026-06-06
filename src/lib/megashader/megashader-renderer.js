@@ -617,6 +617,8 @@ const bindKindTextures = (gl, stack) => {
             cacheKey = layer.depthMapKey
         } else if (layer.kind === 'lasso') {
             cacheKey = layer.maskTextureKey
+        } else if (layer.kind === 'brush') {
+            cacheKey = layer.maskTextureKey
         } else {
             continue
         }

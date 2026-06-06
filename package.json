@@ -14,6 +14,7 @@
     "prisma:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "verify": "bun scripts/verify-megashader.mjs",
+    "verify:mask": "bun scripts/verify-mask-edge-snap.mjs",
     "verify:segment": "bun scripts/verify-segment.mjs",
     "verify:semantic": "bun scripts/verify-semantic.mjs",
     "verify:depth": "bun scripts/verify-depth.mjs",
