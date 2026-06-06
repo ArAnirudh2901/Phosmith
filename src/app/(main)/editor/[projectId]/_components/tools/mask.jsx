@@ -16,6 +16,7 @@ import useMaskLayers from '../../../../../../../hooks/useMaskLayers'
 import { computeImageHistogram, getHistogramSourceElement } from '@/lib/image-histogram'
 import { rgbToHsb } from '@/lib/color-utils'
 import { setMaskTexture } from '@/lib/megashader'
+import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 import {
     BrushSizeControl,
     LabeledSlider,
@@ -109,6 +110,11 @@ const MaskControls = ({ dominantColor }) => {
     // `brushActive` useState) so the hook body never needs to read
     // `brushActive` directly — avoiding a temporal-dead-zone error.
     const [pixelToolDisabled, setPixelToolDisabled] = useState(false)
+    // Quick Erase (the destructive clipPath brush) is OFF by default. Opening
+    // the Mask tool and painting must SELECT a region (non-destructive), not
+    // erase the image — so the pixel tool only takes the pointer when the user
+    // explicitly enables Quick Erase. See the `pixelToolDisabled` effect below.
+    const [quickEraseActive, setQuickEraseActive] = useState(false)
     const tool = usePixelMaskTool({ canvasEditor, defaultMode: 'erase', supportsMagic: false, disabled: pixelToolDisabled })
 
     // AI Subject Selection state
@@ -816,11 +822,27 @@ const MaskControls = ({ dominantColor }) => {
     // `lassoModifier` maps Shift/Alt + the modifier buttons to the chain
     // blend op so a second lasso can add/subtract/intersect with the first.
     const [lassoActive, setLassoActive] = useState(false)
-    const [lassoMode, setLassoMode] = useState('freehand') // 'freehand' | 'polygonal'
+    const [lassoMode, setLassoMode] = useState('freehand') // 'freehand' | 'polygonal' | 'magnetic'
     const [lassoSink, setLassoSink] = useState('select')   // 'select' | 'erase'
     const [lassoModifier, setLassoModifier] = useState('new') // new|add|subtract|intersect
     const [lassoFeather, setLassoFeather] = useState(0.04)
     const [lassoVertexCount, setLassoVertexCount] = useState(0)
+    // ─── Magnetic lasso (edge-snapping) options — Photoshop parity ───
+    // Width = search radius (image px), Contrast = edge threshold (0..100),
+    // Frequency = anchor spacing (image px). Refs mirror them so the
+    // window-level pointer handlers read fresh values without re-binding.
+    const [magneticWidth, setMagneticWidth] = useState(16)
+    const [magneticContrast, setMagneticContrast] = useState(12)
+    const [magneticFrequency, setMagneticFrequency] = useState(14)
+    const magneticWidthRef = useRef(magneticWidth)
+    const magneticContrastRef = useRef(magneticContrast)
+    const magneticFrequencyRef = useRef(magneticFrequency)
+    useEffect(() => { magneticWidthRef.current = magneticWidth }, [magneticWidth])
+    useEffect(() => { magneticContrastRef.current = magneticContrast }, [magneticContrast])
+    useEffect(() => { magneticFrequencyRef.current = magneticFrequency }, [magneticFrequency])
+    // Cached Sobel gradient-magnitude map of the source image (0..1), used to
+    // snap the magnetic lasso to edges. Rebuilt when the source/size changes.
+    const gradientMapRef = useRef(/** @type {{mag:Float32Array,W:number,H:number,scale:number,token:string}|null} */ (null))
     const lassoPointsRef = useRef(/** @type {Array<{x:number,y:number}>} */ ([]))
     const lassoDrawingRef = useRef(false)
     const lassoCursorRef = useRef(/** @type {{x:number,y:number}|null} */ (null))
@@ -838,6 +860,16 @@ const MaskControls = ({ dominantColor }) => {
     const [sigmaColor, setSigmaColor] = useState(0.15)
     const [sigmaSpace, setSigmaSpace] = useState(2)
     const [brushHasContent, setBrushHasContent] = useState(false)
+    // Selection-brush output options (mirror the lasso). `brushSink` picks the
+    // layer's fillMode (select → visible 'fill', erase → 'erase' knockout);
+    // `brushModifier` maps to the chain blend op; `brushEdgeSnap` toggles the
+    // edge-preserving bilateral filter (smartBrush kind) vs a plain brush kind.
+    // `brushFeather` is baked PER-LAYER at add time, so each region keeps its
+    // own soft edge regardless of the slider's later position.
+    const [brushSink, setBrushSink] = useState('select')      // 'select' | 'erase'
+    const [brushModifier, setBrushModifier] = useState('new') // new|add|subtract|intersect
+    const [brushEdgeSnap, setBrushEdgeSnap] = useState(false)
+    const [brushFeather, setBrushFeather] = useState(0)       // image px, baked per region
 
     // Refs (so pointer handlers and effects read consistent values
     // without re-binding effects on every slider tweak).
@@ -891,8 +923,12 @@ const MaskControls = ({ dominantColor }) => {
     // MUST drive it true, or a single click would fire BOTH that mode's
     // handler AND the brush — placing a layer while painting a stray dab.
     useEffect(() => {
-        setPixelToolDisabled(brushActive || colorPickerActive || semanticActive || lassoActive || !!activeDraft || isGradientSelected)
-    }, [brushActive, colorPickerActive, semanticActive, lassoActive, activeDraft, isGradientSelected])
+        // The destructive pixel brush only takes the pointer when the user has
+        // explicitly turned on Quick Erase AND no other capture mode owns the
+        // canvas. Anything else (incl. the default "nothing engaged" state)
+        // suppresses it, so a stray click never erases image pixels.
+        setPixelToolDisabled(!quickEraseActive || brushActive || colorPickerActive || semanticActive || lassoActive || !!activeDraft || isGradientSelected)
+    }, [quickEraseActive, brushActive, colorPickerActive, semanticActive, lassoActive, activeDraft, isGradientSelected])
 
     // Allocate a fresh brush canvas, capped to BRUSH_CANVAS_MAX_DIM on
     // the long edge. Called both on entering brush mode (if the image
@@ -1194,10 +1230,12 @@ const MaskControls = ({ dominantColor }) => {
             toast.error('Image not ready yet')
             return
         }
-        // Cancel any other click-mode so its handler doesn't fire.
+        // Cancel any other click-mode (incl. Quick Erase) so its handler
+        // doesn't fire and the destructive brush can't resume afterwards.
         setColorPickerActive(false)
         setSemanticActive(false)
         handleSemanticStop()
+        setQuickEraseActive(false)
         if (activeDraft) {
             toast('Finish or cancel the current draft first', { icon: 'ℹ️' })
             return
@@ -1210,8 +1248,10 @@ const MaskControls = ({ dominantColor }) => {
         isPaintingRef.current = false
         lastBrushPointRef.current = null
         setBrushActive(true)
-        toast('Paint on the canvas. Click "Add to Mask Layers" when done.')
-    }, [imageSize, ensureBrushCanvas, activeDraft, handleSemanticStop])
+        toast(brushSink === 'erase'
+            ? 'Paint to mark the cut region, then "Add cut to layers". Nothing is erased until you add it.'
+            : 'Paint a selection, then "Add selection to layers". Non-destructive.')
+    }, [imageSize, ensureBrushCanvas, activeDraft, handleSemanticStop, brushSink])
 
     const handleStopBrush = useCallback(() => {
         setBrushActive(false)
@@ -1232,51 +1272,79 @@ const MaskControls = ({ dominantColor }) => {
         }
     }, [canvasEditor])
 
-    // Commit the current brush canvas as a smart-brush megashader layer.
-    // The brush canvas is stored in the mask texture cache (same cache
-    // as semantic + depth); the factory uses `brushTextureKey` to look
-    // it up at render time.
+    // Commit the painted brush canvas as a NON-DESTRUCTIVE megashader
+    // selection layer. The painted alpha is stored in the mask texture cache
+    // and referenced by the new layer (plain `brush` kind, or edge-preserving
+    // `smartBrush` when "Snap to edges" is on). `brushSink` picks fill vs
+    // erase; `brushModifier` maps to the chain blend op; `brushFeather` is
+    // baked into the texture so each region keeps its own soft edge.
     const handleAddBrushLayer = useCallback(() => {
         const brushCanvas = brushCanvasRef.current
         if (!brushCanvas) {
             toast('Start painting first')
             return
         }
+        if (stack.chain.length >= 8) {
+            toast.error('Mask layer limit reached (8). Remove a layer to add more.')
+            return
+        }
         const ctx = brushCanvas.getContext('2d', { willReadFrequently: true })
         if (!ctx) return
-        // Empty check: scan a small grid of pixels (the brush canvas
-        // defaults to fully transparent; if no sampled pixel has any
-        // alpha, don't add the layer). We scan the *full* image with
-        // a small stride so a single-click stroke of any size is
-        // reliably detected. The cost is at most a few hundred getImageData
-        // calls — each is a 4-byte read and the whole sweep is <10ms.
+        // Empty check: a single full-canvas read, scanning only the alpha
+        // channel (one getImageData, not one per pixel).
         let anyPainted = false
-        const W = brushCanvas.width
-        const H = brushCanvas.height
-        const stride = 2
-        outer: for (let y = 0; y < H; y += stride) {
-            for (let x = 0; x < W; x += stride) {
-                try {
-                    const d = ctx.getImageData(x, y, 1, 1).data
-                    if (d[3] > 0) { anyPainted = true; break outer }
-                } catch { /* read error → assume painted */ anyPainted = true; break outer }
-            }
-        }
+        try {
+            const data = ctx.getImageData(0, 0, brushCanvas.width, brushCanvas.height).data
+            for (let i = 3; i < data.length; i += 4) { if (data[i] > 0) { anyPainted = true; break } }
+        } catch { anyPainted = true /* tainted → assume painted */ }
         if (!anyPainted) {
             toast('Paint something first')
             return
         }
+
+        // Bake the feather PER REGION (plain brush only — the smart brush's
+        // bilateral filter is its own edge control). Blurring the painted
+        // alpha into a fresh canvas means moving the slider later never
+        // re-feathers already-committed regions.
+        let textureCanvas = brushCanvas
+        const featherPx = Math.max(0, Math.round(brushFeather * brushScaleRef.current))
+        if (!brushEdgeSnap && featherPx > 0 && typeof document !== 'undefined') {
+            try {
+                const fc = document.createElement('canvas')
+                fc.width = brushCanvas.width
+                fc.height = brushCanvas.height
+                const fctx = fc.getContext('2d')
+                if (fctx) {
+                    fctx.filter = `blur(${featherPx}px)`
+                    fctx.drawImage(brushCanvas, 0, 0)
+                    fctx.filter = 'none'
+                    textureCanvas = fc
+                }
+            } catch { textureCanvas = brushCanvas }
+        }
+
         const key = `brush-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-        setMaskTexture(key, brushCanvas)
-        const id = addChainLayer('smartBrush', {
-            brushTextureKey: key,
-            filterRadius,
-            sigmaColor,
-            sigmaSpace,
-            label: 'Smart brush',
-        })
+        setMaskTexture(key, textureCanvas)
+        const fillMode = brushSink === 'erase' ? 'erase' : 'fill'
+        const id = brushEdgeSnap
+            ? addChainLayer('smartBrush', {
+                brushTextureKey: key,
+                filterRadius,
+                sigmaColor,
+                sigmaSpace,
+                fillMode,
+                label: brushSink === 'erase' ? 'Brush cut (smart)' : 'Smart brush',
+            })
+            : addChainLayer('brush', {
+                maskTextureKey: key,
+                fillMode,
+                label: brushSink === 'erase' ? 'Brush cut' : 'Brush selection',
+            })
         if (id) {
-            toast.success('Smart brush added to chain')
+            if (brushModifier === 'add' || brushModifier === 'subtract' || brushModifier === 'intersect') {
+                setLayerOp(id, brushModifier)
+            }
+            toast.success(brushSink === 'erase' ? 'Brush cut added to layers' : 'Brush selection added to layers')
             // Reset the brush canvas for the next stroke. We allocate
             // a fresh canvas rather than clearing in place — the old
             // canvas is still referenced by the just-added layer, and
@@ -1287,7 +1355,7 @@ const MaskControls = ({ dominantColor }) => {
             isPaintingRef.current = false
             lastBrushPointRef.current = null
         }
-    }, [addChainLayer, filterRadius, sigmaColor, sigmaSpace])
+    }, [addChainLayer, setLayerOp, stack.chain.length, brushSink, brushModifier, brushEdgeSnap, brushFeather, filterRadius, sigmaColor, sigmaSpace])
 
     /* ─── Lasso handlers ─── */
 
@@ -1316,7 +1384,7 @@ const MaskControls = ({ dominantColor }) => {
         const pts = lassoPointsRef.current
         const disp = (pts || []).map((p) => imageToDisplay(p.x, p.y)).filter(Boolean)
         const linePts = disp.slice()
-        if (lassoModeRef.current === 'polygonal' && lassoCursorRef.current && disp.length > 0) {
+        if ((lassoModeRef.current === 'polygonal' || lassoModeRef.current === 'magnetic') && lassoCursorRef.current && disp.length > 0) {
             const c = imageToDisplay(lassoCursorRef.current.x, lassoCursorRef.current.y)
             if (c) linePts.push(c)
         }
@@ -1386,6 +1454,58 @@ const MaskControls = ({ dominantColor }) => {
         return c
     }, [imageSize])
 
+    // ─── Magnetic lasso edge engine ───
+    // Build (and cache) a Sobel gradient-magnitude map of the source image,
+    // normalised to 0..1, at the SAME capped scale rasterizeLasso uses so the
+    // snapped points line up exactly with the rasterised selection texture.
+    const ensureGradientMap = useCallback(() => {
+        if (!imageSize || !tool.mainImage) return null
+        const sourceEl = tool.mainImage._element || tool.mainImage.getElement?.()
+        if (!sourceEl) return null
+        const longEdge = Math.max(imageSize.width, imageSize.height)
+        const scale = longEdge > BRUSH_CANVAS_MAX_DIM ? BRUSH_CANVAS_MAX_DIM / longEdge : 1
+        const W = Math.max(1, Math.round(imageSize.width * scale))
+        const H = Math.max(1, Math.round(imageSize.height * scale))
+        const token = `${sourceEl.currentSrc || sourceEl.src || ''}|${W}x${H}`
+        const cached = gradientMapRef.current
+        if (cached && cached.token === token) return cached
+        let data
+        try {
+            const c = document.createElement('canvas')
+            c.width = W
+            c.height = H
+            const cx = c.getContext('2d', { willReadFrequently: true })
+            if (!cx) return null
+            cx.drawImage(sourceEl, 0, 0, W, H)
+            data = cx.getImageData(0, 0, W, H).data
+        } catch {
+            return null // tainted canvas — magnetic snapping unavailable
+        }
+        const { mag } = computeGradientMagnitude(data, W, H)
+        const result = { mag, W, H, scale, token }
+        gradientMapRef.current = result
+        return result
+    }, [imageSize, tool.mainImage])
+
+    // Snap an image-space point to the strongest edge within `magneticWidth`,
+    // biased toward the cursor (proximity-dominant). Returns the input unchanged
+    // when no edge clears the contrast threshold or the map is unavailable. The
+    // search math is the shared, unit-tested engine in `@/lib/mask-edge-snap`.
+    const snapToEdge = useCallback((imgX, imgY) => {
+        const gm = ensureGradientMap()
+        if (!gm) return { x: imgX, y: imgY }
+        const radius = Math.max(1, magneticWidthRef.current * gm.scale)
+        const threshold = Math.max(0, Math.min(1, magneticContrastRef.current / 100))
+        const snapped = snapToEdgePoint(
+            { mag: gm.mag, w: gm.W, h: gm.H },
+            imgX * gm.scale,
+            imgY * gm.scale,
+            radius,
+            threshold,
+        )
+        return { x: snapped.x / gm.scale, y: snapped.y / gm.scale }
+    }, [ensureGradientMap])
+
     // Resolve the chain blend op from Shift/Alt on the closing event, or
     // (when no modifier is held) the modifier-button state.
     const resolveLassoModifier = useCallback((rawEvent) => {
@@ -1452,6 +1572,33 @@ const MaskControls = ({ dominantColor }) => {
             redrawLassoOverlay()
             return
         }
+        if (lassoModeRef.current === 'magnetic') {
+            // First click starts the path; subsequent moves auto-lay snapped
+            // points (no button held, Photoshop-style); clicks drop a manual
+            // anchor; clicking near the first point (≥3 points) closes.
+            const pts = lassoPointsRef.current
+            if (pts.length >= 3) {
+                const first = pts[0]
+                const dx = pos.x - first.x
+                const dy = pos.y - first.y
+                if (Math.sqrt(dx * dx + dy * dy) <= lassoCloseThreshold()) {
+                    finishLassoSelection(e)
+                    return
+                }
+            }
+            const snapped = snapToEdge(pos.x, pos.y)
+            if (!lassoDrawingRef.current) {
+                ensureGradientMap()
+                lassoDrawingRef.current = true
+                lassoPointsRef.current = [snapped]
+            } else {
+                lassoPointsRef.current = [...pts, snapped]
+            }
+            lassoCursorRef.current = snapped
+            setLassoVertexCount(lassoPointsRef.current.length)
+            redrawLassoOverlay()
+            return
+        }
         // polygonal: clicking near the first vertex (with ≥3 points) closes.
         const pts = lassoPointsRef.current
         if (pts.length >= 3) {
@@ -1466,12 +1613,33 @@ const MaskControls = ({ dominantColor }) => {
         lassoPointsRef.current = [...pts, { x: pos.x, y: pos.y }]
         setLassoVertexCount(lassoPointsRef.current.length)
         redrawLassoOverlay()
-    }, [lassoActive, imageSize, pointerToImage, canvasEditor, redrawLassoOverlay, lassoCloseThreshold, finishLassoSelection])
+    }, [lassoActive, imageSize, pointerToImage, canvasEditor, redrawLassoOverlay, lassoCloseThreshold, finishLassoSelection, snapToEdge, ensureGradientMap])
 
     const handleLassoMove = useCallback((e) => {
         if (!lassoActive) return
         const pos = pointerToImage(canvasEditor, e)
         if (!pos) return
+        if (lassoModeRef.current === 'magnetic') {
+            // Lay snapped points as the cursor moves (no button needed once
+            // started). Append only every `frequency` px so the path stays
+            // light; always update the rubber-band to the live snapped cursor.
+            if (!lassoDrawingRef.current) return
+            const snapped = snapToEdge(pos.x, pos.y)
+            lassoCursorRef.current = snapped
+            const pts = lassoPointsRef.current
+            const last = pts[pts.length - 1]
+            if (last) {
+                const dx = snapped.x - last.x
+                const dy = snapped.y - last.y
+                const spacing = Math.max(3, magneticFrequencyRef.current)
+                if (dx * dx + dy * dy >= spacing * spacing) {
+                    lassoPointsRef.current = [...pts, snapped]
+                    setLassoVertexCount(lassoPointsRef.current.length)
+                }
+            }
+            redrawLassoOverlay()
+            return
+        }
         if (lassoModeRef.current === 'freehand') {
             if (!lassoDrawingRef.current) return
             const pts = lassoPointsRef.current
@@ -1490,7 +1658,7 @@ const MaskControls = ({ dominantColor }) => {
         // polygonal: rubber-band the segment to the cursor.
         lassoCursorRef.current = { x: pos.x, y: pos.y }
         if (lassoPointsRef.current.length > 0) redrawLassoOverlay()
-    }, [lassoActive, pointerToImage, canvasEditor, redrawLassoOverlay])
+    }, [lassoActive, pointerToImage, canvasEditor, redrawLassoOverlay, snapToEdge])
 
     const handleLassoUp = useCallback((rawEvent) => {
         if (!lassoActive) return
@@ -1550,17 +1718,53 @@ const MaskControls = ({ dominantColor }) => {
         setSemanticActive(false)
         handleSemanticStop()
         setBrushActive(false)
+        setQuickEraseActive(false)
         resetLassoPath()
+        if (lassoMode === 'magnetic') {
+            // Build the edge map up front; warn if it can't be made (tainted /
+            // cross-origin image) so the user knows snapping is off rather than
+            // silently getting an un-snapped click-path.
+            const gm = ensureGradientMap()
+            if (!gm) toast('Magnetic snapping unavailable for this image — points won’t snap. Try Freehand or Polygonal.', { icon: '⚠️' })
+        }
         setLassoActive(true)
         toast(lassoMode === 'freehand'
             ? 'Drag to draw a freehand selection'
-            : 'Click to add points, double-click or Enter to close')
-    }, [imageSize, activeDraft, handleSemanticStop, resetLassoPath, lassoMode])
+            : lassoMode === 'magnetic'
+                ? 'Click to start, move along an edge — the path snaps to it. Click to anchor, double-click or Enter to close.'
+                : 'Click to add points, double-click or Enter to close')
+    }, [imageSize, activeDraft, handleSemanticStop, resetLassoPath, lassoMode, ensureGradientMap])
 
     const handleStopLasso = useCallback(() => {
         setLassoActive(false)
         resetLassoPath()
     }, [resetLassoPath])
+
+    // Quick Erase (destructive) — explicit opt-in. Cancels any selection mode
+    // so the pixel-clipPath brush and the megashader selections never fight
+    // over the same click.
+    const handleStartQuickErase = useCallback(() => {
+        setBrushActive(false)
+        setColorPickerActive(false)
+        setSemanticActive(false)
+        handleSemanticStop()
+        setLassoActive(false)
+        resetLassoPath()
+        setQuickEraseActive(true)
+    }, [handleSemanticStop, resetLassoPath])
+    const handleStopQuickErase = useCallback(() => setQuickEraseActive(false), [])
+
+    // Surface the centralized layer-cap rejection (useMaskLayers.addLayer
+    // refuses past MAX_LAYERS and dispatches this) so every "Add ..." path
+    // gives feedback instead of silently failing.
+    useEffect(() => {
+        const onLimit = (e) => {
+            const max = e?.detail?.max || 8
+            toast.error(`Mask layer limit reached (${max}). Remove a layer to add more.`)
+        }
+        try { window.addEventListener('pixxel:mask-layer-limit', onLimit) } catch { /* SSR */ }
+        return () => { try { window.removeEventListener('pixxel:mask-layer-limit', onLimit) } catch { /* SSR */ } }
+    }, [])
 
     // Remove any stray lasso overlay objects when the canvas changes or the
     // tool unmounts (the wiring effect only restores the cursor + listeners).
@@ -2220,13 +2424,42 @@ const MaskControls = ({ dominantColor }) => {
             </Section>
 
             {/* ────────── Smart Brush (Step 7) ────────── */}
-            <Section title="Smart Brush" icon={Paintbrush} badge="STEP 7">
+            <Section title="Selection Brush" icon={Paintbrush} badge="SELECT" defaultOpen={true}>
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Paint on the canvas. A bilateral filter snaps the
-                        stroke to underlying edges so it doesn&apos;t bleed
-                        past object boundaries.
+                        Paint a <strong>selection</strong> — it shows as a live
+                        overlay and becomes an editable, non-destructive layer.
+                        Nothing is erased. Use <strong>Erase / Cut</strong> below
+                        to knock the painted region out instead.
                     </p>
+
+                    {/* Output: select (fill) vs erase (cut) — same as the lasso */}
+                    <div className="grid grid-cols-2 gap-1.5">
+                        {[
+                            { id: 'select', label: 'Select', icon: Layers, hint: 'visible selection layer' },
+                            { id: 'erase', label: 'Erase / Cut', icon: Scissors, hint: 'cut the painted region out' },
+                        ].map((s) => {
+                            const SIcon = s.icon
+                            const active = brushSink === s.id
+                            return (
+                                <button
+                                    key={s.id}
+                                    type="button"
+                                    onClick={() => setBrushSink(s.id)}
+                                    title={s.hint}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
+                                    style={{
+                                        background: active ? 'rgba(124,58,237,0.10)' : 'var(--bg-elevated)',
+                                        border: `1px solid ${active ? 'rgba(124,58,237,0.35)' : 'var(--border-subtle)'}`,
+                                        color: active ? '#A78BFA' : 'var(--text-secondary)',
+                                    }}
+                                >
+                                    <SIcon className="h-3.5 w-3.5" />
+                                    {s.label}
+                                </button>
+                            )
+                        })}
+                    </div>
 
                     <BrushSizeControl
                         value={brushSize}
@@ -2244,6 +2477,69 @@ const MaskControls = ({ dominantColor }) => {
                         onChange={(v) => setBrushHardness(Math.max(0, Math.min(1, v / 100)))}
                         dominantColor={dominantColor}
                     />
+                    {!brushEdgeSnap && (
+                        <LabeledSlider
+                            label="Edge Feather (this region)"
+                            value={brushFeather}
+                            min={0}
+                            max={50}
+                            suffix="px"
+                            onChange={setBrushFeather}
+                            dominantColor={dominantColor}
+                        />
+                    )}
+
+                    {/* Snap-to-edges toggle → smartBrush (bilateral) vs plain brush */}
+                    <button
+                        type="button"
+                        onClick={() => setBrushEdgeSnap((v) => !v)}
+                        aria-pressed={brushEdgeSnap}
+                        title="Snap the stroke to underlying edges (bilateral filter)"
+                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium editor-interactive"
+                        style={{
+                            background: brushEdgeSnap ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
+                            border: `1px solid ${brushEdgeSnap ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                            color: brushEdgeSnap ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                        }}
+                    >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Snap to edges {brushEdgeSnap ? 'ON' : 'OFF'}
+                    </button>
+
+                    {/* Boolean modifier — how this selection combines with the chain */}
+                    <div>
+                        <label className="text-[10px] block mb-1" style={{ color: 'var(--text-muted)' }}>
+                            Combine (Shift = add, Alt = subtract)
+                        </label>
+                        <div className="grid grid-cols-4 gap-1">
+                            {[
+                                { id: 'new', label: 'New', icon: Circle },
+                                { id: 'add', label: 'Add', icon: Plus },
+                                { id: 'subtract', label: 'Sub', icon: Minus },
+                                { id: 'intersect', label: 'Int', icon: Crosshair },
+                            ].map((m) => {
+                                const MIcon = m.icon
+                                const active = brushModifier === m.id
+                                return (
+                                    <button
+                                        key={m.id}
+                                        type="button"
+                                        onClick={() => setBrushModifier(m.id)}
+                                        title={m.label}
+                                        className="flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-[10px] font-medium editor-interactive"
+                                        style={{
+                                            background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
+                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
+                                        }}
+                                    >
+                                        <MIcon className="h-3 w-3" />
+                                        {m.label}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                    </div>
 
                     <div className="grid grid-cols-2 gap-1.5 pt-1">
                         {!brushActive ? (
@@ -2295,37 +2591,39 @@ const MaskControls = ({ dominantColor }) => {
                         </motion.button>
                     </div>
 
-                    {/* Filter settings — these become the layer's params
-                        at add time. Defaults match the schema. */}
-                    <div className="space-y-1.5 pt-1">
-                        <LabeledSlider
-                            label="Filter Radius"
-                            value={filterRadius}
-                            min={1}
-                            max={8}
-                            step={1}
-                            onChange={setFilterRadius}
-                            format={(v) => `${v} px`}
-                        />
-                        <LabeledSlider
-                            label="Color Sigma (edge strictness)"
-                            value={sigmaColor}
-                            min={0.01}
-                            max={1}
-                            step={0.01}
-                            onChange={setSigmaColor}
-                            format={(v) => v.toFixed(2)}
-                        />
-                        <LabeledSlider
-                            label="Space Sigma (spatial spread)"
-                            value={sigmaSpace}
-                            min={0.5}
-                            max={8}
-                            step={0.1}
-                            onChange={setSigmaSpace}
-                            format={(v) => v.toFixed(1)}
-                        />
-                    </div>
+                    {/* Edge-snap (bilateral) filter settings — only relevant
+                        when "Snap to edges" is on; become the layer's params. */}
+                    {brushEdgeSnap && (
+                        <div className="space-y-1.5 pt-1">
+                            <LabeledSlider
+                                label="Filter Radius"
+                                value={filterRadius}
+                                min={1}
+                                max={8}
+                                step={1}
+                                onChange={setFilterRadius}
+                                format={(v) => `${v} px`}
+                            />
+                            <LabeledSlider
+                                label="Color Sigma (edge strictness)"
+                                value={sigmaColor}
+                                min={0.01}
+                                max={1}
+                                step={0.01}
+                                onChange={setSigmaColor}
+                                format={(v) => v.toFixed(2)}
+                            />
+                            <LabeledSlider
+                                label="Space Sigma (spatial spread)"
+                                value={sigmaSpace}
+                                min={0.5}
+                                max={8}
+                                step={0.1}
+                                onChange={setSigmaSpace}
+                                format={(v) => v.toFixed(1)}
+                            />
+                        </div>
+                    )}
 
                     <motion.button
                         type="button"
@@ -2340,26 +2638,29 @@ const MaskControls = ({ dominantColor }) => {
                         }}
                     >
                         <Plus className="h-3.5 w-3.5" />
-                        Add to Mask Layers
+                        {brushSink === 'erase' ? 'Add cut to layers' : 'Add selection to layers'}
                     </motion.button>
                 </div>
             </Section>
 
-            {/* ────────── Lasso (freehand + polygonal) ────────── */}
+            {/* ────────── Lasso (freehand + polygonal + magnetic) ────────── */}
             <Section title="Lasso Select" icon={Lasso} badge="NEW" defaultOpen={true}>
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
                         Draw a selection. <strong>Freehand</strong> = drag;{' '}
-                        <strong>Polygonal</strong> = click points, double-click or{' '}
+                        <strong>Polygonal</strong> = click points;{' '}
+                        <strong>Magnetic</strong> = click to start, glide along an
+                        edge and the path snaps to it. Double-click or{' '}
                         <kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Enter</kbd>{' '}
                         to close (<kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Backspace</kbd> undoes a point).
                     </p>
 
-                    {/* Mode: freehand / polygonal */}
-                    <div className="grid grid-cols-2 gap-1.5">
+                    {/* Mode: freehand / polygonal / magnetic */}
+                    <div className="grid grid-cols-3 gap-1.5">
                         {[
                             { id: 'freehand', label: 'Freehand', icon: Lasso },
                             { id: 'polygonal', label: 'Polygonal', icon: Spline },
+                            { id: 'magnetic', label: 'Magnetic', icon: Wand2 },
                         ].map((m) => {
                             const MIcon = m.icon
                             const active = lassoMode === m.id
@@ -2381,6 +2682,44 @@ const MaskControls = ({ dominantColor }) => {
                             )
                         })}
                     </div>
+
+                    {/* Magnetic options — Width / Contrast / Frequency (Photoshop parity) */}
+                    {lassoMode === 'magnetic' && (
+                        <div className="space-y-1.5 rounded-lg px-2 py-2" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
+                            <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                The path snaps to the strongest nearby edge. Tune how
+                                far it looks (Width), how strong an edge must be
+                                (Contrast), and how often it drops anchors (Frequency).
+                            </p>
+                            <LabeledSlider
+                                label="Width (search)"
+                                value={magneticWidth}
+                                min={4}
+                                max={60}
+                                suffix="px"
+                                onChange={setMagneticWidth}
+                                dominantColor={dominantColor}
+                            />
+                            <LabeledSlider
+                                label="Contrast (edge threshold)"
+                                value={magneticContrast}
+                                min={1}
+                                max={60}
+                                suffix="%"
+                                onChange={setMagneticContrast}
+                                dominantColor={dominantColor}
+                            />
+                            <LabeledSlider
+                                label="Frequency (anchor spacing)"
+                                value={magneticFrequency}
+                                min={4}
+                                max={48}
+                                suffix="px"
+                                onChange={setMagneticFrequency}
+                                dominantColor={dominantColor}
+                            />
+                        </div>
+                    )}
 
                     {/* Output: select (fill) vs erase (cut) */}
                     <div className="grid grid-cols-2 gap-1.5">
@@ -2473,14 +2812,14 @@ const MaskControls = ({ dominantColor }) => {
                             </motion.button>
                         ) : (
                             <>
-                                {lassoMode === 'polygonal' && lassoVertexCount >= 3 && (
+                                {(lassoMode === 'polygonal' || lassoMode === 'magnetic') && lassoVertexCount >= 3 && (
                                     <motion.button
                                         type="button"
                                         onClick={() => finishLassoSelection(null)}
                                         whileTap={{ scale: 0.97 }}
                                         className="flex items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
                                         style={{ background: 'rgba(6,184,212,0.12)', border: '1px solid var(--accent-primary)', color: 'var(--accent-primary)' }}
-                                        title="Close the polygon"
+                                        title="Close the selection"
                                     >
                                         <Plus className="h-3.5 w-3.5" /> Close
                                     </motion.button>
@@ -2978,18 +3317,44 @@ const MaskControls = ({ dominantColor }) => {
             </Section>
 
             {/* ────────── Brush (manual) ────────── */}
-            <Section title="Brush" icon={Scissors} defaultOpen={true}>
-                <ModeToggle mode={tool.mode} setMode={tool.setMode} altActive={tool.altActive} />
-                <BrushSizeControl
-                    value={tool.brushSize}
-                    setValue={tool.setBrushSize}
-                    min={MIN_BRUSH}
-                    max={MAX_BRUSH}
-                    dominantColor={dominantColor}
-                />
-                <LabeledSlider label="Hardness" value={tool.hardness} min={1} max={100} suffix="%" onChange={tool.setHardness} dominantColor={dominantColor} />
-                <LabeledSlider label="Flow" value={tool.flow} min={5} max={100} suffix="%" onChange={tool.setFlow} dominantColor={dominantColor} />
-                <LabeledSlider label="Edge Feather" value={tool.feather} min={0} max={50} suffix="px" onChange={tool.setFeather} dominantColor={dominantColor} />
+            <Section title="Quick Erase (destructive)" icon={Scissors} defaultOpen={false}>
+                <div className="space-y-2">
+                    <p className="text-[10px]" style={{ color: '#FCA5A5' }}>
+                        ⚠ This paints directly onto the image and hides pixels
+                        (destructive). For a reversible result, use the
+                        <strong> Selection Brush</strong> with Erase / Cut instead.
+                        Turn this on to paint; turn it off to stop.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={quickEraseActive ? handleStopQuickErase : handleStartQuickErase}
+                        aria-pressed={quickEraseActive}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-semibold editor-interactive"
+                        style={{
+                            background: quickEraseActive ? 'rgba(239,68,68,0.14)' : 'var(--bg-elevated)',
+                            border: `1px solid ${quickEraseActive ? 'rgba(239,68,68,0.45)' : 'var(--border-subtle)'}`,
+                            color: quickEraseActive ? '#FCA5A5' : 'var(--text-secondary)',
+                        }}
+                    >
+                        {quickEraseActive ? <X className="h-3.5 w-3.5" /> : <Scissors className="h-3.5 w-3.5" />}
+                        {quickEraseActive ? 'Stop erasing' : 'Enable Quick Erase'}
+                    </button>
+                    {quickEraseActive && (
+                        <>
+                            <ModeToggle mode={tool.mode} setMode={tool.setMode} altActive={tool.altActive} />
+                            <BrushSizeControl
+                                value={tool.brushSize}
+                                setValue={tool.setBrushSize}
+                                min={MIN_BRUSH}
+                                max={MAX_BRUSH}
+                                dominantColor={dominantColor}
+                            />
+                            <LabeledSlider label="Hardness" value={tool.hardness} min={1} max={100} suffix="%" onChange={tool.setHardness} dominantColor={dominantColor} />
+                            <LabeledSlider label="Flow" value={tool.flow} min={5} max={100} suffix="%" onChange={tool.setFlow} dominantColor={dominantColor} />
+                            <LabeledSlider label="Edge Feather" value={tool.feather} min={0} max={50} suffix="px" onChange={tool.setFeather} dominantColor={dominantColor} />
+                        </>
+                    )}
+                </div>
             </Section>
 
             {/* ────────── Actions ────────── */}
@@ -3006,16 +3371,17 @@ const MaskControls = ({ dominantColor }) => {
             </div>
 
             <TipCard>
+                <p>• <strong>Selection Brush</strong> paints a non-destructive selection (toggle Snap to edges for the bilateral filter)</p>
+                <p>• <strong>Lasso → Magnetic</strong> snaps the selection path to the nearest edge as you glide</p>
                 <p>• <strong>Select Subject</strong> uses AI to mask the main object</p>
                 <p>• <strong>Click to Select</strong> marks a point — SAM 2 segments around it (Alt-click = background)</p>
-                <p>• <strong>Smart Brush</strong> paints a freehand stroke that snaps to edges (bilateral filter)</p>
                 <p>• <strong>Depth Range</strong> selects pixels by depth (Depth Anything V2)</p>
                 <p>• <strong>Color Range</strong> selects pixels by color (click to sample)</p>
                 <p>• <strong>Luminance</strong> selects by brightness level</p>
                 <p>• <strong>Gradient</strong> creates a smooth directional mask</p>
-                <p>• <strong>Add to Mask Layers</strong> stacks live, editable megashader layers</p>
-                <p>• <strong>Brush</strong> for manual fine-tuning</p>
-                <p>• All masks can be refined with <strong>Erase/Restore</strong> brush</p>
+                <p>• Each selection becomes its own <strong>Mask Layer</strong> with its own feather, blend mode and fill/adjust/erase output</p>
+                <p>• Shift = add, Alt = subtract while drawing; combine selections into one mask</p>
+                <p>• <strong>Quick Erase</strong> is the only destructive option (off by default)</p>
             </TipCard>
         </div>
     )

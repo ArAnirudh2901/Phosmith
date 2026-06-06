@@ -986,7 +986,15 @@ export const floodFillMask = (maskCanvas, sourceEl, seedX, seedY, { tolerance = 
   return affected
 }
 
-/** Paint the red "hidden area" preview overlay from the mask. */
+/** Paint the red "hidden area" preview overlay from the mask.
+ *
+ * Pass `rect` ({ x, y, w, h } in mask px) to repaint ONLY that region — the
+ * brush's dirty bounding box. This makes the per-frame cost proportional to the
+ * brush footprint instead of the whole image, which is what keeps the live
+ * stroke (and the floating brush cursor, on the same thread) responsive on
+ * large images. A full repaint is used whenever the overlay was just
+ * (re)allocated, since a partial write would leave the rest of a fresh buffer
+ * blank. */
 export const paintOverlayFromMask = (
   maskCanvas,
   overlayCanvas,
@@ -1002,18 +1010,40 @@ export const paintOverlayFromMask = (
     // overlay is now a faint tint over the source, not a solid fill.
     // Multiply by (255 - lum) to keep a soft inner-to-outer falloff.
     maxAlpha = 0.2,
+    rect = null,
   } = {},
 ) => {
   if (!maskCanvas || !overlayCanvas) return
+  const fullW = maskCanvas.width
+  const fullH = maskCanvas.height
   // Assigning width/height reallocates + clears the backing store, so only do it
-  // when the size actually changed (this runs once per brush frame). putImageData
-  // below overwrites the whole buffer regardless.
-  if (overlayCanvas.width !== maskCanvas.width) overlayCanvas.width = maskCanvas.width
-  if (overlayCanvas.height !== maskCanvas.height) overlayCanvas.height = maskCanvas.height
+  // when the size actually changed. A reallocation forces a FULL repaint (a
+  // partial putImageData would leave the rest of the cleared buffer blank).
+  let resized = false
+  if (overlayCanvas.width !== fullW) { overlayCanvas.width = fullW; resized = true }
+  if (overlayCanvas.height !== fullH) { overlayCanvas.height = fullH; resized = true }
+
+  // Resolve the region to repaint (clamped to the canvas). null/resized => full.
+  let rx = 0
+  let ry = 0
+  let rw = fullW
+  let rh = fullH
+  if (rect && !resized) {
+    // Clamp the start to [0, fullW] (NOT fullW-1): a fully out-of-bounds rect
+    // then collapses to rw/rh = 0 and early-returns, instead of needlessly
+    // repainting the last row/column. The right edge uses ceil() so the
+    // inclusive max pixel of the dirty bbox is always covered.
+    rx = Math.max(0, Math.min(fullW, Math.floor(rect.x)))
+    ry = Math.max(0, Math.min(fullH, Math.floor(rect.y)))
+    rw = Math.max(0, Math.min(fullW - rx, Math.ceil(rect.x + rect.w) - rx))
+    rh = Math.max(0, Math.min(fullH - ry, Math.ceil(rect.y + rect.h) - ry))
+    if (rw <= 0 || rh <= 0) return
+  }
+
   const maskCtx = maskCanvas.getContext('2d')
   const overlayCtx = overlayCanvas.getContext('2d')
-  const maskData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
-  const overlayData = overlayCtx.createImageData(maskCanvas.width, maskCanvas.height)
+  const maskData = maskCtx.getImageData(rx, ry, rw, rh)
+  const overlayData = overlayCtx.createImageData(rw, rh)
 
   for (let i = 0; i < maskData.data.length; i += 4) {
     const lum = maskData.data[i]
@@ -1024,7 +1054,7 @@ export const paintOverlayFromMask = (
       overlayData.data[i + 3] = Math.round((255 - lum) * maxAlpha)
     }
   }
-  overlayCtx.putImageData(overlayData, 0, 0)
+  overlayCtx.putImageData(overlayData, rx, ry)
 }
 
 /**
