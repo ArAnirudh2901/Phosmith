@@ -64,6 +64,7 @@ export {
     semanticLayer,
     depthLayer,
     lassoLayer,
+    brushLayer,
     setMaskTexture,
     getMaskTexture,
     clearMaskTexture,

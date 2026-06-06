@@ -27,12 +27,14 @@ import {
     linearLayer,
     radialLayer,
     lassoLayer,
+    brushLayer,
     semanticLayer,
     depthLayer,
     setMaskTexture,
     MAX_LAYERS,
 } from '@/lib/megashader'
 import { rgbToHsb } from '@/lib/color-utils'
+import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 
 const MEGASHADER_TYPE = 'Megashader'
 const UPLOAD_MAX_SIDE = 1024
@@ -127,6 +129,47 @@ const rasterizePolygon = (points, w, h) => {
     ctx.closePath()
     ctx.fill('evenodd')
     return c
+}
+
+/**
+ * Rasterise polygon points to a transparent canvas with white+alpha INSIDE.
+ * The plain `brush` kind samples the ALPHA channel, so the selection must live
+ * in alpha (not the R channel like the lasso's opaque-black canvas).
+ */
+const rasterizePolygonAlpha = (points, w, h) => {
+    const c = document.createElement('canvas')
+    c.width = Math.max(1, w)
+    c.height = Math.max(1, h)
+    const ctx = c.getContext('2d')
+    ctx.clearRect(0, 0, c.width, c.height)
+    ctx.fillStyle = '#fff'
+    ctx.beginPath()
+    ctx.moveTo(points[0].x, points[0].y)
+    for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y)
+    ctx.closePath()
+    ctx.fill('evenodd')
+    return c
+}
+
+/**
+ * Build a normalised (0..1) Sobel gradient-magnitude map of the image's source
+ * bitmap (full natural resolution). Used by `addMagneticLasso` to snap rough
+ * points to the nearest edge headlessly — same shared engine the interactive
+ * magnetic lasso uses (`@/lib/mask-edge-snap`).
+ */
+const buildGradientMag = (image) => {
+    const el = getSourceEl(image)
+    const { w, h } = naturalSize(image)
+    if (!el || w < 3 || h < 3) return null
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return null
+    ctx.drawImage(el, 0, 0, w, h)
+    let data
+    try { data = ctx.getImageData(0, 0, w, h).data } catch { return null }
+    return computeGradientMagnitude(data, w, h)
 }
 
 const hexToRgb255 = (hex) => {
@@ -262,6 +305,35 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
                 const { w, h } = naturalSize(requireImage())
                 const key = uniqueKey('lasso')
                 setMaskTexture(key, rasterizePolygon(pts, w, h))
+                return { id: addLayer(lassoLayer({ maskTextureKey: key, feather: a.feather, fillMode: a.fillMode || 'fill', ...pickFill(a) }), a.op) }
+            },
+        },
+        addBrush: {
+            description: 'Add a non-destructive brush selection from a polygon of image-pixel points (samples painted alpha). fillMode fill|erase|adjust.',
+            params: { points: 'Array<{x,y}> (>=3)', fillMode: 'string', op: 'blend op' },
+            run: (a) => {
+                const pts = Array.isArray(a.points) ? a.points : []
+                if (pts.length < 3) throw new Error('[agent.mask] addBrush needs >=3 points')
+                const { w, h } = naturalSize(requireImage())
+                const key = uniqueKey('brush')
+                setMaskTexture(key, rasterizePolygonAlpha(pts, w, h))
+                return { id: addLayer(brushLayer({ maskTextureKey: key, fillMode: a.fillMode || 'fill', ...pickFill(a) }), a.op) }
+            },
+        },
+        addMagneticLasso: {
+            description: 'Add a lasso selection that SNAPS rough points to the nearest image edge (magnetic). width = search radius px, contrast 0..1 edge threshold.',
+            params: { points: 'Array<{x,y}> (>=3)', width: 'number px (default 16)', contrast: 'number 0..1 (default 0.12)', feather: 'number 0..1', fillMode: 'string', op: 'blend op' },
+            run: (a) => {
+                const pts = Array.isArray(a.points) ? a.points : []
+                if (pts.length < 3) throw new Error('[agent.mask] addMagneticLasso needs >=3 points')
+                const image = requireImage()
+                const { w, h } = naturalSize(image)
+                const gm = buildGradientMag(image)
+                const width = typeof a.width === 'number' ? a.width : 16
+                const contrast = typeof a.contrast === 'number' ? a.contrast : 0.12
+                const snapped = pts.map((p) => snapToEdgePoint(gm, p.x, p.y, width, contrast))
+                const key = uniqueKey('lasso')
+                setMaskTexture(key, rasterizePolygon(snapped, w, h))
                 return { id: addLayer(lassoLayer({ maskTextureKey: key, feather: a.feather, fillMode: a.fillMode || 'fill', ...pickFill(a) }), a.op) }
             },
         },

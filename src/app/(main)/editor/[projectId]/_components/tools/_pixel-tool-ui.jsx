@@ -214,6 +214,7 @@ const KIND_META = {
     semantic:   { label: 'AI Subject', color: '#f472b6', step: 5 },
     depth:      { label: 'Depth Map', color: '#60a5fa', step: 6 },
     lasso:      { label: 'Lasso',     color: '#06b8d4', step: null },
+    brush:      { label: 'Brush',     color: '#c084fc', step: null },
 }
 
 export const getKindMeta = (kind) => KIND_META[kind] || { label: kind, color: '#94a3b8', step: null }
@@ -620,6 +621,28 @@ export function KindParamEditor({ layer, onUpdate, dominantColor, imageSize }) {
                 onChange={(v) => onUpdate({ [featherKey]: v / 100 })}
                 dominantColor={dominantColor}
             />
+        )
+    } else if (layer.kind === 'lasso') {
+        // Per-region feather — each lasso layer owns its edge softness, so
+        // editing this only affects THIS selection (not every region).
+        kindSpecific = (
+            <LabeledSlider
+                label="Feather"
+                value={Math.round((layer.feather ?? 0.05) * 100)}
+                min={0} max={40} step={1} suffix="%"
+                onChange={(v) => onUpdate({ feather: v / 100 })}
+                dominantColor={dominantColor}
+            />
+        )
+    } else if (layer.kind === 'brush') {
+        // The brush's soft edge is baked into its texture at paint time, so
+        // there's no live feather here — repaint with a new Edge Feather to
+        // change it. Adjustments below still apply per-region.
+        kindSpecific = (
+            <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                Painted selection. Edge feather is baked per region — repaint to
+                change it.
+            </p>
         )
     }
 

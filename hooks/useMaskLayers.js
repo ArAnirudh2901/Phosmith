@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
-import { luminanceLayer, colorLayer, linearLayer, radialLayer, semanticLayer, depthLayer, smartBrushLayer, lassoLayer, BLEND_OPS, FILL_MODES, sanitiseFill } from "@/lib/megashader"
+import { luminanceLayer, colorLayer, linearLayer, radialLayer, semanticLayer, depthLayer, smartBrushLayer, lassoLayer, brushLayer, BLEND_OPS, FILL_MODES, MAX_LAYERS, sanitiseFill } from "@/lib/megashader"
 
 /**
  * useMaskLayers
@@ -97,6 +97,13 @@ export const useMaskLayers = () => {
 
     const addLayer = useCallback((kind, params = {}) => {
         if (!kind) return null
+        // Hard cap (matches the compiler's MAX_LAYERS). Adding beyond it would
+        // be silently truncated by the shader compiler — wiping the user's new
+        // selection with no feedback — so refuse and signal the UI to toast.
+        if ((stackRef.current?.chain?.length || 0) >= MAX_LAYERS) {
+            try { window.dispatchEvent(new CustomEvent('pixxel:mask-layer-limit', { detail: { max: MAX_LAYERS } })) } catch { /* SSR */ }
+            return null
+        }
         // For kinds with real per-kind parameters (luminance, color in Step 2;
         // linear, radial, smartBrush, semantic, depth in later steps), defer
         // to the factory in mask-types.js so the layer comes out with the
@@ -120,6 +127,8 @@ export const useMaskLayers = () => {
             layer = depthLayer(params)
         } else if (kind === 'lasso') {
             layer = lassoLayer(params)
+        } else if (kind === 'brush') {
+            layer = brushLayer(params)
         } else {
             // Unknown / future kind: build a minimal layer from `params`
             // (the compiler's stub bodies don't care about field shape).
