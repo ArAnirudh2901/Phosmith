@@ -145,6 +145,10 @@ export default function usePixelMaskTool({
     const reattachRafRef = useRef(null)
     const spaceRef = useRef(false)
     const strokePointsRef = useRef([])
+    // Bounding box (mask px) of pixels touched since the last overlay sync, so
+    // the live overlay repaint only scans the brush footprint, not the whole
+    // image. Reset at stroke start and after each overlay frame consumes it.
+    const strokeDirtyRectRef = useRef(null)
     // Snapshot of the mask canvas before the current deferred painting session.
     // Used by discardPending() to revert the mask when the user cancels.
     const preCommitSnapshotRef = useRef(null)
@@ -226,12 +230,12 @@ export default function usePixelMaskTool({
         if (render) canvasEditor.requestRenderAll()
     }, [canvasEditor])
 
-    const updateOverlay = useCallback((img, maskCanvas) => {
+    const updateOverlay = useCallback((img, maskCanvas, rect = null) => {
         if (!canvasEditor || !img || !maskCanvas) return
         const overlayCanvas = overlayCanvasRef.current
         if (!overlayCanvas) return
 
-        paintOverlayFromMask(maskCanvas, overlayCanvas, { threshold: MASK_EMPTY_THRESHOLD })
+        paintOverlayFromMask(maskCanvas, overlayCanvas, { threshold: MASK_EMPTY_THRESHOLD, rect })
 
         const geometry = {
             left: img.left,
@@ -870,8 +874,11 @@ export default function usePixelMaskTool({
     const positionCursor = useCallback((clientX, clientY) => {
         const el = cursorElRef.current
         if (!el) return
-        el.style.left = `${clientX}px`
-        el.style.top = `${clientY}px`
+        // GPU-composited transform (no layout/reflow) so the ring tracks the
+        // pointer in real time even while a stroke repaints the overlay. The
+        // translate(-50%,-50%) centres the ring on the point (moved here from
+        // CSS so the whole transform is one composited property).
+        el.style.transform = `translate3d(${clientX}px, ${clientY}px, 0) translate(-50%, -50%)`
     }, [])
 
     const setCursorVisible = useCallback((visible) => {
@@ -888,27 +895,45 @@ export default function usePixelMaskTool({
         return pointer ? { x: pointer.x, y: pointer.y } : null
     }, [canvasEditor])
 
+    // Grow the per-frame dirty bbox so the overlay only repaints what changed.
+    const markStrokeDirty = useCallback((minX, minY, maxX, maxY) => {
+        const pad = 2 // soft-edge + anti-alias margin
+        const r = strokeDirtyRectRef.current
+        if (!r) {
+            strokeDirtyRectRef.current = { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad }
+            return
+        }
+        if (minX - pad < r.minX) r.minX = minX - pad
+        if (minY - pad < r.minY) r.minY = minY - pad
+        if (maxX + pad > r.maxX) r.maxX = maxX + pad
+        if (maxY + pad > r.maxY) r.maxY = maxY + pad
+    }, [])
+
     const brushAt = useCallback((x, y) => {
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
+        const r = Math.max(0.5, brushSizeRef.current / 2)
         stampMask(maskCanvas.getContext('2d'), x, y, {
-            radius: Math.max(0.5, brushSizeRef.current / 2),
+            radius: r,
             hardness: hardnessRef.current / 100,
             flow: flowRef.current / 100,
             mode: effectiveMode(),
         })
-    }, [effectiveMode])
+        markStrokeDirty(x - r, y - r, x + r, y + r)
+    }, [effectiveMode, markStrokeDirty])
 
     const strokeTo = useCallback((x1, y1, x2, y2) => {
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
+        const r = Math.max(0.5, brushSizeRef.current / 2)
         strokeMaskSegment(maskCanvas, x1, y1, x2, y2, {
-            radius: Math.max(0.5, brushSizeRef.current / 2),
+            radius: r,
             hardness: hardnessRef.current / 100,
             flow: flowRef.current / 100,
             mode: effectiveMode(),
         })
-    }, [effectiveMode])
+        markStrokeDirty(Math.min(x1, x2) - r, Math.min(y1, y2) - r, Math.max(x1, x2) + r, Math.max(y1, y2) + r)
+    }, [effectiveMode, markStrokeDirty])
 
     const inferRegionFromCurrentStroke = useCallback(() => {
         if (!inferRegionRef.current || effectiveMode() !== 'erase') return 0
@@ -947,7 +972,14 @@ export default function usePixelMaskTool({
         // once on mouse:up via syncMaskToImage(). This keeps the brush responsive
         // on large images (e.g. 4K = ~12M pixels).
         if (!hasMaskRef.current) setHasMask(true)
-        updateOverlay(img, maskCanvas)
+        // Repaint only the brush's dirty footprint (set by brushAt/strokeTo),
+        // then clear it. Falls back to a full repaint when nothing tracked it.
+        const dirty = strokeDirtyRectRef.current
+        const rect = dirty
+            ? { x: dirty.minX, y: dirty.minY, w: dirty.maxX - dirty.minX, h: dirty.maxY - dirty.minY }
+            : null
+        strokeDirtyRectRef.current = null
+        updateOverlay(img, maskCanvas, rect)
         canvasEditor.requestRenderAll()
     }, [canvasEditor, updateOverlay])
 
@@ -1082,6 +1114,9 @@ export default function usePixelMaskTool({
         // Build the floating brush-cursor ring (outer ring + inner hardness ring).
         const cursorEl = document.createElement('div')
         cursorEl.className = 'pixxel-brush-cursor'
+        // Seed the transform off-screen so the ring can never flash at (0,0)
+        // before the first positionCursor() call sets its real location.
+        cursorEl.style.transform = 'translate3d(-9999px, -9999px, 0) translate(-50%, -50%)'
         const innerEl = document.createElement('div')
         innerEl.className = 'pixxel-brush-cursor-inner'
         cursorEl.appendChild(innerEl)
@@ -1111,7 +1146,10 @@ export default function usePixelMaskTool({
             applyCanvasCursor()
             if (inside && !magicRef.current) {
                 positionCursor(e.clientX, e.clientY)
-                styleCursor()
+                // The ring's SIZE only changes with brush/zoom, not on move —
+                // skip the restyle while painting so a heavy stroke can't stall
+                // the cursor. styleCursor still runs on hover + on param change.
+                if (!isDrawingRef.current) styleCursor()
                 setCursorVisible(true)
             } else {
                 setCursorVisible(false)
@@ -1230,6 +1268,14 @@ export default function usePixelMaskTool({
             opt.e.preventDefault?.()
             opt.e.stopPropagation?.()
 
+            // Snap the ring to the stroke origin immediately so it never trails
+            // (or flashes from a stale hover position) on the first dab.
+            if (!magicRef.current) {
+                overCanvasRef.current = true
+                positionCursor(opt.e.clientX, opt.e.clientY)
+                setCursorVisible(true)
+            }
+
             if (magicRef.current) {
                 strokePointsRef.current = []
                 doMagic(local)
@@ -1247,6 +1293,7 @@ export default function usePixelMaskTool({
             isDrawingRef.current = true
             lastPointRef.current = local
             strokePointsRef.current = [local]
+            strokeDirtyRectRef.current = null
             brushAt(local.x, local.y)
             scheduleLiveSync(targetImageRef.current)
         }
@@ -1254,6 +1301,10 @@ export default function usePixelMaskTool({
         const onMouseMove = (opt) => {
             if (!isDrawingRef.current || !opt?.e) return
             if (spaceRef.current) return
+            // Keep the ring glued to the pointer BEFORE the (heavier) paint work
+            // in this same handler — a cheap composited transform, so the cursor
+            // never trails the stroke.
+            if (!magicRef.current && overCanvasRef.current) positionCursor(opt.e.clientX, opt.e.clientY)
             const local = localFromEvent(opt.e)
             if (!isPointInImage(local, targetImageRef.current)) {
                 // Pointer briefly left the image bounds mid-stroke. Do NOT clear

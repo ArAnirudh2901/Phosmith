@@ -4228,10 +4228,15 @@ a:focus-visible,
   border-radius: 50%;
   border: 1.5px solid rgba(220, 60, 80, 0.95);
   background: rgba(220, 60, 80, 0.08);
-  transform: translate(-50%, -50%);
+  /* Position + centring are set together in JS as one composited transform
+     (translate3d(x,y,0) translate(-50%,-50%)) so pointer tracking never triggers
+     layout. Do NOT set `transform` here or it would override the live value
+     before the first mousemove. */
   pointer-events: none;
   z-index: 9998;
-  will-change: left, top, width, height;
+  will-change: transform;
+  /* Only animate size/colour — never the position transform (that must be 1:1
+     with the pointer, no easing lag). */
   transition: width 60ms ease, height 60ms ease, border-color 120ms ease, background 120ms ease;
 }
 
