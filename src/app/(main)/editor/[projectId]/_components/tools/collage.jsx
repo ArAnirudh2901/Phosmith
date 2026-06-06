@@ -3,6 +3,7 @@
 import React, { useState, useCallback, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { LayoutGrid, Grid2X2, Columns, Rows, GripHorizontal, GripVertical, Check } from 'lucide-react'
+import { Rect } from 'fabric'
 import { useCanvas } from '../../../../../../../context/context'
 import { isPixxelMaskOverlay } from '@/lib/canvas-mask'
 import { toast } from 'sonner'
@@ -74,38 +75,112 @@ const getCollageSource = (image) => {
     return source
 }
 
+/** Cover scale: the smallest uniform scale that fully fills the cell from the
+ *  image's source crop region (overflow on the longer axis = pan room). */
+const getCellCoverScale = (image, cell) => {
+    const source = getCollageSource(image)
+    return Math.max(cell.w / Math.max(1, source.width), cell.h / Math.max(1, source.height))
+}
+
+/**
+ * Frame an image into a collage cell: scale to COVER the cell, centre it, and
+ * clip it to the cell with an absolutely-positioned rect so it can never spill
+ * outside its frame (alignment is preserved). The overflow on the non-matching
+ * axis is the room the user can drag-to-pan through (`clampToCell` keeps it
+ * covering). Rotation/skew are locked so the rectangular cell always stays
+ * fully covered; `enterCollageConstraints`/`exitCollageConstraints` toggle that
+ * while the tool is open so other tools aren't restricted.
+ */
 const fitImageToCell = (image, cell) => {
     const source = getCollageSource(image)
-    const targetAspect = cell.w / cell.h
-    const sourceAspect = source.width / source.height
-    let cropWidth = source.width
-    let cropHeight = source.height
-    let cropX = source.cropX
-    let cropY = source.cropY
-
-    if (sourceAspect > targetAspect) {
-        cropWidth = source.height * targetAspect
-        cropX += (source.width - cropWidth) / 2
-    } else {
-        cropHeight = source.width / targetAspect
-        cropY += (source.height - cropHeight) / 2
-    }
+    const coverScale = getCellCoverScale(image, cell)
 
     image.set({
         left: cell.x + cell.w / 2,
         top: cell.y + cell.h / 2,
         originX: 'center',
         originY: 'center',
-        width: cropWidth,
-        height: cropHeight,
-        cropX,
-        cropY,
-        scaleX: cell.w / cropWidth,
-        scaleY: cell.h / cropHeight,
+        width: source.width,
+        height: source.height,
+        cropX: source.cropX,
+        cropY: source.cropY,
+        scaleX: coverScale,
+        scaleY: coverScale,
+        angle: 0,
         selectable: true,
         evented: true,
+        lockRotation: true,
+        lockSkewingX: true,
+        lockSkewingY: true,
+        clipPath: new Rect({
+            left: cell.x,
+            top: cell.y,
+            width: Math.max(1, cell.w),
+            height: Math.max(1, cell.h),
+            originX: 'left',
+            originY: 'top',
+            absolutePositioned: true,
+        }),
     })
+    image.pixxelCollageCell = { x: cell.x, y: cell.y, w: cell.w, h: cell.h }
+    image._pixxelCollageCell = image.pixxelCollageCell
+    image.pixxelCollageCoverScale = coverScale
+    image._pixxelCollageCoverScale = coverScale
     image.setCoords()
+}
+
+/** Keep a framed image covering its cell — clamp pan so no empty edge shows,
+ *  and never let it scale below cover. Returns true if it mutated the image. */
+const clampToCell = (image) => {
+    const cell = image?.pixxelCollageCell
+    if (!cell) return false
+    let changed = false
+
+    // Never smaller than cover (would reveal empty cell). Re-clamp from the
+    // stored cover scale, recomputed if missing (e.g. after reload).
+    const cover = image.pixxelCollageCoverScale || getCellCoverScale(image, cell)
+    if (image.scaleX < cover - 1e-4 || image.scaleY < cover - 1e-4) {
+        image.set({ scaleX: Math.max(image.scaleX, cover), scaleY: Math.max(image.scaleY, cover) })
+        changed = true
+    }
+
+    // Centre-origin image: clamp its centre so the scaled half-extent always
+    // reaches past the cell edges.
+    const halfW = (image.width * image.scaleX) / 2
+    const halfH = (image.height * image.scaleY) / 2
+    const cx = cell.x + cell.w / 2
+    const cy = cell.y + cell.h / 2
+    const maxDX = Math.max(0, halfW - cell.w / 2)
+    const maxDY = Math.max(0, halfH - cell.h / 2)
+    const left = Math.min(cx + maxDX, Math.max(cx - maxDX, image.left))
+    const top = Math.min(cy + maxDY, Math.max(cy - maxDY, image.top))
+    if (left !== image.left || top !== image.top) {
+        image.set({ left, top })
+        changed = true
+    }
+    if (changed) image.setCoords()
+    return changed
+}
+
+/** Recover a cell from a persisted clipPath (after reload) so panning stays
+ *  constrained without re-applying the layout. */
+const cellFromClipPath = (image) => {
+    const cp = image?.clipPath
+    if (!cp || !cp.absolutePositioned) return null
+    if ((cp.type || '').toLowerCase() !== 'rect') return null
+    return {
+        x: cp.left,
+        y: cp.top,
+        w: (cp.width || 0) * (cp.scaleX || 1),
+        h: (cp.height || 0) * (cp.scaleY || 1),
+    }
+}
+
+const enterCollageConstraints = (image) => {
+    image.set({ lockRotation: true, lockSkewingX: true, lockSkewingY: true })
+}
+const exitCollageConstraints = (image) => {
+    image.set({ lockRotation: false, lockSkewingX: false, lockSkewingY: false })
 }
 
 export default function CollageControls({ project }) {
@@ -128,6 +203,45 @@ export default function CollageControls({ project }) {
         return () => events.forEach(event => canvasEditor.off(event, syncImageCount))
     }, [canvasEditor, syncImageCount])
 
+    // While the collage tool is open, keep every FRAMED image (one carrying a
+    // collage cell, or one we can recover a cell from via its persisted absolute
+    // clipPath) panning/scaling INSIDE its cell. Handlers are scoped to this
+    // tool so other tools aren't constrained; rotation/skew locks are released
+    // when the tool closes.
+    useEffect(() => {
+        if (!canvasEditor) return undefined
+        canvasEditor.getObjects().filter(isVisibleImage).forEach((img) => {
+            if (!img.pixxelCollageCell) {
+                const cell = cellFromClipPath(img)
+                if (cell) {
+                    img.pixxelCollageCell = cell
+                    img._pixxelCollageCell = cell
+                    img.pixxelCollageCoverScale = getCellCoverScale(img, cell)
+                }
+            }
+            if (img.pixxelCollageCell) enterCollageConstraints(img)
+        })
+
+        const onMoving = (e) => { if (e?.target?.pixxelCollageCell) clampToCell(e.target) }
+        const onScaling = (e) => { if (e?.target?.pixxelCollageCell) clampToCell(e.target) }
+        const onModified = (e) => {
+            if (e?.target?.pixxelCollageCell && clampToCell(e.target)) canvasEditor.requestRenderAll()
+        }
+        canvasEditor.on('object:moving', onMoving)
+        canvasEditor.on('object:scaling', onScaling)
+        canvasEditor.on('object:modified', onModified)
+        canvasEditor.requestRenderAll()
+        return () => {
+            canvasEditor.off('object:moving', onMoving)
+            canvasEditor.off('object:scaling', onScaling)
+            canvasEditor.off('object:modified', onModified)
+            canvasEditor.getObjects?.().filter(isVisibleImage).forEach((img) => {
+                if (img.pixxelCollageCell) exitCollageConstraints(img)
+            })
+            canvasEditor.requestRenderAll()
+        }
+    }, [canvasEditor])
+
     const applyLayout = useCallback(() => {
         if (!canvasEditor) return
 
@@ -143,38 +257,43 @@ export default function CollageControls({ project }) {
 
         const W = Math.max(1, Number(project?.width) || 1)
         const H = Math.max(1, Number(project?.height) || 1)
-        const aw = W - 2 * padding
-        const ah = H - 2 * padding
+        // Clamp the usable area + gap so an over-large padding/gap (relative to a
+        // small canvas) can't produce negative/NaN cell sizes.
+        const safeGap = Math.max(0, Math.min(gap, Math.min(W, H) / 2))
+        const aw = Math.max(1, W - 2 * padding)
+        const ah = Math.max(1, H - 2 * padding)
 
-        // Compute cells
+        // Compute cells (safeGap guards against an over-large gap on a small canvas)
         const cells = []
         if (selectedLayout === '2-split-h') {
-            const cw = (aw - gap) / 2
+            const cw = (aw - safeGap) / 2
             cells.push({ x: padding, y: padding, w: cw, h: ah })
-            cells.push({ x: padding + cw + gap, y: padding, w: cw, h: ah })
+            cells.push({ x: padding + cw + safeGap, y: padding, w: cw, h: ah })
         } else if (selectedLayout === '2-split-v') {
-            const ch = (ah - gap) / 2
+            const ch = (ah - safeGap) / 2
             cells.push({ x: padding, y: padding, w: aw, h: ch })
-            cells.push({ x: padding, y: padding + ch + gap, w: aw, h: ch })
+            cells.push({ x: padding, y: padding + ch + safeGap, w: aw, h: ch })
         } else if (selectedLayout === '3-grid') {
-            const ch = (ah - gap) / 2
-            const cw = (aw - gap) / 2
+            const ch = (ah - safeGap) / 2
+            const cw = (aw - safeGap) / 2
             cells.push({ x: padding, y: padding, w: aw, h: ch })
-            cells.push({ x: padding, y: padding + ch + gap, w: cw, h: ch })
-            cells.push({ x: padding + cw + gap, y: padding + ch + gap, w: cw, h: ch })
+            cells.push({ x: padding, y: padding + ch + safeGap, w: cw, h: ch })
+            cells.push({ x: padding + cw + safeGap, y: padding + ch + safeGap, w: cw, h: ch })
         } else if (selectedLayout === '3-split-v') {
-            const cw = (aw - 2 * gap) / 3
+            const cw = (aw - 2 * safeGap) / 3
             cells.push({ x: padding, y: padding, w: cw, h: ah })
-            cells.push({ x: padding + cw + gap, y: padding, w: cw, h: ah })
-            cells.push({ x: padding + 2 * cw + 2 * gap, y: padding, w: cw, h: ah })
+            cells.push({ x: padding + cw + safeGap, y: padding, w: cw, h: ah })
+            cells.push({ x: padding + 2 * cw + 2 * safeGap, y: padding, w: cw, h: ah })
         } else if (selectedLayout === '4-grid') {
-            const cw = (aw - gap) / 2
-            const ch = (ah - gap) / 2
+            const cw = (aw - safeGap) / 2
+            const ch = (ah - safeGap) / 2
             cells.push({ x: padding, y: padding, w: cw, h: ch })
-            cells.push({ x: padding + cw + gap, y: padding, w: cw, h: ch })
-            cells.push({ x: padding, y: padding + ch + gap, w: cw, h: ch })
-            cells.push({ x: padding + cw + gap, y: padding + ch + gap, w: cw, h: ch })
+            cells.push({ x: padding + cw + safeGap, y: padding, w: cw, h: ch })
+            cells.push({ x: padding, y: padding + ch + safeGap, w: cw, h: ch })
+            cells.push({ x: padding + cw + safeGap, y: padding + ch + safeGap, w: cw, h: ch })
         }
+        // Final guard: no cell can be sub-pixel (would make cover scale blow up).
+        cells.forEach((c) => { c.w = Math.max(1, c.w); c.h = Math.max(1, c.h) })
 
         canvasEditor.discardActiveObject()
         images.slice(0, cells.length).forEach((image, index) => {
