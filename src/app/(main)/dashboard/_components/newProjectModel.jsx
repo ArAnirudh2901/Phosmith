@@ -172,9 +172,20 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                 body: formData
             })
 
-            const uploadData = await uploadResponse.json()
+            // 401/403 = the Clerk session is missing or expired for this request
+            // (common after a dev session times out, or when the app is opened on
+            // a different host than the one you signed in on — Clerk's session
+            // cookie is host-scoped). Guide the user back to sign in instead of
+            // surfacing a raw "Unauthorised" error.
+            if (uploadResponse.status === 401 || uploadResponse.status === 403) {
+                toast.error("Your session has expired. Please sign in again.")
+                router.push("/sign-in")
+                return
+            }
 
-            if (!uploadData.success)
+            const uploadData = await uploadResponse.json().catch(() => ({}))
+
+            if (!uploadResponse.ok || !uploadData.success)
                 throw new Error(uploadData.error || "Failed to upload the image")
 
             // Creating a project in Neon
