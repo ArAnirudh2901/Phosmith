@@ -55,3 +55,8 @@ skills-lock.json
 
 # IDE configs
 .trae/
+
+# Model weights
+*.pt
+*.onnx
+
