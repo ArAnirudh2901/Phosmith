@@ -20,7 +20,7 @@
 const SNAPSHOT_ENDPOINT = "/api/canvas/snapshot"
 const FLUSH_ENDPOINT = "/api/canvas/flush"
 
-export const snapshotToCache = async (projectId, canvasState, currentImageUrl = null) => {
+export const snapshotToCache = async (projectId, canvasState, currentImageUrl = null, baseRevision = null) => {
     if (!projectId || !canvasState) return false
     try {
         const response = await fetch(SNAPSHOT_ENDPOINT, {
@@ -30,6 +30,7 @@ export const snapshotToCache = async (projectId, canvasState, currentImageUrl = 
                 projectId,
                 canvasState,
                 currentImageUrl,
+                baseRevision,
                 clientUpdatedAt: Date.now(),
             }),
         })
@@ -47,21 +48,33 @@ export const snapshotToCache = async (projectId, canvasState, currentImageUrl = 
     }
 }
 
-export const flushToNeon = async (projectId, { keepalive = false } = {}) => {
-    if (!projectId) return false
+// Flush the cached/inline canvas state to Neon. Returns the server response
+// object: { flushed, revision } on success, { flushed:false, conflict, project }
+// when another session advanced the revision, or { flushed:false } on failure.
+// Passing canvasState makes the flush carry the content inline (authoritative
+// for this client, immune to the shared Redis key); omitting it flushes whatever
+// is in Redis (used by the small keepalive unload flush).
+export const flushToNeon = async (projectId, { keepalive = false, canvasState, currentImageUrl = null, baseRevision, force = false } = {}) => {
+    if (!projectId) return { flushed: false }
     try {
+        const payload = { projectId }
+        if (canvasState !== undefined) {
+            payload.canvasState = canvasState
+            payload.currentImageUrl = currentImageUrl
+        }
+        if (baseRevision !== undefined && baseRevision !== null) payload.baseRevision = baseRevision
+        if (force) payload.force = true
         const response = await fetch(FLUSH_ENDPOINT, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ projectId }),
+            body: JSON.stringify(payload),
             keepalive,
         })
-        if (!response.ok) return false
-        const data = await response.json().catch(() => ({}))
-        return !!data.flushed
+        if (!response.ok) return { flushed: false }
+        return await response.json().catch(() => ({ flushed: false }))
     } catch (error) {
         console.warn("[canvas-cache] flush failed:", error?.message || error)
-        return false
+        return { flushed: false }
     }
 }
 

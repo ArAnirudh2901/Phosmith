@@ -61,11 +61,12 @@ import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../li
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
 import { addImageFilesToCanvas } from "../../../../../lib/canvas-images"
 import {
-    createDebouncedFlusher,
     fetchCachedSnapshot,
     flushToNeon,
     snapshotToCache,
 } from "../../../../../lib/canvas-cache"
+import { createCanvasSync, loadLocalState, clearLocalState } from "../../../../../lib/canvas-sync"
+import { toast } from "sonner"
 import { isPixxelMaskOverlay } from "../../../../../lib/canvas-mask"
 import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
 import AuroraLoader from "./AuroraLoader"
@@ -149,6 +150,7 @@ const CanvasEditor = ({ project }) => {
     const activeToolRef = useRef(activeTool)
     activeToolRef.current = activeTool
     const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
+    const { mutate: createProjectRevisionMut } = useDatabaseMutation(api.projects.createProjectRevision)
 
     const disposeCanvasInstance = useCallback(() => {
         const existing = canvasInstanceRef.current
@@ -287,11 +289,118 @@ const CanvasEditor = ({ project }) => {
         return true
     }, [restoreCanvasState])
 
-    // Write-behind cache flusher, lazily created per project. Holds its debounce
-    // timer in closure state. We never let two flushers exist for the same project
-    // simultaneously — see the useEffect below that recreates it when projectId
-    // changes.
-    const flusherRef = useRef(null)
+    // Canvas sync manager, lazily created per project (see the useEffect below
+    // that recreates it when projectId changes). It owns the write-behind path:
+    // dedup, single-flight, the durable IndexedDB mirror, reconnect replay, and
+    // the unload beacon. We never let two managers exist for the same project.
+    const syncRef = useRef(null)
+    // Stable indirection to the latest direct-Neon writer so the sync manager
+    // (created once per project) always calls the current updateProject mutation.
+    const directWriteRef = useRef(async () => {})
+    const wasOfflineRef = useRef(false)
+    // 'idle' | 'saving' | 'saved' | 'offline' | 'error' — drives the status pill.
+    const [syncStatus, setSyncStatus] = useState("idle")
+
+    // Surface sync-manager status: update the pill and toast on offline/online
+    // transitions (deduped via wasOfflineRef so we don't spam).
+    const handleSyncStatus = useCallback((status) => {
+        setSyncStatus(status)
+        if (status === "offline") {
+            if (!wasOfflineRef.current) {
+                wasOfflineRef.current = true
+                toast.warning(
+                    "You're offline — changes are saved on this device and will sync when you reconnect.",
+                    { id: "canvas-sync", duration: Infinity },
+                )
+            }
+        } else if (status === "saved" && wasOfflineRef.current) {
+            wasOfflineRef.current = false
+            toast.success("Back online — your changes are synced.", { id: "canvas-sync", duration: 3000 })
+        }
+    }, [])
+
+    // Conflict handler: another session (device/tab) advanced the project's
+    // revision while we were editing, so the flush was rejected (no overwrite).
+    // We resolve it NON-DESTRUCTIVELY — both versions land in version history —
+    // then let the user pick which becomes current.
+    const handleConflict = useCallback(async (serverProject) => {
+        setSyncStatus("conflict")
+        const canvas = canvasInstanceRef.current
+        const proj = projectRef.current
+        if (!canvas || !proj) return
+
+        // Always preserve OUR working copy in version history first, so it's
+        // recoverable no matter which way the user resolves.
+        try {
+            const localState = serializeCanvasState(canvas)
+            await createProjectRevisionMut({
+                projectId: proj._id,
+                canvasState: {
+                    ...localState,
+                    history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
+                    historyIndex: historyIndexRef.current,
+                },
+                width: proj.width,
+                height: proj.height,
+                currentImageUrl: getPrimaryRemoteImageUrl(canvas) || undefined,
+                title: "Your version (edit conflict)",
+                summary: "Auto-saved because this project was edited on another device.",
+            })
+        } catch (error) {
+            console.warn("[canvas] failed to preserve local conflict copy:", error?.message || error)
+        }
+
+        toast.warning("This project was edited on another device.", {
+            id: "canvas-conflict",
+            duration: Infinity,
+            // Require an explicit choice — dismissing without resolving would leave
+            // the manager holding all saves with no way to resume.
+            dismissible: false,
+            description: "Your version is saved in version history. Reload the latest, or keep yours (overwrites the other copy).",
+            action: {
+                label: "Reload latest",
+                onClick: async () => {
+                    // Point every cache at the remote so the reload shows it, then
+                    // reuse the normal mount/rehydration path.
+                    try { await clearLocalState(proj._id) } catch { /* ignore */ }
+                    try {
+                        if (serverProject?.canvasState) {
+                            await snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision)
+                        }
+                    } catch { /* ignore */ }
+                    if (typeof window !== "undefined") window.location.reload()
+                },
+            },
+            cancel: {
+                label: "Keep mine",
+                onClick: async () => {
+                    // Preserve the OTHER device's version too before we overwrite it.
+                    try {
+                        if (serverProject?.canvasState) {
+                            await createProjectRevisionMut({
+                                projectId: proj._id,
+                                canvasState: serverProject.canvasState,
+                                width: serverProject.width || proj.width,
+                                height: serverProject.height || proj.height,
+                                currentImageUrl: serverProject.currentImageUrl || undefined,
+                                title: "Other device's version (edit conflict)",
+                                summary: "Preserved before overwriting with your version.",
+                            })
+                        }
+                    } catch (error) {
+                        console.warn("[canvas] failed to preserve remote conflict copy:", error?.message || error)
+                    }
+                    syncRef.current?.overwriteRemote()
+                    toast.dismiss("canvas-conflict")
+                },
+            },
+        })
+    }, [createProjectRevisionMut])
+
+    // Stable indirection so the per-project sync manager always calls the latest
+    // conflict handler without being torn down when it changes identity.
+    const onConflictRef = useRef(() => {})
+    onConflictRef.current = handleConflict
 
     const saveCanvasState = useCallback(async ({ rethrow = false, immediate = false } = {}) => {
         const canvas = canvasInstanceRef.current
@@ -338,93 +447,104 @@ const CanvasEditor = ({ project }) => {
             }
         }
 
-        // Strategy:
-        //   - Always write to the server cache first (fast in-memory store, no DB hit).
-        //   - For autosave (default): schedule a debounced flush to Neon. Lots of
-        //     edits coalesce into one DB write.
-        //   - For manual Save or `immediate: true` / `rethrow: true`: flush right
-        //     now so the user gets a hard guarantee the state is persisted.
-        //   - If the cache write fails for any reason, fall back to direct Neon
-        //     so no edit is ever lost.
-        const cached = await snapshotToCache(proj._id, fullState, currentImageUrl)
-
-        const writeDirect = async () => {
-            await updateProject({
-                projectId: proj._id,
-                canvasState: fullState,
-                ...(currentImageUrl ? { currentImageUrl } : {}),
-            })
+        // Delegate persistence to the sync manager: it mirrors to IndexedDB
+        // FIRST (durable across reload/disconnect/tab-close), dedups identical
+        // states, single-flights, and — when online — writes through the cache to
+        // Neon, falling back to a direct Neon write when the cache is unavailable.
+        // When offline it keeps the local copy and replays it on reconnect.
+        const manager = syncRef.current
+        if (!manager) {
+            // Manager not constructed yet (very first paint) — write directly so
+            // the initial state isn't lost.
+            try {
+                await directWriteRef.current(fullState, currentImageUrl)
+            } catch (error) {
+                if (rethrow) throw error
+                console.error("Error saving canvas state", error)
+            }
+            return
         }
-
         try {
-            if (!cached) {
-                // Cache unavailable — fall back to the legacy direct-write path.
-                await writeDirect()
-                return
-            }
-
-            if (immediate || rethrow) {
-                // Manual Save or explicit immediate request: flush the cached state
-                // through to Neon right now and wait for the result.
-                const flushed = await flushToNeon(proj._id)
-                if (!flushed && rethrow) {
-                    // Cache had nothing new to flush OR flush failed — write
-                    // directly so the user's Save-button click isn't a no-op.
-                    await writeDirect()
-                }
-                flusherRef.current?.cancel()
-            } else {
-                // Autosave: defer the DB write. Coalesces N rapid edits into 1
-                // mutation after ~8s of idle (or sooner on critical events).
-                flusherRef.current?.schedule()
-            }
+            await manager.save(fullState, currentImageUrl, { immediate, rethrow })
         } catch (error) {
             if (error?.status === 401) {
                 console.warn("Transient 401 saving canvas state", error.message)
             } else {
                 console.error("Error saving canvas state", error)
             }
-            // Best-effort recovery: try direct write before bubbling up.
-            try { await writeDirect() } catch (fallbackError) {
-                if (rethrow) throw fallbackError
-                return
-            }
             if (rethrow) throw error
+        }
+    }, [])
+
+    // Keep the direct-Neon writer current so the per-project sync manager (built
+    // once) always calls the latest updateProject mutation.
+    useEffect(() => {
+        directWriteRef.current = async (fullState, currentImageUrl) => {
+            const proj = projectRef.current
+            if (!proj) return
+            await updateProject({
+                projectId: proj._id,
+                canvasState: fullState,
+                ...(currentImageUrl ? { currentImageUrl } : {}),
+            })
         }
     }, [updateProject])
 
-    // Manage one debounced flusher per project. On unmount or projectId change,
-    // flush any pending writes synchronously (best-effort) so the next editor
-    // session doesn't see stale data.
+    // One sync manager per project. On unmount or projectId change, flush any
+    // pending writes (best-effort) and tear down its listeners/timers so the next
+    // editor session starts clean.
     useEffect(() => {
         const projectId = project?._id
         if (!projectId) return
-        const flusher = createDebouncedFlusher(projectId, 8000)
-        flusherRef.current = flusher
+        const manager = createCanvasSync({
+            projectId,
+            snapshotFn: snapshotToCache,
+            flushFn: flushToNeon,
+            onStatus: handleSyncStatus,
+            onConflict: (serverProject) => onConflictRef.current(serverProject),
+            initialRevision: Number(projectRef.current?.revision) || 0,
+            flushDebounceMs: 8000,
+        })
+        syncRef.current = manager
         return () => {
-            flusher.flushNow()
-            if (flusherRef.current === flusher) flusherRef.current = null
+            manager.flushNow()
+            manager.destroy()
+            if (syncRef.current === manager) syncRef.current = null
         }
-    }, [getViewportState, project?._id, setViewportState, syncPreviewZoomState])
+    }, [project?._id, handleSyncStatus])
 
-    // beforeunload + pagehide: force-flush the cache to Neon before the user
-    // navigates away. `keepalive` lets the fetch survive the page unloading.
+    // beforeunload + pagehide: capture the very latest state before the user
+    // navigates away. The manager beacons it to Redis (surviving unload) and
+    // keepalive-flushes to Neon, so edits made inside the autosave window aren't
+    // lost; the IndexedDB mirror is the backstop if the beacon is dropped.
     useEffect(() => {
         const projectId = project?._id
         if (!projectId) return
-        const handler = () => {
-            try { flusherRef.current?.cancel() } catch { /* ignore */ }
-            // Fire and forget. The browser will let this request finish even
-            // though the page is going away thanks to keepalive.
-            flushToNeon(projectId, { keepalive: true })
+        const persistNow = () => {
+            // Push the CURRENT canvas into the manager FIRST — the 2s autosave
+            // debounce may not have fired yet, so without this the manager's
+            // `latest` (and therefore the beacon) would carry stale state and the
+            // final edits would be lost. saveCanvasState() updates `latest`
+            // synchronously and fires a full snapshot before the beacon reads it.
+            try { saveCanvasState() } catch { /* ignore */ }
+            try { syncRef.current?.beaconUnload() } catch { /* ignore */ }
         }
-        window.addEventListener("beforeunload", handler)
-        window.addEventListener("pagehide", handler)
+        // visibilitychange → hidden is the reliable save point: it fires while the
+        // page is still ALIVE (so the normal full-state snapshot fetch completes,
+        // sidestepping the 64KB beacon cap for large states) and, unlike
+        // beforeunload, it fires on mobile/tab-switch and bfcache navigations.
+        const onVisibility = () => {
+            if (typeof document !== "undefined" && document.visibilityState === "hidden") persistNow()
+        }
+        window.addEventListener("beforeunload", persistNow)
+        window.addEventListener("pagehide", persistNow)
+        document.addEventListener("visibilitychange", onVisibility)
         return () => {
-            window.removeEventListener("beforeunload", handler)
-            window.removeEventListener("pagehide", handler)
+            window.removeEventListener("beforeunload", persistNow)
+            window.removeEventListener("pagehide", persistNow)
+            document.removeEventListener("visibilitychange", onVisibility)
         }
-    }, [getViewportState, project?._id, setViewportState, syncPreviewZoomState])
+    }, [project?._id, saveCanvasState])
 
     useEffect(() => {
         if (!canvasRef.current || !projectRef.current) return
@@ -468,21 +588,67 @@ const CanvasEditor = ({ project }) => {
             // user would see an old version of their work after a reload.
             let rawCanvasState = proj.canvasState
             let effectiveCurrentImageUrl = proj.currentImageUrl
+            let bestUpdatedAt = Number(proj.updatedAt) || 0
+            // The revision the WINNING content is based on. Neon content → the
+            // project's current revision; an unflushed Redis/IDB snapshot → the
+            // revision IT was based on. The sync manager must flush against this,
+            // not always the current Neon revision, or replaying older unflushed
+            // content would clobber a newer concurrent write.
+            let effectiveBaseRevision = Number(proj.revision) || 0
             try {
                 const cachedSnapshot = await fetchCachedSnapshot(proj._id)
                 if (cachedSnapshot?.canvasState) {
-                    const projectUpdatedAt = Number(proj.updatedAt) || 0
-                    const cachedUpdatedAt = Number(cachedSnapshot.updatedAt) || 0
-                    if (cachedUpdatedAt > projectUpdatedAt) {
+                    // Prefer the server-stamped time (comparable to Neon's
+                    // server-set updatedAt) so a skewed client clock can't make a
+                    // Redis snapshot wrongly win or lose against Neon. Older
+                    // snapshots without it fall back to the client time.
+                    const cachedUpdatedAt = Number(cachedSnapshot.serverUpdatedAt ?? cachedSnapshot.updatedAt) || 0
+                    if (cachedUpdatedAt > bestUpdatedAt) {
                         rawCanvasState = cachedSnapshot.canvasState
                         if (cachedSnapshot.currentImageUrl) {
                             effectiveCurrentImageUrl = cachedSnapshot.currentImageUrl
+                        }
+                        bestUpdatedAt = cachedUpdatedAt
+                        if (Number.isFinite(Number(cachedSnapshot.baseRevision))) {
+                            effectiveBaseRevision = Number(cachedSnapshot.baseRevision)
                         }
                     }
                 }
             } catch (cacheError) {
                 console.warn("[canvas] cached snapshot lookup failed:", cacheError?.message || cacheError)
             }
+
+            // Offline backstop: a prior session may have ended offline (or closed
+            // before the unload beacon landed), leaving the freshest work only in
+            // the local IndexedDB mirror. If it's newer than both Neon and Redis,
+            // restore from it — the sync manager replays it to the server on
+            // reconnect / next edit.
+            try {
+                const localState = await loadLocalState(proj._id)
+                // Only let the local mirror override server state when it holds
+                // UNSYNCED work (dirty). A clean local copy already reached the
+                // server, so prefer the server — this stops a skewed client clock
+                // from clobbering newer server state across devices.
+                if (localState?.fullState && localState.dirty !== false) {
+                    const localUpdatedAt = Number(localState.updatedAt) || 0
+                    if (localUpdatedAt > bestUpdatedAt) {
+                        rawCanvasState = localState.fullState
+                        if (localState.currentImageUrl) {
+                            effectiveCurrentImageUrl = localState.currentImageUrl
+                        }
+                        bestUpdatedAt = localUpdatedAt
+                        if (Number.isFinite(Number(localState.baseRevision))) {
+                            effectiveBaseRevision = Number(localState.baseRevision)
+                        }
+                    }
+                }
+            } catch (localError) {
+                console.warn("[canvas] local snapshot lookup failed:", localError?.message || localError)
+            }
+
+            // Tell the sync manager which revision the loaded content is based on,
+            // so its first flush is checked against the right baseline.
+            try { syncRef.current?.setBaseRevision(effectiveBaseRevision) } catch { /* manager may not exist yet */ }
 
             const canvasState = normalizeCanvasState(rawCanvasState)
             const persistedHistory = Array.isArray(rawCanvasState?.history) ? rawCanvasState.history : null
@@ -1406,6 +1572,54 @@ const CanvasEditor = ({ project }) => {
                                 ? `${imageNativeSize.width} × ${imageNativeSize.height} px`
                                 : `${project.width} × ${project.height} px`}
                     </strong>
+                </div>
+            )}
+
+            {(syncStatus === "offline" || syncStatus === "error" || syncStatus === "saving" || syncStatus === "conflict") && (
+                <div
+                    className="absolute left-1/2 z-30 flex items-center gap-2"
+                    style={{
+                        top: 12,
+                        transform: "translateX(-50%)",
+                        pointerEvents: "none",
+                        padding: "5px 12px",
+                        background: "var(--bg-elevated, #0a0d14)",
+                        border: "2px solid",
+                        borderColor:
+                            syncStatus === "offline" ? "var(--accent-amber, #f5b945)"
+                                : (syncStatus === "error" || syncStatus === "conflict") ? "var(--accent-coral, #ff6b5e)"
+                                    : "var(--accent-primary, #38e0c8)",
+                        boxShadow: "3px 3px 0 0 rgba(0,0,0,0.55)",
+                        borderRadius: 6,
+                        fontFamily: "var(--font-mono, monospace)",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        letterSpacing: "0.08em",
+                        textTransform: "uppercase",
+                        color: "var(--text-primary, #f5f7fa)",
+                        whiteSpace: "nowrap",
+                    }}
+                    role="status"
+                    aria-live="polite"
+                >
+                    <span
+                        style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            background:
+                                syncStatus === "offline" ? "var(--accent-amber, #f5b945)"
+                                    : (syncStatus === "error" || syncStatus === "conflict") ? "var(--accent-coral, #ff6b5e)"
+                                        : "var(--accent-primary, #38e0c8)",
+                        }}
+                    />
+                    {syncStatus === "offline"
+                        ? "Offline · saved locally"
+                        : syncStatus === "conflict"
+                            ? "Edited elsewhere"
+                            : syncStatus === "error"
+                                ? "Sync retrying…"
+                                : "Syncing…"}
                 </div>
             )}
 
