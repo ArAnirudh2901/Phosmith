@@ -45,6 +45,7 @@ import {
   computePerceptualHash,
 } from "@/lib/image-fingerprint";
 import { extractImageFeatures } from "@/lib/image-features";
+import { flattenLiveCanvasForAnalysis, renderFabricObjectElement } from "@/lib/canvas-snapshot";
 import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
 import { STYLE_LABELS } from "@/lib/style-profiles";
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
@@ -357,13 +358,45 @@ const isVisibleImageOnCanvas = (obj) =>
 // multi-image targeting endpoint. Each entry carries enough data for the
 // server to: (a) ask Gemini which layers the user is talking about
 // (thumbnail + name) and (b) compute a per-image plan (sourceUrl + hash).
+// Mirror the server's MAX_LAYERS cap (in the edit-plan route) so the client
+// never renders/encodes more layers than the server will accept — otherwise a
+// canvas with many images would do N wasted renders + base64 encodes before the
+// server truncates to 12.
+const MAX_AGENT_LAYERS = 12;
+// Mirror the server's MAX_RENDERED_BASE64_CHARS bound so we never POST a render
+// the server would just discard.
+const MAX_AGENT_RENDER_CHARS = 3 * 1024 * 1024;
+
 const collectLayersForTargeting = (canvasEditor, project) => {
   const objects = canvasEditor?.getObjects?.() || [];
-  const visibleImages = objects.filter(isVisibleImageOnCanvas);
+  const visibleImages = objects.filter(isVisibleImageOnCanvas).slice(0, MAX_AGENT_LAYERS);
+  const isMultiLayer = visibleImages.length >= 2;
   return visibleImages.map((img, idx) => {
-    const fingerprint = computeImageFingerprint(img);
-    const pHash = computePerceptualHash(img);
-    const thumb = computeLayerThumbnail(img, 256);
+    // Render THIS layer WITH its current filters/masks applied so the agent's
+    // context (hash / perceptual hash / features / thumbnail / grading bytes)
+    // reflects manual edits rather than the immutable original bitmap. Only
+    // worth doing in the multi-layer case — the single-image path flattens the
+    // whole canvas itself. Falls back to the raw FabricImage if the per-object
+    // render fails (e.g. a tainted or WebGL-filtered layer).
+    const renderedEl = isMultiLayer ? renderFabricObjectElement(img, { maxEdge: 1024 }) : null;
+    const analysisSource = renderedEl || img;
+    let renderedBase64 = null;
+    let renderedMime = null;
+    if (renderedEl) {
+      try {
+        const durl = renderedEl.toDataURL("image/jpeg", 0.85);
+        const commaIdx = durl.indexOf(",");
+        if (commaIdx >= 0) {
+          renderedBase64 = durl.slice(commaIdx + 1);
+          renderedMime = "image/jpeg";
+        }
+      } catch {
+        /* tainted layer — leave null; server falls back to the layer's sourceUrl */
+      }
+    }
+    const fingerprint = computeImageFingerprint(analysisSource);
+    const pHash = computePerceptualHash(analysisSource);
+    const thumb = computeLayerThumbnail(analysisSource, 256);
     const layerName =
       (typeof img.pixxelLayerName === "string" && img.pixxelLayerName.trim()) ||
       (typeof img.name === "string" && img.name.trim()) ||
@@ -374,9 +407,12 @@ const collectLayersForTargeting = (canvasEditor, project) => {
       sourceUrl: getSourceUrl(img, project),
       imageHash: fingerprint?.hash || `nohash-${idx}`,
       pHash: pHash || null,
-      features: extractImageFeatures(img),
+      features: extractImageFeatures(analysisSource),
       thumbBase64: thumb?.base64 || null,
       thumbMime: thumb?.mime || null,
+      // Flattened render of this layer (reflects manual edits) for grading.
+      renderedBase64,
+      renderedMime,
       // Reference to the canvas object so we can apply per-layer filters later.
       __canvasObject: img,
     };
@@ -1513,6 +1549,8 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           features: l.features,
           thumbBase64: l.thumbBase64,
           thumbMime: l.thumbMime,
+          renderedBase64: l.renderedBase64,
+          renderedMime: l.renderedMime,
         }));
         const response = await fetch("/api/ai/edit-plan", {
           method: "POST",
@@ -1600,9 +1638,37 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         return;
       } else {
         // v2 endpoint — single image, image-aware, deterministic, returns per-effect slider entries.
-        const fingerprint = computeImageFingerprint(image);
-        const pHash = computePerceptualHash(image);
-        const features = extractImageFeatures(image);
+        // Flatten the LIVE canvas first so the agent analyses what the user
+        // actually sees — original upload PLUS every manual edit (adjust, mask,
+        // erase, draw, text, layer composition) — not the immutable upload. The
+        // rendered element drives the fingerprint/pHash/features (so the server
+        // cache self-invalidates whenever the pixels change) and the JPEG is sent
+        // to the vision model for grading. Falls back to the raw FabricImage if
+        // the render fails (e.g. a tainted canvas that can't be read).
+        let analysisSource = image;
+        let renderedImageBase64 = null;
+        let renderedImageMime = null;
+        try {
+          const flat = await flattenLiveCanvasForAnalysis(canvasEditor, { project, maxEdge: 1024 });
+          if (flat?.canvasElement) {
+            analysisSource = flat.canvasElement;
+            // Defense-in-depth: a 1024px JPEG is normally 150-400 KB. Only ship it
+            // when within the server's accepted bound (~3 MB); if somehow larger,
+            // still hash/feature from the element locally but let the server fall
+            // back to the source URL rather than send an oversized payload.
+            if (flat.base64 && flat.base64.length <= MAX_AGENT_RENDER_CHARS) {
+              renderedImageBase64 = flat.base64;
+              renderedImageMime = flat.mimeType;
+            } else if (flat.base64) {
+              console.warn("[agent] flattened render too large to send; server will use the source URL");
+            }
+          }
+        } catch (flattenError) {
+          console.warn("[agent] live-canvas flatten failed, using original image:", flattenError?.message || flattenError);
+        }
+        const fingerprint = computeImageFingerprint(analysisSource);
+        const pHash = computePerceptualHash(analysisSource);
+        const features = extractImageFeatures(analysisSource);
         const response = await fetch("/api/ai/edit-plan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1613,6 +1679,8 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
             imageHash: fingerprint?.hash || `nohash-${latestUrl}`,
             pHash,
             features,
+            renderedImageBase64,
+            renderedImageMime,
           }),
         });
         const data = await response.json();

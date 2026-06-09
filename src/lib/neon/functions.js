@@ -401,6 +401,56 @@ const functions = {
     return updated.id;
   },
 
+  // Optimistic-concurrency canvas flush. Bumps `revision` on every write so two
+  // sessions editing the same project can't silently clobber each other.
+  //   - expectedRevision given + matches  → write + return { ok, revision }
+  //   - expectedRevision given + mismatch → no write, return { conflict, project }
+  //   - force / no expectedRevision        → unconditional write + bump (used for
+  //     "keep mine" overwrite and legacy callers).
+  "projects.flushCanvasState": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    await getOwnedProject(db, user, args.projectId); // ownership guard
+
+    const data = clean({
+      canvasState: args.canvasState,
+      currentImageUrl: args.currentImageUrl,
+      updatedAt: new Date(),
+    });
+
+    // Unconditional overwrite — ONLY when the caller explicitly forces it
+    // ("Keep mine" conflict resolution). A merely missing/invalid revision must
+    // never reach this path, or it would silently bypass the concurrency check.
+    if (args.force === true) {
+      const updated = await db.project.update({
+        where: { id: args.projectId },
+        data: { ...data, revision: { increment: 1 } },
+      });
+      await db.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } });
+      return { ok: true, revision: updated.revision };
+    }
+
+    const expected = Number(args.expectedRevision);
+    if (!Number.isInteger(expected)) {
+      // No usable baseline → refuse rather than clobber. The caller keeps the
+      // work locally (IndexedDB) and reconciles on the next load.
+      return { ok: false, reason: "no-base-revision" };
+    }
+
+    // Atomic conditional write: only succeeds if nobody advanced the revision
+    // since the client loaded it. updateMany returns the affected-row count.
+    const result = await db.project.updateMany({
+      where: { id: args.projectId, revision: expected },
+      data: { ...data, revision: { increment: 1 } },
+    });
+    if (result.count === 0) {
+      const current = await db.project.findUnique({ where: { id: args.projectId } });
+      return { conflict: true, project: withDocFields(current) };
+    }
+    await db.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } });
+    return { ok: true, revision: expected + 1 };
+  },
+
   "agentEditSets.listForProject": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
