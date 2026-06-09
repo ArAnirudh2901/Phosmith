@@ -129,15 +129,14 @@ export function LabeledSlider({ label, value, min, max, step = 1, suffix = '%', 
 
 export function MaskActionButtons({ hasMask, undoDepth, redoDepth, onUndo, onRedo, onInvert, onClear }) {
     return (
-        <div className="space-y-1.5" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+        <div className="space-y-2" style={{ borderTop: '1px solid rgba(244,244,245,0.06)', paddingTop: '12px' }}>
             <label className="panel-label">Actions</label>
-            <div className="grid grid-cols-2 gap-1.5">
+            <div className="grid grid-cols-2 gap-2">
                 <button
                     type="button"
                     onClick={onUndo}
                     disabled={undoDepth === 0}
-                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium editor-interactive disabled:opacity-35"
-                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                    className="mask-btn"
                 >
                     <Undo2 className="h-3.5 w-3.5" />
                     Undo
@@ -146,8 +145,7 @@ export function MaskActionButtons({ hasMask, undoDepth, redoDepth, onUndo, onRed
                     type="button"
                     onClick={onRedo}
                     disabled={redoDepth === 0}
-                    className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium editor-interactive disabled:opacity-35"
-                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                    className="mask-btn"
                 >
                     <Redo2 className="h-3.5 w-3.5" />
                     Redo
@@ -157,8 +155,7 @@ export function MaskActionButtons({ hasMask, undoDepth, redoDepth, onUndo, onRed
                 type="button"
                 onClick={onInvert}
                 disabled={!hasMask}
-                className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive disabled:opacity-35"
-                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
+                className="mask-btn w-full"
             >
                 <RotateCcw className="h-3.5 w-3.5" />
                 Invert
@@ -167,8 +164,7 @@ export function MaskActionButtons({ hasMask, undoDepth, redoDepth, onUndo, onRed
                 type="button"
                 onClick={onClear}
                 disabled={!hasMask}
-                className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive disabled:opacity-35"
-                style={{ background: 'rgba(239, 68, 68, 0.08)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.2)' }}
+                className="mask-btn mask-btn--danger w-full"
             >
                 <Trash2 className="h-3.5 w-3.5" />
                 Reset
@@ -179,9 +175,9 @@ export function MaskActionButtons({ hasMask, undoDepth, redoDepth, onUndo, onRed
 
 export function ToolEmptyState({ icon: Icon, title, subtitle }) {
     return (
-        <div className="p-4 text-center">
-            <Icon className="h-8 w-8 mx-auto mb-3" style={{ color: 'var(--text-muted)' }} />
-            <p className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{title}</p>
+        <div className="mask-empty-state">
+            <Icon className="mask-empty-state__icon" />
+            <p className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>{title}</p>
             <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>{subtitle}</p>
         </div>
     )
@@ -189,9 +185,9 @@ export function ToolEmptyState({ icon: Icon, title, subtitle }) {
 
 export function TipCard({ title = 'Tips', children }) {
     return (
-        <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(6, 184, 212, 0.1)' }}>
-            <p className="font-medium mb-1.5" style={{ color: 'var(--text-secondary)' }}>{title}</p>
-            <div className="space-y-1" style={{ color: 'var(--text-muted)' }}>
+        <div className="mask-tip-card">
+            <p className="font-semibold mb-2" style={{ color: 'var(--text-secondary)', fontSize: '11px' }}>{title}</p>
+            <div className="space-y-1.5">
                 {children}
             </div>
         </div>
@@ -702,11 +698,7 @@ export function MaskChainCard({
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.18 }}
             onClick={() => onSelect?.(layer.id)}
-            className="rounded-md p-2"
-            style={{
-                background: selected ? 'rgba(6,184,212,0.06)' : 'var(--bg-elevated)',
-                border: `1px solid ${selected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-            }}
+            className={`mask-chain-card ${selected ? 'mask-chain-card--selected' : ''}`}
         >
             <div className="flex items-center gap-1.5">
                 <span
@@ -716,8 +708,8 @@ export function MaskChainCard({
                     {index}
                 </span>
                 <span
-                    className="text-[9px] font-bold px-1.5 py-0.5 rounded"
-                    style={{ background: hexToRgba(meta.color, 0.15), color: meta.color }}
+                    className="mask-kind-badge"
+                    style={{ background: hexToRgba(meta.color, 0.12), color: meta.color }}
                 >
                     {meta.label}
                 </span>
@@ -731,58 +723,58 @@ export function MaskChainCard({
                 <button
                     type="button"
                     onClick={() => setExpanded((v) => !v)}
-                    className="p-0.5"
+                    className="mask-icon-btn"
                     title={expanded ? 'Hide params' : 'Edit params'}
                 >
                     {expanded
-                        ? <ChevronUp className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
-                        : <ChevronDown className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />}
+                        ? <ChevronUp className="h-3 w-3" />
+                        : <ChevronDown className="h-3 w-3" />}
                 </button>
                 <button
                     type="button"
                     onClick={() => onUpdate({ visible: layer.visible === false })}
-                    className="p-0.5"
+                    className={`mask-icon-btn ${layer.visible !== false ? 'mask-icon-btn--accent' : ''}`}
                     title={layer.visible === false ? 'Show' : 'Hide'}
                 >
                     {layer.visible === false
-                        ? <EyeOff className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
-                        : <Eye className="h-3 w-3" style={{ color: 'var(--accent-primary)' }} />}
+                        ? <EyeOff className="h-3 w-3" />
+                        : <Eye className="h-3 w-3" />}
                 </button>
                 <button
                     type="button"
                     onClick={() => onMove(layer.id, 'up')}
                     disabled={isFirst}
-                    className="p-0.5 disabled:opacity-30"
+                    className="mask-icon-btn"
                     title="Move up"
                 >
-                    <ChevronUp className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
+                    <ChevronUp className="h-3 w-3" />
                 </button>
                 <button
                     type="button"
                     onClick={() => onMove(layer.id, 'down')}
                     disabled={index === total - 1}
-                    className="p-0.5 disabled:opacity-30"
+                    className="mask-icon-btn"
                     title="Move down"
                 >
-                    <ChevronDown className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
+                    <ChevronDown className="h-3 w-3" />
                 </button>
                 <button
                     type="button"
                     onClick={() => onUpdate({ lock: !locked })}
-                    className="p-0.5"
+                    className={`mask-icon-btn ${locked ? 'mask-icon-btn--accent' : ''}`}
                     title={locked ? 'Unlock layer' : 'Lock layer (freeze params)'}
                 >
                     {locked
-                        ? <Lock className="h-3 w-3" style={{ color: 'var(--accent-primary)' }} />
-                        : <LockOpen className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />}
+                        ? <Lock className="h-3 w-3" />
+                        : <LockOpen className="h-3 w-3" />}
                 </button>
                 <button
                     type="button"
                     onClick={() => onRemove(layer.id)}
-                    className="p-0.5"
+                    className="mask-icon-btn mask-icon-btn--danger"
                     title="Remove layer"
                 >
-                    <Trash2 className="h-3 w-3" style={{ color: '#EF4444' }} />
+                    <Trash2 className="h-3 w-3" />
                 </button>
             </div>
 
@@ -791,12 +783,7 @@ export function MaskChainCard({
                     value={entry.op}
                     disabled={locked}
                     onChange={(e) => onSetOp(layer.id, e.target.value)}
-                    className="w-full text-[10px] px-1.5 py-0.5 rounded mt-1.5 disabled:opacity-50"
-                    style={{
-                        background: 'var(--bg-base)',
-                        border: '1px solid var(--border-subtle)',
-                        color: 'var(--text-primary)',
-                    }}
+                    className="mask-select mt-1.5"
                 >
                     {OPS.map((op) => (
                         <option key={op.id} value={op.id}>{op.label}</option>
@@ -807,7 +794,7 @@ export function MaskChainCard({
             {/* Output mode: fill (visible selection) / adjust (recolour) /
                 erase (cut). Root-cause #1 — a 'fill' layer is visible without
                 any adjustment. */}
-            <div className="grid grid-cols-3 gap-1 mt-1.5">
+            <div className="mask-fill-modes mt-1.5">
                 {FILL_MODE_OPTIONS.map((m) => {
                     const active = fillMode === m.id
                     return (
@@ -816,12 +803,7 @@ export function MaskChainCard({
                             type="button"
                             disabled={locked}
                             onClick={() => (onSetFillMode ? onSetFillMode(layer.id, m.id) : onUpdate({ fillMode: m.id }))}
-                            className="text-[9px] py-1 rounded editor-interactive disabled:opacity-50"
-                            style={{
-                                background: active ? 'rgba(6,184,212,0.14)' : 'var(--bg-base)',
-                                border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
-                            }}
+                            className={`mask-fill-mode-btn ${active ? 'mask-fill-mode-btn--active' : ''}`}
                         >
                             {m.label}
                         </button>
@@ -830,34 +812,33 @@ export function MaskChainCard({
             </div>
 
             {fillMode === 'fill' && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                    <span className="text-[9px]" style={{ color: 'var(--text-muted)' }}>Tint</span>
+                <div className="mask-param-row mt-1.5">
+                    <span className="mask-param-label">Tint</span>
                     <input
                         type="color"
                         disabled={locked}
                         value={fillColorToHex(layer.fillColor)}
                         onChange={(e) => onUpdate({ fillColor: hexToFillColor(e.target.value) })}
-                        className="w-6 h-5 rounded disabled:opacity-50"
-                        style={{ background: 'transparent', border: '1px solid var(--border-subtle)' }}
+                        className="mask-color-input disabled:opacity-50"
                         title="Fill colour"
                     />
-                    <span className="text-[9px]" style={{ color: 'var(--text-muted)' }}>Strength</span>
+                    <span className="mask-param-label" style={{ minWidth: 'auto' }}>Strength</span>
                     <input
                         type="range"
                         min="0" max="100"
                         disabled={locked}
                         value={Math.round((layer.fillStrength ?? 0.5) * 100)}
                         onChange={(e) => onUpdate({ fillStrength: Number(e.target.value) / 100 })}
-                        className="flex-1 disabled:opacity-50"
+                        className="mask-range flex-1"
                     />
-                    <span className="text-[9px] w-6 text-right" style={{ color: 'var(--text-secondary)' }}>
+                    <span className="mask-param-value">
                         {Math.round((layer.fillStrength ?? 0.5) * 100)}
                     </span>
                 </div>
             )}
 
-            <div className="flex items-center gap-1.5 mt-1.5">
-                <span className="text-[9px] flex-1" style={{ color: 'var(--text-muted)' }} title="Overall strength of this mask (Lightroom 'Density')">
+            <div className="mask-param-row mt-1.5">
+                <span className="mask-param-label" title="Overall strength of this mask (Lightroom 'Density')">
                     Density
                 </span>
                 <input
@@ -866,13 +847,13 @@ export function MaskChainCard({
                     disabled={locked}
                     value={Math.round((layer.opacity ?? 1) * 100)}
                     onChange={(e) => onUpdate({ opacity: Number(e.target.value) / 100 })}
-                    className="flex-1 disabled:opacity-50"
+                    className="mask-range flex-1"
                 />
-                <span className="text-[9px] w-6 text-right" style={{ color: 'var(--text-secondary)' }}>
+                <span className="mask-param-value">
                     {Math.round((layer.opacity ?? 1) * 100)}
                 </span>
             </div>
-            <label className="flex items-center gap-1.5 text-[10px] mt-1" style={{ color: 'var(--text-muted)' }}>
+            <label className="mask-toggle mt-2">
                 <input
                     type="checkbox"
                     checked={!!layer.inverted}

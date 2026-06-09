@@ -32,25 +32,18 @@ import {
 const Section = ({ title, icon: Icon, defaultOpen = false, children, badge }) => {
     const [open, setOpen] = useState(defaultOpen)
     return (
-        <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
+        <div className={`mask-section ${open ? 'mask-section--open' : ''}`}>
             <button
                 type="button"
                 onClick={() => setOpen(v => !v)}
-                className="flex w-full items-center gap-2 py-2.5 px-1 text-left group"
-                style={{ color: 'var(--text-secondary)' }}
+                className="mask-section__header"
             >
-                {Icon && <Icon className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />}
-                <span className="text-xs font-semibold flex-1 tracking-wide uppercase">{title}</span>
+                {Icon && <Icon className="mask-section__icon" />}
+                <span className="mask-section__title">{title}</span>
                 {badge && (
-                    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded"
-                        style={{ background: 'rgba(6,184,212,0.12)', color: 'var(--accent-primary)' }}>
-                        {badge}
-                    </span>
+                    <span className="mask-section__badge">{badge}</span>
                 )}
-                {open
-                    ? <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform" style={{ color: 'var(--text-muted)' }} />
-                    : <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform" style={{ color: 'var(--text-muted)' }} />
-                }
+                <ChevronRight className="mask-section__chevron" />
             </button>
             <AnimatePresence initial={false}>
                 {open && (
@@ -58,10 +51,10 @@ const Section = ({ title, icon: Icon, defaultOpen = false, children, badge }) =>
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.2, ease: 'easeInOut' }}
+                        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                         className="overflow-hidden"
                     >
-                        <div className="pb-3 space-y-3 px-0.5">
+                        <div className="mask-section__body space-y-3">
                             {children}
                         </div>
                     </motion.div>
@@ -70,6 +63,13 @@ const Section = ({ title, icon: Icon, defaultOpen = false, children, badge }) =>
         </div>
     )
 }
+
+/* ─── category divider between section groups ─── */
+const CategoryHeader = ({ label }) => (
+    <div className="mask-category-header">
+        <span>{label}</span>
+    </div>
+)
 
 /* ─── gradient direction icons ─── */
 const DIRECTIONS = [
@@ -96,6 +96,63 @@ const ColorSwatch = ({ color, size = 24 }) => {
             }}
         />
     )
+}
+
+const CLOSED_BRUSH_MIN_POINTS = 8
+const CLOSED_BRUSH_MIN_AREA = 64
+
+const pathLength = (points) => {
+    let length = 0
+    for (let i = 1; i < points.length; i += 1) {
+        const dx = points[i].x - points[i - 1].x
+        const dy = points[i].y - points[i - 1].y
+        length += Math.sqrt(dx * dx + dy * dy)
+    }
+    return length
+}
+
+const polygonArea = (points) => {
+    let area = 0
+    for (let i = 0; i < points.length; i += 1) {
+        const a = points[i]
+        const b = points[(i + 1) % points.length]
+        area += a.x * b.y - b.x * a.y
+    }
+    return Math.abs(area) / 2
+}
+
+const isClosedBrushPath = (points, brushSize) => {
+    if (!Array.isArray(points) || points.length < CLOSED_BRUSH_MIN_POINTS) return false
+    const first = points[0]
+    const last = points[points.length - 1]
+    const dx = last.x - first.x
+    const dy = last.y - first.y
+    const closeDistance = Math.sqrt(dx * dx + dy * dy)
+    const radius = Math.max(0.5, brushSize / 2)
+    const closeThreshold = Math.max(10, Math.min(96, radius * 1.5))
+    const area = polygonArea(points)
+    return (
+        closeDistance <= closeThreshold &&
+        pathLength(points) >= closeThreshold * 3 &&
+        area >= Math.max(CLOSED_BRUSH_MIN_AREA, radius * radius * 3)
+    )
+}
+
+const fillClosedBrushPath = (ctx, points, scale, brushSize) => {
+    if (!ctx || !isClosedBrushPath(points, brushSize)) return false
+    const s = Math.max(0.0001, scale || 1)
+    ctx.save()
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.fillStyle = 'rgba(255, 255, 255, 1)'
+    ctx.beginPath()
+    ctx.moveTo(points[0].x * s, points[0].y * s)
+    for (let i = 1; i < points.length; i += 1) {
+        ctx.lineTo(points[i].x * s, points[i].y * s)
+    }
+    ctx.closePath()
+    ctx.fill('evenodd')
+    ctx.restore()
+    return true
 }
 
 const MaskControls = ({ dominantColor }) => {
@@ -860,6 +917,7 @@ const MaskControls = ({ dominantColor }) => {
     const [sigmaColor, setSigmaColor] = useState(0.15)
     const [sigmaSpace, setSigmaSpace] = useState(2)
     const [brushHasContent, setBrushHasContent] = useState(false)
+    const [isShapeFilling, setIsShapeFilling] = useState(false)
     // Selection-brush output options (mirror the lasso). `brushSink` picks the
     // layer's fillMode (select → visible 'fill', erase → 'erase' knockout);
     // `brushModifier` maps to the chain blend op; `brushEdgeSnap` toggles the
@@ -877,6 +935,8 @@ const MaskControls = ({ dominantColor }) => {
     const brushOverlayRef = useRef(/** @type {any} */ (null))
     const isPaintingRef = useRef(false)
     const lastBrushPointRef = useRef(null)
+    const brushPointsRef = useRef(/** @type {Array<{x:number,y:number}>} */ ([]))
+    const shapeFillTokenRef = useRef(0)
     const brushSizeRef = useRef(brushSize)
     const brushHardnessRef = useRef(brushHardness)
     const filterRadiusRef = useRef(filterRadius)
@@ -1037,6 +1097,7 @@ const MaskControls = ({ dominantColor }) => {
         if (!ctx) return
         isPaintingRef.current = true
         lastBrushPointRef.current = { x: pos.x, y: pos.y }
+        brushPointsRef.current = [{ x: pos.x, y: pos.y }]
         // Step 10.1: scale the stamp position and radius into
         // brush-canvas space. `brushScale` is 1.0 for images already
         // at or below 2048 on the long edge, <1.0 for higher-res
@@ -1078,6 +1139,11 @@ const MaskControls = ({ dominantColor }) => {
         const r = Math.max(0.5, brushSizeRef.current / 2) * s
         strokeBrush(ctx, last.x * s, last.y * s, cx * s, cy * s, r, brushHardnessRef.current)
         lastBrushPointRef.current = { x: cx, y: cy }
+        const pts = brushPointsRef.current
+        const prev = pts[pts.length - 1]
+        if (!prev || (cx - prev.x) * (cx - prev.x) + (cy - prev.y) * (cy - prev.y) >= 4) {
+            pts.push({ x: cx, y: cy })
+        }
         markBrushChanged()
         if (brushOverlayRef.current) {
             brushOverlayRef.current.set('dirty', true)
@@ -1088,11 +1154,114 @@ const MaskControls = ({ dominantColor }) => {
         }
     }, [brushActive, imageSize, canvasEditor, pointerToImage, ensureBrushCanvas, strokeBrush, markBrushChanged])
 
-    const handleBrushUp = useCallback(() => {
+    const drawShapeMaskBlob = useCallback(async (blob, token) => {
+        const objectUrl = URL.createObjectURL(blob)
+        try {
+            const img = await new Promise((resolve, reject) => {
+                const image = new Image()
+                image.onload = () => resolve(image)
+                image.onerror = () => reject(new Error('Failed to decode shape mask PNG'))
+                image.src = objectUrl
+            })
+            if (shapeFillTokenRef.current !== token) return false
+            const brushCanvas = brushCanvasRef.current
+            if (!brushCanvas) return false
+            const ctx = brushCanvas.getContext('2d')
+            if (!ctx) return false
+            ctx.save()
+            ctx.globalCompositeOperation = 'source-over'
+            ctx.drawImage(img, 0, 0, brushCanvas.width, brushCanvas.height)
+            ctx.restore()
+            markBrushChanged()
+            if (brushOverlayRef.current) {
+                brushOverlayRef.current.set('dirty', true)
+                canvasEditor?.requestRenderAll?.()
+            }
+            return true
+        } finally {
+            URL.revokeObjectURL(objectUrl)
+        }
+    }, [canvasEditor, markBrushChanged])
+
+    const requestPythonClosedShapeFill = useCallback(async (points, token) => {
+        const brushCanvas = brushCanvasRef.current
+        if (!brushCanvas || !Array.isArray(points) || points.length < 3) return false
+        const scale = brushScaleRef.current || 1
+        const scaledPoints = points.map((p) => [
+            Math.round(p.x * scale * 100) / 100,
+            Math.round(p.y * scale * 100) / 100,
+        ])
+
+        setIsShapeFilling(true)
+        try {
+            const response = await fetch('/api/ai/shape-mask', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    width: brushCanvas.width,
+                    height: brushCanvas.height,
+                    points: scaledPoints,
+                }),
+                signal: AbortSignal.timeout(8_000),
+            })
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}))
+                throw new Error(err.error || `shape mask failed (${response.status})`)
+            }
+            return drawShapeMaskBlob(await response.blob(), token)
+        } catch (error) {
+            console.warn('[mask] Python closed-shape fill unavailable; using canvas fallback:', error?.message)
+            return false
+        } finally {
+            if (shapeFillTokenRef.current === token) setIsShapeFilling(false)
+        }
+    }, [drawShapeMaskBlob])
+
+    const fillClosedBrushStroke = useCallback(() => {
+        const brushCanvas = brushCanvasRef.current
+        if (!brushCanvas) return false
+        const ctx = brushCanvas.getContext('2d')
+        if (!ctx) return false
+        const points = brushPointsRef.current.slice()
+        const filled = fillClosedBrushPath(
+            ctx,
+            points,
+            brushScaleRef.current,
+            brushSizeRef.current,
+        )
+        if (!filled) return false
+        const token = shapeFillTokenRef.current + 1
+        shapeFillTokenRef.current = token
+        void requestPythonClosedShapeFill(points, token)
+        markBrushChanged()
+        if (brushOverlayRef.current) {
+            brushOverlayRef.current.set('dirty', true)
+            canvasEditor?.requestRenderAll?.()
+        }
+        return true
+    }, [canvasEditor, markBrushChanged, requestPythonClosedShapeFill])
+
+    const handleBrushUp = useCallback((e) => {
         if (!isPaintingRef.current) return
+        if (e && canvasEditor) {
+            const pos = pointerToImage(canvasEditor, e)
+            const w = imageSize?.width || 0
+            const h = imageSize?.height || 0
+            if (pos && w > 0 && h > 0) {
+                const cx = Math.max(0, Math.min(w, pos.x))
+                const cy = Math.max(0, Math.min(h, pos.y))
+                const pts = brushPointsRef.current
+                const prev = pts[pts.length - 1]
+                if (!prev || (cx - prev.x) * (cx - prev.x) + (cy - prev.y) * (cy - prev.y) >= 1) {
+                    pts.push({ x: cx, y: cy })
+                }
+            }
+        }
+        fillClosedBrushStroke()
         isPaintingRef.current = false
         lastBrushPointRef.current = null
-    }, [])
+        brushPointsRef.current = []
+    }, [canvasEditor, imageSize, pointerToImage, fillClosedBrushStroke])
 
     // Wire the pointer events when brush mode is active. Window-level
     // move + up so a drag that escapes the canvas still finalises.
@@ -1107,7 +1276,7 @@ const MaskControls = ({ dominantColor }) => {
             const fake = { e }
             handleBrushMove(fake)
         }
-        const onUp = () => handleBrushUp()
+        const onUp = (ev) => handleBrushUp({ e: ev })
         fabricCanvas.on('mouse:down', onDown)
         window.addEventListener('mousemove', onMove)
         window.addEventListener('mouseup', onUp)
@@ -1247,6 +1416,9 @@ const MaskControls = ({ dominantColor }) => {
         setBrushHasContent(false)
         isPaintingRef.current = false
         lastBrushPointRef.current = null
+        brushPointsRef.current = []
+        shapeFillTokenRef.current += 1
+        setIsShapeFilling(false)
         setBrushActive(true)
         toast(brushSink === 'erase'
             ? 'Paint to mark the cut region, then "Add cut to layers". Nothing is erased until you add it.'
@@ -1257,6 +1429,9 @@ const MaskControls = ({ dominantColor }) => {
         setBrushActive(false)
         isPaintingRef.current = false
         lastBrushPointRef.current = null
+        brushPointsRef.current = []
+        shapeFillTokenRef.current += 1
+        setIsShapeFilling(false)
     }, [])
 
     const handleClearBrush = useCallback(() => {
@@ -1266,6 +1441,9 @@ const MaskControls = ({ dominantColor }) => {
         if (!ctx) return
         ctx.clearRect(0, 0, c.width, c.height)
         setBrushHasContent(false)
+        brushPointsRef.current = []
+        shapeFillTokenRef.current += 1
+        setIsShapeFilling(false)
         if (brushOverlayRef.current) {
             brushOverlayRef.current.set('dirty', true)
             canvasEditor?.requestRenderAll?.()
@@ -1279,6 +1457,10 @@ const MaskControls = ({ dominantColor }) => {
     // erase; `brushModifier` maps to the chain blend op; `brushFeather` is
     // baked into the texture so each region keeps its own soft edge.
     const handleAddBrushLayer = useCallback(() => {
+        if (isShapeFilling) {
+            toast('Finishing the closed shape fill...')
+            return
+        }
         const brushCanvas = brushCanvasRef.current
         if (!brushCanvas) {
             toast('Start painting first')
@@ -1354,8 +1536,11 @@ const MaskControls = ({ dominantColor }) => {
             setBrushActive(false)
             isPaintingRef.current = false
             lastBrushPointRef.current = null
+            brushPointsRef.current = []
+            shapeFillTokenRef.current += 1
+            setIsShapeFilling(false)
         }
-    }, [addChainLayer, setLayerOp, stack.chain.length, brushSink, brushModifier, brushEdgeSnap, brushFeather, filterRadius, sigmaColor, sigmaSpace])
+    }, [addChainLayer, setLayerOp, stack.chain.length, brushSink, brushModifier, brushEdgeSnap, brushFeather, filterRadius, sigmaColor, sigmaSpace, isShapeFilling])
 
     /* ─── Lasso handlers ─── */
 
@@ -2235,19 +2420,117 @@ const MaskControls = ({ dominantColor }) => {
 
     return (
         <div className="space-y-0 overflow-y-auto pr-1 panel-scroll">
+            {/* ────────── Mask Layers (megashader chain) — pinned to top ────────── */}
+            <Section
+                title="Mask Layers"
+                icon={Layers}
+                defaultOpen={true}
+                badge={stack.chain.length > 0 ? `${stack.chain.length}` : null}
+            >
+                <div className="space-y-1.5">
+                    {stack.chain.length > 0 && (
+                        <div className="flex items-center gap-2 pb-1">
+                            <button
+                                type="button"
+                                onClick={() => setShowMaskOverlay(!showMaskOverlay)}
+                                aria-pressed={showMaskOverlay}
+                                title="Show the selected area as a red overlay"
+                                className={`mask-btn flex-1 text-[10px] py-1.5 ${showMaskOverlay ? 'mask-btn--danger' : ''}`}
+                            >
+                                <Eye className="h-3 w-3" />
+                                Show mask
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setGlobalInvert(!globalInvert)}
+                                aria-pressed={globalInvert}
+                                title="Invert the whole mask"
+                                className={`mask-btn flex-1 text-[10px] py-1.5 ${globalInvert ? 'mask-btn--primary' : ''}`}
+                            >
+                                <Contrast className="h-3 w-3" />
+                                Invert
+                            </button>
+                        </div>
+                    )}
+                    {stack.chain.length > 0 && (
+                        <div className="flex items-center justify-end gap-1.5 pb-1">
+                            <button
+                                type="button"
+                                onClick={undoChain}
+                                disabled={!canUndo}
+                                title="Undo layer change"
+                                className="mask-icon-btn"
+                            >
+                                <RotateCcw className="h-3 w-3" />
+                            </button>
+                            <button
+                                type="button"
+                                onClick={redoChain}
+                                disabled={!canRedo}
+                                title="Redo layer change"
+                                className="mask-icon-btn"
+                                style={{ transform: 'scaleX(-1)' }}
+                            >
+                                <RotateCcw className="h-3 w-3" />
+                            </button>
+                        </div>
+                    )}
+                    <AnimatePresence>
+                        {stack.chain.map((entry, i) => (
+                            <MaskChainCard
+                                key={entry.layer.id}
+                                entry={entry}
+                                index={i}
+                                total={stack.chain.length}
+                                isFirst={i === 0}
+                                imageSize={imageSize}
+                                selected={selectedLayerId === entry.layer.id}
+                                onSelect={selectLayer}
+                                onUpdate={(patch) => updateLayer(entry.layer.id, patch)}
+                                onRemove={removeLayer}
+                                onMove={moveLayer}
+                                onSetOp={setLayerOp}
+                                onSetFillMode={setFillMode}
+                                dominantColor={dominantColor}
+                            />
+                        ))}
+                    </AnimatePresence>
+
+                    {stack.chain.length === 0 && (
+                        <p
+                            className="text-[10px] text-center py-3 rounded-md"
+                            style={{ color: 'var(--text-muted)', border: '1px dashed var(--border-subtle)' }}
+                        >
+                            No layers yet — use any selection tool below to add one.
+                        </p>
+                    )}
+
+                    {stack.chain.length > 0 && (
+                        <button
+                            type="button"
+                            onClick={clearAll}
+                            className="mask-btn mask-btn--danger w-full text-[10px] py-1.5 mt-1"
+                        >
+                            Clear all layers
+                        </button>
+                    )}
+                </div>
+                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    Each selection you create becomes a non-destructive mask layer.
+                    Layers are composited by the megashader filter.
+                </p>
+            </Section>
+
+            <CategoryHeader label="AI Tools" />
+
             {/* ────────── AI Masking ────────── */}
-            <Section title="AI Masking" icon={Sparkles} defaultOpen={true} badge="AI">
+            <Section title="Select Subject" icon={Sparkles} defaultOpen={true} badge="AI">
                 <motion.button
                     type="button"
                     onClick={handleSelectSubject}
                     disabled={isSegmenting}
                     whileTap={{ scale: 0.97 }}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-50"
-                    style={{
-                        background: 'linear-gradient(135deg, rgba(6,184,212,0.15) 0%, rgba(124,58,237,0.12) 100%)',
-                        border: '1px solid rgba(6,184,212,0.25)',
-                        color: 'var(--accent-primary)',
-                    }}
+                    className="mask-btn mask-btn--primary w-full py-2.5 text-xs font-semibold"
                 >
                     {isSegmenting ? (
                         <>
@@ -2267,7 +2550,7 @@ const MaskControls = ({ dominantColor }) => {
             </Section>
 
             {/* ────────── Click-to-Select (SAM 2) ────────── */}
-            <Section title="Click to Select" icon={MousePointer} badge="STEP 5">
+            <Section title="Click to Select" icon={MousePointer} badge="AI">
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
                         Click to mark the subject, then run SAM 2. Hold{' '}
@@ -2424,11 +2707,14 @@ const MaskControls = ({ dominantColor }) => {
             </Section>
 
             {/* ────────── Smart Brush (Step 7) ────────── */}
-            <Section title="Selection Brush" icon={Paintbrush} badge="SELECT" defaultOpen={true}>
+            <CategoryHeader label="Draw Selection" />
+
+            <Section title="Selection Brush" icon={Paintbrush}>
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
                         Paint a <strong>selection</strong> — it shows as a live
                         overlay and becomes an editable, non-destructive layer.
+                        Closed outlines fill their entire inside automatically.
                         Nothing is erased. Use <strong>Erase / Cut</strong> below
                         to knock the painted region out instead.
                     </p>
@@ -2628,7 +2914,7 @@ const MaskControls = ({ dominantColor }) => {
                     <motion.button
                         type="button"
                         onClick={handleAddBrushLayer}
-                        disabled={!brushHasContent}
+                        disabled={!brushHasContent || isShapeFilling}
                         whileTap={{ scale: 0.97 }}
                         className="flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold editor-interactive disabled:opacity-40"
                         style={{
@@ -2637,14 +2923,18 @@ const MaskControls = ({ dominantColor }) => {
                             color: 'var(--accent-primary)',
                         }}
                     >
-                        <Plus className="h-3.5 w-3.5" />
-                        {brushSink === 'erase' ? 'Add cut to layers' : 'Add selection to layers'}
+                        {isShapeFilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                        {isShapeFilling
+                            ? 'Filling shape...'
+                            : brushSink === 'erase'
+                                ? 'Add cut to layers'
+                                : 'Add selection to layers'}
                     </motion.button>
                 </div>
             </Section>
 
             {/* ────────── Lasso (freehand + polygonal + magnetic) ────────── */}
-            <Section title="Lasso Select" icon={Lasso} badge="NEW" defaultOpen={true}>
+            <Section title="Lasso Select" icon={Lasso}>
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
                         Draw a selection. <strong>Freehand</strong> = drag;{' '}
@@ -2841,7 +3131,7 @@ const MaskControls = ({ dominantColor }) => {
             </Section>
 
             {/* ────────── Depth Range (Depth Anything V2) ────────── */}
-            <Section title="Depth Range" icon={Mountain} badge="STEP 6">
+            <Section title="Depth Range" icon={Mountain} badge="AI">
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
                         Generate a per-pixel depth map, then add it as a
@@ -2961,119 +3251,7 @@ const MaskControls = ({ dominantColor }) => {
                 </div>
             </Section>
 
-            {/* ────────── Mask Layers (megashader chain) ────────── */}
-            <Section
-                title="Mask Layers"
-                icon={Layers}
-                defaultOpen={true}
-                badge={stack.chain.length > 0 ? `${stack.chain.length}` : null}
-            >
-                <div className="space-y-1.5">
-                    {stack.chain.length > 0 && (
-                        <div className="flex items-center gap-1.5 pb-1">
-                            <button
-                                type="button"
-                                onClick={() => setShowMaskOverlay(!showMaskOverlay)}
-                                aria-pressed={showMaskOverlay}
-                                title="Show the selected area as a red overlay"
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-medium editor-interactive"
-                                style={{
-                                    background: showMaskOverlay ? 'rgba(239,68,68,0.14)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${showMaskOverlay ? 'rgba(239,68,68,0.45)' : 'var(--border-subtle)'}`,
-                                    color: showMaskOverlay ? '#FCA5A5' : 'var(--text-secondary)',
-                                }}
-                            >
-                                <Eye className="h-3 w-3" />
-                                Show mask
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setGlobalInvert(!globalInvert)}
-                                aria-pressed={globalInvert}
-                                title="Invert the whole mask"
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-medium editor-interactive"
-                                style={{
-                                    background: globalInvert ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${globalInvert ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                    color: globalInvert ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                }}
-                            >
-                                <Contrast className="h-3 w-3" />
-                                Invert
-                            </button>
-                        </div>
-                    )}
-                    {stack.chain.length > 0 && (
-                        <div className="flex items-center justify-end gap-1 pb-1">
-                            <button
-                                type="button"
-                                onClick={undoChain}
-                                disabled={!canUndo}
-                                title="Undo layer change"
-                                className="p-1 rounded editor-interactive disabled:opacity-30"
-                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
-                            >
-                                <RotateCcw className="h-3 w-3" />
-                            </button>
-                            <button
-                                type="button"
-                                onClick={redoChain}
-                                disabled={!canRedo}
-                                title="Redo layer change"
-                                className="p-1 rounded editor-interactive disabled:opacity-30"
-                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transform: 'scaleX(-1)' }}
-                            >
-                                <RotateCcw className="h-3 w-3" />
-                            </button>
-                        </div>
-                    )}
-                    <AnimatePresence>
-                        {stack.chain.map((entry, i) => (
-                            <MaskChainCard
-                                key={entry.layer.id}
-                                entry={entry}
-                                index={i}
-                                total={stack.chain.length}
-                                isFirst={i === 0}
-                                imageSize={imageSize}
-                                selected={selectedLayerId === entry.layer.id}
-                                onSelect={selectLayer}
-                                onUpdate={(patch) => updateLayer(entry.layer.id, patch)}
-                                onRemove={removeLayer}
-                                onMove={moveLayer}
-                                onSetOp={setLayerOp}
-                                onSetFillMode={setFillMode}
-                                dominantColor={dominantColor}
-                            />
-                        ))}
-                    </AnimatePresence>
-
-                    {stack.chain.length === 0 && (
-                        <p
-                            className="text-[10px] text-center py-3 rounded-md"
-                            style={{ color: 'var(--text-muted)', border: '1px dashed var(--border-subtle)' }}
-                        >
-                            No layers yet. Use the buttons in Luminance, Color, or
-                            Gradient below to add one.
-                        </p>
-                    )}
-
-                    {stack.chain.length > 0 && (
-                        <button
-                            type="button"
-                            onClick={clearAll}
-                            className="flex w-full items-center justify-center gap-1.5 text-[10px] py-1.5"
-                            style={{ color: '#EF4444' }}
-                        >
-                            Clear all layers
-                        </button>
-                    )}
-                </div>
-                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    Non-destructive chain rendered by the megashader filter.
-                    Composes on top of the brush mask.
-                </p>
-            </Section>
+            <CategoryHeader label="Range Selection" />
 
             {/* ────────── Color Range ────────── */}
             <Section title="Color Range" icon={Palette}>
@@ -3285,7 +3463,7 @@ const MaskControls = ({ dominantColor }) => {
                     >
                         <Layers className="h-3.5 w-3.5" />
                         Add Linear to Mask Layers
-                        <span className="text-[8px] font-bold px-1 rounded ml-1" style={{ background: 'rgba(124,58,237,0.2)', color: '#A78BFA' }}>STEP 3</span>
+
                     </motion.button>
                 </div>
             </Section>
@@ -3311,13 +3489,15 @@ const MaskControls = ({ dominantColor }) => {
                     >
                         <Layers className="h-3.5 w-3.5" />
                         Add Radial to Mask Layers
-                        <span className="text-[8px] font-bold px-1 rounded ml-1" style={{ background: 'rgba(124,58,237,0.2)', color: '#A78BFA' }}>STEP 3</span>
+
                     </motion.button>
                 </div>
             </Section>
 
+            <CategoryHeader label="Destructive" />
+
             {/* ────────── Brush (manual) ────────── */}
-            <Section title="Quick Erase (destructive)" icon={Scissors} defaultOpen={false}>
+            <Section title="Quick Erase" icon={Scissors} defaultOpen={false}>
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: '#FCA5A5' }}>
                         ⚠ This paints directly onto the image and hides pixels
@@ -3371,17 +3551,11 @@ const MaskControls = ({ dominantColor }) => {
             </div>
 
             <TipCard>
-                <p>• <strong>Selection Brush</strong> paints a non-destructive selection (toggle Snap to edges for the bilateral filter)</p>
-                <p>• <strong>Lasso → Magnetic</strong> snaps the selection path to the nearest edge as you glide</p>
-                <p>• <strong>Select Subject</strong> uses AI to mask the main object</p>
-                <p>• <strong>Click to Select</strong> marks a point — SAM 2 segments around it (Alt-click = background)</p>
-                <p>• <strong>Depth Range</strong> selects pixels by depth (Depth Anything V2)</p>
-                <p>• <strong>Color Range</strong> selects pixels by color (click to sample)</p>
-                <p>• <strong>Luminance</strong> selects by brightness level</p>
-                <p>• <strong>Gradient</strong> creates a smooth directional mask</p>
-                <p>• Each selection becomes its own <strong>Mask Layer</strong> with its own feather, blend mode and fill/adjust/erase output</p>
-                <p>• Shift = add, Alt = subtract while drawing; combine selections into one mask</p>
-                <p>• <strong>Quick Erase</strong> is the only destructive option (off by default)</p>
+                <p><strong>AI Tools</strong> — Select Subject (one-click), Click to Select (SAM 2), and Depth Range use AI models to generate masks automatically.</p>
+                <p><strong>Draw Selection</strong> — Selection Brush paints a region; Lasso draws freehand, polygonal, or edge-snapping (magnetic) outlines.</p>
+                <p><strong>Range Selection</strong> — Color, Luminance, and Gradient masks select by pixel properties. Combine multiple methods into one mask.</p>
+                <p>Each selection becomes its own <strong>Mask Layer</strong> with per-layer feather, blend mode, and fill / adjust / erase output.</p>
+                <p>Shift = add, Alt = subtract while drawing to combine selections.</p>
             </TipCard>
         </div>
     )
