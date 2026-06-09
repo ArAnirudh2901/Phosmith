@@ -19,6 +19,7 @@ const LIMITERS = {
     "edit-plan":         { count: 30,  windowSec: 60 },  // 30 / minute
     "ai-extend":         { count: 5,   windowSec: 60 },  // 5  / minute — expensive AI
     "ai-segment":        { count: 5,   windowSec: 60 },  // 5  / minute — HuggingFace segmentation
+    "shape-mask":        { count: 120, windowSec: 60 },  // 120/minute — deterministic local shape rasterization
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute
     "canvas-snapshot":   { count: 240, windowSec: 60 },  // 240/ minute — write-behind cache

@@ -2,21 +2,22 @@
  * Fabric Megashader Filter
  * ------------------------
  * A `fabric.Image.filters.BaseFilter` subclass that wraps the private-WebGL
- * megashader renderer (`megashader-renderer.js`). It is marked as a 2D
- * filter (`is2d = true`) so Fabric's filter chain treats its output as a
- * regular 2D canvas — this is what lets us coexist with the codebase's
- * decision to disable Fabric's WebGL filtering (see the comment in
- * `canvas.jsx`).
- *
+ * megashader renderer (`megashader-renderer.js`). It implements `applyTo2d`
+ * to integrate with Fabric v7's Canvas2D filter pipeline (Fabric's WebGL
+ * filtering is disabled globally — see `canvas.jsx`). The filter receives
+ * a `pipelineState` object from Fabric, renders the megashader via its own
+ * private WebGL2 context, and writes the result back into `pipelineState`
+ * so downstream filters (curves, adjustment, etc.) see the megashader's
+ * output.
  * Lifecycle:
  *   1. Caller (the canvas component) creates a `new MegashaderFilter({ ... })`
  *      and pushes it into `image.filters`. The constructor stores the layer
  *      stack but does NOT compile a shader yet.
- *   2. Fabric calls `applyTo(canvas, sourceCanvas)` for each filter in the
- *      chain. We render the megashader to a fresh 2D canvas via
- *      `renderMegashader` and `drawImage` it onto the destination canvas.
- *   3. `serialize` produces a Fabric-friendly plain object for persistence
- *      via `loadFromJSON`. `initializeFromObject` is the inverse.
+ *   2. Fabric calls `filter.applyTo(pipelineState)` for each filter in the
+ *      chain. Our `applyTo2d` renders the megashader via `renderMegashader`
+ *      and writes the result back into `pipelineState.imageData`.
+ *   3. `toObject` produces a Fabric-friendly plain object for persistence
+ *      via `loadFromJSON`. `fromObject` is the inverse.
  *
  * Why the filter does not subclass the existing `BaseFilter` directly:
  *   The codebase already has a custom `PixxelCurvesFilter` extending
@@ -112,9 +113,9 @@ export class MegashaderFilter extends filters.BaseFilter {
     constructor(options = {}) {
         super()
         this.type = MEGASHADER_FILTER_TYPE
-        // No fragmentSource — the renderer compiles the real source. This
-        // 2D filter only drawImages the pre-rendered canvas.
-        this.is2d = true
+        // No fragmentSource — the renderer compiles the real source via its
+        // own private WebGL2 context. This filter implements applyTo2d() to
+        // integrate with Fabric v7's Canvas2D filter pipeline.
         this.stack = options.stack || { chain: [] }
         this.globalMaskAlpha = typeof options.globalMaskAlpha === 'number' ? options.globalMaskAlpha : 1
         this.enabled = options.enabled !== false
@@ -126,24 +127,56 @@ export class MegashaderFilter extends filters.BaseFilter {
     }
 
     /**
-     * Fabric invokes `applyTo` for each filter in the chain. We render the
-     * megashader over `sourceCanvas` and draw the result onto `targetCanvas`.
+     * Fabric v7 calls `applyTo(pipelineState)` for each filter in the
+     * chain. The base class dispatches to `applyTo2d(pipelineState)` when
+     * WebGL filtering is disabled (our case — see `canvas.jsx`).
      *
-     * @param {CanvasRenderingContext2D} targetCtx
-     * @param {HTMLCanvasElement} sourceCanvas
+     * We override `applyTo` with a defensive wrapper so that a megashader
+     * failure never kills the entire filter chain (which would leave the
+     * canvas blank — the original bug).
+     *
+     * @param {object} options  Fabric's pipelineState object.
      */
-    applyTo(targetCtx, sourceCanvas) {
-        if (!this.enabled) {
-            targetCtx.drawImage(sourceCanvas, 0, 0)
-            return
+    applyTo(options) {
+        try {
+            this.applyTo2d(options)
+        } catch (e) {
+            console.warn('[megashader] applyTo failed, passing through:', e)
+            // Don't touch pipelineState — the downstream filters and
+            // Fabric's putImageData will use whatever imageData is
+            // already there (the pre-megashader state), which is the
+            // correct passthrough behavior.
         }
-        // Bug #3 hardening: a bad stack (unknown kind/op, GL link failure,
-        // readback error) must degrade to a passthrough — drawing the
-        // untouched source — instead of throwing out of Fabric's filter
-        // loop and leaving the image canvas blank.
+    }
+
+    /**
+     * 2D filter implementation. Receives Fabric's pipelineState:
+     *   { imageData, ctx, canvasEl, sourceWidth, sourceHeight, originalEl, ... }
+     *
+     * We render the megashader from the current canvas state (canvasEl,
+     * which holds the accumulated output of all prior filters in the
+     * chain) and write the result back into `pipelineState.imageData`
+     * so downstream filters see the megashader's output.
+     *
+     * @param {object} options  Fabric's pipelineState object.
+     */
+    applyTo2d(options) {
+        if (!this.enabled) return
+
+        const { canvasEl, ctx, sourceWidth, sourceHeight } = options || {}
+        if (!canvasEl || !ctx) return
+
+        // The canvasEl holds the current filtered pixels (accumulated from
+        // all prior filters in the chain). We need to flush the current
+        // imageData to it first, because prior filters may have modified
+        // imageData in-place without drawing it back to the canvas.
+        if (options.imageData) {
+            ctx.putImageData(options.imageData, 0, 0)
+        }
+
         let result
         try {
-            result = renderMegashader(sourceCanvas, this.stack, {
+            result = renderMegashader(canvasEl, this.stack, {
                 globalMaskAlpha: this.globalMaskAlpha,
                 globalInvert: this.globalInvert,
                 maskOverlay: this.maskOverlay,
@@ -151,12 +184,19 @@ export class MegashaderFilter extends filters.BaseFilter {
             })
         } catch (e) {
             console.warn('[megashader] render failed, passing through source:', e)
-            result = sourceCanvas
+            return  // Leave pipelineState unchanged — passthrough.
         }
-        targetCtx.save()
-        targetCtx.globalCompositeOperation = 'source-over'
-        targetCtx.drawImage(result || sourceCanvas, 0, 0)
-        targetCtx.restore()
+
+        if (!result) return  // Passthrough — renderMegashader returned null.
+
+        // Draw the megashader result back onto the pipeline canvas and
+        // re-read imageData so downstream filters see the megashader's
+        // output.
+        const w = sourceWidth || canvasEl.width
+        const h = sourceHeight || canvasEl.height
+        ctx.clearRect(0, 0, w, h)
+        ctx.drawImage(result, 0, 0)
+        options.imageData = ctx.getImageData(0, 0, w, h)
     }
 
     /**

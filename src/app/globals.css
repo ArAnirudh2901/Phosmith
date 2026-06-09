@@ -708,6 +708,26 @@ a:focus-visible,
   pointer-events: none !important;
   transition: none !important;
   animation: none !important;
+  /* Neutralise glass-panel / transmission-glass effects that break in the
+     fixed overlay: backdrop-filter would blur the dark page body instead of
+     the card's original backdrop; isolation creates a new stacking context
+     that clips the thumbnail; will-change on descendants causes compositing
+     artefacts in the tile's overflow-hidden box. */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  isolation: auto !important;
+  will-change: auto !important;
+}
+
+/* Kill the decorative ::before / ::after pseudo-elements that glass-panel,
+   glass-card, and transmission-glass add. Inside the pixel overlay those
+   gradients and blend-mode layers reference the wrong stacking context and
+   produce visible dark streaks across the tiles. */
+.project-pixel-clone *::before,
+.project-pixel-clone *::after,
+.project-pixel-clone::before,
+.project-pixel-clone::after {
+  display: none !important;
 }
 
 .project-pixel-source-hidden,
@@ -718,6 +738,39 @@ a:focus-visible,
 .project-card-pending-delete {
   transform: scale(0.985);
   filter: saturate(0.7);
+}
+
+/* ── Mask tool category dividers ───────────────────────────────── */
+.mask-category-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 4px 8px;
+  user-select: none;
+}
+
+.mask-category-header::before,
+.mask-category-header::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(6, 184, 212, 0.12) 30%,
+    rgba(6, 184, 212, 0.12) 70%,
+    transparent
+  );
+}
+
+.mask-category-header span {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(6, 184, 212, 0.55);
+  white-space: nowrap;
+  text-shadow: 0 0 12px rgba(6, 184, 212, 0.15);
 }
 
 .glass-card {
@@ -3854,7 +3907,560 @@ a:focus-visible,
   background: var(--border-strong);
 }
 
-/* Radial menu styles */
+/* ── Mask tool — modernised controls ─────────────────────────── */
+
+/* Section headers — subtle left accent when expanded */
+.mask-section {
+  border-top: 1px solid rgba(244, 244, 245, 0.06);
+  transition: background 200ms ease;
+}
+
+.mask-section--open {
+  background: rgba(6, 184, 212, 0.02);
+  border-left: 2px solid rgba(6, 184, 212, 0.5);
+}
+
+.mask-section__header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 10px 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.mask-section__header:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.mask-section__icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--accent-primary);
+  opacity: 0.85;
+  transition: opacity 150ms ease;
+}
+
+.mask-section--open .mask-section__icon {
+  opacity: 1;
+}
+
+.mask-section__title {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  text-align: left;
+  transition: color 150ms ease;
+}
+
+.mask-section--open .mask-section__title {
+  color: var(--text-primary);
+}
+
+.mask-section__badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(6, 184, 212, 0.14), rgba(124, 58, 237, 0.10));
+  color: var(--accent-primary);
+  border: 1px solid rgba(6, 184, 212, 0.15);
+  letter-spacing: 0.03em;
+}
+
+.mask-section__chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1), color 150ms ease;
+}
+
+.mask-section--open .mask-section__chevron {
+  transform: rotate(90deg);
+  color: var(--accent-primary);
+}
+
+.mask-section__body {
+  padding: 0 10px 14px 12px;
+}
+
+/* Action buttons — glass style with gradient hover */
+.mask-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid rgba(244, 244, 245, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
+    var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.mask-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  background: linear-gradient(135deg, rgba(6, 184, 212, 0.08), rgba(124, 58, 237, 0.06));
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+.mask-btn:hover::before {
+  opacity: 1;
+}
+
+.mask-btn:hover {
+  border-color: rgba(6, 184, 212, 0.25);
+  color: var(--text-primary);
+  transform: translateY(-0.5px);
+  box-shadow: 0 2px 8px rgba(6, 184, 212, 0.08);
+}
+
+.mask-btn:active {
+  transform: scale(0.97) translateY(0);
+}
+
+.mask-btn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.mask-btn--primary {
+  background:
+    linear-gradient(135deg, rgba(6, 184, 212, 0.15) 0%, rgba(124, 58, 237, 0.12) 100%);
+  border: 1px solid rgba(6, 184, 212, 0.25);
+  color: var(--accent-primary);
+}
+
+.mask-btn--primary:hover {
+  border-color: rgba(6, 184, 212, 0.45);
+  box-shadow: 0 2px 12px rgba(6, 184, 212, 0.15);
+}
+
+.mask-btn--danger {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.15);
+  color: #FCA5A5;
+}
+
+.mask-btn--danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);
+}
+
+/* Mask chain card — glass card with gradient border */
+.mask-chain-card {
+  border-radius: 10px;
+  padding: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
+    var(--bg-elevated);
+  border: 1px solid rgba(244, 244, 245, 0.06);
+  transition: all 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mask-chain-card:hover {
+  border-color: rgba(244, 244, 245, 0.12);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+
+.mask-chain-card--selected {
+  background:
+    linear-gradient(180deg, rgba(6, 184, 212, 0.04), rgba(6, 184, 212, 0.01)),
+    var(--bg-elevated);
+  border-color: rgba(6, 184, 212, 0.3);
+  box-shadow:
+    0 0 0 1px rgba(6, 184, 212, 0.08),
+    0 2px 8px rgba(6, 184, 212, 0.06);
+}
+
+/* Kind badge — pill with subtle gradient */
+.mask-kind-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+/* Icon buttons in chain card */
+.mask-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
+  color: var(--text-muted);
+}
+
+.mask-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+}
+
+.mask-icon-btn:active {
+  transform: scale(0.9);
+}
+
+.mask-icon-btn:disabled {
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+.mask-icon-btn--accent {
+  color: var(--accent-primary);
+}
+
+.mask-icon-btn--accent:hover {
+  background: rgba(6, 184, 212, 0.1);
+}
+
+.mask-icon-btn--danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #EF4444;
+}
+
+/* Modern native select */
+.mask-select {
+  appearance: none;
+  width: 100%;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 5px 24px 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(244, 244, 245, 0.08);
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 6px center,
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
+    var(--bg-base);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 150ms ease;
+  outline: none;
+}
+
+.mask-select:hover {
+  border-color: rgba(6, 184, 212, 0.3);
+}
+
+.mask-select:focus {
+  border-color: rgba(6, 184, 212, 0.5);
+  box-shadow: 0 0 0 2px rgba(6, 184, 212, 0.08);
+}
+
+.mask-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Modern native range input */
+.mask-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 4px;
+  background: rgba(244, 244, 245, 0.08);
+  outline: none;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+
+.mask-range:hover {
+  background: rgba(244, 244, 245, 0.12);
+}
+
+.mask-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  box-shadow:
+    0 0 8px rgba(6, 184, 212, 0.35),
+    0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.mask-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow:
+    0 0 14px rgba(6, 184, 212, 0.5),
+    0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.mask-range::-webkit-slider-thumb:active {
+  transform: scale(1.25);
+}
+
+.mask-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  box-shadow:
+    0 0 8px rgba(6, 184, 212, 0.35),
+    0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
+.mask-range:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Modern toggle checkbox */
+.mask-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.mask-toggle input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 30px;
+  height: 16px;
+  border-radius: 10px;
+  background: rgba(244, 244, 245, 0.1);
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  cursor: pointer;
+  transition: all 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.mask-toggle input[type="checkbox"]::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mask-toggle input[type="checkbox"]:checked {
+  background: rgba(6, 184, 212, 0.25);
+  border-color: rgba(6, 184, 212, 0.4);
+}
+
+.mask-toggle input[type="checkbox"]:checked::after {
+  left: 16px;
+  background: var(--accent-primary);
+  box-shadow: 0 0 6px rgba(6, 184, 212, 0.4);
+}
+
+.mask-toggle input[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Color input — better swatch */
+.mask-color-input {
+  width: 24px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1px solid rgba(244, 244, 245, 0.12);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 150ms ease;
+}
+
+.mask-color-input:hover {
+  border-color: rgba(6, 184, 212, 0.35);
+}
+
+.mask-color-input::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.mask-color-input::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+/* Fill mode segmented control */
+.mask-fill-modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(244, 244, 245, 0.03);
+  border: 1px solid rgba(244, 244, 245, 0.06);
+}
+
+.mask-fill-mode-btn {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 5px 0;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.mask-fill-mode-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+}
+
+.mask-fill-mode-btn--active {
+  background: rgba(6, 184, 212, 0.12);
+  color: var(--accent-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.mask-fill-mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Density / Strength row */
+.mask-param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.mask-param-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 44px;
+}
+
+.mask-param-value {
+  font-size: 9px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  width: 28px;
+  text-align: right;
+}
+
+/* TipCard — modernised glass */
+.mask-tip-card {
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 8px;
+  background:
+    linear-gradient(135deg, rgba(6, 184, 212, 0.03), rgba(124, 58, 237, 0.02)),
+    rgba(14, 17, 24, 0.5);
+  border: 1px solid rgba(6, 184, 212, 0.08);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.mask-tip-card strong {
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+
+/* Empty state — centered with icon */
+.mask-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.mask-empty-state__icon {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 12px;
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+/* ── Scoped upgrade: editor-interactive buttons inside mask sections ── */
+/* Automatically gives glass treatment to all action buttons in the mask panel
+   without needing to edit 30+ individual inline-styled buttons. */
+
+.mask-section .editor-interactive {
+  border-radius: 10px;
+  border: 1px solid rgba(244, 244, 245, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
+    var(--bg-elevated);
+  transition: all 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+}
+
+.mask-section .editor-interactive:hover {
+  border-color: rgba(6, 184, 212, 0.2);
+  box-shadow: 0 1px 6px rgba(6, 184, 212, 0.06);
+  transform: translateY(-0.5px);
+}
+
+.mask-section .editor-interactive:active {
+  transform: scale(0.97) translateY(0);
+}
+
+.mask-section .editor-interactive:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Keyboard shortcut badges — modern pill style */
+.mask-section kbd {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(244, 244, 245, 0.06);
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  color: var(--text-secondary);
+  font-family: ui-monospace, monospace;
+}
+
+
 .radial-menu-item {
   transition: all 0.15s ease-out;
 }

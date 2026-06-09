@@ -9,12 +9,138 @@ import { isPixxelMaskOverlay } from '@/lib/canvas-mask'
 import { toast } from 'sonner'
 
 const LAYOUTS = [
-    { id: '2-split-h', label: '2 Columns', icon: Columns, cellCount: 2 },
-    { id: '2-split-v', label: '2 Rows', icon: Rows, cellCount: 2 },
-    { id: '3-grid', label: '3 Grid', icon: GripHorizontal, cellCount: 3 },
-    { id: '3-split-v', label: '3 Columns', icon: GripVertical, cellCount: 3 },
-    { id: '4-grid', label: '4 Grid', icon: Grid2X2, cellCount: 4 }
+    { id: '2-split-h', label: '2 Columns', icon: Columns, cellCount: 2, maxColumns: 2, maxRows: 1 },
+    { id: '2-split-v', label: '2 Rows', icon: Rows, cellCount: 2, maxColumns: 1, maxRows: 2 },
+    { id: '3-grid', label: 'Top + 2', icon: GripHorizontal, cellCount: 3, maxColumns: 2, maxRows: 2 },
+    { id: '3-split-v', label: '3 Columns', icon: GripVertical, cellCount: 3, maxColumns: 3, maxRows: 1 },
+    { id: '3-split-h', label: '3 Rows', icon: Rows, cellCount: 3, maxColumns: 1, maxRows: 3 },
+    { id: '3-feature-left', label: 'Left Feature', icon: GripVertical, cellCount: 3, maxColumns: 2, maxRows: 2 },
+    { id: '3-feature-right', label: 'Right Feature', icon: GripVertical, cellCount: 3, maxColumns: 2, maxRows: 2 },
+    { id: '4-grid', label: '4 Grid', icon: Grid2X2, cellCount: 4, maxColumns: 2, maxRows: 2 },
+    { id: '4-columns', label: '4 Columns', icon: Columns, cellCount: 4, maxColumns: 4, maxRows: 1 },
+    { id: '4-rows', label: '4 Rows', icon: Rows, cellCount: 4, maxColumns: 1, maxRows: 4 },
+    { id: '4-feature-top', label: 'Top Feature', icon: GripHorizontal, cellCount: 4, maxColumns: 3, maxRows: 2 },
+    { id: '4-feature-left', label: 'Side Feature', icon: GripVertical, cellCount: 4, maxColumns: 2, maxRows: 3 },
+    { id: '5-mosaic', label: '5 Mosaic', icon: LayoutGrid, cellCount: 5, maxColumns: 3, maxRows: 2 },
+    { id: '6-grid', label: '6 Grid', icon: LayoutGrid, cellCount: 6, maxColumns: 3, maxRows: 2 }
 ]
+
+const clampCells = (cells) =>
+    cells.map((cell) => ({
+        ...cell,
+        w: Math.max(1, cell.w),
+        h: Math.max(1, cell.h),
+    }))
+
+const makeRows = ({ x, y, w, h }, count, gap) => {
+    const cellW = (w - gap * (count - 1)) / count
+    return Array.from({ length: count }, (_, index) => ({
+        x: x + index * (cellW + gap),
+        y,
+        w: cellW,
+        h,
+    }))
+}
+
+const makeColumns = ({ x, y, w, h }, count, gap) => {
+    const cellH = (h - gap * (count - 1)) / count
+    return Array.from({ length: count }, (_, index) => ({
+        x,
+        y: y + index * (cellH + gap),
+        w,
+        h: cellH,
+    }))
+}
+
+const makeGrid = (frame, columns, rows, gap) => {
+    const cellW = (frame.w - gap * (columns - 1)) / columns
+    const cellH = (frame.h - gap * (rows - 1)) / rows
+    return Array.from({ length: rows }).flatMap((_, row) =>
+        Array.from({ length: columns }, (_, column) => ({
+            x: frame.x + column * (cellW + gap),
+            y: frame.y + row * (cellH + gap),
+            w: cellW,
+            h: cellH,
+        }))
+    )
+}
+
+const buildLayoutCells = (layoutId, frame, gap) => {
+    const { x, y, w, h } = frame
+
+    if (layoutId === '2-split-h') return clampCells(makeRows(frame, 2, gap))
+    if (layoutId === '2-split-v') return clampCells(makeColumns(frame, 2, gap))
+    if (layoutId === '3-split-v') return clampCells(makeRows(frame, 3, gap))
+    if (layoutId === '3-split-h') return clampCells(makeColumns(frame, 3, gap))
+    if (layoutId === '4-grid') return clampCells(makeGrid(frame, 2, 2, gap))
+    if (layoutId === '4-columns') return clampCells(makeRows(frame, 4, gap))
+    if (layoutId === '4-rows') return clampCells(makeColumns(frame, 4, gap))
+    if (layoutId === '6-grid') return clampCells(makeGrid(frame, 3, 2, gap))
+
+    if (layoutId === '3-grid') {
+        const topH = (h - gap) / 2
+        const bottomH = h - topH - gap
+        const bottomW = (w - gap) / 2
+        return clampCells([
+            { x, y, w, h: topH },
+            { x, y: y + topH + gap, w: bottomW, h: bottomH },
+            { x: x + bottomW + gap, y: y + topH + gap, w: bottomW, h: bottomH },
+        ])
+    }
+
+    if (layoutId === '3-feature-left' || layoutId === '3-feature-right') {
+        const sideW = (w - gap) * 0.38
+        const featureW = w - gap - sideW
+        const sideH = (h - gap) / 2
+        const sideCells = [
+            { x, y, w: sideW, h: sideH },
+            { x, y: y + sideH + gap, w: sideW, h: sideH },
+        ]
+
+        if (layoutId === '3-feature-left') {
+            const sideX = x + featureW + gap
+            return clampCells([
+                { x, y, w: featureW, h },
+                { ...sideCells[0], x: sideX },
+                { ...sideCells[1], x: sideX },
+            ])
+        }
+
+        return clampCells([
+            { x: x + sideW + gap, y, w: featureW, h },
+            ...sideCells,
+        ])
+    }
+
+    if (layoutId === '4-feature-top') {
+        const featureH = (h - gap) * 0.58
+        const bottomH = h - featureH - gap
+        return clampCells([
+            { x, y, w, h: featureH },
+            ...makeRows({ x, y: y + featureH + gap, w, h: bottomH }, 3, gap),
+        ])
+    }
+
+    if (layoutId === '4-feature-left') {
+        const featureW = (w - gap) * 0.58
+        const sideW = w - featureW - gap
+        return clampCells([
+            { x, y, w: featureW, h },
+            ...makeColumns({ x: x + featureW + gap, y, w: sideW, h }, 3, gap),
+        ])
+    }
+
+    if (layoutId === '5-mosaic') {
+        const featureW = (w - gap) * 0.48
+        const gridFrame = { x: x + featureW + gap, y, w: w - featureW - gap, h }
+        return clampCells([
+            { x, y, w: featureW, h },
+            ...makeGrid(gridFrame, 2, 2, gap),
+        ])
+    }
+
+    return []
+}
 
 const LabeledSlider = ({ label, value, min, max, onChange, suffix = 'px' }) => (
     <div className="space-y-1.5">
@@ -259,41 +385,16 @@ export default function CollageControls({ project }) {
         const H = Math.max(1, Number(project?.height) || 1)
         // Clamp the usable area + gap so an over-large padding/gap (relative to a
         // small canvas) can't produce negative/NaN cell sizes.
-        const safeGap = Math.max(0, Math.min(gap, Math.min(W, H) / 2))
-        const aw = Math.max(1, W - 2 * padding)
-        const ah = Math.max(1, H - 2 * padding)
-
-        // Compute cells (safeGap guards against an over-large gap on a small canvas)
-        const cells = []
-        if (selectedLayout === '2-split-h') {
-            const cw = (aw - safeGap) / 2
-            cells.push({ x: padding, y: padding, w: cw, h: ah })
-            cells.push({ x: padding + cw + safeGap, y: padding, w: cw, h: ah })
-        } else if (selectedLayout === '2-split-v') {
-            const ch = (ah - safeGap) / 2
-            cells.push({ x: padding, y: padding, w: aw, h: ch })
-            cells.push({ x: padding, y: padding + ch + safeGap, w: aw, h: ch })
-        } else if (selectedLayout === '3-grid') {
-            const ch = (ah - safeGap) / 2
-            const cw = (aw - safeGap) / 2
-            cells.push({ x: padding, y: padding, w: aw, h: ch })
-            cells.push({ x: padding, y: padding + ch + safeGap, w: cw, h: ch })
-            cells.push({ x: padding + cw + safeGap, y: padding + ch + safeGap, w: cw, h: ch })
-        } else if (selectedLayout === '3-split-v') {
-            const cw = (aw - 2 * safeGap) / 3
-            cells.push({ x: padding, y: padding, w: cw, h: ah })
-            cells.push({ x: padding + cw + safeGap, y: padding, w: cw, h: ah })
-            cells.push({ x: padding + 2 * cw + 2 * safeGap, y: padding, w: cw, h: ah })
-        } else if (selectedLayout === '4-grid') {
-            const cw = (aw - safeGap) / 2
-            const ch = (ah - safeGap) / 2
-            cells.push({ x: padding, y: padding, w: cw, h: ch })
-            cells.push({ x: padding + cw + safeGap, y: padding, w: cw, h: ch })
-            cells.push({ x: padding, y: padding + ch + safeGap, w: cw, h: ch })
-            cells.push({ x: padding + cw + safeGap, y: padding + ch + safeGap, w: cw, h: ch })
-        }
-        // Final guard: no cell can be sub-pixel (would make cover scale blow up).
-        cells.forEach((c) => { c.w = Math.max(1, c.w); c.h = Math.max(1, c.h) })
+        const safePadding = Math.max(0, Math.min(padding, (Math.min(W, H) - 1) / 2))
+        const aw = Math.max(1, W - 2 * safePadding)
+        const ah = Math.max(1, H - 2 * safePadding)
+        const maxGapSlots = Math.max((layout.maxColumns || 1) - 1, (layout.maxRows || 1) - 1, 1)
+        const safeGap = Math.max(0, Math.min(gap, Math.min(aw, ah) / (maxGapSlots + 1)))
+        const cells = buildLayoutCells(
+            selectedLayout,
+            { x: safePadding, y: safePadding, w: aw, h: ah },
+            safeGap
+        )
 
         canvasEditor.discardActiveObject()
         images.slice(0, cells.length).forEach((image, index) => {
@@ -328,8 +429,10 @@ export default function CollageControls({ project }) {
                                 key={layout.id}
                                 type="button"
                                 onClick={() => setSelectedLayout(layout.id)}
+                                aria-label={`Use ${layout.label} collage layout`}
+                                title={layout.label}
                                 whileTap={{ scale: 0.95 }}
-                                className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-lg editor-interactive relative"
+                                className="flex min-h-[72px] flex-col items-center justify-center gap-1.5 rounded-lg p-3 text-center editor-interactive relative"
                                 style={{
                                     background: isActive ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
                                     border: `1px solid ${isActive ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
@@ -337,7 +440,7 @@ export default function CollageControls({ project }) {
                                 }}
                             >
                                 <Icon className="w-5 h-5" strokeWidth={1.5} />
-                                <span className="text-[10px] font-medium">{layout.label}</span>
+                                <span className="text-[10px] font-medium leading-tight">{layout.label}</span>
                                 {isActive && (
                                     <div className="absolute top-1.5 right-1.5">
                                         <div className="bg-[var(--accent-primary)] rounded-full p-0.5">

@@ -43,7 +43,7 @@ except Exception:  # pragma: no cover - optional accel
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from PIL import Image, ImageFilter, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFilter, UnidentifiedImageError
 from rembg import new_session, remove
 from starlette.concurrency import run_in_threadpool
 
@@ -92,6 +92,8 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "24").strip())
 # at a fixed 1024² internally, so a 12K image only wastes resize/YOLO work.
 # Mirrors the /depth handler's DEPTH_MAX_SIDE.
 SEGMENT_MAX_SIDE = int(os.getenv("SEGMENT_MAX_SIDE", "2048").strip())
+SHAPE_MASK_MAX_SIDE = int(os.getenv("SHAPE_MASK_MAX_SIDE", "2048").strip())
+SHAPE_MASK_MAX_POINTS = int(os.getenv("SHAPE_MASK_MAX_POINTS", "10000").strip())
 
 # By default, SAM 2 and Depth Anything (the heavy torch models behind the
 # /sam2 and /depth endpoints) are loaded LAZILY — on first use of their
@@ -844,6 +846,65 @@ async def _read_limited(image: UploadFile) -> bytes:
     return bytes(contents)
 
 
+def _parse_shape_points(raw: str, width: int, height: int) -> list[tuple[float, float]]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"invalid points JSON: {e}")
+
+    if not isinstance(data, list) or len(data) < 3:
+        raise HTTPException(400, "points must be an array with at least 3 [x, y] pairs")
+    if len(data) > SHAPE_MASK_MAX_POINTS:
+        raise HTTPException(
+            400,
+            f"too many points: {len(data)} > {SHAPE_MASK_MAX_POINTS}",
+        )
+
+    points: list[tuple[float, float]] = []
+    for i, point in enumerate(data):
+        if not (isinstance(point, list) and len(point) == 2):
+            raise HTTPException(400, f"point #{i} must be [x, y]; got {point!r}")
+        x, y = point
+        if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x):
+            raise HTTPException(400, f"point #{i} x must be a finite number; got {x!r}")
+        if not isinstance(y, (int, float)) or isinstance(y, bool) or not math.isfinite(y):
+            raise HTTPException(400, f"point #{i} y must be a finite number; got {y!r}")
+        if not (-1 <= x <= width + 1 and -1 <= y <= height + 1):
+            raise HTTPException(
+                400,
+                f"point #{i} ({x}, {y}) is outside mask bounds ({width}x{height})",
+            )
+        points.append((float(x), float(y)))
+    return points
+
+
+def _rasterize_shape_mask(width: int, height: int, points: list[tuple[float, float]]) -> tuple[bytes, str]:
+    """Fill a closed path to an RGBA PNG mask.
+
+    White+alpha inside the polygon and transparent outside matches the editor's
+    brush texture contract: plain brush layers sample alpha, smart-brush layers
+    sample the red channel.
+    """
+    if cv2 is not None:
+        mask = np.zeros((height, width, 4), dtype=np.uint8)
+        poly = np.array(
+            [[[int(round(x)), int(round(y))] for x, y in points]],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(mask, poly, color=(255, 255, 255, 255), lineType=cv2.LINE_AA)
+        out = Image.fromarray(mask, "RGBA")
+        engine = "opencv-fillpoly"
+    else:
+        out = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(out)
+        draw.polygon(points, fill=(255, 255, 255, 255))
+        engine = "pillow-polygon"
+
+    buf = io.BytesIO()
+    out.save(buf, format="PNG", optimize=True)
+    return buf.getvalue(), engine
+
+
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -870,7 +931,63 @@ async def health() -> dict:
         or (_torch_stack_loadable() and not app.state.depth_load_failed),
         "depth_loaded": app.state.depth_available,
         "depth_model": app.state.depth_model_id,
+        "shape_mask_engine": "opencv-fillpoly" if cv2 is not None else "pillow-polygon",
     }
+
+
+@app.post("/shape/fill")
+async def shape_fill(
+    width: int = Form(...),
+    height: int = Form(...),
+    points: str = Form(...),
+) -> Response:
+    """Rasterize a closed editor path into a filled RGBA mask.
+
+    Form fields:
+        width/height: target mask texture dimensions
+        points: JSON array of `[x, y]` pairs in target-mask pixel coords
+
+    Returns an RGBA PNG: white+alpha inside the path, transparent outside.
+    """
+    if width < 1 or height < 1:
+        raise HTTPException(400, "width and height must be positive")
+    if max(width, height) > SHAPE_MASK_MAX_SIDE:
+        raise HTTPException(
+            413,
+            f"mask too large ({width}x{height}); max longest side is {SHAPE_MASK_MAX_SIDE}px",
+        )
+
+    parsed_points = _parse_shape_points(points, width, height)
+    t0 = time.perf_counter()
+    try:
+        png, engine = await run_in_threadpool(_rasterize_shape_mask, width, height, parsed_points)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("shape fill failed")
+        raise HTTPException(500, f"shape fill failed: {e}")
+
+    elapsed = time.perf_counter() - t0
+    log.info(
+        "shape fill %dx%d (%d points) via %s in %.3fs -> %dB",
+        width,
+        height,
+        len(parsed_points),
+        engine,
+        elapsed,
+        len(png),
+    )
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Model": engine,
+            "X-Width": str(width),
+            "X-Height": str(height),
+            "X-Elapsed-Ms": str(int(elapsed * 1000)),
+        },
+    )
 
 
 @app.post("/segment")

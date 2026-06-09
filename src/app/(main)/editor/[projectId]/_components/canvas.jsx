@@ -212,11 +212,12 @@ const CanvasEditor = ({ project }) => {
         const projectH = Math.max(1, proj?.height || 1)
         if (!canvasW || !canvasH || !projectW || !projectH) return
 
-        // Use 92% of canvas area as the safe zone. This gives a tighter fit
-        // on small screens (13" MacBook Air) while still having breathing room.
-        // The fixed VIEWPORT_PADDING acts as a minimum margin.
-        const safeW = Math.max(canvasW * 0.92, canvasW - VIEWPORT_PADDING * 2, 1)
-        const safeH = Math.max(canvasH * 0.92, canvasH - VIEWPORT_PADDING * 2, 1)
+        // Use 85% of canvas area as the safe zone, ensuring visible breathing
+        // room on all four sides. Math.min ensures BOTH the percentage margin
+        // AND the fixed padding are respected (the tighter constraint wins).
+        const safeW = Math.min(canvasW * 0.85, canvasW - VIEWPORT_PADDING * 2)
+        const safeH = Math.min(canvasH * 0.85, canvasH - VIEWPORT_PADDING * 2)
+        if (safeW <= 0 || safeH <= 0) return
         const fitZoom = Math.min(safeW / projectW, safeH / projectH)
         setViewportState(canvas, {
             zoom: clamp(fitZoom || 1, MIN_ZOOM, MAX_ZOOM),
@@ -542,7 +543,11 @@ const CanvasEditor = ({ project }) => {
                 }
             }
 
-            if (!hasRestoredViewport) createInitialViewport(canvas)
+            // Always fit the project to the current viewport on load so the
+            // canvas content is centered with proper margins, regardless of
+            // the viewport state that was saved (which may have been for a
+            // different window/container size).
+            createInitialViewport(canvas)
             if (initGen !== initGenerationRef.current || !mounted) {
                 canvas.dispose()
                 canvasInstanceRef.current = null
@@ -1209,30 +1214,12 @@ const CanvasEditor = ({ project }) => {
                     return
                 }
 
-                // Capture the current viewport state BEFORE resizing the canvas
-                // element so we can preserve the user's pan position and scale
-                // the zoom proportionally to the container size change. This
-                // avoids the jarring snap-to-fit that __fitCanvasToProject does.
-                const currentViewport = getViewportState(canvas)
-                const scaleRatio = Math.min(
-                    nextWidth / (prevWidth || 1),
-                    nextHeight / (prevHeight || 1),
-                )
-
                 canvas.setDimensions({ width: nextWidth, height: nextHeight }, { backstoreOnly: false })
 
-                // Scale zoom proportionally but keep the same logical center
-                // point. The effect is a smooth proportional resize rather than
-                // a full recomputation from project dimensions.
-                const adjustedZoom = clamp(
-                    currentViewport.zoom * scaleRatio,
-                    MIN_ZOOM,
-                    MAX_ZOOM,
-                )
-                setViewportState(canvas, {
-                    zoom: adjustedZoom,
-                    center: currentViewport.center,
-                })
+                // Always re-fit the project to the new viewport so the canvas
+                // content stays centered after sidebar resizes, tool panel
+                // toggles, or window resizes.
+                fitProjectToViewport(canvas)
                 canvas.calcOffset()
                 canvas.requestRenderAll()
 
@@ -1257,7 +1244,7 @@ const CanvasEditor = ({ project }) => {
             if (resizeFrameRef.current) cancelAnimationFrame(resizeFrameRef.current)
             resizeFrameRef.current = null
         }
-    }, [getViewportState, project?._id, setViewportState, syncPreviewZoomState])
+    }, [fitProjectToViewport, project?._id, syncPreviewZoomState])
 
     useEffect(() => {
         const canvas = canvasInstanceRef.current

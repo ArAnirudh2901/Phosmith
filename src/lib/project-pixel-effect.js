@@ -86,6 +86,15 @@ const createTile = ({ target, rect, column, row, columns, rows, tileWidth, tileH
     clone.style.opacity = "1"
     clone.style.transform = "none"
     clone.style.pointerEvents = "none"
+    // The glass-panel uses a semi-transparent background + backdrop-filter.
+    // Inside the fixed overlay the backdrop-filter is disabled (see CSS) so
+    // the card would be nearly invisible. Replace with an opaque background
+    // that approximates the original look.
+    clone.style.background = "#0E1118"
+    clone.style.backdropFilter = "none"
+    clone.style.webkitBackdropFilter = "none"
+    clone.style.boxShadow = "none"
+    clone.style.border = "none"
 
     tile.appendChild(clone)
     return tile

@@ -602,7 +602,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
 
                     <Link
                         href="/dashboard"
-                        className="editor-logo-button editor-logo-button--wordmark flex items-center flex-none"
+                        className="editor-logo-button flex items-center justify-center flex-none"
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
