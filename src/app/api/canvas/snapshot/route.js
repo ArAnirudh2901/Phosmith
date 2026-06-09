@@ -59,6 +59,9 @@ export async function POST(request) {
         const canvasState = body.canvasState
         const currentImageUrl = body.currentImageUrl || null
         const clientUpdatedAt = Number(body.clientUpdatedAt) || Date.now()
+        // Carried so the unload/keepalive flush (which reads from Redis, not the
+        // request body) can still do an optimistic-concurrency write.
+        const baseRevision = Number.isFinite(Number(body.baseRevision)) ? Number(body.baseRevision) : null
         if (!projectId || !canvasState) {
             return NextResponse.json({ error: "projectId and canvasState required" }, { status: 400 })
         }
@@ -68,7 +71,11 @@ export async function POST(request) {
         await ensureOwnership(projectId, neonAuth)
 
         const redis = getRedis()
-        const payload = JSON.stringify({ canvasState, currentImageUrl, updatedAt: clientUpdatedAt, userId })
+        // Stamp a SERVER-authoritative time alongside the client one. Rehydration
+        // compares this against Neon's (also server-set) updatedAt, so a skewed
+        // client clock can't make a Redis snapshot wrongly win/lose vs Neon.
+        const serverUpdatedAt = Date.now()
+        const payload = JSON.stringify({ canvasState, currentImageUrl, baseRevision, updatedAt: clientUpdatedAt, serverUpdatedAt, userId })
 
         // SET with EX in one round-trip. Side meta blob lets us cheaply check
         // freshness without pulling the whole state.
@@ -76,12 +83,12 @@ export async function POST(request) {
             redis.set(stateKey(projectId), payload, { ex: SNAPSHOT_TTL_SECONDS }),
             redis.set(
                 metaKey(projectId),
-                JSON.stringify({ updatedAt: clientUpdatedAt, userId, dirty: true }),
+                JSON.stringify({ updatedAt: clientUpdatedAt, serverUpdatedAt, baseRevision, userId, dirty: true }),
                 { ex: SNAPSHOT_TTL_SECONDS },
             ),
         ])
 
-        return NextResponse.json({ ok: true, updatedAt: clientUpdatedAt })
+        return NextResponse.json({ ok: true, updatedAt: clientUpdatedAt, serverUpdatedAt })
     } catch (error) {
         console.error("[canvas-snapshot POST] failed:", error)
         return NextResponse.json(

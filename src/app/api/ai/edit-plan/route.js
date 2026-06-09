@@ -4,10 +4,14 @@
 //
 // Flow:
 //   1. Auth (Clerk)
-//   2. Look up cache (Neon editPlanCache) keyed by (projectId + imageHash + promptKey + plannerVersion)
-//   3. Cache hit → return immediately. Same image + same prompt = byte-exact plan, forever.
-//   4. Cache miss → ask Gemini 2.0 Flash (vision, temperature=0) what style the image is now and what
-//      the user wants, then run the deterministic planner.
+//   2. Look up cache (Neon editPlanCache) keyed by (projectId + imageHash + promptKey + plannerVersion).
+//      imageHash is computed by the client from the LIVE rendered canvas, so it
+//      changes whenever the visible pixels change (including manual edits) and the
+//      cache self-invalidates — same rendered image + same prompt = same plan.
+//   3. Cache hit → return immediately.
+//   4. Cache miss → ask the configured Gemini vision model (temperature=0) what style the
+//      image is now and what the user wants, analysing the client's flattened canvas
+//      render when provided, then run the deterministic planner.
 //   5. Persist the plan into the cache and return it.
 //
 // If GEMINI_API_KEY is not configured (or the call fails), we fall back to a pure
@@ -26,15 +30,51 @@ import {
 } from "@/lib/style-profiles"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
 
-// Model is configurable via env so we can pin to a specific snapshot (e.g.
-// "gemini-2.5-flash-002") for production. Default: "gemini-2.5-flash" — the
-// frontier-class free-tier vision model as of May 2026 (1500 RPD, 1M TPM,
-// 15 RPM, native multimodal, JSON mode, no card required).
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"
+// Model is configurable via env so we can pin a snapshot or trade quality for
+// free-tier headroom. Default: "gemini-3.5-flash" — Google's current-generation
+// vision Flash model: generous free tier, native multimodal, JSON mode, and
+// Gemini-3 "thinking" + per-request media-resolution control (both applied below
+// for sharper colour-grading judgment). Switch to a Pro tier (e.g. "gemini-3-pro")
+// for the highest ceiling at a tighter free quota.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash"
 const GEMINI_ENDPOINT = (model) =>
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`
 const GEMINI_TIMEOUT_MS = 12_000
 const MAX_IMAGE_BYTES_FOR_VISION = 4 * 1024 * 1024 // 4 MB — fetch a downsized image if larger
+
+// ── Gemini 3.x request tuning ──────────────────────────────────────────────
+// Gemini 3 models replace 2.5's integer `thinkingBudget` with a `thinkingLevel`
+// enum and add `mediaResolution` (the max vision tokens spent per image). For
+// interactive colour grading we want a little reasoning — but must stay inside
+// GEMINI_TIMEOUT_MS — and HIGH media resolution so the model perceives fine
+// colour/tonal detail. Both are env-overridable and only attached for gemini-3*
+// models (older models 400 on thinkingLevel). The callGemini retry strips them
+// defensively if a given snapshot rejects a field.
+const isGemini3Model = (model) => /^gemini-3/i.test(model || "")
+const GEMINI3_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || "low"
+const GEMINI3_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || "MEDIA_RESOLUTION_HIGH"
+
+const tuneGenerationConfig = (model, baseConfig, { safe = false } = {}) => {
+    if (safe) {
+        // Defensive retry: keep only universally-supported fields so a model or
+        // snapshot that rejects a newer field still returns a plan.
+        const safeConfig = { ...baseConfig }
+        delete safeConfig.seed
+        delete safeConfig.topP
+        delete safeConfig.topK
+        return safeConfig
+    }
+    if (!isGemini3Model(model)) return baseConfig
+    return {
+        ...baseConfig,
+        mediaResolution: GEMINI3_MEDIA_RESOLUTION,
+        thinkingConfig: { thinkingLevel: GEMINI3_THINKING_LEVEL },
+    }
+}
+
+// Cap the flattened-render payload a client may send per image. A 1024px JPEG is
+// ~150-400 KB of base64; this leaves generous headroom while rejecting abuse.
+const MAX_RENDERED_BASE64_CHARS = 3 * 1024 * 1024
 
 // DoS guards for the multi-layer path. A client could otherwise send an
 // arbitrarily long layers[] and drive N concurrent image fetches + N Gemini
@@ -362,14 +402,14 @@ const callGeminiForTargeting = async ({ apiKey, model, prompt, layers }) => {
     const body = {
         systemInstruction: { parts: [{ text: GEMINI_TARGETING_PROMPT }] },
         contents: [{ role: "user", parts }],
-        generationConfig: {
+        generationConfig: tuneGenerationConfig(model, {
             temperature: 0,
             topP: 0,
             topK: 1,
             seed: 42,
             responseMimeType: "application/json",
             maxOutputTokens: 256,
-        },
+        }),
     }
 
     const controller = new AbortController()
@@ -531,15 +571,79 @@ Examples:
 You MAY combine adjustments WITH a named style (e.g. targetStyle="cinematic" plus
 adjustments {"noise": 20}). Be proportional — match the magnitude to the request.
 
+## Colour grading — the attached image is the CURRENT canvas
+
+The image attached to this request is the LIVE, fully-rendered canvas: the user's
+original photo WITH every manual edit already baked in (their brightness / contrast /
+white-balance moves, masks, local edits, layers). Grade what you SEE, not an
+imagined original:
+- Judge exposure, white balance and saturation from the attached pixels. If a manual
+  edit already achieved the look (e.g. it already reads warm and faded when asked for
+  "vintage"), prefer alreadyMatchesTarget=true / a small gain over stacking another
+  pass on top.
+- For colour work reach for: temperature (warm/cool white balance), hue (global tint /
+  teal–orange split), vibrance vs saturation (vibrance protects skin tones and
+  already-saturated areas; saturation is global), and contrast + gamma (tonal curve /
+  shadow lift). Prefer vibrance over saturation when people are present.
+- Keep skin tones natural and neutrals neutral unless the user explicitly wants a
+  stylised cast. A colour grade is a deliberate, measured move — precise and
+  proportional, never maximal for its own sake.
+
 Output JSON only.`
 
 const STRICTER_RETRY_SUFFIX =
     "\n\nPrevious response was not valid JSON. YOU MUST RETURN VALID JSON. NO COMMENTS. NO MARKDOWN FENCES. NO PROSE. Only the object."
 
-const callGeminiOnce = async ({ apiKey, model, prompt, imageBase64, mimeType, features, systemPrompt }) => {
+const callGeminiOnce = async ({ apiKey, model, prompt, imageBase64, mimeType, features, systemPrompt, safeConfig = false }) => {
     const userPart = {
         text: `User instruction: ${prompt || "(no specific instruction — apply a sensible default look)"}\n\nClient-computed image features:\n${JSON.stringify(features || {})}`,
     }
+    const baseGenerationConfig = {
+        // Deterministic settings — same image + same prompt = same JSON.
+        temperature: 0,
+        topP: 0,
+        topK: 1,
+        seed: 42,
+        responseMimeType: "application/json",
+        responseSchema: {
+            type: "OBJECT",
+            properties: {
+                currentStyle: { type: "STRING", enum: STYLE_KEYS },
+                targetStyle: { type: "STRING", enum: STYLE_KEYS },
+                alreadyMatchesTarget: { type: "BOOLEAN" },
+                gain: { type: "NUMBER" },
+                imagekitAi: {
+                    type: "OBJECT",
+                    properties: {
+                        retouch: { type: "BOOLEAN" },
+                        bgRemove: { type: "BOOLEAN" },
+                        upscale: { type: "BOOLEAN" },
+                        sharpen: { type: "BOOLEAN" },
+                        contrast: { type: "BOOLEAN" },
+                    },
+                },
+                adjustments: {
+                    type: "OBJECT",
+                    properties: {
+                        brightness: { type: "NUMBER" },
+                        contrast: { type: "NUMBER" },
+                        saturation: { type: "NUMBER" },
+                        vibrance: { type: "NUMBER" },
+                        temperature: { type: "NUMBER" },
+                        gamma: { type: "NUMBER" },
+                        sharpness: { type: "NUMBER" },
+                        blur: { type: "NUMBER" },
+                        noise: { type: "NUMBER" },
+                        hue: { type: "NUMBER" },
+                    },
+                },
+                notes: { type: "STRING" },
+            },
+            required: ["currentStyle", "targetStyle", "alreadyMatchesTarget", "gain", "notes"],
+        },
+        maxOutputTokens: 512,
+    }
+
     const body = {
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: [
@@ -553,51 +657,9 @@ const callGeminiOnce = async ({ apiKey, model, prompt, imageBase64, mimeType, fe
                 ],
             },
         ],
-        generationConfig: {
-            // Deterministic settings — same image + same prompt = same JSON.
-            temperature: 0,
-            topP: 0,
-            topK: 1,
-            seed: 42,
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: "OBJECT",
-                properties: {
-                    currentStyle: { type: "STRING", enum: STYLE_KEYS },
-                    targetStyle: { type: "STRING", enum: STYLE_KEYS },
-                    alreadyMatchesTarget: { type: "BOOLEAN" },
-                    gain: { type: "NUMBER" },
-                    imagekitAi: {
-                        type: "OBJECT",
-                        properties: {
-                            retouch: { type: "BOOLEAN" },
-                            bgRemove: { type: "BOOLEAN" },
-                            upscale: { type: "BOOLEAN" },
-                            sharpen: { type: "BOOLEAN" },
-                            contrast: { type: "BOOLEAN" },
-                        },
-                    },
-                    adjustments: {
-                        type: "OBJECT",
-                        properties: {
-                            brightness: { type: "NUMBER" },
-                            contrast: { type: "NUMBER" },
-                            saturation: { type: "NUMBER" },
-                            vibrance: { type: "NUMBER" },
-                            temperature: { type: "NUMBER" },
-                            gamma: { type: "NUMBER" },
-                            sharpness: { type: "NUMBER" },
-                            blur: { type: "NUMBER" },
-                            noise: { type: "NUMBER" },
-                            hue: { type: "NUMBER" },
-                        },
-                    },
-                    notes: { type: "STRING" },
-                },
-                required: ["currentStyle", "targetStyle", "alreadyMatchesTarget", "gain", "notes"],
-            },
-            maxOutputTokens: 512,
-        },
+        // Gemini-3 thinking + media-resolution tuning is merged in here; the
+        // retry path passes safe:true to strip any field a snapshot rejects.
+        generationConfig: tuneGenerationConfig(model, baseGenerationConfig, { safe: safeConfig }),
     }
 
     const controller = new AbortController()
@@ -629,11 +691,14 @@ const callGemini = async (params) => {
     try {
         return await callGeminiOnce({ ...params, systemPrompt: GEMINI_SYSTEM_PROMPT })
     } catch (firstError) {
-        // Retry once with a stricter "JSON ONLY" suffix appended to the system prompt.
-        console.warn("[edit-plan] Gemini first attempt failed, retrying with strict prompt:", firstError?.message)
+        // Retry once with a stricter "JSON ONLY" suffix AND a safe generationConfig
+        // (drops Gemini-3 thinking/mediaResolution + seed/topP/topK) so the retry
+        // also recovers from a model/snapshot that rejects one of those fields.
+        console.warn("[edit-plan] Gemini first attempt failed, retrying with strict prompt + safe config:", firstError?.message)
         return await callGeminiOnce({
             ...params,
             systemPrompt: GEMINI_SYSTEM_PROMPT + STRICTER_RETRY_SUFFIX,
+            safeConfig: true,
         })
     }
 }
@@ -755,6 +820,11 @@ const computePlanForImage = async ({
     projectId,
     neonAuth,
     apiKey,
+    // Flattened render of the LIVE canvas/layer (reflects manual edits). When
+    // present it is what the vision model actually analyses — so the agent grades
+    // what the user sees, not the original upload. sourceUrl is only the fallback.
+    renderedImageBase64 = null,
+    renderedImageMime = null,
 }) => {
     // 1) Exact cache lookup — content-addressable, fast O(1).
     try {
@@ -811,8 +881,16 @@ const computePlanForImage = async ({
 
     if (apiKey) {
         try {
-            const standardizedUrl = buildStandardizedVisionUrl(sourceUrl)
-            const fetched = standardizedUrl ? await fetchImageAsBase64(standardizedUrl) : null
+            // Prefer the client's live-canvas render (reflects manual edits). Only
+            // fetch the source URL (original / last-applied image) as a fallback
+            // when no render was supplied (e.g. a tainted canvas client-side).
+            let fetched
+            if (renderedImageBase64) {
+                fetched = { base64: renderedImageBase64, mimeType: renderedImageMime || "image/jpeg" }
+            } else {
+                const standardizedUrl = buildStandardizedVisionUrl(sourceUrl)
+                fetched = standardizedUrl ? await fetchImageAsBase64(standardizedUrl) : null
+            }
             rawGeminiResponse = await callGemini({
                 apiKey,
                 model: GEMINI_MODEL,
@@ -975,19 +1053,25 @@ export async function POST(request) {
         // reaches the vision model.
         const layers = Array.isArray(body.layers)
             ? body.layers.slice(0, MAX_LAYERS).map((layer) => {
+                  if (!layer || typeof layer !== "object") return layer
+                  // Strip oversized payloads so they never reach the vision model;
+                  // keep the rest of the layer (name/hash/sourceUrl) intact.
+                  const sanitized = { ...layer }
                   if (
-                      layer &&
-                      typeof layer.thumbBase64 === "string" &&
-                      layer.thumbBase64.length > MAX_THUMB_BASE64_CHARS
+                      typeof sanitized.thumbBase64 === "string" &&
+                      sanitized.thumbBase64.length > MAX_THUMB_BASE64_CHARS
                   ) {
-                      // Drop the oversized thumbnail so it never reaches the vision
-                      // model; keep the rest of the layer (name/hash/sourceUrl) intact.
-                      const sanitized = { ...layer }
                       delete sanitized.thumbBase64
                       delete sanitized.thumbMime
-                      return sanitized
                   }
-                  return layer
+                  if (
+                      typeof sanitized.renderedBase64 === "string" &&
+                      sanitized.renderedBase64.length > MAX_RENDERED_BASE64_CHARS
+                  ) {
+                      delete sanitized.renderedBase64
+                      delete sanitized.renderedMime
+                  }
+                  return sanitized
               })
             : null
         // Optional override from the client when the user has explicitly confirmed
@@ -1066,6 +1150,8 @@ export async function POST(request) {
                     projectId,
                     neonAuth,
                     apiKey,
+                    renderedImageBase64: layer.renderedBase64 || null,
+                    renderedImageMime: layer.renderedMime || null,
                 })
                 return { layerIndex, ...result }
             }
@@ -1090,6 +1176,18 @@ export async function POST(request) {
         const imageHash = String(body.imageHash || "").slice(0, 128)
         const pHash = body.pHash ? String(body.pHash).slice(0, 32) : null
         const features = body.features || null
+        // Flattened live-canvas render — bounded so a client can't send an
+        // unreasonably large payload to the vision model.
+        const renderedImageBase64 =
+            typeof body.renderedImageBase64 === "string" &&
+            body.renderedImageBase64.length > 0 &&
+            body.renderedImageBase64.length <= MAX_RENDERED_BASE64_CHARS
+                ? body.renderedImageBase64
+                : null
+        const renderedImageMime =
+            renderedImageBase64 && typeof body.renderedImageMime === "string"
+                ? body.renderedImageMime
+                : null
 
         if (!imageHash) {
             return NextResponse.json({ error: "imageHash or layers[] required" }, { status: 400 })
@@ -1105,6 +1203,8 @@ export async function POST(request) {
                 projectId,
                 neonAuth,
                 apiKey,
+                renderedImageBase64,
+                renderedImageMime,
             })
 
         return NextResponse.json({
