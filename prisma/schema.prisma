@@ -82,6 +82,10 @@ model Project {
   userId                String
   user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   canvasState           Json?
+  // Monotonic optimistic-concurrency token. Bumped on every conditional canvas
+  // flush so concurrent edits from another device/tab are detected instead of
+  // silently overwriting each other (last-write-wins).
+  revision              Int      @default(0)
   width                 Int
   height                Int
   originalImageUrl      String?
