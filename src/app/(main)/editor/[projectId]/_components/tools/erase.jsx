@@ -252,7 +252,7 @@ const EraseControls = ({ project, dominantColor }) => {
                 the WHOLE object under the pointer and erases it. Click more
                 objects to erase each (multi-subject by accumulation). */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                <label className="panel-label">AI Object Eraser</label>
+                <label className="panel-label">AI Object Remover</label>
                 <motion.button
                     type="button"
                     onClick={() => tool.setObjectSelect(!tool.objectSelect)}
@@ -276,11 +276,11 @@ const EraseControls = ({ project, dominantColor }) => {
                     <div className="min-w-0">
                         <div className="text-xs font-semibold">
                             {tool.isObjectRunning
-                                ? 'Detecting object…'
-                                : tool.objectSelect ? 'Click-object erase: ON' : 'Click-object erase: OFF'}
+                                ? 'Removing object…'
+                                : tool.objectSelect ? 'Click-to-remove: ON' : 'Click-to-remove: OFF'}
                         </div>
                         <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                            SAM 2 segments the whole object you click — repeat for multiple subjects
+                            SAM 2 detects the object, AI fills the background — click each subject to remove
                         </div>
                     </div>
                 </motion.button>
@@ -356,7 +356,7 @@ const EraseControls = ({ project, dominantColor }) => {
 
             <TipCard>
                 <p>• <strong>Paint</strong> over what you want to erase — the exact stroke is removed when you release</p>
-                <p>• <strong>AI object eraser</strong>: click an object and SAM 2 removes the whole thing — click each subject to erase several</p>
+                <p>• <strong>AI object remover</strong>: click an object and AI removes it + fills the background — click each subject to remove several</p>
                 <p>• <strong>Magic eraser</strong>: click a contiguous color region to remove it</p>
                 <p>• Hold <strong>Alt</strong> to temporarily switch Erase ↔ Restore</p>
                 <p>• <strong>[</strong> / <strong>]</strong> resize the brush; raise feather for soft edges</p>

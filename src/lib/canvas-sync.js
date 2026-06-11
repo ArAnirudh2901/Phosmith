@@ -135,6 +135,7 @@ export const createCanvasSync = ({
     // another session wrote in between (conflict).
     let baseRevision = Number.isFinite(Number(initialRevision)) ? Number(initialRevision) : 0
     let conflicted = false       // holding flushes until the user resolves a conflict
+    console.log(`[canvas-sync] created for ${projectId}, initialRevision=${initialRevision}, baseRevision=${baseRevision}`)
 
     const setStatus = (status, detail) => {
         if (destroyed) return // don't poke React state after teardown
@@ -167,6 +168,7 @@ export const createCanvasSync = ({
     // can still complete.
     const doFlush = async ({ keepalive = false, force = false } = {}) => {
         if (!online || !latest) return { flushed: false }
+        console.log(`[canvas-sync] doFlush baseRevision=${baseRevision}, force=${force}`)
         const flushHash = latest.hash
         let res
         try {
@@ -182,17 +184,15 @@ export const createCanvasSync = ({
             return { flushed: false }
         }
         if (res?.conflict) {
-            // Another session advanced the revision. Hold further auto-flushes and
-            // hand the server state to the UI to reconcile (non-destructively).
-            // Deliberately DON'T advance baseRevision: our local content is still
-            // based on the OLD revision, so the held base must stay old — otherwise
-            // a later unload/keepalive flush would match the server and overwrite
-            // the other session's work.
+            console.warn(`[canvas-sync] CONFLICT! baseRevision=${baseRevision}, serverRevision=${res.project?.revision}`, res)
             conflicted = true
-            cancelFlush() // stop any scheduled flush from re-firing the conflict
+            cancelFlush()
             setStatus("conflict")
             try { onConflict?.(res.project) } catch { /* UI cb must not break sync */ }
             return res
+        }
+        if (res && !res.flushed && !res.conflict) {
+            console.warn(`[canvas-sync] flush returned non-flushed, non-conflict:`, res)
         }
         if (res?.flushed) {
             if (typeof res.revision === "number") baseRevision = res.revision

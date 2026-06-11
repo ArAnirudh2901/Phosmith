@@ -1,22 +1,12 @@
 // /api/ai/inpaint
-// ===============
-// ⚠️  WORK IN PROGRESS — NO FRONTEND CALLER
-// =========================================
-// This route is fully implemented (Hugging Face Stable Diffusion
-// inpainting, sharp pipeline, mask-bounds detection, edge-aware
-// composite) but no editor tool invokes it yet. The route builds
-// and deploys; calling it directly will incur a Hugging Face API
-// bill without producing any visible UI result.
+// ================
+// Backend-selectable AI inpainting route. Supports two backends:
+//   - "lama"  → proxy to the local Python mask service (LaMa, fast, free)
+//   - "hf"    → Hugging Face Stable Diffusion inpainting (slower, creative)
+//   - "auto"  → try LaMa first, fall back to HF SD on failure (default)
 //
-// Audit (2025-06): no `fetch('/api/ai/inpaint')` in `src/` or
-// `hooks/`. The companion `/api/ai/outpaint` route does not exist;
-// "outpaint" is just a keyword in the ImageKit Agent's intent
-// parser (mapped to `/api/ai/extend`).
-//
-// Status: keep the route around as scaffolding for a future
-// inpaint tool. The build / lint / verify suites still pass.
-// See README.md "Scripts" → verify-inpaint (TODO) for the planned
-// end-to-end test.
+// The client sends an image + mask (white = inpaint region) as multipart.
+// Returns the composited result as PNG.
 
 import { auth } from '@clerk/nextjs/server'
 import { NextResponse } from 'next/server'
@@ -44,10 +34,9 @@ const fileToBuffer = async (file, label) => {
   return Buffer.from(await file.arrayBuffer())
 }
 
-const dataUrl = (buffer, contentType = 'image/png') =>
-  `data:${contentType};base64,${buffer.toString('base64')}`
-
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
+
+// ─── Mask bounds detection ──────────────────────────────────────────────────
 
 const getMaskBounds = async (maskBuffer) => {
   const { data, info } = await sharp(maskBuffer, { failOn: 'none' })
@@ -92,6 +81,8 @@ const getMaskBounds = async (maskBuffer) => {
   }
 }
 
+// ─── Normalize for HF SD model ──────────────────────────────────────────────
+
 const normalizeForModel = async (imageBuffer, maskBuffer, bounds) => {
   const maxSide = Math.max(bounds.width, bounds.height)
   const scale = Math.min(1, MAX_MODEL_SIDE / maxSide)
@@ -115,6 +106,91 @@ const normalizeForModel = async (imageBuffer, maskBuffer, bounds) => {
   const [image, mask] = await Promise.all([imageCrop.toBuffer(), maskCrop.toBuffer()])
   return { image, mask, modelWidth, modelHeight }
 }
+
+// ─── Composite the inpainted patch back ─────────────────────────────────────
+
+const compositePatch = async (imageBuffer, maskBuffer, generatedBuffer, bounds) => {
+  const patchRgb = await sharp(generatedBuffer, { failOn: 'none' })
+    .resize(bounds.width, bounds.height, { fit: 'fill' })
+    .removeAlpha()
+    .png()
+    .toBuffer()
+
+  const alpha = await sharp(maskBuffer, { failOn: 'none' })
+    .rotate()
+    .extract({ left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height })
+    .resize(bounds.width, bounds.height, { fit: 'fill', kernel: 'nearest' })
+    .greyscale()
+    .threshold(16)
+    .blur(1.2)
+    .png()
+    .toBuffer()
+
+  const patch = await sharp(patchRgb, { failOn: 'none' })
+    .joinChannel(alpha)
+    .png()
+    .toBuffer()
+
+  return sharp(imageBuffer, { failOn: 'none' })
+    .rotate()
+    .composite([{ input: patch, left: bounds.left, top: bounds.top }])
+    .png()
+    .toBuffer()
+}
+
+// ─── Backend: LaMa via mask service ─────────────────────────────────────────
+
+const callLamaInpaint = async (imageBuffer, maskBuffer) => {
+  const maskServiceUrl = process.env.MASK_SERVICE_URL?.trim()
+  if (!maskServiceUrl) {
+    throw new Error('MASK_SERVICE_URL is not configured')
+  }
+
+  // Quick health check — does the service support /inpaint?
+  try {
+    const healthResp = await fetch(`${maskServiceUrl}/health`, { signal: AbortSignal.timeout(3000) })
+    if (healthResp.ok) {
+      const health = await healthResp.json()
+      if (!health.lama_available) {
+        throw new Error('LaMa not available on the mask service')
+      }
+    }
+  } catch (err) {
+    if (err?.message?.includes('LaMa not available')) throw err
+    // Health check failed (timeout/network) — try anyway, the service might
+    // support /inpaint even if /health is unreachable.
+  }
+
+  const form = new FormData()
+  form.append('image', new Blob([imageBuffer], { type: 'image/png' }), 'image.png')
+  form.append('mask', new Blob([maskBuffer], { type: 'image/png' }), 'mask.png')
+
+  console.info('[ai-inpaint] trying LaMa via mask service:', maskServiceUrl)
+  const response = await fetch(`${maskServiceUrl}/inpaint`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(30_000),
+  })
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`LaMa inpaint failed (${response.status}): ${text.slice(0, 200)}`)
+  }
+
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.startsWith('image/')) {
+    throw new Error('LaMa returned non-image response')
+  }
+
+  return Buffer.from(await response.arrayBuffer())
+}
+
+// ─── Backend: Hugging Face SD Inpainting ────────────────────────────────────
+
+const HF_ENDPOINTS = [
+  'https://router.huggingface.co/hf-inference/models',
+  'https://api-inference.huggingface.co/models',
+]
 
 const extractImageBuffer = async (response) => {
   const contentType = response.headers.get('content-type') || ''
@@ -145,13 +221,6 @@ const extractImageBuffer = async (response) => {
   const message = parsed?.error || parsed?.message || raw.slice(0, 240) || `HTTP ${response.status}`
   throw new Error(message)
 }
-
-const HF_ENDPOINTS = [
-  // Primary: the router endpoint (same one used by the working background generation route)
-  'https://router.huggingface.co/hf-inference/models',
-  // Fallback: the legacy endpoint
-  'https://api-inference.huggingface.co/models',
-]
 
 const callHuggingFaceInpaint = async ({ image, mask, prompt, width, height }) => {
   const token = process.env.HUGGINGFACE_API_TOKEN?.trim()
@@ -196,7 +265,7 @@ const callHuggingFaceInpaint = async ({ image, mask, prompt, width, height }) =>
   for (const baseUrl of HF_ENDPOINTS) {
     const endpoint = `${baseUrl}/${model}`
     try {
-      console.info('[ai-inpaint] trying endpoint:', endpoint)
+      console.info('[ai-inpaint] trying HF endpoint:', endpoint)
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -208,11 +277,9 @@ const callHuggingFaceInpaint = async ({ image, mask, prompt, width, height }) =>
       })
       return await extractImageBuffer(response)
     } catch (error) {
-      console.warn('[ai-inpaint] endpoint failed:', endpoint, error?.message)
+      console.warn('[ai-inpaint] HF endpoint failed:', endpoint, error?.message)
       lastError = error
-      // DNS / network errors → try the next endpoint
       if (/ENOTFOUND|ECONNREFUSED|fetch failed/i.test(error?.message || '')) continue
-      // Other errors (e.g. model errors) → don't retry with a different host
       throw error
     }
   }
@@ -220,34 +287,7 @@ const callHuggingFaceInpaint = async ({ image, mask, prompt, width, height }) =>
   throw lastError || new Error('Hugging Face inpainting failed')
 }
 
-const compositePatch = async (imageBuffer, maskBuffer, generatedBuffer, bounds) => {
-  const patchRgb = await sharp(generatedBuffer, { failOn: 'none' })
-    .resize(bounds.width, bounds.height, { fit: 'fill' })
-    .removeAlpha()
-    .png()
-    .toBuffer()
-
-  const alpha = await sharp(maskBuffer, { failOn: 'none' })
-    .rotate()
-    .extract({ left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height })
-    .resize(bounds.width, bounds.height, { fit: 'fill', kernel: 'nearest' })
-    .greyscale()
-    .threshold(16)
-    .blur(1.2)
-    .png()
-    .toBuffer()
-
-  const patch = await sharp(patchRgb, { failOn: 'none' })
-    .joinChannel(alpha)
-    .png()
-    .toBuffer()
-
-  return sharp(imageBuffer, { failOn: 'none' })
-    .rotate()
-    .composite([{ input: patch, left: bounds.left, top: bounds.top }])
-    .png()
-    .toBuffer()
-}
+// ─── Route handler ──────────────────────────────────────────────────────────
 
 export async function POST(request) {
   try {
@@ -266,34 +306,72 @@ export async function POST(request) {
       formData.get('prompt') ||
         'remove the selected object and naturally continue the surrounding background texture, realistic photo cleanup'
     )
+    const requestedBackend = String(formData.get('backend') || 'auto').toLowerCase()
 
     const bounds = await getMaskBounds(maskBuffer)
     if (!bounds) {
       return NextResponse.json({ error: 'No selected pixels found' }, { status: 400 })
     }
 
-    const normalized = await normalizeForModel(imageBuffer, maskBuffer, bounds)
-    const generated = await callHuggingFaceInpaint({
-      image: normalized.image,
-      mask: normalized.mask,
-      prompt,
-      width: normalized.modelWidth,
-      height: normalized.modelHeight,
-    })
+    let finalBuffer = null
+    let usedBackend = null
 
-    const finalBuffer = await compositePatch(imageBuffer, maskBuffer, generated, bounds)
+    // ── LaMa path (local mask service) ──
+    const tryLama = requestedBackend === 'lama' || requestedBackend === 'auto'
+    if (tryLama) {
+      try {
+        // LaMa gets the full image + mask (it handles cropping internally)
+        const lamaResult = await callLamaInpaint(imageBuffer, maskBuffer)
+        finalBuffer = lamaResult
+        usedBackend = 'lama'
+      } catch (lamaErr) {
+        console.warn('[ai-inpaint] LaMa failed:', lamaErr?.message)
+        if (requestedBackend === 'lama') {
+          // Explicit LaMa request — don't fall back
+          return NextResponse.json(
+            { error: `LaMa inpaint failed: ${lamaErr?.message}` },
+            { status: 502 }
+          )
+        }
+        // Auto mode — fall through to HF
+      }
+    }
+
+    // ── HF SD path (Hugging Face Stable Diffusion) ──
+    if (!finalBuffer) {
+      try {
+        const normalized = await normalizeForModel(imageBuffer, maskBuffer, bounds)
+        const generated = await callHuggingFaceInpaint({
+          image: normalized.image,
+          mask: normalized.mask,
+          prompt,
+          width: normalized.modelWidth,
+          height: normalized.modelHeight,
+        })
+        finalBuffer = await compositePatch(imageBuffer, maskBuffer, generated, bounds)
+        usedBackend = 'hf'
+      } catch (hfErr) {
+        console.error('[ai-inpaint] HF SD failed:', hfErr?.message)
+        return NextResponse.json(
+          { error: hfErr?.message || 'Inpainting failed' },
+          { status: /not configured/i.test(hfErr?.message || '') ? 501 : 500 }
+        )
+      }
+    }
+
     return new NextResponse(finalBuffer, {
       status: 200,
       headers: {
         'Content-Type': 'image/png',
         'Cache-Control': 'no-store',
+        'X-Inpaint-Backend': usedBackend,
       },
     })
   } catch (error) {
     console.error('[ai-inpaint] failed:', error)
     return NextResponse.json(
       { error: error?.message || 'Inpainting failed' },
-      { status: /not configured/i.test(error?.message || '') ? 501 : 500 }
+      { status: 500 }
     )
   }
 }

@@ -77,6 +77,14 @@ export const AI_CAPABILITIES = {
         clientImpl: 'RMBG-1.4 in browser',
         serverImpl: 'BiRefNet (service)',
     },
+    inpaint: {
+        label: 'Object fill',
+        hint: 'Fills erased regions with background texture',
+        client: false,
+        server: true,
+        clientImpl: null,
+        serverImpl: 'LaMa / HF SD (auto)',
+    },
 }
 
 const STORAGE_KEY = 'pixxel:ai-routing'

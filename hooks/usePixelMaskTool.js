@@ -1127,17 +1127,9 @@ export default function usePixelMaskTool({
         setIsObjectRunning(true)
 
         try {
-            // The mask canvas and `local` both live in the image's CROPPED
-            // bitmap space (getImageBitmapSize → img.width/height, which is the
-            // crop size for a cropped Fabric image). Build the SAM upload, the
-            // click, and (downstream) the returned mask in that SAME frame so
-            // everything aligns — for a cropped image the naïve full-bitmap
-            // upload would misplace both the click and the result.
             const { width: bw, height: bh } = getImageBitmapSize(img)
             const cropX = img.cropX || 0
             const cropY = img.cropY || 0
-            // An <img> mid-load reports naturalWidth 0; a not-yet-ready bitmap
-            // collapses to a 1px size. Either way SAM would get garbage.
             const srcW = sourceEl.naturalWidth || sourceEl.width || 0
             const srcH = sourceEl.naturalHeight || sourceEl.height || 0
             if (srcW < 1 || srcH < 1 || bw < 2 || bh < 2) {
@@ -1155,10 +1147,8 @@ export default function usePixelMaskTool({
                 blob = await new Promise((res, rej) =>
                     up.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.85))
             } catch (e) {
-                // A canvas drawn from a cross-origin image without CORS is
-                // tainted, so toBlob throws SecurityError — say so plainly.
                 if (e?.name === 'SecurityError') {
-                    throw new Error('This image is from another site without CORS, so it can’t be read for AI selection')
+                    throw new Error('This image is from another site without CORS, so it can\u2019t be read for AI selection')
                 }
                 throw e
             }
@@ -1186,29 +1176,106 @@ export default function usePixelMaskTool({
             })
             if (controller.signal.aborted) return
 
-            // Did SAM actually find an object under the click? An all-black
-            // mask composites to a no-op (darken-with-white / lighten-with-
-            // black), so a miss would silently do nothing yet still push a junk
-            // undo state and a misleading toast. Detect the empty result first.
             const matteFraction = sampleMaskCoverage(decoded)
             if (matteFraction < 0.0008) {
                 toast('No object found there — click directly on the thing you want to remove', { icon: '🤔' })
                 return
             }
 
-            // The image (and its mask canvas) can change WHILE SAM runs — the
-            // user might delete/replace it, or undo past it. The `decoded` mask
-            // belongs to the bitmap we uploaded, so applying it to a different
-            // image now would composite the wrong shape. Bail if the target
-            // moved on or left the canvas.
             if (targetImageRef.current !== img
                 || maskCanvasRef.current !== maskCanvas
                 || !(canvasEditor?.getObjects?.() || []).includes(img)) {
                 return
             }
 
-            // Pre-commit snapshot for the deferred-session revert path (same
-            // contract as doMagic).
+            // ── Inpaint path: fill the erased region with AI-generated background ──
+            // Only for erase mode — restore mode still uses the alpha-mask path.
+            if (effectiveMode() === 'erase') {
+                let inpaintSucceeded = false
+                try {
+                    // Build full-resolution image canvas (in cropped bitmap space)
+                    const fullImg = document.createElement('canvas')
+                    fullImg.width = bw
+                    fullImg.height = bh
+                    const fctx = fullImg.getContext('2d')
+                    fctx.drawImage(sourceEl, cropX, cropY, bw, bh, 0, 0, bw, bh)
+
+                    // Build a mask at the same size from the SAM2 result
+                    const fullMask = document.createElement('canvas')
+                    fullMask.width = bw
+                    fullMask.height = bh
+                    const mctx = fullMask.getContext('2d')
+                    mctx.fillStyle = '#000000'
+                    mctx.fillRect(0, 0, bw, bh)
+                    mctx.drawImage(decoded, 0, 0, bw, bh)
+
+                    // Convert both to blobs for the inpaint API
+                    const [imgBlob, mskBlob] = await Promise.all([
+                        new Promise((res, rej) =>
+                            fullImg.toBlob((b) => (b ? res(b) : rej(new Error('image toBlob failed'))), 'image/png')),
+                        new Promise((res, rej) =>
+                            fullMask.toBlob((b) => (b ? res(b) : rej(new Error('mask toBlob failed'))), 'image/png')),
+                    ])
+
+                    if (controller.signal.aborted) return
+
+                    // Call inpaint API
+                    const inpaintForm = new FormData()
+                    inpaintForm.append('image', imgBlob, 'image.png')
+                    inpaintForm.append('mask', mskBlob, 'mask.png')
+                    inpaintForm.append('backend', 'auto')
+
+                    const inpaintResp = await fetch('/api/ai/inpaint', {
+                        method: 'POST',
+                        body: inpaintForm,
+                        signal: controller.signal,
+                    })
+
+                    if (!inpaintResp.ok) {
+                        const errData = await inpaintResp.json().catch(() => ({}))
+                        throw new Error(errData.error || `Inpaint failed (${inpaintResp.status})`)
+                    }
+
+                    // Decode the inpainted result
+                    const resultBlob = await inpaintResp.blob()
+                    const resultUrl = URL.createObjectURL(resultBlob)
+
+                    if (controller.signal.aborted) {
+                        URL.revokeObjectURL(resultUrl)
+                        return
+                    }
+
+                    // Verify the target image hasn't changed while inpainting
+                    if (targetImageRef.current !== img
+                        || !(canvasEditor?.getObjects?.() || []).includes(img)) {
+                        URL.revokeObjectURL(resultUrl)
+                        return
+                    }
+
+                    // Commit the inpainted image via bitmap replacement (undo-safe)
+                    const committed = await commitCleanupUrl(resultUrl)
+                    URL.revokeObjectURL(resultUrl)
+
+                    if (committed) {
+                        inpaintSucceeded = true
+                        if (matteFraction > 0.97) {
+                            toast('That removed almost the entire image — press undo if it wasn\u2019t what you meant',
+                                { icon: '⚠️', duration: 6000 })
+                        } else {
+                            toast.success('Object removed — click another to remove more')
+                        }
+                    }
+                } catch (inpaintErr) {
+                    if (inpaintErr?.name === 'AbortError') throw inpaintErr
+                    console.warn('[object-eraser] inpaint failed, falling back to alpha erase:', inpaintErr?.message)
+                    // Fall through to alpha-mask erase below
+                }
+
+                if (inpaintSucceeded) return
+                // Fallback: inpaint failed — use the old alpha-mask path
+            }
+
+            // ── Alpha-mask path (restore mode, or inpaint fallback) ──
             if (deferApplyRef.current && !preCommitSnapshotRef.current) {
                 preCommitSnapshotRef.current = snapshot()
                 preCommitUndoDepthRef.current = undoStackRef.current.length
@@ -1221,8 +1288,6 @@ export default function usePixelMaskTool({
             const ctx = maskCanvas.getContext('2d')
             ctx.save()
             if (effectiveMode() === 'erase') {
-                // erase = min(mask, NOT object): invert the object mask, then
-                // darken-blend so object pixels go black and the rest is kept.
                 const inv = document.createElement('canvas')
                 inv.width = w
                 inv.height = h
@@ -1234,7 +1299,6 @@ export default function usePixelMaskTool({
                 ctx.globalCompositeOperation = 'darken'
                 ctx.drawImage(inv, 0, 0)
             } else {
-                // restore = max(mask, object).
                 ctx.globalCompositeOperation = 'lighten'
                 ctx.drawImage(decoded, 0, 0, w, h)
             }
@@ -1248,12 +1312,9 @@ export default function usePixelMaskTool({
                 commitMaskChange(canvasEditor, img)
             }
             if (matteFraction > 0.97) {
-                // SAM occasionally grabs the whole frame (e.g. a click on flat
-                // background). Don't block it — the user may want it — but flag
-                // it so an accidental "erase everything" is obvious.
                 toast(effectiveMode() === 'erase'
-                    ? 'That selected almost the entire image — press undo if it wasn’t what you meant'
-                    : 'That restored almost the entire image — press undo if it wasn’t what you meant',
+                    ? 'That selected almost the entire image — press undo if it wasn\u2019t what you meant'
+                    : 'That restored almost the entire image — press undo if it wasn\u2019t what you meant',
                     { icon: '⚠️', duration: 6000 })
             } else {
                 toast.success(effectiveMode() === 'erase' ? 'Object erased — click another to remove more' : 'Object restored')
@@ -1269,7 +1330,7 @@ export default function usePixelMaskTool({
                 setIsObjectRunning(false)
             }
         }
-    }, [effectiveMode, pushUndo, snapshot, syncMaskToImage, canvasEditor])
+    }, [effectiveMode, pushUndo, snapshot, syncMaskToImage, canvasEditor, commitCleanupUrl])
 
     /* ─── canvas lock / unlock (disable selection while painting) ─── */
 

@@ -568,28 +568,57 @@ const CanvasEditor = ({ project }) => {
     useEffect(() => {
         const projectId = project?._id
         if (!projectId) return
-        const persistNow = () => {
-            // Push the CURRENT canvas into the manager FIRST — the 2s autosave
-            // debounce may not have fired yet, so without this the manager's
-            // `latest` (and therefore the beacon) would carry stale state and the
-            // final edits would be lost. saveCanvasState() updates `latest`
-            // synchronously and fires a full snapshot before the beacon reads it.
+
+        // Push the CURRENT canvas into the manager FIRST — the autosave debounce
+        // may not have fired yet, so without this the manager's `latest` would
+        // carry stale state. save() updates `latest`/`pendingSync` synchronously.
+        // Returns whether there's unsynced work worth flushing.
+        const captureLatest = () => {
             try { saveCanvasState() } catch { /* ignore */ }
+            try { return Boolean(syncRef.current?.hasPendingSync?.()) } catch { return false }
+        }
+
+        // Page is going away for good (real navigation / tab close): the manager
+        // is about to be destroyed, so use the fire-and-forget beacon + keepalive
+        // flush. It can't await, so it intentionally does NOT advance baseRevision
+        // — fine, because nothing here will flush again.
+        const persistOnUnload = () => {
+            captureLatest()
             try { syncRef.current?.beaconUnload() } catch { /* ignore */ }
         }
-        // visibilitychange → hidden is the reliable save point: it fires while the
-        // page is still ALIVE (so the normal full-state snapshot fetch completes,
-        // sidestepping the 64KB beacon cap for large states) and, unlike
-        // beforeunload, it fires on mobile/tab-switch and bfcache navigations.
-        const onVisibility = () => {
-            if (typeof document !== "undefined" && document.visibilityState === "hidden") persistNow()
+
+        // Page is hidden but STILL ALIVE (tab/app switch, or a bfcache navigation
+        // that may restore it). Do a NORMAL flush, which advances the manager's
+        // baseRevision on success. Using the unload beacon here was the bug behind
+        // repeated "edited on another device" conflicts on a single window: its
+        // keepalive flush bumped the server revision without updating our base, so
+        // the next edit flushed against a stale revision and spuriously conflicted
+        // every time the user tabbed away and back. Only flush when there's
+        // actually unsynced work, so idle tab-switches don't churn the revision.
+        const persistWhileAlive = () => {
+            if (captureLatest()) {
+                try { syncRef.current?.flushNow() } catch { /* ignore */ }
+            }
         }
-        window.addEventListener("beforeunload", persistNow)
-        window.addEventListener("pagehide", persistNow)
+
+        const onBeforeUnload = () => persistOnUnload()
+        const onPageHide = (e) => {
+            // A persisted (bfcache) pagehide may be restored alive → keep the
+            // manager coherent; a non-persisted one is a real unload.
+            if (e?.persisted) persistWhileAlive()
+            else persistOnUnload()
+        }
+        const onVisibility = () => {
+            if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+                persistWhileAlive()
+            }
+        }
+        window.addEventListener("beforeunload", onBeforeUnload)
+        window.addEventListener("pagehide", onPageHide)
         document.addEventListener("visibilitychange", onVisibility)
         return () => {
-            window.removeEventListener("beforeunload", persistNow)
-            window.removeEventListener("pagehide", persistNow)
+            window.removeEventListener("beforeunload", onBeforeUnload)
+            window.removeEventListener("pagehide", onPageHide)
             document.removeEventListener("visibilitychange", onVisibility)
         }
     }, [project?._id, saveCanvasState])
@@ -685,8 +714,16 @@ const CanvasEditor = ({ project }) => {
                             effectiveCurrentImageUrl = localState.currentImageUrl
                         }
                         bestUpdatedAt = localUpdatedAt
-                        if (Number.isFinite(Number(localState.baseRevision))) {
-                            effectiveBaseRevision = Number(localState.baseRevision)
+                        // Only adopt the local IDB revision if it's >= the
+                        // project's current server revision. If the local
+                        // revision is OLDER, the data was already flushed (e.g.
+                        // via beacon on tab close) but IDB wasn't cleaned up.
+                        // Adopting the stale revision would make the first flush
+                        // send baseRevision=OLD → server has NEW → spurious conflict.
+                        const localRev = Number(localState.baseRevision)
+                        const serverRev = Number(proj.revision) || 0
+                        if (Number.isFinite(localRev) && localRev >= serverRev) {
+                            effectiveBaseRevision = localRev
                         }
                     }
                 }

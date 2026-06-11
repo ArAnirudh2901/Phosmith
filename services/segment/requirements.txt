@@ -37,3 +37,9 @@ transformers>=4.45.0
 # (torch / torchvision are already pulled in by the SAM 2 block above.)
 ultralytics>=8.4.0
 
+# LaMa inpainting for the /inpaint endpoint ("AI Object Remover").
+# Optional — if absent, /inpaint returns 501; the Next.js route falls back to
+# Hugging Face SD inpainting (slower but works without the mask service).
+# ~200 MB model, MIT license, reuses torch/torchvision from above.
+simple-lama-inpainting>=0.1.0
+

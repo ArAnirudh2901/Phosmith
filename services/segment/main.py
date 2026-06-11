@@ -869,6 +869,57 @@ def _ensure_ground(app: FastAPI) -> bool:
         return _load_ground(app)
 
 
+# ─── LaMa inpainting ─────────────────────────────────────────────────────────
+
+_LAMA_LOCK = threading.Lock()
+
+
+def _lama_loadable() -> bool:
+    """Cheap probe: is simple-lama-inpainting importable?"""
+    try:
+        return bool(importlib.util.find_spec("simple_lama_inpainting"))
+    except Exception:
+        return False
+
+
+def _load_lama(app: FastAPI) -> bool:
+    """Load LaMa into app.state (blocking). Caller holds _LAMA_LOCK."""
+    try:
+        from simple_lama_inpainting import SimpleLama  # type: ignore
+
+        log.info("loading LaMa inpainting model ...")
+        t0 = time.perf_counter()
+        app.state.lama_model = SimpleLama()
+        app.state.lama_available = True
+        log.info("LaMa ready in %.1fs", time.perf_counter() - t0)
+        return True
+    except ImportError:
+        log.warning(
+            "simple-lama-inpainting not installed; /inpaint disabled. "
+            "Install with: pip install simple-lama-inpainting"
+        )
+        app.state.lama_load_failed = True
+        return False
+    except Exception as e:
+        log.exception("failed to load LaMa: %s", e)
+        app.state.lama_load_failed = True
+        return False
+
+
+def _ensure_lama(app: FastAPI) -> bool:
+    """Lazily load LaMa; return True if it's ready to use."""
+    if getattr(app.state, "lama_available", False):
+        return True
+    if getattr(app.state, "lama_load_failed", False):
+        return False
+    with _LAMA_LOCK:
+        if getattr(app.state, "lama_available", False):
+            return True
+        if getattr(app.state, "lama_load_failed", False):
+            return False
+        return _load_lama(app)
+
+
 def _ground_heatmaps(app, img: Image.Image, phrases: "list[str]") -> np.ndarray:
     """CLIPSeg relevance maps for `phrases` against `img`.
 
@@ -998,6 +1049,8 @@ async def lifespan(app: FastAPI):
     app.state.ground_available = False
     app.state.ground_load_failed = False
     app.state.ground_model_id = GROUND_MODEL_ID
+    app.state.lama_available = False
+    app.state.lama_load_failed = False
 
     if SEGMENT_EAGER_MODELS:
         await run_in_threadpool(_ensure_sam2, app)
@@ -1166,7 +1219,61 @@ async def health() -> dict:
         "ground_loaded": app.state.ground_available,
         "ground_model": app.state.ground_model_id,
         "shape_mask_engine": "opencv-fillpoly" if cv2 is not None else "pillow-polygon",
+        "lama_available": getattr(app.state, "lama_available", False)
+        or _lama_loadable(),
+        "lama_loaded": getattr(app.state, "lama_available", False),
     }
+
+
+@app.post("/inpaint")
+async def inpaint(
+    image: UploadFile = File(..., alias="image"),
+    mask: UploadFile = File(..., alias="mask"),
+) -> Response:
+    """Inpaint masked regions using LaMa.
+
+    Accepts:
+      - image: the source image (JPEG/PNG)
+      - mask: a white-on-black mask where white = region to fill
+
+    Returns the inpainted image as PNG.
+    """
+    if not _ensure_lama(app):
+        raise HTTPException(
+            501,
+            "LaMa inpainting is not available. "
+            "Install with: pip install simple-lama-inpainting",
+        )
+
+    image_bytes = await _read_limited(image)
+    mask_bytes = await _read_limited(mask)
+
+    def _run():
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        msk = Image.open(io.BytesIO(mask_bytes)).convert("L")
+
+        # Resize mask to match image if needed
+        if msk.size != img.size:
+            msk = msk.resize(img.size, Image.NEAREST)
+
+        # LaMa expects mask > 0 = inpaint region. Threshold to binary.
+        msk_np = np.array(msk)
+        msk_np = (msk_np > 16).astype(np.uint8) * 255
+        msk = Image.fromarray(msk_np, mode="L")
+
+        result = app.state.lama_model(img, msk)
+        buf = io.BytesIO()
+        result.save(buf, format="PNG")
+        return buf.getvalue()
+
+    from starlette.concurrency import run_in_threadpool  # type: ignore
+
+    png_bytes = await run_in_threadpool(_run)
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/shape/fill")
