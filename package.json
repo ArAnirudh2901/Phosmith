@@ -25,6 +25,7 @@
     "verify:nl-mask": "bun scripts/verify-nl-mask.mjs",
     "verify:client-ai": "bun scripts/verify-client-ai.mjs",
     "verify:agent": "bun scripts/verify-agent-loop.mjs",
+    "verify:inpaint": "bun scripts/verify-inpaint.mjs",
     "mask:install": "pip install -r services/segment/requirements.txt",
     "mask:dev": "python services/segment/main.py"
   },
