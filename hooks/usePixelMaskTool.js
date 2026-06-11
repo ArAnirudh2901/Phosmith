@@ -25,6 +25,7 @@ import {
     stampMask,
     strokeMaskSegment,
 } from '@/lib/canvas-mask'
+import { getRoutingMode } from '@/lib/ai-routing'
 
 export const MIN_BRUSH = 1
 export const MAX_BRUSH = 400
@@ -62,6 +63,49 @@ const commitMaskChange = (canvasEditor, img) => {
  * getImageData won't taint; the guards just keep a transient failure from
  * blocking the erase (assume non-empty and proceed).
  */
+/**
+ * Turn an AI-result blob into a URL that SURVIVES — undo/redo recreates Fabric
+ * images from their serialized `src` (loadFromJSON), and the canvas state is
+ * persisted to Neon, so a `blob:` URL (revoked, page-scoped) would break both.
+ * Primary: upload to ImageKit (same pattern as the Crop tool) → permanent
+ * remote URL. Fallback (offline / upload failed): a `data:` URL — in-session
+ * undo/redo keeps working, and canvas-state.js already knows how to handle
+ * oversized data: srcs at save time.
+ */
+const blobToDataUrl = (blob) =>
+    new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(new Error('could not read result blob'))
+        reader.readAsDataURL(blob)
+    })
+
+const persistResultBlob = async (blob, { signal, label = 'inpaint' } = {}) => {
+    try {
+        const fileName = `${label}-${Date.now()}.png`
+        const form = new FormData()
+        form.append('fileName', fileName)
+        form.append('rasterFile', blob, fileName)
+        form.append('rasterFileName', fileName)
+        const resp = await fetch('/api/imagekit/upload', { method: 'POST', body: form, signal })
+        const data = await resp.json().catch(() => null)
+        if (resp.ok && data?.success && data?.url) return data.url
+        console.warn('[pixel-tool] result upload failed, falling back to data URL:', data?.error || resp.status)
+    } catch (err) {
+        if (err?.name === 'AbortError') throw err
+        console.warn('[pixel-tool] result upload failed, falling back to data URL:', err?.message)
+    }
+    return blobToDataUrl(blob)
+}
+
+/** The /api/ai/inpaint backend for the user's `inpaint` routing preference. */
+const inpaintBackendFromRouting = () => {
+    const mode = getRoutingMode('inpaint')
+    if (mode === 'client') return 'lama'
+    if (mode === 'server') return 'hf'
+    return 'auto'
+}
+
 const sampleMaskCoverage = (imageEl) => {
     const cap = 128
     const iw = imageEl?.naturalWidth || imageEl?.width || 0
@@ -136,6 +180,8 @@ export default function usePixelMaskTool({
     // colour flood) — each setter below clears the other.
     const [objectSelect, setObjectSelectState] = useState(false)
     const [isObjectRunning, setIsObjectRunning] = useState(false)
+    // Phase of the AI object operation: 'detecting' (SAM2), 'filling' (inpaint), or null
+    const [objectPhase, setObjectPhase] = useState(null)
     const [tolerance, setTolerance] = useState(24)
     const [altActive, setAltActive] = useState(false)
 
@@ -1125,6 +1171,8 @@ export default function usePixelMaskTool({
         objectAbortRef.current = controller
         isObjectRunningRef.current = true
         setIsObjectRunning(true)
+        // Phase tracking for UI feedback
+        setObjectPhase?.('detecting')
 
         try {
             const { width: bw, height: bh } = getImageBitmapSize(img)
@@ -1164,7 +1212,19 @@ export default function usePixelMaskTool({
             const resp = await fetch('/api/ai/sam2', { method: 'POST', body: form, signal: controller.signal })
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({}))
+                // Detect model-loading error for user-friendly message
+                if (resp.status === 502 && /model is loading|downloading weights/i.test(err.error || '')) {
+                    throw Object.assign(
+                        new Error('AI model is loading for the first time — please try again in about 30 seconds'),
+                        { isModelLoading: true },
+                    )
+                }
                 throw new Error(err.error || `Object detection failed (${resp.status})`)
+            }
+            // Detect cold-load from response header
+            const wasColdLoad = resp.headers.get('x-cold-load') === 'true'
+            if (wasColdLoad) {
+                toast('AI model loaded — future clicks will be faster', { icon: '✅', duration: 4000 })
             }
             const maskBlob = await resp.blob()
             const decoded = await new Promise((resolve, reject) => {
@@ -1191,6 +1251,7 @@ export default function usePixelMaskTool({
             // ── Inpaint path: fill the erased region with AI-generated background ──
             // Only for erase mode — restore mode still uses the alpha-mask path.
             if (effectiveMode() === 'erase') {
+                setObjectPhase?.('filling')
                 let inpaintSucceeded = false
                 try {
                     // Build full-resolution image canvas (in cropped bitmap space)
@@ -1219,11 +1280,13 @@ export default function usePixelMaskTool({
 
                     if (controller.signal.aborted) return
 
-                    // Call inpaint API
+                    // Call inpaint API. The backend follows the user's AI
+                    // routing preference: Device → LaMa on the local mask
+                    // service, Server → HF Stable Diffusion, Auto → LaMa first.
                     const inpaintForm = new FormData()
                     inpaintForm.append('image', imgBlob, 'image.png')
                     inpaintForm.append('mask', mskBlob, 'mask.png')
-                    inpaintForm.append('backend', 'auto')
+                    inpaintForm.append('backend', inpaintBackendFromRouting())
 
                     const inpaintResp = await fetch('/api/ai/inpaint', {
                         method: 'POST',
@@ -1236,25 +1299,28 @@ export default function usePixelMaskTool({
                         throw new Error(errData.error || `Inpaint failed (${inpaintResp.status})`)
                     }
 
-                    // Decode the inpainted result
                     const resultBlob = await inpaintResp.blob()
-                    const resultUrl = URL.createObjectURL(resultBlob)
 
-                    if (controller.signal.aborted) {
-                        URL.revokeObjectURL(resultUrl)
-                        return
-                    }
+                    // The committed src must outlive this page: undo/redo
+                    // recreates the image from its serialized src and the
+                    // canvas state is persisted, so a blob: URL (revoked,
+                    // page-scoped) would break both. Upload to ImageKit,
+                    // falling back to an inline data: URL.
+                    const resultUrl = await persistResultBlob(resultBlob, {
+                        signal: controller.signal,
+                        label: 'object-remove',
+                    })
+
+                    if (controller.signal.aborted) return
 
                     // Verify the target image hasn't changed while inpainting
                     if (targetImageRef.current !== img
                         || !(canvasEditor?.getObjects?.() || []).includes(img)) {
-                        URL.revokeObjectURL(resultUrl)
                         return
                     }
 
                     // Commit the inpainted image via bitmap replacement (undo-safe)
                     const committed = await commitCleanupUrl(resultUrl)
-                    URL.revokeObjectURL(resultUrl)
 
                     if (committed) {
                         inpaintSucceeded = true
@@ -1321,13 +1387,18 @@ export default function usePixelMaskTool({
             }
         } catch (err) {
             if (err?.name !== 'AbortError') {
-                toast.error(err?.message || 'Object detection failed')
+                if (err?.isModelLoading) {
+                    toast('AI model is warming up — it needs ~30–90s on first use. Try again shortly!', { icon: '⏳', duration: 8000 })
+                } else {
+                    toast.error(err?.message || 'Object detection failed')
+                }
             }
         } finally {
             if (objectAbortRef.current === controller) {
                 objectAbortRef.current = null
                 isObjectRunningRef.current = false
                 setIsObjectRunning(false)
+                setObjectPhase?.(null)
             }
         }
     }, [effectiveMode, pushUndo, snapshot, syncMaskToImage, canvasEditor, commitCleanupUrl])
@@ -1976,7 +2047,7 @@ export default function usePixelMaskTool({
         flow, setFlow,
         feather, setFeather,
         magic, setMagic: setMagicExclusive,
-        objectSelect, setObjectSelect, isObjectRunning,
+        objectSelect, setObjectSelect, isObjectRunning, objectPhase,
         tolerance, setTolerance,
         altActive,
         hasMask, undoDepth, redoDepth,

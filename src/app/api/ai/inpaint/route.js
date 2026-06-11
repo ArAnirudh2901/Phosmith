@@ -140,7 +140,7 @@ const compositePatch = async (imageBuffer, maskBuffer, generatedBuffer, bounds) 
 
 // ─── Backend: LaMa via mask service ─────────────────────────────────────────
 
-const callLamaInpaint = async (imageBuffer, maskBuffer) => {
+const callLamaInpaint = async (imageBuffer, maskBuffer, bounds) => {
   const maskServiceUrl = process.env.MASK_SERVICE_URL?.trim()
   if (!maskServiceUrl) {
     throw new Error('MASK_SERVICE_URL is not configured')
@@ -161,16 +161,39 @@ const callLamaInpaint = async (imageBuffer, maskBuffer) => {
     // support /inpaint even if /health is unreachable.
   }
 
-  const form = new FormData()
-  form.append('image', new Blob([imageBuffer], { type: 'image/png' }), 'image.png')
-  form.append('mask', new Blob([maskBuffer], { type: 'image/png' }), 'mask.png')
+  // Inpaint only the padded region AROUND the mask, not the whole photo —
+  // LaMa runs at native resolution, so a 12MP full-frame pass on CPU takes
+  // minutes (and would blow this route's timeout) while contributing nothing
+  // outside the mask. The crop keeps native sharpness; the patch is
+  // composited back over the original afterwards.
+  const region = { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height }
+  const [imageCrop, maskCrop] = await Promise.all([
+    sharp(imageBuffer, { failOn: 'none' }).rotate().extract(region).png().toBuffer(),
+    sharp(maskBuffer, { failOn: 'none' }).rotate().extract(region).greyscale().png().toBuffer(),
+  ])
 
-  console.info('[ai-inpaint] trying LaMa via mask service:', maskServiceUrl)
-  const response = await fetch(`${maskServiceUrl}/inpaint`, {
-    method: 'POST',
-    body: form,
-    signal: AbortSignal.timeout(30_000),
-  })
+  const form = new FormData()
+  form.append('image', new Blob([imageCrop], { type: 'image/png' }), 'image.png')
+  form.append('mask', new Blob([maskCrop], { type: 'image/png' }), 'mask.png')
+
+  console.info('[ai-inpaint] trying LaMa via mask service:', maskServiceUrl,
+    `(region ${region.width}x${region.height} of ${bounds.sourceWidth}x${bounds.sourceHeight})`)
+  let response
+  try {
+    response = await fetch(`${maskServiceUrl}/inpaint`, {
+      method: 'POST',
+      body: form,
+      // First call lazy-loads the model; large regions are slow on CPU.
+      signal: AbortSignal.timeout(110_000),
+    })
+  } catch (fetchErr) {
+    const isTimeout = /timeout|abort/i.test(fetchErr?.message || '')
+    throw new Error(
+      isTimeout
+        ? 'AI inpaint model is loading for the first time (downloading weights). This takes 30–90 seconds — please try again in a moment.'
+        : `LaMa service unreachable: ${fetchErr?.message}`
+    )
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
@@ -182,7 +205,15 @@ const callLamaInpaint = async (imageBuffer, maskBuffer) => {
     throw new Error('LaMa returned non-image response')
   }
 
-  return Buffer.from(await response.arrayBuffer())
+  // Log cold-load for observability
+  if (response.headers.get('x-cold-load') === 'true') {
+    console.info('[ai-inpaint] LaMa cold load — first request after model download')
+  }
+
+  // Composite the inpainted patch back into the full image (mask-feathered,
+  // same path the HF backend uses — the patch is already bounds-sized).
+  const patch = Buffer.from(await response.arrayBuffer())
+  return compositePatch(imageBuffer, maskBuffer, patch, bounds)
 }
 
 // ─── Backend: Hugging Face SD Inpainting ────────────────────────────────────
@@ -320,8 +351,7 @@ export async function POST(request) {
     const tryLama = requestedBackend === 'lama' || requestedBackend === 'auto'
     if (tryLama) {
       try {
-        // LaMa gets the full image + mask (it handles cropping internally)
-        const lamaResult = await callLamaInpaint(imageBuffer, maskBuffer)
+        const lamaResult = await callLamaInpaint(imageBuffer, maskBuffer, bounds)
         finalBuffer = lamaResult
         usedBackend = 'lama'
       } catch (lamaErr) {

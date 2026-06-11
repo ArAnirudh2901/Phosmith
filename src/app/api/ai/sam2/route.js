@@ -196,9 +196,19 @@ const callSam2Service = async (imageBuffer, clicks, box = null) => {
       model: response.headers.get('x-model') || 'sam2',
       score: response.headers.get('x-score') || '',
       elapsedMs: response.headers.get('x-elapsed-ms') || '',
+      coldLoad: response.headers.get('x-cold-load') === 'true',
     }
   } catch (e) {
-    return { ok: false, reason: e?.message || String(e) }
+    const reason = e?.message || String(e)
+    // Detect timeout during model download/load and give a helpful message
+    const isTimeout = /timeout|abort/i.test(reason)
+    return {
+      ok: false,
+      reason: isTimeout
+        ? 'AI model is loading for the first time (downloading weights). This takes 30–90 seconds — please try again in a moment.'
+        : reason,
+      isModelLoading: isTimeout,
+    }
   }
 }
 
@@ -307,6 +317,7 @@ export async function POST(request) {
         'X-Model': result.model,
         'X-Score': result.score,
         'X-Elapsed-Ms': result.elapsedMs,
+        ...(result.coldLoad ? { 'X-Cold-Load': 'true' } : {}),
       },
     })
   } catch (error) {

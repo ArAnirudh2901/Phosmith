@@ -764,8 +764,9 @@ def _load_sam2(app: FastAPI) -> bool:
         return False
 
 
-def _ensure_sam2(app: FastAPI) -> bool:
-    """Lazily load SAM 2; return True if it's ready to use."""
+def _ensure_sam2(app: FastAPI):
+    """Lazily load SAM 2; return True/'cold' if ready, False if failed.
+    Returns 'cold' on first load (model just downloaded/loaded)."""
     if app.state.sam2_available:
         return True
     if getattr(app.state, "sam2_load_failed", False):
@@ -775,7 +776,8 @@ def _ensure_sam2(app: FastAPI) -> bool:
             return True
         if getattr(app.state, "sam2_load_failed", False):
             return False
-        return _load_sam2(app)
+        ok = _load_sam2(app)
+        return "cold" if ok else False
 
 
 def _load_depth(app: FastAPI) -> bool:
@@ -808,8 +810,9 @@ def _load_depth(app: FastAPI) -> bool:
         return False
 
 
-def _ensure_depth(app: FastAPI) -> bool:
-    """Lazily load Depth Anything V2; return True if it's ready to use."""
+def _ensure_depth(app: FastAPI):
+    """Lazily load Depth Anything V2; return True/'cold' if ready, False if failed.
+    Returns 'cold' on first load (model just downloaded/loaded)."""
     if app.state.depth_available:
         return True
     if getattr(app.state, "depth_load_failed", False):
@@ -819,7 +822,8 @@ def _ensure_depth(app: FastAPI) -> bool:
             return True
         if getattr(app.state, "depth_load_failed", False):
             return False
-        return _load_depth(app)
+        ok = _load_depth(app)
+        return "cold" if ok else False
 
 
 _GROUND_LOCK = threading.Lock()
@@ -855,8 +859,9 @@ def _load_ground(app: FastAPI) -> bool:
         return False
 
 
-def _ensure_ground(app: FastAPI) -> bool:
-    """Lazily load CLIPSeg; return True if it's ready to use."""
+def _ensure_ground(app: FastAPI):
+    """Lazily load CLIPSeg; return True/'cold' if ready, False if failed.
+    Returns 'cold' on first load (model just downloaded/loaded)."""
     if getattr(app.state, "ground_available", False):
         return True
     if getattr(app.state, "ground_load_failed", False):
@@ -866,7 +871,8 @@ def _ensure_ground(app: FastAPI) -> bool:
             return True
         if getattr(app.state, "ground_load_failed", False):
             return False
-        return _load_ground(app)
+        ok = _load_ground(app)
+        return "cold" if ok else False
 
 
 # ─── LaMa inpainting ─────────────────────────────────────────────────────────
@@ -906,8 +912,9 @@ def _load_lama(app: FastAPI) -> bool:
         return False
 
 
-def _ensure_lama(app: FastAPI) -> bool:
-    """Lazily load LaMa; return True if it's ready to use."""
+def _ensure_lama(app: FastAPI):
+    """Lazily load LaMa; return True/'cold' if ready, False if failed.
+    Returns 'cold' on first load (model just downloaded/loaded)."""
     if getattr(app.state, "lama_available", False):
         return True
     if getattr(app.state, "lama_load_failed", False):
@@ -917,7 +924,8 @@ def _ensure_lama(app: FastAPI) -> bool:
             return True
         if getattr(app.state, "lama_load_failed", False):
             return False
-        return _load_lama(app)
+        ok = _load_lama(app)
+        return "cold" if ok else False
 
 
 def _ground_heatmaps(app, img: Image.Image, phrases: "list[str]") -> np.ndarray:
@@ -1225,6 +1233,51 @@ async def health() -> dict:
     }
 
 
+@app.post("/warmup")
+async def warmup() -> dict:
+    """Pre-load all lazy models in background so the first real request is fast.
+
+    Call this once after the Space starts to avoid cold-load latency on the
+    first user interaction. Returns which models were loaded (vs already warm).
+    """
+    results = {}
+
+    # SAM 2
+    sam2_was_loaded = app.state.sam2_available
+    sam2_status = await run_in_threadpool(_ensure_sam2, app)
+    results["sam2"] = (
+        "already_loaded" if sam2_was_loaded
+        else "loaded" if sam2_status else "failed"
+    )
+
+    # Depth Anything V2
+    depth_was_loaded = app.state.depth_available
+    depth_status = await run_in_threadpool(_ensure_depth, app)
+    results["depth"] = (
+        "already_loaded" if depth_was_loaded
+        else "loaded" if depth_status else "failed"
+    )
+
+    # CLIPSeg grounding
+    ground_was_loaded = getattr(app.state, "ground_available", False)
+    ground_status = await run_in_threadpool(_ensure_ground, app)
+    results["ground"] = (
+        "already_loaded" if ground_was_loaded
+        else "loaded" if ground_status else "failed"
+    )
+
+    # LaMa inpainting
+    lama_was_loaded = getattr(app.state, "lama_available", False)
+    lama_status = _ensure_lama(app)
+    results["lama"] = (
+        "already_loaded" if lama_was_loaded
+        else "loaded" if lama_status else "failed"
+    )
+
+    log.info("warmup results: %s", results)
+    return {"status": "ok", "models": results}
+
+
 @app.post("/inpaint")
 async def inpaint(
     image: UploadFile = File(..., alias="image"),
@@ -1238,12 +1291,14 @@ async def inpaint(
 
     Returns the inpainted image as PNG.
     """
-    if not _ensure_lama(app):
+    _lama_status = _ensure_lama(app)
+    if not _lama_status:
         raise HTTPException(
             501,
             "LaMa inpainting is not available. "
             "Install with: pip install simple-lama-inpainting",
         )
+    _lama_cold = _lama_status == "cold"
 
     image_bytes = await _read_limited(image)
     mask_bytes = await _read_limited(mask)
@@ -1269,10 +1324,14 @@ async def inpaint(
     from starlette.concurrency import run_in_threadpool  # type: ignore
 
     png_bytes = await run_in_threadpool(_run)
+    resp_headers = {"Cache-Control": "no-store"}
+    if _lama_cold:
+        resp_headers["X-Cold-Load"] = "true"
+        log.info("LaMa cold load — first request after model download")
     return Response(
         content=png_bytes,
         media_type="image/png",
-        headers={"Cache-Control": "no-store"},
+        headers=resp_headers,
     )
 
 
@@ -1629,13 +1688,15 @@ async def sam2_click(
     Returns a greyscale PNG mask: white = include, black = exclude.
     """
     # Lazily load SAM 2 on first use (no-op once loaded).
-    if not await run_in_threadpool(_ensure_sam2, app):
+    _sam2_status = await run_in_threadpool(_ensure_sam2, app)
+    if not _sam2_status:
         raise HTTPException(
             501,
             "SAM 2 not available on this server. "
             "Install torch + transformers and restart, "
             "or set SAM2_MODEL_ID to a model in your HF cache.",
         )
+    _sam2_cold = _sam2_status == "cold"
 
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(415, f"unsupported content-type: {image.content_type}")
@@ -1760,15 +1821,20 @@ async def sam2_click(
     buf = io.BytesIO()
     mask_img.save(buf, format="PNG", optimize=True)
 
-    return Response(
-        content=buf.getvalue(),
-        media_type="image/png",
-        headers={
+    resp_headers = {
             "Cache-Control": "no-store",
             "X-Model": app.state.sam2_model_id or "sam2",
             "X-Score": f"{float(scores[best_idx]):.4f}",
             "X-Elapsed-Ms": str(int(elapsed * 1000)),
-        },
+        }
+    if _sam2_cold:
+        resp_headers["X-Cold-Load"] = "true"
+        log.info("SAM 2 cold load — first request after model download")
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers=resp_headers,
     )
 
 
@@ -1789,13 +1855,15 @@ async def depth(image: UploadFile = File(..., alias="image")) -> Response:
     in milliseconds.
     """
     # Lazily load Depth Anything V2 on first use (no-op once loaded).
-    if not await run_in_threadpool(_ensure_depth, app):
+    _depth_status = await run_in_threadpool(_ensure_depth, app)
+    if not _depth_status:
         raise HTTPException(
             501,
             "Depth Anything V2 not available on this server. "
             "Install torch + transformers and restart, "
             "or set DEPTH_MODEL_ID to a model in your HF cache.",
         )
+    _depth_cold = _depth_status == "cold"
 
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(415, f"unsupported content-type: {image.content_type}")
@@ -1855,16 +1923,21 @@ async def depth(image: UploadFile = File(..., alias="image")) -> Response:
     buf = io.BytesIO()
     depth_img.save(buf, format="PNG", optimize=True)
 
-    return Response(
-        content=buf.getvalue(),
-        media_type="image/png",
-        headers={
+    resp_headers = {
             "Cache-Control": "no-store",
             "X-Model": app.state.depth_model_id or "depth",
             "X-Width": str(img.width),
             "X-Height": str(img.height),
             "X-Elapsed-Ms": str(int(elapsed * 1000)),
-        },
+        }
+    if _depth_cold:
+        resp_headers["X-Cold-Load"] = "true"
+        log.info("Depth cold load — first request after model download")
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers=resp_headers,
     )
 
 

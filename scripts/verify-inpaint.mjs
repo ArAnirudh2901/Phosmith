@@ -1,149 +1,150 @@
 #!/usr/bin/env node
-// scripts/verify-inpaint.mjs
-// ==========================
-// Smoke-test for the /api/ai/inpaint route. Generates a synthetic test image
-// and mask, POSTs them to the local dev server, and verifies the response.
-//
-// Usage:
-//   bun run verify:inpaint           # or: node scripts/verify-inpaint.mjs
-//   BASE_URL=http://localhost:3000 bun scripts/verify-inpaint.mjs
-//
-// Requires: the dev server running + a valid Clerk session cookie (or
-// CLERK_SECRET_KEY for test auth). For CI, set SKIP_AUTH=1 to bypass.
+/**
+ * End-to-end test for the mask service's /inpaint endpoint (LaMa) — the
+ * engine behind the AI Object Eraser's remove-and-fill.
+ *
+ * (Tests the SERVICE directly, like the other verify scripts — the Next
+ * route in front of it requires a Clerk session, so it can't be driven
+ * headlessly; its backend-selection logic is pure proxying over this.)
+ *
+ * Synthesises a textured background with an obvious foreign object (a red
+ * disc), masks the disc, POSTs both to /inpaint, and asserts:
+ *   - the response is a decodable PNG at the source size
+ *   - the disc REGION is no longer red (the object was actually removed)
+ *   - the filled region's colour resembles the surrounding background
+ *   - pixels OUTSIDE the mask are essentially untouched
+ *
+ * The first call lazy-loads LaMa (downloads the model once), so the request
+ * timeout is generous. Skips gracefully (exit 0) when the service is
+ * unreachable or LaMa isn't installed (501); exits 1 only on a bad result
+ * from a live, LaMa-capable service.
+ */
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3000'
+import sharp from 'sharp'
 
-// ─── Generate a synthetic test image (100×100 red square on white) ──────────
+const MASK_SERVICE_URL = (process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8001')
+  .trim()
+  .replace(/\/+$/, '')
 
-function createTestPNG(width, height, fillRgb = [255, 255, 255]) {
-  // Minimal uncompressed PNG: IHDR + single IDAT (uncompressed deflate)
-  // For simplicity, use a BMP-in-memory approach via canvas if available,
-  // or fall back to a raw RGBA buffer.
-  const pixels = Buffer.alloc(width * height * 4)
-  for (let i = 0; i < width * height; i++) {
-    pixels[i * 4] = fillRgb[0]
-    pixels[i * 4 + 1] = fillRgb[1]
-    pixels[i * 4 + 2] = fillRgb[2]
-    pixels[i * 4 + 3] = 255
-  }
-  return pixels
+const W = 512
+const H = 384
+// Disc well inside the frame; mask is a slightly larger circle around it.
+const CX = 200
+const CY = 190
+const R = 60
+const MASK_R = 78
+
+const log = (msg) => console.log(`[verify-inpaint] ${msg}`)
+const fail = (msg) => { console.error(`[verify-inpaint] ✗ ${msg}`); process.exit(1) }
+const skip = (msg) => { log(`skip — ${msg}`); process.exit(0) }
+
+let checks = 0
+const check = (label, ok, detail = '') => {
+  checks += 1
+  if (!ok) fail(`${label}${detail ? ` — ${detail}` : ''}`)
+  log(`ok ${label}${detail ? ` — ${detail}` : ''}`)
 }
 
-function createMaskPNG(width, height, regionX, regionY, regionW, regionH) {
-  const pixels = Buffer.alloc(width * height * 4)
-  // Black background, white region = inpaint area
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4
-      const inRegion = x >= regionX && x < regionX + regionW && y >= regionY && y < regionY + regionH
-      const v = inRegion ? 255 : 0
-      pixels[i] = v
-      pixels[i + 1] = v
-      pixels[i + 2] = v
-      pixels[i + 3] = 255
+/** Soft green-on-green texture (vertical bands) + a red disc. */
+const synthesize = async () => {
+  const bands = []
+  for (let i = 0; i < 8; i += 1) {
+    const g = 120 + (i % 2) * 24
+    bands.push(`<rect x="${(W / 8) * i}" y="0" width="${W / 8}" height="${H}" fill="rgb(52,${g},70)"/>`)
+  }
+  const sceneSvg = Buffer.from(
+    `<svg width="${W}" height="${H}">${bands.join('')}<circle cx="${CX}" cy="${CY}" r="${R}" fill="rgb(225,30,30)"/></svg>`,
+  )
+  const image = await sharp(sceneSvg).png().toBuffer()
+
+  const maskSvg = Buffer.from(
+    `<svg width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="black"/><circle cx="${CX}" cy="${CY}" r="${MASK_R}" fill="white"/></svg>`,
+  )
+  const mask = await sharp(maskSvg).png().toBuffer()
+  return { image, mask }
+}
+
+/** Mean RGB inside the disc, background reference ring, untouched-zone delta. */
+const analyze = async (pngBuffer, referencePng) => {
+  const { data, info } = await sharp(pngBuffer).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+  if (info.width !== W || info.height !== H) fail(`output is ${info.width}x${info.height}, expected ${W}x${H}`)
+  const ref = await sharp(referencePng).removeAlpha().raw().toBuffer()
+
+  let inR = 0; let inG = 0; let inB = 0; let inN = 0
+  let outDeltaMax = 0
+  let ringG = 0; let ringN = 0
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const d = Math.hypot(x - CX, y - CY)
+      const i = (y * W + x) * 3
+      if (d <= R) {
+        inR += data[i]; inG += data[i + 1]; inB += data[i + 2]; inN += 1
+      } else if (d > MASK_R + 6) {
+        // Untouched zone: must match the source.
+        for (let c = 0; c < 3; c += 1) {
+          outDeltaMax = Math.max(outDeltaMax, Math.abs(data[i + c] - ref[i + c]))
+        }
+        if (d < MASK_R + 40) { ringG += ref[i + 1]; ringN += 1 }
+      }
     }
   }
-  return pixels
+  return {
+    inMean: { r: inR / inN, g: inG / inN, b: inB / inN },
+    ringGreenMean: ringG / ringN,
+    outDeltaMax,
+  }
 }
 
-// Use sharp (already a project dependency) to encode raw RGBA → PNG
-async function rawToPng(buffer, width, height) {
-  const sharp = (await import('sharp')).default
-  return sharp(buffer, { raw: { width, height, channels: 4 } })
-    .png()
-    .toBuffer()
-}
-
-// ─── Test runner ────────────────────────────────────────────────────────────
-
-async function runTest(backend) {
-  const W = 100
-  const H = 100
-
-  console.log(`\n🔬 Testing /api/ai/inpaint with backend="${backend}" ...`)
-
-  const imageRaw = createTestPNG(W, H, [200, 180, 160])
-  const maskRaw = createMaskPNG(W, H, 30, 30, 40, 40) // 40×40 white square in center
-
-  const [imagePng, maskPng] = await Promise.all([
-    rawToPng(imageRaw, W, H),
-    rawToPng(maskRaw, W, H),
-  ])
-
-  const form = new FormData()
-  form.append('image', new Blob([imagePng], { type: 'image/png' }), 'test.png')
-  form.append('mask', new Blob([maskPng], { type: 'image/png' }), 'mask.png')
-  form.append('backend', backend)
-
-  const url = `${BASE_URL}/api/ai/inpaint`
-  console.log(`   POST ${url}`)
-
+const main = async () => {
+  let health
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(`${MASK_SERVICE_URL}/health`, { signal: AbortSignal.timeout(3000) })
+    health = await resp.json()
+  } catch {
+    skip(`mask service unreachable at ${MASK_SERVICE_URL} (bun run mask:dev)`)
+  }
+  if (!health?.lama_available) {
+    skip('LaMa not available on the service (pip install simple-lama-inpainting)')
+  }
+
+  const { image, mask } = await synthesize()
+  const form = new FormData()
+  form.append('image', new Blob([image], { type: 'image/png' }), 'image.png')
+  form.append('mask', new Blob([mask], { type: 'image/png' }), 'mask.png')
+
+  log('POST /inpaint (first call downloads + loads LaMa — may take a few minutes)…')
+  const t0 = Date.now()
+  let resp
+  try {
+    resp = await fetch(`${MASK_SERVICE_URL}/inpaint`, {
       method: 'POST',
       body: form,
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(10 * 60 * 1000),
     })
-
-    const usedBackend = resp.headers.get('x-inpaint-backend') || 'unknown'
-
-    if (resp.ok) {
-      const contentType = resp.headers.get('content-type') || ''
-      const body = await resp.arrayBuffer()
-      console.log(`   ✅ ${resp.status} — ${contentType} — ${body.byteLength} bytes — backend: ${usedBackend}`)
-      return true
-    }
-
-    const errText = await resp.text().catch(() => '')
-    if (resp.status === 401) {
-      console.log(`   ⚠️  401 Unauthorized — need a valid session. Set SKIP_AUTH=1 to bypass auth check.`)
-      return 'auth'
-    }
-    if (resp.status === 501) {
-      console.log(`   ⚠️  501 — backend "${backend}" not configured (expected if no HF token / no mask service)`)
-      return 'not_configured'
-    }
-    console.log(`   ❌ ${resp.status}: ${errText.slice(0, 200)}`)
-    return false
   } catch (err) {
-    if (err?.name === 'TimeoutError') {
-      console.log(`   ❌ Timed out after 60s`)
-    } else {
-      console.log(`   ❌ ${err.message}`)
-    }
-    return false
+    fail(`request failed: ${err?.message}`)
   }
+  if (resp.status === 501) skip('service reports LaMa not installed (501)')
+  if (!resp.ok) fail(`HTTP ${resp.status}: ${(await resp.text().catch(() => '')).slice(0, 200)}`)
+  const ct = resp.headers.get('content-type') || ''
+  check('response is an image', ct.startsWith('image/'), ct)
+
+  const out = Buffer.from(await resp.arrayBuffer())
+  const stats = await analyze(out, image)
+  log(`inpainted in ${((Date.now() - t0) / 1000).toFixed(1)}s — disc region mean rgb(${stats.inMean.r.toFixed(0)},${stats.inMean.g.toFixed(0)},${stats.inMean.b.toFixed(0)})`)
+
+  // The disc was rgb(225,30,30). Removed = no longer red-dominant.
+  check('object removed (region not red anymore)',
+    stats.inMean.r < 140 && stats.inMean.g > stats.inMean.r,
+    `r=${stats.inMean.r.toFixed(0)} g=${stats.inMean.g.toFixed(0)}`)
+  // Fill should resemble the surrounding green texture.
+  check('fill resembles surrounding background',
+    Math.abs(stats.inMean.g - stats.ringGreenMean) < 60,
+    `fill g=${stats.inMean.g.toFixed(0)} vs ring g=${stats.ringGreenMean.toFixed(0)}`)
+  // Outside the mask the image must be essentially untouched.
+  check('pixels outside the mask are untouched', stats.outDeltaMax <= 8, `max delta ${stats.outDeltaMax}`)
+
+  console.log(`\n[verify-inpaint] ✓ all ${checks} checks passed (LaMa object removal verified)`)
 }
 
-async function main() {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  console.log('  verify-inpaint: end-to-end inpaint route smoke test')
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  console.log(`  Base URL: ${BASE_URL}`)
-
-  // Test auto (tries LaMa → HF), then explicit backends
-  const results = {}
-  for (const backend of ['auto', 'lama', 'hf']) {
-    results[backend] = await runTest(backend)
-  }
-
-  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  console.log('  Results:')
-  for (const [backend, result] of Object.entries(results)) {
-    const icon = result === true ? '✅' : result === 'auth' ? '🔒' : result === 'not_configured' ? '⚠️' : '❌'
-    console.log(`    ${icon} ${backend}: ${result}`)
-  }
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-
-  const failed = Object.values(results).some(r => r === false)
-  if (failed) {
-    console.log('\n❌ Some tests failed')
-    process.exit(1)
-  }
-  console.log('\n✅ All tests passed (or expected skip)')
-}
-
-main().catch((err) => {
-  console.error('Fatal:', err)
-  process.exit(1)
-})
+main().catch((err) => fail(err?.message || String(err)))

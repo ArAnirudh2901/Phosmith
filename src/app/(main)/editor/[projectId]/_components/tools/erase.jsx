@@ -117,8 +117,46 @@ const EraseControls = ({ project, dominantColor }) => {
         livePreview: false,
     })
     const [isAutoErasing, setIsAutoErasing] = useState(false)
+    const [maskServiceStatus, setMaskServiceStatus] = useState(null) // null | 'checking' | 'warm' | 'cold' | 'warming' | 'unavailable'
     const abortRef = useRef(null)
+    const warmupTriggeredRef = useRef(false)
     const { setMagic, setMode, setObjectSelect } = tool
+
+    // Proactively check mask service health and trigger warmup on first mount
+    useEffect(() => {
+        if (warmupTriggeredRef.current) return
+        warmupTriggeredRef.current = true
+        let cancelled = false
+        ;(async () => {
+            try {
+                setMaskServiceStatus('checking')
+                const resp = await fetch('/api/ai/warmup', { signal: AbortSignal.timeout(5000) })
+                if (cancelled) return
+                if (!resp.ok) {
+                    setMaskServiceStatus('unavailable')
+                    return
+                }
+                const data = await resp.json()
+                if (!data.configured) {
+                    setMaskServiceStatus('unavailable')
+                    return
+                }
+                if (data.allWarm) {
+                    setMaskServiceStatus('warm')
+                    return
+                }
+                // Models not all loaded — trigger warmup in background
+                setMaskServiceStatus('warming')
+                fetch('/api/ai/warmup', { method: 'POST' })
+                    .then((r) => r.ok ? r.json() : null)
+                    .then(() => { if (!cancelled) setMaskServiceStatus('warm') })
+                    .catch(() => { if (!cancelled) setMaskServiceStatus('cold') })
+            } catch {
+                if (!cancelled) setMaskServiceStatus('cold')
+            }
+        })()
+        return () => { cancelled = true }
+    }, [])
 
     const canUseAi = hasAccess(PRO_BG_TOOL)
     const backgroundRemovalUrls = useMemo(() => buildBackgroundRemovalUrls(project), [project])
@@ -253,6 +291,28 @@ const EraseControls = ({ project, dominantColor }) => {
                 objects to erase each (multi-subject by accumulation). */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <label className="panel-label">AI Object Remover</label>
+
+                {/* Warmup status banner */}
+                {maskServiceStatus === 'warming' && (
+                    <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[10px]"
+                        style={{ background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251,191,36,0.2)', color: 'rgba(251,191,36,0.9)' }}>
+                        <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                        AI models are warming up in the background… first click will be fast once ready
+                    </div>
+                )}
+                {maskServiceStatus === 'cold' && (
+                    <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[10px]"
+                        style={{ background: 'rgba(251, 191, 36, 0.06)', border: '1px solid rgba(251,191,36,0.15)', color: 'rgba(251,191,36,0.7)' }}>
+                        ⚡ First click may take 30–90s while AI models load
+                    </div>
+                )}
+                {maskServiceStatus === 'unavailable' && (
+                    <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[10px]"
+                        style={{ background: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239,68,68,0.15)', color: 'rgba(239,68,68,0.7)' }}>
+                        ⚠ AI service not connected — object remover unavailable
+                    </div>
+                )}
+
                 <motion.button
                     type="button"
                     onClick={() => tool.setObjectSelect(!tool.objectSelect)}
@@ -276,11 +336,15 @@ const EraseControls = ({ project, dominantColor }) => {
                     <div className="min-w-0">
                         <div className="text-xs font-semibold">
                             {tool.isObjectRunning
-                                ? 'Removing object…'
+                                ? (tool.objectPhase === 'filling' ? 'Filling background…' : 'Detecting object…')
                                 : tool.objectSelect ? 'Click-to-remove: ON' : 'Click-to-remove: OFF'}
                         </div>
                         <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                            SAM 2 detects the object, AI fills the background — click each subject to remove
+                            {tool.isObjectRunning
+                                ? (tool.objectPhase === 'filling'
+                                    ? 'AI is generating the background texture'
+                                    : 'SAM 2 is segmenting the object you clicked')
+                                : 'SAM 2 detects the object, AI fills the background — click each subject to remove'}
                         </div>
                     </div>
                 </motion.button>
