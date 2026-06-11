@@ -1,11 +1,44 @@
 "use client"
 
-import { CheckCheck, Crop, Maximize, RectangleHorizontal, RectangleVertical, Smartphone, Square, X } from 'lucide-react'
+import { CheckCheck, Crop, Loader2, Maximize, Mountain, RectangleHorizontal, RectangleVertical, Scissors, Smartphone, Sparkles, Square, Users, X } from 'lucide-react'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useCanvas } from '../../../../../../../context/context'
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { createPortal } from 'react-dom'
+
+/**
+ * Auto-Crop strategies surfaced to the user. Each strategy is one click; the
+ * Auto-Crop panel forwards the optional aspect ratio of the active preset
+ * (when any) to /api/ai/auto-crop so subject-aware composition can be fitted
+ * to e.g. 4:5 / 9:16 in a single round trip.
+ */
+const AUTO_CROP_MODES = [
+    {
+        id: "subject",
+        label: "Subject-Aware",
+        sub: "Detects every subject + thirds composition",
+        icon: Users,
+    },
+    {
+        id: "aspect",
+        label: "Aspect Preset",
+        sub: "Max-area fit to the selected ratio",
+        icon: RectangleHorizontal,
+    },
+    {
+        id: "content",
+        label: "Content-Fill",
+        sub: "Trims near-solid borders / matting",
+        icon: Scissors,
+    },
+    {
+        id: "depth",
+        label: "Depth Foreground",
+        sub: "Crops to the nearest plane (slow first run)",
+        icon: Mountain,
+    },
+]
 
 const CROP_PRESETS = [
     { id: "freeform", label: "Freeform", value: null, icon: Maximize, ratio: "Any" },
@@ -506,6 +539,155 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         applyCropPreset(preset)
     }, [applyCropPreset, canvasEditor, getActiveImage, initializeCropMode, isCropMode, selectedImage])
 
+    // ─── Auto-Crop ──────────────────────────────────────────────────────────
+    // Calls /api/ai/auto-crop, converts the returned image-pixel box to a
+    // canvas-space cropBox, and either previews it in the existing crop
+    // overlay or applies it directly.
+    const [autoBusy, setAutoBusy] = useState(null) // null | 'subject' | 'aspect' | ...
+    const [autoResults, setAutoResults] = useState(null) // { crops, recommended, subjects }
+    const [autoStrategy, setAutoStrategy] = useState(null)
+    const autoAbortRef = useRef(null)
+
+    /** Convert an image-pixel `[x,y,w,h]` box to a canvas-space cropBox. */
+    const imagePixelBoxToCropBox = useCallback((image, [x, y, w, h]) => {
+        if (!image) return null
+        const imgBounds = getImageCanvasBounds(image)
+        if (!imgBounds) return null
+        const sx = Math.abs(image.scaleX || 1)
+        const sy = Math.abs(image.scaleY || 1)
+        return {
+            left: imgBounds.left + x * sx,
+            top: imgBounds.top + y * sy,
+            width: w * sx,
+            height: h * sy,
+        }
+    }, [])
+
+    const getActivePresetAspect = useCallback(() => {
+        const preset = CROP_PRESETS.find((p) => p.id === selectedPresetId)
+        return preset?.value || null
+    }, [selectedPresetId])
+
+    const runAutoCrop = useCallback(async (modeId, { autoApply = false } = {}) => {
+        const image = selectedImage || getActiveImage(canvasEditor)
+        if (!image) { toast.error("Select an image first"); return }
+
+        const sourceEl =
+            image._originalElement || image.getElement?.() || image._element
+        if (!sourceEl) { toast.error("Image not ready"); return }
+        const sw = sourceEl.naturalWidth || sourceEl.width
+        const sh = sourceEl.naturalHeight || sourceEl.height
+        if (!sw || !sh) { toast.error("Image has no dimensions"); return }
+
+        // Cancel any in-flight request before kicking a new one.
+        autoAbortRef.current?.abort?.()
+        const ac = new AbortController()
+        autoAbortRef.current = ac
+
+        const aspect = getActivePresetAspect()
+        setAutoBusy(modeId)
+        const toastId = toast.loading(`Auto-crop (${modeId})…`)
+
+        try {
+            // Capture the image source to a sized JPEG (the route caps at 2048).
+            const MAX = 2048
+            const scale = Math.min(1, MAX / Math.max(sw, sh))
+            const w = Math.max(1, Math.round(sw * scale))
+            const h = Math.max(1, Math.round(sh * scale))
+            const off = document.createElement('canvas')
+            off.width = w
+            off.height = h
+            off.getContext('2d').drawImage(sourceEl, 0, 0, w, h)
+            const blob = await new Promise((res, rej) =>
+                off.toBlob((b) => (b ? res(b) : rej(new Error("encode failed"))), 'image/jpeg', 0.88),
+            )
+
+            const form = new FormData()
+            form.append('image', blob, 'image.jpg')
+            form.append('mode', modeId === 'subject' || modeId === 'aspect' || modeId === 'content' || modeId === 'depth' ? modeId : 'all')
+            if (aspect) form.append('aspect', String(aspect))
+
+            const resp = await fetch('/api/ai/auto-crop', { method: 'POST', body: form, signal: ac.signal })
+            const data = await resp.json().catch(() => ({}))
+            if (!resp.ok) {
+                throw new Error(data?.error || `Auto-crop failed (${resp.status})`)
+            }
+
+            const chosen = data.crops?.[modeId]
+            if (!chosen?.box) {
+                throw new Error(
+                    modeId === 'aspect' && !aspect
+                        ? "Pick an aspect preset first (e.g. Square or YouTube Thumb)."
+                        : `Couldn't compute a ${modeId} crop for this image — try another strategy.`,
+                )
+            }
+
+            setAutoResults(data)
+            setAutoStrategy(modeId)
+
+            // ── "Already tight" detection ──────────────────────────────────
+            // Backend flags `already_tight` when the crop box covers ≥ 92% of
+            // the frame. Client-side fallback: compare box area to image dims.
+            const [bx, by, bw, bh] = chosen.box
+            const imgArea = (data.width || sw) * (data.height || sh)
+            const boxArea = bw * bh
+            const isAlreadyTight =
+                chosen.already_tight === true ||
+                (imgArea > 0 && (boxArea / imgArea) >= 0.92)
+
+            if (isAlreadyTight) {
+                // Check if any OTHER strategy returned a non-tight result we
+                // can suggest as an alternative.
+                const alternatives = Object.entries(data.crops || {})
+                    .filter(([k, v]) => k !== modeId && v?.box && !v.already_tight)
+                    .map(([k]) => k)
+
+                let message = `Photo is already tightly framed around the subject — no further ${modeId} cropping needed`
+                if (alternatives.length > 0) {
+                    message += `. Try ${alternatives.map((a) => a.charAt(0).toUpperCase() + a.slice(1)).join(' or ')} instead`
+                }
+                toast.info(message, { id: toastId, duration: 5000 })
+                return
+            }
+
+            const newBox = imagePixelBoxToCropBox(image, chosen.box)
+            if (!newBox) throw new Error("Could not place crop box on canvas")
+
+            if (!isCropMode) {
+                initializeCropMode(image, CROP_PRESETS.find((p) => p.id === selectedPresetId) || CROP_PRESETS[0])
+            }
+            setCropBox(newBox)
+            setInteractionMode("frame")
+
+            const sub = data.subjects?.length
+                ? `${data.subjects.length} subject${data.subjects.length === 1 ? '' : 's'}`
+                : null
+            toast.success(
+                `Auto-crop ready (${chosen.rationale}${sub ? ' · ' + sub : ''})`,
+                { id: toastId },
+            )
+
+            if (autoApply) {
+                // Defer one frame so cropBox state is committed before applyCrop reads it.
+                requestAnimationFrame(() => {
+                    // applyCrop is defined below — guard against undefined during tree-shaking.
+                    document.dispatchEvent(new CustomEvent('pixxel:crop-auto-apply'))
+                })
+            }
+        } catch (err) {
+            if (err?.name === 'AbortError') {
+                toast.dismiss(toastId)
+                return
+            }
+            console.error('[crop.auto]', err)
+            toast.error(err?.message || "Auto-crop failed", { id: toastId })
+        } finally {
+            setAutoBusy(null)
+        }
+    }, [canvasEditor, selectedImage, getActiveImage, getActivePresetAspect, imagePixelBoxToCropBox, initializeCropMode, isCropMode, selectedPresetId])
+
+    useEffect(() => () => autoAbortRef.current?.abort?.(), [])
+
     useEffect(() => {
         if (!canvasEditor || !selectedImage || !isCropMode) return
 
@@ -692,6 +874,72 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                         <Crop className='h-3.5 w-3.5' />
                         Start Crop
                     </button>
+                )}
+
+                {activeImage && (
+                    <div>
+                        <label className='panel-label mb-2.5 flex items-center gap-1.5'>
+                            <Sparkles className='h-3 w-3' style={{ color: dominantColor || 'var(--accent-primary)' }} />
+                            Auto-Crop (AI)
+                            {autoResults?.subjects?.length ? (
+                                <span className='ml-auto text-[10px] font-normal' style={{ color: 'var(--text-muted)' }}>
+                                    {autoResults.subjects.length} subject{autoResults.subjects.length === 1 ? '' : 's'}
+                                </span>
+                            ) : null}
+                        </label>
+                        <div className='grid grid-cols-2 gap-1.5'>
+                            {AUTO_CROP_MODES.map((mode) => {
+                                const Icon = mode.icon
+                                const busy = autoBusy === mode.id
+                                const active = autoStrategy === mode.id
+                                const disabledAspect = mode.id === 'aspect' && !getActivePresetAspect()
+                                return (
+                                    <button
+                                        key={mode.id}
+                                        type='button'
+                                        onClick={() => runAutoCrop(mode.id)}
+                                        disabled={busy || disabledAspect}
+                                        title={disabledAspect ? 'Select an aspect preset below first' : mode.sub}
+                                        className='rounded-lg p-2.5 text-left editor-interactive disabled:opacity-50 disabled:cursor-not-allowed'
+                                        style={{
+                                            border: `1px solid ${active ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            background: active
+                                                ? (dominantColor ? `${dominantColor}1a` : 'rgba(6,184,212,0.14)')
+                                                : 'var(--bg-elevated)',
+                                        }}
+                                    >
+                                        <div className='flex items-start gap-2'>
+                                            {busy ? (
+                                                <Loader2 className='h-4 w-4 flex-none mt-0.5 animate-spin'
+                                                    style={{ color: dominantColor || 'var(--accent-primary)' }} />
+                                            ) : (
+                                                <Icon className='h-4 w-4 flex-none mt-0.5'
+                                                    style={{ color: active ? dominantColor || 'var(--accent-primary)' : 'var(--text-secondary)' }} />
+                                            )}
+                                            <div className='min-w-0'>
+                                                <div className='truncate text-[11px] font-semibold'
+                                                    style={{ color: active ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
+                                                    {mode.label}
+                                                </div>
+                                                <div className='mt-0.5 text-[9.5px] leading-tight' style={{ color: 'var(--text-muted)' }}>
+                                                    {mode.sub}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </button>
+                                )
+                            })}
+                        </div>
+                        {autoResults?.recommended && (
+                            <p className='mt-2 text-[10px]' style={{ color: 'var(--text-muted)' }}>
+                                Recommended: <strong style={{ color: dominantColor || 'var(--accent-primary)' }}>{autoResults.recommended}</strong>
+                                {autoResults.crops?.[autoResults.recommended]?.score
+                                    ? ` · score ${(autoResults.crops[autoResults.recommended].score * 100).toFixed(0)}%`
+                                    : ''}
+                                . Click <strong>Crop</strong> below to confirm.
+                            </p>
+                        )}
+                    </div>
                 )}
 
                 {activeImage && (

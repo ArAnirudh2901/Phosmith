@@ -59,8 +59,11 @@ const readImageMeta = async (inputBuffer) => {
   return { origWidth: origW, origHeight: origH }
 }
 
-const parseClicks = (raw) => {
-  if (raw == null) throw new Error('clicks is required')
+const parseClicks = (raw, { optional = false } = {}) => {
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
+    if (optional) return []
+    throw new Error('clicks is required')
+  }
   if (typeof raw !== 'string') throw new Error('clicks must be a JSON string')
   let data
   try {
@@ -69,6 +72,7 @@ const parseClicks = (raw) => {
     throw new Error(`invalid clicks JSON: ${e.message}`)
   }
   if (!Array.isArray(data) || data.length === 0) {
+    if (optional && Array.isArray(data)) return []
     throw new Error('clicks must be a non-empty array')
   }
   if (data.length > MAX_CLICKS) {
@@ -101,6 +105,26 @@ const validateClicksInBounds = (clicks, origWidth, origHeight) => {
       )
     }
   }
+}
+
+/** Optional SAM 2 box prompt: JSON [x0, y0, x1, y1] in ORIGINAL image px. */
+const parseBox = (raw, origWidth, origHeight) => {
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) return null
+  if (typeof raw !== 'string') throw new Error('box must be a JSON string')
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch (e) {
+    throw new Error(`invalid box JSON: ${e.message}`)
+  }
+  if (!Array.isArray(data) || data.length !== 4 || data.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
+    throw new Error(`box must be [x0, y0, x1, y1] numbers; got ${JSON.stringify(data)}`)
+  }
+  const [x0, y0, x1, y1] = data
+  if (!(x0 >= 0 && y0 >= 0 && x1 > x0 && y1 > y0 && x1 <= origWidth && y1 <= origHeight)) {
+    throw new Error(`box ${JSON.stringify(data)} is degenerate or outside image (${origWidth}x${origHeight})`)
+  }
+  return data
 }
 
 const prepareImage = async (inputBuffer, origWidth, origHeight) => {
@@ -141,7 +165,7 @@ const refineMaskEdges = async (pngBuffer, modelW, modelH, origW, origH) => {
     .toBuffer()
 }
 
-const callSam2Service = async (imageBuffer, clicks) => {
+const callSam2Service = async (imageBuffer, clicks, box = null) => {
   if (!MASK_SERVICE_URL) {
     return { ok: false, reason: 'MASK_SERVICE_URL not configured' }
   }
@@ -149,7 +173,8 @@ const callSam2Service = async (imageBuffer, clicks) => {
   try {
     const formData = new FormData()
     formData.append('image', new Blob([imageBuffer], { type: 'image/jpeg' }), 'image.jpg')
-    formData.append('clicks', JSON.stringify(clicks))
+    if (clicks.length) formData.append('clicks', JSON.stringify(clicks))
+    if (box) formData.append('box', JSON.stringify(box))
 
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -184,9 +209,11 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // Shares the ai-segment bucket — both are SOTA model calls with
-    // comparable cost (encoder cold-start + decoder inference).
-    const limited = rateLimitResponse(await enforceRateLimit('ai-segment', userId))
+    // Dedicated bucket: SAM 2 prompts are interactive (the Mask tool's
+    // click-to-select and the Erase tool's AI Object Eraser fire one call
+    // PER CLICK), so sharing ai-segment's 5/min would rate-limit a normal
+    // multi-subject click burst.
+    const limited = rateLimitResponse(await enforceRateLimit('ai-sam2', userId))
     if (limited) return limited
 
     if (!MASK_SERVICE_URL) {
@@ -221,7 +248,11 @@ export async function POST(request) {
     // coordinates and we scale them here, hiding the resize constant.
     const meta = await readImageMeta(imageBuffer)
 
-    const clicksOriginal = parseClicks(formData.get('clicks'))
+    const boxOriginal = parseBox(formData.get('box'), meta.origWidth, meta.origHeight)
+    const clicksOriginal = parseClicks(formData.get('clicks'), { optional: Boolean(boxOriginal) })
+    if (!clicksOriginal.length && !boxOriginal) {
+      return NextResponse.json({ error: 'provide clicks and/or a box prompt' }, { status: 400 })
+    }
     validateClicksInBounds(clicksOriginal, meta.origWidth, meta.origHeight)
 
     const prepared = await prepareImage(imageBuffer, meta.origWidth, meta.origHeight)
@@ -230,15 +261,17 @@ export async function POST(request) {
       y * prepared.scale,
       label,
     ])
+    const boxScaled = boxOriginal ? boxOriginal.map((v) => v * prepared.scale) : null
 
     console.info(
       '[ai-sam2] image:', prepared.width, 'x', prepared.height,
       '→ orig:', meta.origWidth, 'x', meta.origHeight,
       '· scale:', prepared.scale.toFixed(4),
       '· clicks:', clicksOriginal.length,
+      boxOriginal ? '· box' : '',
     )
 
-    const result = await callSam2Service(prepared.buffer, clicksScaled)
+    const result = await callSam2Service(prepared.buffer, clicksScaled, boxScaled)
     if (!result.ok) {
       console.warn('[ai-sam2] service failed:', result.reason)
       const status = /not configured|not available/i.test(result.reason) ? 501 : 502

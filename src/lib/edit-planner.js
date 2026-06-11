@@ -19,7 +19,14 @@ import { ADJUSTMENT_RANGES, ADJUSTMENT_REASONS, STYLE_PROFILES } from "./style-p
 //     technicolor, lomography, earthy-muted) AND a directAdjustments channel
 //     so explicit tonal requests ("30% brighter", "warmer", "add grain") apply
 //     even with no named style. Old caches lacked both.
-export const PLANNER_VERSION = 5
+// v6: criticFeedback channel — the judge/critic loop (see agent/critic.js and
+//     /api/ai/edit-judge) re-enters the planner with a SMALL ADDITIVE corrective
+//     delta ("lift highlights -8 inside mask") instead of a full re-plan. The
+//     corrective layer applies LAST (after style, corrections, and direct
+//     adjustments) and bypasses the no-change guard, because a corrective by
+//     definition means the previous output needs to move. Old cached plans
+//     never carried corrective state, so a version bump invalidates cleanly.
+export const PLANNER_VERSION = 6
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
@@ -175,6 +182,10 @@ export const buildEditPlan = ({
     notes = "",
     imagekitAi = {},
     directAdjustments = null,
+    // v6: corrective feedback from the critic loop — `{ deltas, notes, axis }`.
+    // `deltas` are SIGNED moves from the previous output (e.g. {brightness: -8})
+    // in the same units as STYLE_PROFILES; they apply as the LAST layer.
+    criticFeedback = null,
 } = {}) => {
     const safeGain = alreadyMatchesTarget
         ? 0
@@ -186,11 +197,33 @@ export const buildEditPlan = ({
     const directVec = sanitizeDirectAdjustments(directAdjustments)
     const hasDirect = Object.keys(directVec).length > 0
 
+    // v6: corrective deltas from the critic. Deltas are signed moves, so they
+    // are converted to absolute values around each range's neutral before the
+    // sanitizer (which expects absolutes) sees them. An empty/invalid payload
+    // degrades to "no corrective" — the loop never crashes the planner.
+    const criticVec = (() => {
+        const deltas = criticFeedback?.deltas
+        if (!deltas || typeof deltas !== "object") return {}
+        const abs = {}
+        for (const [key, delta] of Object.entries(deltas)) {
+            const range = ADJUSTMENT_RANGES[key]
+            const num = Number(delta)
+            if (!range || !Number.isFinite(num)) continue
+            abs[key] = range.neutral + num
+        }
+        return sanitizeDirectAdjustments(abs)
+    })()
+    const hasCorrective = Object.keys(criticVec).length > 0
+    const correctiveNotes = hasCorrective || criticFeedback?.notes
+        ? String(criticFeedback?.notes || "").trim()
+        : ""
+
     // No-change guard: if the image already matches the target AND gain is 0 AND
     // the user didn't ask for any explicit adjustment, return a zero-change plan.
     // This guarantees idempotency for pure restyle prompts on already-styled
-    // images — but never suppresses an explicit direct adjustment.
-    if (alreadyMatchesTarget && safeGain === 0 && !hasDirect) {
+    // images — but never suppresses an explicit direct adjustment or a critic
+    // corrective (a corrective means the previous output must move).
+    if (alreadyMatchesTarget && safeGain === 0 && !hasDirect && !hasCorrective) {
         return {
             plannerVersion: PLANNER_VERSION,
             currentStyle,
@@ -215,8 +248,8 @@ export const buildEditPlan = ({
     // target (gain 0). In that case apply just the requested delta — do not drag
     // in the objective correction stack (brightness/contrast/gamma), which the
     // user did not ask for. So "make it warmer" applies only the warmth move.
-    const directOnly = alreadyMatchesTarget && safeGain === 0 && hasDirect
-    const merged = directOnly
+    const directOnly = alreadyMatchesTarget && safeGain === 0 && (hasDirect || hasCorrective)
+    const base = directOnly
         ? mergeAdjustments({}, directVec)
         : (() => {
               const styleVec = STYLE_PROFILES[targetStyle] || STYLE_PROFILES.neutral
@@ -228,7 +261,14 @@ export const buildEditPlan = ({
               // always apply even when style gain is 0.
               return mergeAdjustments(mergeAdjustments(scaledStyle, corrections), directVec)
           })()
+    // v6: the critic corrective is the FINAL layer — it encodes what the judge
+    // saw in the actual rendered output, which trumps every prior heuristic.
+    const merged = hasCorrective ? mergeAdjustments(base, criticVec) : base
     const entries = enumerateEntries(merged)
+
+    const combinedNotes = [String(notes || "").trim(), correctiveNotes]
+        .filter(Boolean)
+        .join(" | ")
 
     return {
         plannerVersion: PLANNER_VERSION,
@@ -236,7 +276,8 @@ export const buildEditPlan = ({
         targetStyle,
         gain: safeGain,
         alreadyMatchesTarget,
-        notes: String(notes || "").trim(),
+        notes: combinedNotes,
+        criticApplied: hasCorrective ? { axis: criticFeedback?.axis ?? null, deltas: criticFeedback?.deltas ?? null } : null,
         adjustments: merged,
         entries,
         imagekitAi: {

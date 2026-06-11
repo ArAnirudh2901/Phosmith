@@ -118,7 +118,7 @@ const EraseControls = ({ project, dominantColor }) => {
     })
     const [isAutoErasing, setIsAutoErasing] = useState(false)
     const abortRef = useRef(null)
-    const { setMagic, setMode } = tool
+    const { setMagic, setMode, setObjectSelect } = tool
 
     const canUseAi = hasAccess(PRO_BG_TOOL)
     const backgroundRemovalUrls = useMemo(() => buildBackgroundRemovalUrls(project), [project])
@@ -132,15 +132,15 @@ const EraseControls = ({ project, dominantColor }) => {
             const { toolId, subId } = event.detail || {}
             if (toolId !== 'erase' || !subId) return
             if (subId === 'magic') setMagic(true)
-            else if (subId === 'brush') { setMagic(false); setMode('erase') }
-            else if (subId === 'restore') { setMagic(false); setMode('restore') }
+            else if (subId === 'brush') { setMagic(false); setObjectSelect(false); setMode('erase') }
+            else if (subId === 'restore') { setMagic(false); setObjectSelect(false); setMode('restore') }
             else if (subId === 'auto') handleAutoEraseRef.current?.()
         }
         window.addEventListener('pixxel:tool-sub', onSub)
         return () => window.removeEventListener('pixxel:tool-sub', onSub)
-        // setMagic/setMode are stable useState setters and handleAutoEraseRef is a
+        // setMagic/setMode/setObjectSelect are stable and handleAutoEraseRef is a
         // ref, so the listener binds once instead of re-binding every render.
-    }, [setMagic, setMode])
+    }, [setMagic, setMode, setObjectSelect])
 
     const handleAutoErase = useCallback(async () => {
         if (!canvasEditor || isAutoErasing) return
@@ -248,6 +248,44 @@ const EraseControls = ({ project, dominantColor }) => {
                 )}
             </div>
 
+            {/* AI object eraser — SAM 2: click an object, the model segments
+                the WHOLE object under the pointer and erases it. Click more
+                objects to erase each (multi-subject by accumulation). */}
+            <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                <label className="panel-label">AI Object Eraser</label>
+                <motion.button
+                    type="button"
+                    onClick={() => tool.setObjectSelect(!tool.objectSelect)}
+                    whileTap={{ scale: 0.97 }}
+                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left editor-interactive"
+                    style={{
+                        background: tool.objectSelect ? 'rgba(124, 58, 237, 0.1)' : 'transparent',
+                        border: `1px solid ${tool.objectSelect ? 'rgba(124,58,237,0.6)' : 'var(--border-subtle)'}`,
+                        color: tool.objectSelect ? '#C4B5FD' : 'var(--text-secondary)',
+                    }}
+                >
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0"
+                        style={{
+                            background: tool.objectSelect ? 'rgba(124,58,237,0.15)' : 'var(--bg-elevated)',
+                            border: `1px solid ${tool.objectSelect ? 'rgba(124,58,237,0.5)' : 'var(--border-default)'}`,
+                        }}>
+                        {tool.isObjectRunning
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <Sparkles className="h-4 w-4" />}
+                    </div>
+                    <div className="min-w-0">
+                        <div className="text-xs font-semibold">
+                            {tool.isObjectRunning
+                                ? 'Detecting object…'
+                                : tool.objectSelect ? 'Click-object erase: ON' : 'Click-object erase: OFF'}
+                        </div>
+                        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                            SAM 2 segments the whole object you click — repeat for multiple subjects
+                        </div>
+                    </div>
+                </motion.button>
+            </div>
+
             {/* Magic eraser toggle */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <label className="panel-label">Magic Eraser</label>
@@ -292,8 +330,8 @@ const EraseControls = ({ project, dominantColor }) => {
                 <ModeToggle mode={tool.mode} setMode={tool.setMode} altActive={tool.altActive} />
             </div>
 
-            {/* Brush controls — hidden when magic click mode is active */}
-            {!tool.magic && (
+            {/* Brush controls — hidden when a click mode (magic / AI object) is active */}
+            {!tool.magic && !tool.objectSelect && (
                 <div className="space-y-3" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                     <BrushSizeControl value={tool.brushSize} setValue={tool.setBrushSize} min={MIN_BRUSH} max={MAX_BRUSH} dominantColor={dominantColor} />
                     <LabeledSlider label="Hardness" value={tool.hardness} min={1} max={100} suffix="%" onChange={tool.setHardness} dominantColor={dominantColor} />
@@ -318,6 +356,7 @@ const EraseControls = ({ project, dominantColor }) => {
 
             <TipCard>
                 <p>• <strong>Paint</strong> over what you want to erase — the exact stroke is removed when you release</p>
+                <p>• <strong>AI object eraser</strong>: click an object and SAM 2 removes the whole thing — click each subject to erase several</p>
                 <p>• <strong>Magic eraser</strong>: click a contiguous color region to remove it</p>
                 <p>• Hold <strong>Alt</strong> to temporarily switch Erase ↔ Restore</p>
                 <p>• <strong>[</strong> / <strong>]</strong> resize the brush; raise feather for soft edges</p>

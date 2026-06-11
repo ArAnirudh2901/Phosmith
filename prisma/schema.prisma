@@ -71,6 +71,8 @@ model User {
   agentEditSets             AgentEditSet[]
   agentEditSetSnapshots     AgentEditSetSnapshot[]
   firstTriggeredEditPlanRows EditPlanCache[]
+  firstTriggeredEditJudgeRows EditJudgeCache[]
+  agentRuns                 AgentRun[]
 
   @@index([email])
   @@index([name])
@@ -102,6 +104,8 @@ model Project {
   agentEditSets             AgentEditSet[]
   agentEditSetSnapshots     AgentEditSetSnapshot[]
   firstTriggeredEditPlanRows EditPlanCache[]
+  firstTriggeredEditJudgeRows EditJudgeCache[]
+  agentRuns                 AgentRun[]
 
   @@index([userId])
   @@index([userId, updatedAt])
@@ -229,4 +233,60 @@ model EditPlanCache {
   @@unique([imageHash, promptKey, plannerVersion])
   @@index([pHashHead, promptKey, plannerVersion])
   @@index([pHashTail, promptKey, plannerVersion])
+}
+
+// 12-axis edit-judge verdicts (see /api/ai/edit-judge). Same cache discipline
+// as EditPlanCache: identical (beforeHash, afterHash, planHash, judgeVersion)
+// tuples return byte-identical scores forever.
+model EditJudgeCache {
+  id             String   @id @default(cuid())
+  beforeHash     String
+  afterHash      String
+  planHash       String
+  judgeVersion   Int
+  axes           Json
+  overall        Float
+  correctiveHint String?
+  source         String
+  projectId      String?
+  project        Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  model          String?
+  rawResponse    Json?
+  createdAt      DateTime @default(now())
+
+  @@unique([beforeHash, afterHash, planHash, judgeVersion])
+  @@index([projectId, createdAt])
+}
+
+// Durable per-step agent-run state (plan→execute→judge→critic loop). A crashed
+// run resumes from the last completed step instead of replanning from scratch.
+// Complements AgentEditSet (the user-facing edit set); this is the machine-
+// facing execution journal.
+model AgentRun {
+  id          String    @id @default(cuid())
+  projectId   String
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  imageHash   String
+  promptKey   String
+  prompt      String
+  plan        Json
+  // running | succeeded | failed | halted (critic gave up / needs user confirm)
+  status      String    @default("running")
+  stepIndex   Int       @default(0)
+  steps       Json?     // per-step observed results [{stepIndex, status, attempt, out|error}]
+  judgeScores Json?     // latest 12-axis judge verdict
+  critic      Json?     // latest critic payload (incl. corrective history)
+  iteration   Int       @default(0) // replan round (0 = first pass)
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([projectId, imageHash, promptKey, updatedAt])
+  @@index([projectId, updatedAt])
+  @@index([userId, updatedAt])
 }

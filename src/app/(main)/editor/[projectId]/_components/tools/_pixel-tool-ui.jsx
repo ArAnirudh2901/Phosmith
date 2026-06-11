@@ -675,11 +675,60 @@ export function KindParamEditor({ layer, onUpdate, dominantColor, imageSize }) {
  * Used by both the dev test panel and the production Mask tool's
  * "Mask Layers" section.
  */
+/** Mask kinds whose selection lives in a texture and can therefore have its
+ *  boundary grown/shrunk (mirrors TEXTURE_BACKED_KINDS in mask-grow.js). */
+const GROWABLE_KINDS = ['semantic', 'lasso', 'brush', 'smartBrush']
+const GROW_UI_MAX_PX = 60
+
+/**
+ * "Boundary" slider: extend (+) or shrink (−) a texture-backed selection's
+ * edge by N pixels. Regenerating the mask texture isn't per-frame cheap, so
+ * the slider tracks locally and COMMITS on release — and because the commit
+ * is absolute (derived from the layer's pristine base texture every time),
+ * scrubbing back to 0 restores the original AI-detected edge exactly.
+ */
+function BoundaryGrowControl({ layer, locked, onCommit }) {
+    const committed = Math.round(layer.growPx || 0)
+    const [local, setLocal] = useState(null)
+    const value = local ?? committed
+    const commit = () => {
+        if (local == null) return
+        const px = local
+        setLocal(null)
+        if (px !== committed) onCommit(px)
+    }
+    return (
+        <div className="mask-param-row mt-1.5">
+            <span
+                className="mask-param-label"
+                title="Extend (+) or shrink (−) this selection's boundary, in image pixels. Works on AI-detected subject masks too; 0 restores the original edge."
+            >
+                Boundary
+            </span>
+            <input
+                type="range"
+                min={-GROW_UI_MAX_PX}
+                max={GROW_UI_MAX_PX}
+                step={1}
+                disabled={locked}
+                value={value}
+                onChange={(e) => setLocal(Number(e.target.value))}
+                onMouseUp={commit}
+                onTouchEnd={commit}
+                onKeyUp={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Enter') commit() }}
+                onBlur={commit}
+                className="mask-range flex-1"
+            />
+            <span className="mask-param-value">{value > 0 ? `+${value}` : value}px</span>
+        </div>
+    )
+}
+
 export function MaskChainCard({
     entry, index, total, isFirst,
     onUpdate, onRemove, onMove, onSetOp, onSetFillMode,
     selected, onSelect,
-    dominantColor, imageSize,
+    dominantColor, imageSize, onExpandBoundary,
 }) {
     const layer = entry.layer
     const meta = getKindMeta(layer.kind)
@@ -853,6 +902,16 @@ export function MaskChainCard({
                     {Math.round((layer.opacity ?? 1) * 100)}
                 </span>
             </div>
+            {typeof onExpandBoundary === 'function'
+                && GROWABLE_KINDS.includes(layer.kind)
+                && layer.maskTextureKey && (
+                <BoundaryGrowControl
+                    layer={layer}
+                    locked={locked}
+                    onCommit={(px) => onExpandBoundary(layer.id, px)}
+                />
+            )}
+
             <label className="mask-toggle mt-2">
                 <input
                     type="checkbox"

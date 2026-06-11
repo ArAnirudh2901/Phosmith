@@ -810,6 +810,154 @@ const functions = {
     });
     return row.id;
   },
+
+  // ── Edit-judge cache (12-axis verdicts; see /api/ai/edit-judge) ──────────
+  // Same discipline as editPlanCache: identical (beforeHash, afterHash,
+  // planHash, judgeVersion) tuples return byte-identical scores forever.
+
+  "editJudgeCache.getVerdict": async (_ctx, args) => {
+    const db = await ensureDb();
+    const row = await db.editJudgeCache.findUnique({
+      where: {
+        beforeHash_afterHash_planHash_judgeVersion: {
+          beforeHash: args.beforeHash,
+          afterHash: args.afterHash,
+          planHash: args.planHash,
+          judgeVersion: args.judgeVersion,
+        },
+      },
+    });
+    if (!row) return null;
+    return {
+      axes: row.axes,
+      overall: row.overall,
+      correctiveHint: row.correctiveHint,
+      source: row.source,
+      model: row.model,
+      createdAt: toMs(row.createdAt),
+    };
+  },
+
+  "editJudgeCache.saveVerdict": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    let auditProjectId = args.projectId;
+    if (auditProjectId) {
+      const project = await db.project.findUnique({ where: { id: auditProjectId } });
+      if (!project || project.userId !== user.id) auditProjectId = undefined;
+    }
+    const row = await db.editJudgeCache.upsert({
+      where: {
+        beforeHash_afterHash_planHash_judgeVersion: {
+          beforeHash: args.beforeHash,
+          afterHash: args.afterHash,
+          planHash: args.planHash,
+          judgeVersion: args.judgeVersion,
+        },
+      },
+      update: clean({
+        axes: args.axes,
+        overall: args.overall,
+        correctiveHint: args.correctiveHint,
+        source: args.source,
+        model: args.model,
+        rawResponse: args.rawResponse,
+      }),
+      create: clean({
+        beforeHash: args.beforeHash,
+        afterHash: args.afterHash,
+        planHash: args.planHash,
+        judgeVersion: args.judgeVersion,
+        axes: args.axes,
+        overall: args.overall,
+        correctiveHint: args.correctiveHint,
+        source: args.source,
+        projectId: auditProjectId,
+        userId: user.id,
+        model: args.model,
+        rawResponse: args.rawResponse,
+        createdAt: new Date(),
+      }),
+    });
+    return row.id;
+  },
+
+  // ── Durable agent-run journal (resume a crashed loop per-step) ───────────
+
+  "agentRun.start": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    const project = await db.project.findUnique({ where: { id: args.projectId } });
+    if (!project || project.userId !== user.id) throw new Error("Project not found");
+    const row = await db.agentRun.create({
+      data: clean({
+        projectId: args.projectId,
+        userId: user.id,
+        imageHash: args.imageHash,
+        promptKey: args.promptKey,
+        prompt: args.prompt,
+        plan: args.plan,
+        status: "running",
+        stepIndex: 0,
+        iteration: args.iteration ?? 0,
+      }),
+    });
+    return withDocFields(row);
+  },
+
+  "agentRun.getResumable": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    const row = await db.agentRun.findFirst({
+      where: {
+        projectId: args.projectId,
+        userId: user.id,
+        imageHash: args.imageHash,
+        promptKey: args.promptKey,
+        status: "running",
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+    return row ? withDocFields(row) : null;
+  },
+
+  "agentRun.recordStep": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    const run = await db.agentRun.findUnique({ where: { id: args.runId } });
+    if (!run || run.userId !== user.id) throw new Error("Run not found");
+    const steps = Array.isArray(run.steps) ? [...run.steps] : [];
+    steps.push(args.step);
+    const row = await db.agentRun.update({
+      where: { id: args.runId },
+      data: clean({
+        steps,
+        stepIndex: args.step?.stepIndex != null ? args.step.stepIndex + 1 : run.stepIndex,
+        updatedAt: new Date(),
+      }),
+    });
+    return withDocFields(row);
+  },
+
+  "agentRun.finish": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    const run = await db.agentRun.findUnique({ where: { id: args.runId } });
+    if (!run || run.userId !== user.id) throw new Error("Run not found");
+    const row = await db.agentRun.update({
+      where: { id: args.runId },
+      data: clean({
+        status: args.status, // succeeded | failed | halted
+        judgeScores: args.judgeScores,
+        critic: args.critic,
+        iteration: args.iteration,
+        error: args.error,
+        updatedAt: new Date(),
+        finishedAt: new Date(),
+      }),
+    });
+    return withDocFields(row);
+  },
 };
 
 export const runNeonFunction = async (name, args = {}, ctx = {}) => {

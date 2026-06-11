@@ -4,11 +4,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
     ArrowDown, ArrowDownLeft, ArrowDownRight, ArrowLeft, ArrowRight,
     ArrowUp, ArrowUpLeft, ArrowUpRight,
-    Blend, ChevronDown, ChevronRight, Circle, Contrast, Crosshair, Eye, Layers,
-    Lasso, Loader2, Minus, Mountain, MousePointer, Palette, Paintbrush, Plus, RotateCcw, Scissors, Spline, Sparkles, Sun, Wand2, X,
+    Blend, ChevronDown, ChevronRight, Circle, Contrast, Cpu, Crosshair, Eye, Layers,
+    Lasso, Loader2, Minus, Mountain, MousePointer, Palette, Paintbrush, Plus, RotateCcw, Scissors, Spline, Sparkles, Square, Sun, Wand2, X,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Circle as FabricCircle, Ellipse, FabricImage, Line, Polyline } from 'fabric'
+import { Circle as FabricCircle, Ellipse, FabricImage, Line, Polyline, Rect as FabricRect } from 'fabric'
 import { toast } from 'sonner'
 import { useCanvas } from '../../../../../../../context/context'
 import usePixelMaskTool, { MIN_BRUSH, MAX_BRUSH } from '../../../../../../../hooks/usePixelMaskTool'
@@ -16,6 +16,9 @@ import useMaskLayers from '../../../../../../../hooks/useMaskLayers'
 import { computeImageHistogram, getHistogramSourceElement } from '@/lib/image-histogram'
 import { rgbToHsb } from '@/lib/color-utils'
 import { setMaskTexture } from '@/lib/megashader'
+import { expandLayerBoundary } from '@/lib/mask-grow'
+import { AI_CAPABILITIES, getRoutingPolicy, resetRoutingPolicy, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
+import { runClientAISelfTest } from '@/lib/client-ai'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 import {
     BrushSizeControl,
@@ -176,6 +179,15 @@ const MaskControls = ({ dominantColor }) => {
 
     // AI Subject Selection state
     const [isSegmenting, setIsSegmenting] = useState(false)
+    // Multi-subject (instance) detection state. Populated by the "Detect All
+    // Subjects" button; persists until the image changes so the user can
+    // re-select an individual subject without re-running BiRefNet + YOLO.
+    const [isDetectingInstances, setIsDetectingInstances] = useState(false)
+    const isDetectingInstancesRef = useRef(false)
+    const instancesAbortRef = useRef(/** @type {AbortController | null} */ (null))
+    const [subjectInstances, setSubjectInstances] = useState(/** @type {Array<any> | null} */ (null))
+    const [activeInstanceIndex, setActiveInstanceIndex] = useState(/** @type {number | null} */ (null))
+    const lastInstancesImageRef = useRef(/** @type {any} */ (null))
     // Ref-mirrors of the "running" flags. The `useCallback` closures for
     // `handleSelectSubject` / `handleSemanticRun` / `handleDepthRun` capture
     // the React state at render time, so a fast double-click (or two clicks
@@ -232,6 +244,44 @@ const MaskControls = ({ dominantColor }) => {
             chainHydratedRef.current = true
         }
     }, [tool.mainImage, stack.chain.length, setChain])
+
+    // Per-capability AI routing policy (Auto / Device / Server). Initialised
+    // to all-auto and synced from localStorage AFTER mount — reading the
+    // persisted policy during the first render would make SSR and client
+    // markup disagree (hydration mismatch) whenever a custom policy is saved.
+    const [routingPolicy, setRoutingPolicyState] = useState(() =>
+        Object.fromEntries(Object.keys(AI_CAPABILITIES).map((cap) => [cap, 'auto'])))
+    useEffect(() => {
+        setRoutingPolicyState(getRoutingPolicy())
+        return subscribeRouting(setRoutingPolicyState)
+    }, [])
+    const routingBadge = Object.values(routingPolicy).some((m) => m !== 'auto') ? 'Custom' : 'Auto'
+
+    // On-device AI self-test: runs the REAL in-browser models on a synthetic
+    // scene with a known answer (see runClientAISelfTest). First run also
+    // downloads + caches the models, so it doubles as a warm-up.
+    const [selfTest, setSelfTest] = useState({ running: false, progress: null, report: null })
+    const handleSelfTest = useCallback(async () => {
+        setSelfTest({ running: true, progress: 'Starting…', report: null })
+        try {
+            const report = await runClientAISelfTest({
+                onProgress: (msg) => setSelfTest((s) => ({ ...s, progress: msg })),
+            })
+            setSelfTest({ running: false, progress: null, report })
+            if (report.ok) {
+                toast.success(`Device AI works — ${report.device.toUpperCase()}, ${(report.totalMs / 1000).toFixed(1)}s`)
+            } else {
+                toast.error('Device AI self-test found problems — see the AI Processing section')
+            }
+        } catch (err) {
+            setSelfTest({
+                running: false,
+                progress: null,
+                report: { ok: false, device: 'unknown', totalMs: 0, checks: [{ label: 'Self-test crashed', ok: false, detail: String(err?.message || err) }] },
+            })
+            toast.error(err?.message || 'Device AI self-test failed')
+        }
+    }, [])
 
     // Selected layer — drives the re-editable gradient-handle gizmo (linear/
     // radial) and the brush pointer-arbitration (handles must suppress the
@@ -488,8 +538,20 @@ const MaskControls = ({ dominantColor }) => {
     // so we can draw/erase them in lockstep with `semanticClicks`.
     const semanticMarkerRefs = useRef(/** @type {Array<any>} */ ([]))
 
+    // SAM 2 BOX prompt — the strongest single prompt for whole-object
+    // selection. When armed, the next drag on the canvas defines the box
+    // (in natural image-pixel coords, [x0, y0, x1, y1]); it can be combined
+    // with clicks to refine. One box at a time — a new drag replaces it.
+    const [semanticBox, setSemanticBox] = useState(/** @type {[number,number,number,number] | null} */ (null))
+    const [boxArmed, setBoxArmed] = useState(false)
+    const boxArmedRef = useRef(false)
+    boxArmedRef.current = boxArmed
+    const boxDraftRef = useRef(/** @type {{x:number,y:number} | null} */ (null))
+    const boxRectRef = useRef(/** @type {any} */ (null))
+
     const handleSemanticClick = useCallback((e) => {
         if (!semanticActive || !tool.mainImage) return
+        if (boxArmedRef.current) return // a box drag owns the pointer right now
         const fabricCanvas = canvasEditor
         if (!fabricCanvas) return
         const pos = pointerToImage(fabricCanvas, e)
@@ -526,6 +588,92 @@ const MaskControls = ({ dominantColor }) => {
             fabricCanvas.off('mouse:down', onDown)
         }
     }, [semanticActive, canvasEditor, handleSemanticClick])
+
+    // Box-drag capture. While armed, mouse:down anchors the box, mouse:move
+    // resizes a dashed live rect (display coords), mouse:up commits the box
+    // in natural image coords and disarms. The rect marker itself persists
+    // (mirroring semanticBox) until reset/stop.
+    useEffect(() => {
+        const fabricCanvas = canvasEditor
+        if (!fabricCanvas || !semanticActive || !boxArmed) return undefined
+        fabricCanvas.defaultCursor = 'crosshair'
+        const onDown = (e) => {
+            const pos = pointerToImage(fabricCanvas, e)
+            if (!pos) return
+            boxDraftRef.current = { x: pos.x, y: pos.y }
+        }
+        const onMove = (e) => {
+            if (!boxDraftRef.current) return
+            const pos = pointerToImage(fabricCanvas, e)
+            if (!pos) return
+            const x0 = Math.min(boxDraftRef.current.x, pos.x)
+            const y0 = Math.min(boxDraftRef.current.y, pos.y)
+            const x1 = Math.max(boxDraftRef.current.x, pos.x)
+            const y1 = Math.max(boxDraftRef.current.y, pos.y)
+            setSemanticBox([x0, y0, x1, y1])
+        }
+        const onUp = () => {
+            if (!boxDraftRef.current) return
+            boxDraftRef.current = null
+            setBoxArmed(false)
+            setSemanticBox((b) => {
+                // Discard degenerate boxes (a stray click instead of a drag).
+                if (!b || b[2] - b[0] < 4 || b[3] - b[1] < 4) return null
+                return b
+            })
+        }
+        fabricCanvas.on('mouse:down', onDown)
+        fabricCanvas.on('mouse:move', onMove)
+        fabricCanvas.on('mouse:up', onUp)
+        return () => {
+            fabricCanvas.defaultCursor = 'default'
+            fabricCanvas.off('mouse:down', onDown)
+            fabricCanvas.off('mouse:move', onMove)
+            fabricCanvas.off('mouse:up', onUp)
+            boxDraftRef.current = null
+        }
+    }, [semanticActive, boxArmed, canvasEditor, pointerToImage])
+
+    // Dashed live rect mirroring `semanticBox` (display coords).
+    useEffect(() => {
+        const fabricCanvas = canvasEditor
+        if (!fabricCanvas || !tool.mainImage) return undefined
+        if (boxRectRef.current) {
+            try { fabricCanvas.remove(boxRectRef.current) } catch { /* gone */ }
+            boxRectRef.current = null
+        }
+        if (!semanticActive || !semanticBox) {
+            fabricCanvas.requestRenderAll()
+            return undefined
+        }
+        const tl = imageToDisplay(semanticBox[0], semanticBox[1])
+        const br = imageToDisplay(semanticBox[2], semanticBox[3])
+        if (!tl || !br) return undefined
+        const rect = new FabricRect({
+            left: Math.min(tl.x, br.x),
+            top: Math.min(tl.y, br.y),
+            width: Math.abs(br.x - tl.x),
+            height: Math.abs(br.y - tl.y),
+            fill: 'rgba(6, 184, 212, 0.08)',
+            stroke: 'rgba(6, 184, 212, 0.95)',
+            strokeWidth: 1.5,
+            strokeDashArray: [5, 4],
+            strokeUniform: true,
+            selectable: false,
+            evented: false,
+            excludeFromExport: true,
+        })
+        fabricCanvas.add(rect)
+        boxRectRef.current = rect
+        fabricCanvas.requestRenderAll()
+        return () => {
+            if (boxRectRef.current) {
+                try { fabricCanvas.remove(boxRectRef.current) } catch { /* gone */ }
+                boxRectRef.current = null
+                fabricCanvas.requestRenderAll()
+            }
+        }
+    }, [semanticActive, semanticBox, canvasEditor, tool.mainImage, imageToDisplay])
 
     // Live markers — one small Fabric circle per click. Cyan = positive
     // (include), red = negative (exclude). Mirrors the click list so
@@ -569,6 +717,8 @@ const MaskControls = ({ dominantColor }) => {
 
     const handleSemanticReset = useCallback(() => {
         setSemanticClicks([])
+        setSemanticBox(null)
+        setBoxArmed(false)
         setLastSemanticMask(null)
         setLastSemanticPreview(null)
     }, [])
@@ -576,6 +726,8 @@ const MaskControls = ({ dominantColor }) => {
     const handleSemanticStop = useCallback(() => {
         setSemanticActive(false)
         setSemanticClicks([])
+        setSemanticBox(null)
+        setBoxArmed(false)
         setLastSemanticMask(null)
         setLastSemanticPreview(null)
     }, [])
@@ -614,8 +766,8 @@ const MaskControls = ({ dominantColor }) => {
         // state — a fast double-click can otherwise launch two concurrent
         // fetches and race to overwrite the decoded mask.
         if (isSemanticRunningRef.current) return
-        if (semanticClicks.length === 0) {
-            toast('Add at least one click first')
+        if (semanticClicks.length === 0 && !semanticBox) {
+            toast('Add a click or draw a box first')
             return
         }
         const sourceEl = tool.mainImage._element || tool.mainImage.getElement?.()
@@ -633,8 +785,13 @@ const MaskControls = ({ dominantColor }) => {
         try {
             // Resize source for the upload (matches the route's MAX_MODEL_SIDE
             // so we don't burn bandwidth shipping 12MP images over the wire).
-            const origW = sourceEl.naturalWidth || sourceEl.width
-            const origH = sourceEl.naturalHeight || sourceEl.height
+            const origW = sourceEl.naturalWidth || sourceEl.width || 0
+            const origH = sourceEl.naturalHeight || sourceEl.height || 0
+            // An <img> mid-load reports 0 — sending a 1px upload would 400 or
+            // mis-select. Fail with a clear message instead.
+            if (origW < 1 || origH < 1) {
+                throw new Error('Image is still loading — try again in a moment')
+            }
             const MAX_UPLOAD_SIDE = 1024
             const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(origW, origH))
             const uploadW = Math.max(1, Math.round(origW * scale))
@@ -646,9 +803,19 @@ const MaskControls = ({ dominantColor }) => {
             const ctx = c.getContext('2d')
             if (!ctx) throw new Error('Could not allocate upload canvas')
             ctx.drawImage(sourceEl, 0, 0, uploadW, uploadH)
-            const blob = await new Promise((resolve, reject) => {
-                c.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85)
-            })
+            let blob
+            try {
+                blob = await new Promise((resolve, reject) => {
+                    c.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85)
+                })
+            } catch (e) {
+                // Cross-origin image without CORS taints the canvas → toBlob
+                // throws SecurityError. Say so plainly.
+                if (e?.name === 'SecurityError') {
+                    throw new Error('This image is from another site without CORS, so it can’t be read for AI selection')
+                }
+                throw e
+            }
 
             // Bug #10: clicks are captured in TRUE-natural image space, but
             // the route derives "original" dims from the (already downscaled
@@ -664,7 +831,18 @@ const MaskControls = ({ dominantColor }) => {
             ])
             const form = new FormData()
             form.append('image', blob, 'image.jpg')
-            form.append('clicks', JSON.stringify(scaledClicks))
+            if (scaledClicks.length) form.append('clicks', JSON.stringify(scaledClicks))
+            if (semanticBox) {
+                // Same reference-frame fix as clicks: scale the box into the
+                // uploaded blob's space, clamped inside it.
+                const scaledBox = [
+                    Math.max(0, Math.round(semanticBox[0] * scale * 100) / 100),
+                    Math.max(0, Math.round(semanticBox[1] * scale * 100) / 100),
+                    Math.min(uploadW, Math.round(semanticBox[2] * scale * 100) / 100),
+                    Math.min(uploadH, Math.round(semanticBox[3] * scale * 100) / 100),
+                ]
+                form.append('box', JSON.stringify(scaledBox))
+            }
 
             const resp = await fetch('/api/ai/sam2', { method: 'POST', body: form, signal: abortController.signal })
             if (!resp.ok) {
@@ -694,7 +872,7 @@ const MaskControls = ({ dominantColor }) => {
                 setIsSemanticRunning(false)
             }
         }
-    }, [tool, semanticClicks, decodeMaskBlob])
+    }, [tool, semanticClicks, semanticBox, decodeMaskBlob])
 
     // Add the most recent decoded mask as a megashader layer. The
     // texture is stored in the module-level mask cache under a freshly
@@ -2254,6 +2432,136 @@ const MaskControls = ({ dominantColor }) => {
         }
     }, [tool])
 
+    /* ─── Multi-Subject Detection (Detect All Subjects) ──────────────────────
+     * Calls /api/ai/segment-instances to enumerate every subject in the image
+     * and lets the user mask either the union or a specific instance with one
+     * click. Results are cached on the Fabric image (one detection pass per
+     * image) so re-clicking individual subjects is free.
+     */
+    const base64PngToBlob = useCallback((b64) => {
+        const bin = atob(b64)
+        const len = bin.length
+        const arr = new Uint8Array(len)
+        for (let i = 0; i < len; i++) arr[i] = bin.charCodeAt(i)
+        return new Blob([arr], { type: 'image/png' })
+    }, [])
+
+    const handleDetectAllSubjects = useCallback(async () => {
+        if (!tool.mainImage) return
+        if (isDetectingInstancesRef.current) return
+        try { instancesAbortRef.current?.abort() } catch { /* ignore */ }
+        const abortController = new AbortController()
+        instancesAbortRef.current = abortController
+        isDetectingInstancesRef.current = true
+        setIsDetectingInstances(true)
+
+        try {
+            const fabricObj = tool.mainImage
+            const sourceEl = fabricObj?._element || fabricObj?.getElement?.()
+            if (!sourceEl) throw new Error('Cannot access image element')
+
+            const origW = sourceEl.naturalWidth || sourceEl.width || fabricObj.width
+            const origH = sourceEl.naturalHeight || sourceEl.height || fabricObj.height
+            const scale = Math.min(1, 2048 / Math.max(origW, origH))
+            const c = document.createElement('canvas')
+            c.width = Math.round(origW * scale)
+            c.height = Math.round(origH * scale)
+            c.getContext('2d').drawImage(sourceEl, 0, 0, c.width, c.height)
+            const blob = await new Promise((resolve, reject) =>
+                c.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.9),
+            )
+
+            const form = new FormData()
+            form.append('image', blob, 'image.jpg')
+
+            const resp = await fetch('/api/ai/segment-instances', {
+                method: 'POST', body: form, signal: abortController.signal,
+            })
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}))
+                throw new Error(err.error || `Detection failed (${resp.status})`)
+            }
+            const data = await resp.json()
+            if (instancesAbortRef.current !== abortController) return
+
+            if (!data.instances?.length) {
+                toast.info('No distinct subjects detected — try Select Subject for the unified matte.')
+                setSubjectInstances([])
+                return
+            }
+            setSubjectInstances(data.instances)
+            setActiveInstanceIndex(null)
+            lastInstancesImageRef.current = fabricObj
+            // Cache on the Fabric image so other tools (and the agent's
+            // mask-commands cache) can reuse the same payload.
+            try { fabricObj.__pixxelSubjectInstances = { ...data, instances: data.instances } } catch { /* ignore */ }
+
+            // Auto-apply the union so the panel shows immediate masking feedback.
+            if (data.unionPng) {
+                const unionBlob = base64PngToBlob(data.unionPng)
+                await tool.applyExternalMaskBlob(unionBlob)
+            }
+            toast.success(
+                `Detected ${data.instances.length} subject${data.instances.length === 1 ? '' : 's'}` +
+                (data.truncated ? ' (capped, refine to see more)' : ''),
+            )
+        } catch (err) {
+            if (err?.name === 'AbortError') return
+            console.error('[mask] detect-all-subjects failed:', err)
+            toast.error(err?.message || 'Subject detection failed')
+        } finally {
+            if (instancesAbortRef.current === abortController) {
+                isDetectingInstancesRef.current = false
+                setIsDetectingInstances(false)
+            }
+        }
+    }, [tool, base64PngToBlob])
+
+    const handleApplyInstance = useCallback(async (instance) => {
+        if (!tool.mainImage || !instance?.maskPng) return
+        try {
+            const blob = base64PngToBlob(instance.maskPng)
+            const ok = await tool.applyExternalMaskBlob(blob)
+            if (ok) {
+                setActiveInstanceIndex(instance.index ?? null)
+                toast.success(`Masked ${instance.label || `subject ${instance.index ?? ''}`}`)
+            } else {
+                toast.error('Could not apply subject mask')
+            }
+        } catch (err) {
+            console.error('[mask] apply-instance failed:', err)
+            toast.error('Could not apply subject mask')
+        }
+    }, [tool, base64PngToBlob])
+
+    const handleApplyAllSubjectsUnion = useCallback(async () => {
+        if (!tool.mainImage) return
+        const cached = tool.mainImage.__pixxelSubjectInstances || subjectInstances && { unionPng: null, instances: subjectInstances }
+        if (cached?.unionPng) {
+            try {
+                const blob = base64PngToBlob(cached.unionPng)
+                const ok = await tool.applyExternalMaskBlob(blob)
+                if (ok) {
+                    setActiveInstanceIndex(-1)
+                    toast.success(`Masked all ${cached.instances?.length || subjectInstances?.length || ''} subjects`)
+                }
+            } catch (err) {
+                console.error('[mask] apply-union failed:', err)
+                toast.error('Could not apply union mask')
+            }
+        }
+    }, [tool, subjectInstances, base64PngToBlob])
+
+    // Invalidate the multi-subject cache when the user switches to a
+    // different image so the chips don't show stale data.
+    useEffect(() => {
+        if (lastInstancesImageRef.current && tool.mainImage !== lastInstancesImageRef.current) {
+            setSubjectInstances(null)
+            setActiveInstanceIndex(null)
+            lastInstancesImageRef.current = tool.mainImage
+        }
+    }, [tool.mainImage])
+
     /* ─── Color Range ─── */
     const handleColorPick = useCallback((e) => {
         if (!colorPickerActive || !tool.mainImage) return
@@ -2492,6 +2800,17 @@ const MaskControls = ({ dominantColor }) => {
                                 onSetOp={setLayerOp}
                                 onSetFillMode={setFillMode}
                                 dominantColor={dominantColor}
+                                onExpandBoundary={(layerId, px) => {
+                                    // Regenerates the layer's texture from its
+                                    // pristine base and re-syncs the panel via
+                                    // the chain-replaced event — so the edge of
+                                    // an AI-detected subject stays extendable.
+                                    try {
+                                        expandLayerBoundary(tool.mainImage, layerId, px)
+                                    } catch (err) {
+                                        toast.error(err?.message || 'Could not adjust the mask boundary')
+                                    }
+                                }}
                             />
                         ))}
                     </AnimatePresence>
@@ -2523,6 +2842,98 @@ const MaskControls = ({ dominantColor }) => {
 
             <CategoryHeader label="AI Tools" />
 
+            {/* AI processing routing: per-capability choice of where each AI
+                function runs — Auto (server first, device fallback), Device
+                (in-browser models via transformers.js, downloaded once and
+                cached), or Server (local mask service / Gemini). The NL-mask
+                executor follows this policy with runtime fallback to the
+                other side, so a misconfigured side degrades instead of
+                failing (see src/lib/ai-routing.js). */}
+            <Section title="AI Processing" icon={Cpu} defaultOpen={false} badge={routingBadge}>
+                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    Choose where each AI function runs. <strong>Device</strong> keeps
+                    everything in this browser (models download once);{' '}
+                    <strong>Server</strong> uses the local AI service / Gemini;{' '}
+                    <strong>Auto</strong> prefers the server and falls back to the device.
+                </p>
+                {Object.entries(AI_CAPABILITIES).map(([cap, def]) => (
+                    <div key={cap} className="space-y-1">
+                        {/* flex-wrap: in a narrow sidebar the three-mode pill
+                            row drops below the label instead of overlapping it */}
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span
+                                className="text-[10px] font-semibold"
+                                style={{ color: 'var(--text-secondary)' }}
+                                title={def.hint}
+                            >
+                                {def.label}
+                            </span>
+                            <div className="mask-fill-modes" style={{ marginTop: 0 }}>
+                                {['auto', ...(def.client ? ['client'] : []), ...(def.server ? ['server'] : [])].map((mode) => (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        onClick={() => setRoutingMode(cap, mode)}
+                                        className={`mask-fill-mode-btn ${routingPolicy[cap] === mode ? 'mask-fill-mode-btn--active' : ''}`}
+                                        title={mode === 'client' ? (def.clientImpl || 'In this browser')
+                                            : mode === 'server' ? (def.serverImpl || 'On the server')
+                                                : 'Server first, device fallback'}
+                                    >
+                                        {mode === 'auto' ? 'Auto' : mode === 'client' ? 'Device' : 'Server'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                ))}
+                <div className="flex items-center justify-between gap-2">
+                    <button
+                        type="button"
+                        onClick={resetRoutingPolicy}
+                        className="text-[10px]"
+                        style={{ color: 'var(--text-muted)' }}
+                    >
+                        Reset to Auto
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleSelfTest}
+                        disabled={selfTest.running}
+                        className="mask-btn px-2 py-1 text-[10px] font-semibold"
+                        title="Runs the in-browser models on a test image with a known answer. First run downloads the models (one-time)."
+                    >
+                        {selfTest.running ? (
+                            <>
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Testing…
+                            </>
+                        ) : (
+                            <>
+                                <Cpu className="h-3 w-3" />
+                                Test device AI
+                            </>
+                        )}
+                    </button>
+                </div>
+                {selfTest.running && selfTest.progress && (
+                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{selfTest.progress}</p>
+                )}
+                {selfTest.report && (
+                    <div className="space-y-1">
+                        {selfTest.report.checks.map((c) => (
+                            <div key={c.label} className="flex items-center gap-1.5 text-[10px]">
+                                <span style={{ color: c.ok ? '#4ade80' : '#ef4444' }}>{c.ok ? '✓' : '✗'}</span>
+                                <span style={{ color: 'var(--text-secondary)' }}>{c.label}</span>
+                                <span className="ml-auto font-mono" style={{ color: 'var(--text-muted)' }}>{c.detail}</span>
+                            </div>
+                        ))}
+                        <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                            {selfTest.report.device?.toUpperCase()} · {(selfTest.report.totalMs / 1000).toFixed(1)}s
+                        </p>
+                    </div>
+                )}
+            </Section>
+
             {/* ────────── AI Masking ────────── */}
             <Section title="Select Subject" icon={Sparkles} defaultOpen={true} badge="AI">
                 <motion.button
@@ -2547,13 +2958,80 @@ const MaskControls = ({ dominantColor }) => {
                 <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
                     AI detects and masks the main subject
                 </p>
+
+                {/* ── Multi-subject: per-instance picker ────────────────── */}
+                <motion.button
+                    type="button"
+                    onClick={handleDetectAllSubjects}
+                    disabled={isDetectingInstances}
+                    whileTap={{ scale: 0.97 }}
+                    className="mask-btn w-full py-2 text-[11px] font-semibold"
+                    style={{
+                        background: 'rgba(124,58,237,0.10)',
+                        border: '1px solid rgba(124,58,237,0.30)',
+                        color: '#C4B5FD',
+                    }}
+                >
+                    {isDetectingInstances ? (
+                        <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Detecting all subjects…
+                        </>
+                    ) : (
+                        <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Detect All Subjects
+                        </>
+                    )}
+                </motion.button>
+
+                {subjectInstances && subjectInstances.length > 0 && (
+                    <div className="space-y-1.5">
+                        <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                            Detected {subjectInstances.length} subject{subjectInstances.length === 1 ? '' : 's'}. Pick one or All:
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                            <button
+                                type="button"
+                                onClick={handleApplyAllSubjectsUnion}
+                                className="rounded-md px-2 py-1 text-[10px] font-semibold editor-interactive"
+                                style={{
+                                    background: activeInstanceIndex === -1 ? 'rgba(124,58,237,0.25)' : 'var(--bg-elevated)',
+                                    border: `1px solid ${activeInstanceIndex === -1 ? 'rgba(124,58,237,0.55)' : 'var(--border-subtle)'}`,
+                                    color: activeInstanceIndex === -1 ? '#C4B5FD' : 'var(--text-primary)',
+                                }}
+                            >
+                                All ({subjectInstances.length})
+                            </button>
+                            {subjectInstances.map((inst) => {
+                                const isActive = activeInstanceIndex === inst.index
+                                return (
+                                    <button
+                                        key={inst.index}
+                                        type="button"
+                                        onClick={() => handleApplyInstance(inst)}
+                                        title={`${inst.label} · conf ${(inst.confidence * 100).toFixed(0)}%`}
+                                        className="rounded-md px-2 py-1 text-[10px] font-medium editor-interactive"
+                                        style={{
+                                            background: isActive ? 'rgba(124,58,237,0.25)' : 'var(--bg-elevated)',
+                                            border: `1px solid ${isActive ? 'rgba(124,58,237,0.55)' : 'var(--border-subtle)'}`,
+                                            color: isActive ? '#C4B5FD' : 'var(--text-primary)',
+                                        }}
+                                    >
+                                        {inst.label} #{inst.index + 1}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                    </div>
+                )}
             </Section>
 
             {/* ────────── Click-to-Select (SAM 2) ────────── */}
             <Section title="Click to Select" icon={MousePointer} badge="AI">
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Click to mark the subject, then run SAM 2. Hold{' '}
+                        Click to mark the subject — or draw a box around it — then run SAM 2. Hold{' '}
                         <kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Alt</kbd>{' '}
                         to mark background (negative click).
                     </p>
@@ -2615,6 +3093,44 @@ const MaskControls = ({ dominantColor }) => {
                         </motion.button>
                     </div>
 
+                    {/* Box prompt — SAM 2's strongest single prompt for whole
+                        objects. One box at a time; a new drag replaces it. */}
+                    {semanticActive && (
+                        <div className="flex items-center gap-1.5">
+                            <motion.button
+                                type="button"
+                                onClick={() => setBoxArmed((v) => !v)}
+                                whileTap={{ scale: 0.97 }}
+                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[10px] font-medium editor-interactive"
+                                style={{
+                                    background: boxArmed ? 'rgba(6,184,212,0.18)' : 'var(--bg-elevated)',
+                                    border: `1px solid ${boxArmed ? 'rgba(6,184,212,0.45)' : 'var(--border-subtle)'}`,
+                                    color: boxArmed ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                }}
+                                title="Drag a rectangle around the object — SAM 2 selects what's inside"
+                            >
+                                <Square className="h-3 w-3" />
+                                {boxArmed ? 'Drag on the image…' : semanticBox ? 'Redraw box' : 'Draw box'}
+                            </motion.button>
+                            {semanticBox && (
+                                <button
+                                    type="button"
+                                    onClick={() => setSemanticBox(null)}
+                                    className="flex items-center gap-1 text-[9px] px-1.5 py-1.5 rounded"
+                                    title="Remove the box prompt"
+                                    style={{
+                                        background: 'rgba(6,184,212,0.15)',
+                                        color: 'var(--accent-primary)',
+                                        border: '1px solid rgba(6,184,212,0.35)',
+                                    }}
+                                >
+                                    {Math.round(semanticBox[2] - semanticBox[0])}×{Math.round(semanticBox[3] - semanticBox[1])}
+                                    <X className="h-2.5 w-2.5" />
+                                </button>
+                            )}
+                        </div>
+                    )}
+
                     {/* Click list — cyan dot = positive, red = negative */}
                     {semanticActive && semanticClicks.length > 0 && (
                         <div
@@ -2644,7 +3160,7 @@ const MaskControls = ({ dominantColor }) => {
                     <motion.button
                         type="button"
                         onClick={handleSemanticRun}
-                        disabled={isSemanticRunning || semanticClicks.length === 0}
+                        disabled={isSemanticRunning || (semanticClicks.length === 0 && !semanticBox)}
                         whileTap={{ scale: 0.97 }}
                         className="flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold editor-interactive disabled:opacity-40"
                         style={{
@@ -2661,7 +3177,7 @@ const MaskControls = ({ dominantColor }) => {
                         ) : (
                             <>
                                 <Wand2 className="h-3.5 w-3.5" />
-                                Run ({semanticClicks.length})
+                                Run ({semanticClicks.length}{semanticBox ? ' + box' : ''})
                             </>
                         )}
                     </motion.button>

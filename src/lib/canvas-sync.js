@@ -287,11 +287,25 @@ export const createCanvasSync = ({
                 updatedAt: local.updatedAt,
             }
             dirty = local.dirty !== false // missing/true ⇒ assume it needs syncing
+
             // Restore the revision this offline work was BASED ON, so the replay
-            // flush is checked against the right baseline. Without this we'd flush
-            // against the current server revision and silently clobber another
-            // session that wrote while we were offline.
-            if (Number.isFinite(Number(local.baseRevision))) baseRevision = Number(local.baseRevision)
+            // flush is checked against the right baseline. BUT only if the local
+            // revision is >= what the manager was initialized with. If the local
+            // revision is OLDER, the data was already flushed (e.g. via beacon on
+            // tab close) and bumped the server revision — the IDB just wasn't
+            // cleaned up. In that case, the "dirty" state is stale and should be
+            // discarded to avoid a spurious conflict.
+            const localRev = Number(local.baseRevision)
+            if (Number.isFinite(localRev)) {
+                if (localRev < baseRevision) {
+                    // Stale local state — the server already has this or newer data.
+                    // Clear the dirty flag so it doesn't re-trigger on next load.
+                    saveLocalState(projectId, { ...local, dirty: false }).catch(() => {})
+                    setStatus("saved")
+                    return
+                }
+                baseRevision = localRev
+            }
             latest = source
         }
         if (!dirty || (lastSentHash && source.hash === lastSentHash)) {

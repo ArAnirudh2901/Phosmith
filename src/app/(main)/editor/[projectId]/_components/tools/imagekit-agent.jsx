@@ -20,6 +20,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  User,
   WandSparkles,
   X,
   Zap,
@@ -163,6 +164,7 @@ const newMessage = (role, content, extra = {}) => ({
   id: `${role}-${Date.now()}-${messageId++}`,
   role,
   content,
+  at: Date.now(),
   ...extra,
 });
 
@@ -859,9 +861,29 @@ const AgentThinkingRow = ({ prompt, autoPreview = true }) => (
   </motion.div>
 );
 
+const formatMessageTime = (at) => {
+  if (!at) return "";
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return "now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return new Date(at).toLocaleDateString();
+};
+
 const MessageBubble = ({ message, canUndoPreview = false, onUndoPreview, isApplying = false }) => {
   const isUser = message.role === "user";
   const hasUndoablePreview = !isUser && Boolean(message.previewToken);
+
+  const copyContent = () => {
+    try {
+      navigator.clipboard?.writeText(message.content || "");
+      toast.success("Copied");
+    } catch {
+      toast.error("Couldn't copy");
+    }
+  };
 
   return (
     <motion.div
@@ -871,7 +893,15 @@ const MessageBubble = ({ message, canUndoPreview = false, onUndoPreview, isApply
       className={`agent-message-line ${isUser ? "agent-message-line--user" : ""}`}
     >
       <div className="agent-message-meta">
-        <span>{isUser ? "YOU" : "AGENT"}</span>
+        <span
+          className={`agent-message-avatar ${isUser ? "agent-message-avatar--user" : ""}`}
+          title={isUser ? "You" : "Agent"}
+        >
+          {isUser ? <User className="h-3 w-3" /> : <Bot className="h-3 w-3" />}
+        </span>
+        {message.at && (
+          <span className="agent-message-time">{formatMessageTime(message.at)}</span>
+        )}
       </div>
       <div className={`agent-message-card ${isUser ? "agent-message-card--user" : ""}`}>
         <p>{message.content}</p>
@@ -882,6 +912,17 @@ const MessageBubble = ({ message, canUndoPreview = false, onUndoPreview, isApply
             compact
             interactive={false}
           />
+        )}
+        {!isUser && (message.content || "").length > 0 && (
+          <button
+            type="button"
+            className="agent-message-copy"
+            onClick={copyContent}
+            title="Copy message"
+            aria-label="Copy message"
+          >
+            <Copy className="h-3 w-3" />
+          </button>
         )}
         {hasUndoablePreview && (
           <div className="agent-message-actions">

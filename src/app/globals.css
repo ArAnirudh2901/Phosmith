@@ -360,28 +360,36 @@ a:focus-visible,
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
+/* Loading toast — cyan accent shadow matching info/default for consistency.
+   Explicit flex-row with gap prevents the spinner icon from overlapping text. */
 .neo-toast.neo-toast--loading {
   box-shadow:
-    4px 4px 0 0 rgba(244, 244, 245, 0.55),
+    4px 4px 0 0 rgba(6, 184, 212, 0.70),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  /* Enforce horizontal layout so the spinner icon stays to the left of the
-     title + description text block. Without this, the icon can visually
-     land between the title and description lines. */
-  display: flex;
-  flex-direction: row;
-  align-items: flex-start;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  gap: 0.625rem !important;
+  flex-wrap: nowrap !important;
 }
 .neo-toast.neo-toast--loading .neo-toast-icon {
-  background: rgba(14, 17, 24, 0.95);
-  color: #F4F4F5;
-  flex-shrink: 0;
-  order: -1; /* force icon first in visual order */
+  background: #06B8D4;
+  color: #03050A;
+  flex-shrink: 0 !important;
+  position: relative !important;
+  /* Reset any absolute positioning sonner might inject */
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
 }
 .neo-toast.neo-toast--loading .neo-toast-content {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 0%;
+  /* Prevent text from sliding under the icon */
+  overflow: hidden;
 }
 
 /* Belt-and-braces overlay enforcement. Sonner's container is already
@@ -451,6 +459,40 @@ a:focus-visible,
 /* Give the toast title some right-padding so it doesn't overlap the close btn */
 .neo-toast .neo-toast-content {
   padding-right: 18px;
+}
+
+/* ── Toast with action / cancel buttons ────────────────────────────────────
+   Sonner renders [icon] [content] [action-btn] [cancel-btn] in a single flex
+   row. When BOTH buttons are present, content (min-w-0 flex-1) shrinks to
+   near-zero, wrapping text one word per line.
+   Fix: wrap the flex container and give content a flex-basis large enough to
+   push the buttons onto a second row. The 48px deduction accounts for the
+   28px icon tile + gap. */
+.neo-toast {
+  flex-wrap: wrap !important;
+  overflow: visible !important;
+}
+
+/* When action buttons exist, content must claim enough width to force the
+   buttons below. flex-basis: calc(100% - 48px) = full row minus icon+gap. */
+.neo-toast:has(.neo-toast-action) .neo-toast-content,
+.neo-toast:has(.neo-toast-cancel) .neo-toast-content {
+  flex: 1 0 calc(100% - 48px) !important;
+  min-width: 0;
+  padding-right: 18px;
+}
+
+/* Buttons sit side-by-side on their own wrapped row */
+.neo-toast .neo-toast-action,
+.neo-toast .neo-toast-cancel {
+  margin-top: 6px;
+}
+
+/* Force the description text to wrap normally */
+.neo-toast .neo-toast-description {
+  text-transform: none !important;
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 /* ── Neo-brutalist loader card ─────────────────────────────────────────────
@@ -2008,7 +2050,11 @@ a:focus-visible,
 }
 
 .agent-message-meta {
-  padding-top: 0.32rem;
+  padding-top: 0.22rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.22rem;
   color: var(--agent-dim);
   font-size: clamp(0.48rem, 0.6vw, 0.54rem);
   font-weight: 850;
@@ -2016,7 +2062,32 @@ a:focus-visible,
   text-align: right;
 }
 
+.agent-message-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 0.42rem;
+  background: rgba(83, 216, 255, 0.14);
+  border: 1px solid rgba(83, 216, 255, 0.32);
+  color: rgba(83, 216, 255, 0.95);
+}
+
+.agent-message-avatar--user {
+  background: rgba(155, 249, 91, 0.1);
+  border-color: rgba(155, 249, 91, 0.3);
+  color: rgba(155, 249, 91, 0.9);
+}
+
+.agent-message-time {
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
 .agent-message-card {
+  position: relative;
   max-width: 100%;
   border-radius: 0.35rem;
   border-left: 2px solid rgba(83, 216, 255, 0.42);
@@ -2027,6 +2098,35 @@ a:focus-visible,
   color: var(--agent-ink);
   font-size: clamp(0.62rem, 0.74vw, 0.7rem);
   line-height: 1.45;
+  /* Agent replies often carry line breaks and long URLs — keep both readable. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* Hover-revealed copy on agent messages. */
+.agent-message-copy {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 0.32rem;
+  border: 1px solid rgba(83, 216, 255, 0.22);
+  background: rgba(8, 16, 20, 0.65);
+  color: var(--agent-dim);
+  opacity: 0;
+  transition: opacity 140ms ease, color 140ms ease;
+}
+
+.agent-message-card:hover .agent-message-copy {
+  opacity: 1;
+}
+
+.agent-message-copy:hover {
+  color: var(--agent-ink);
 }
 
 .agent-message-card--user {

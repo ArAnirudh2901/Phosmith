@@ -19,12 +19,19 @@
     "verify:semantic": "bun scripts/verify-semantic.mjs",
     "verify:depth": "bun scripts/verify-depth.mjs",
     "verify:depth:full": "bun scripts/verify-depth-comprehensive.mjs",
+    "verify:instances": "bun scripts/verify-instances.mjs",
+    "verify:auto-crop": "bun scripts/verify-auto-crop.mjs",
+    "verify:extend": "bun scripts/verify-extend-frame.mjs",
+    "verify:nl-mask": "bun scripts/verify-nl-mask.mjs",
+    "verify:client-ai": "bun scripts/verify-client-ai.mjs",
+    "verify:agent": "bun scripts/verify-agent-loop.mjs",
     "mask:install": "pip install -r services/segment/requirements.txt",
     "mask:dev": "python services/segment/main.py"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.0.6",
     "@clerk/themes": "^2.4.57",
+    "@huggingface/transformers": "^4.2.0",
     "@phosphor-icons/react": "^2.1.10",
     "@prisma/adapter-neon": "^7.8.0",
     "@prisma/client": "^7.8.0",
@@ -41,7 +48,7 @@
     "lottie-react": "^2.4.1",
     "lucide": "^1.0.0-rc.1",
     "lucide-react": "^1.0.1",
-    "next": "16.2.7",
+    "next": "16.2.9",
     "next-themes": "1.0.0-beta.0",
     "radix-ui": "^1.4.3",
     "react": "19.2.7",
@@ -59,7 +66,8 @@
     "@tailwindcss/postcss": "^4",
     "babel-plugin-react-compiler": "1.0.0",
     "eslint": "^9",
-    "eslint-config-next": "16.2.7",
+    "eslint-config-next": "16.2.9",
+    "playwright": "^1.60.0",
     "prisma": "^7.8.0",
     "tailwindcss": "^4"
   },
@@ -72,6 +80,7 @@
     "core-js",
     "esbuild",
     "msw",
+    "onnxruntime-node",
     "sharp",
     "unrs-resolver"
   ]

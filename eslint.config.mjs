@@ -10,6 +10,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Not our code: the Python virtualenv ships .js/.mjs assets (matplotlib,
+    // torch) and .cache holds the bun-built client-ai harness bundle.
+    "services/segment/.venv/**",
+    ".cache/**",
   ]),
   {
     rules: {

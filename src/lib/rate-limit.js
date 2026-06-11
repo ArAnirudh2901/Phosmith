@@ -17,8 +17,13 @@ import { getRedis } from "./redis"
 
 const LIMITERS = {
     "edit-plan":         { count: 30,  windowSec: 60 },  // 30 / minute
+    "edit-judge":        { count: 20,  windowSec: 60 },  // 20 / minute — vision judge (2 images per call)
     "ai-extend":         { count: 5,   windowSec: 60 },  // 5  / minute — expensive AI
     "ai-segment":        { count: 5,   windowSec: 60 },  // 5  / minute — HuggingFace segmentation
+    "ai-sam2":           { count: 15,  windowSec: 60 },  // 15 / minute — interactive click/box prompts (the AI Object Eraser fires one per click, so this must absorb a multi-subject click burst)
+    "ai-auto-crop":      { count: 10,  windowSec: 60 },  // 10 / minute — local subject + depth + saliency pipeline
+    "ai-ground":         { count: 10,  windowSec: 60 },  // 10 / minute — CLIPSeg + SAM2 text grounding
+    "ai-mask-plan":      { count: 30,  windowSec: 60 },  // 30 / minute — NL mask planning (Gemini text-only)
     "shape-mask":        { count: 120, windowSec: 60 },  // 120/minute — deterministic local shape rasterization
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute

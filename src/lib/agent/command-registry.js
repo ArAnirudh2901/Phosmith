@@ -30,13 +30,28 @@
  * @module agent/command-registry
  */
 
+import { beginAgentAction, endAgentAction, recordChange } from '@/lib/change-journal'
+
 /** @type {Map<string, Map<string, object>>} domain -> (name -> def) */
 const registry = new Map()
+
+/** Read-only commands (queries/inspections) that shouldn't pollute the
+ *  change history — everything else an agent runs is a change. */
+const READ_ONLY_NAME = /^(list|get|detect|describe|inspect|status)/i
+
+const summarizeArgs = (args) => {
+    try {
+        const str = JSON.stringify(args)
+        return str && str !== '{}' ? str.slice(0, 160) : undefined
+    } catch {
+        return undefined
+    }
+}
 
 const syncWindow = () => {
     if (typeof window === 'undefined') return
     window.__pixxel = window.__pixxel || {}
-    window.__pixxel.agent = { listCommands, getCommand, runCommand, registerCommand, registerDomain }
+    window.__pixxel.agent = { listCommands, getCommand, runCommand, runPlan, registerCommand, registerDomain }
 }
 
 /**
@@ -109,7 +124,95 @@ export const runCommand = async (id, args = {}, ctx = {}) => {
     const name = id.slice(idx + 1)
     const def = getCommand(domain, name)
     if (!def) throw new Error(`[agent] unknown command: ${id}`)
-    return def.run(args || {}, ctx || {})
+
+    // Everything inside a command execution is agent-attributed — including
+    // nested history pushes and mask-stack mutations the command triggers.
+    // The journal flag is refcounted, so nested runCommand calls are safe.
+    beginAgentAction()
+    try {
+        const out = await def.run(args || {}, ctx || {})
+        if (!READ_ONLY_NAME.test(name) && !args?.dryRun) {
+            recordChange({
+                label: id,
+                detail: summarizeArgs(args),
+                source: 'agent',
+                domain,
+            })
+        }
+        return out
+    } finally {
+        endAgentAction()
+    }
+}
+
+/**
+ * Drive a multi-step plan through the registry with per-step validation,
+ * bounded retry, and observable per-step events — the executor half of the
+ * planner-executor-critic loop.
+ *
+ * Each step is `{ id: '<domain>.<name>', args?: object }`. Steps run
+ * SEQUENTIALLY (mask-chain mutations are order-dependent). A step that still
+ * fails after `maxRetries` attempts HALTS the run — partial results are
+ * returned so the critic can re-plan from what actually happened instead of
+ * what was intended.
+ *
+ * Resumability: pass `startAt` (e.g. from a persisted agentRun row's
+ * stepIndex) to skip already-completed steps after a crash.
+ *
+ * @param {{ steps: Array<{id: string, args?: object}> }} plan
+ * @param {object} [ctx]    runtime context forwarded to every command
+ * @param {object} [opts]
+ * @param {number} [opts.maxRetries=3]  attempts per step beyond the first
+ * @param {number} [opts.startAt=0]     resume index (skip completed steps)
+ * @param {(ev: {stepIndex:number,id:string,status:'ok'|'retry'|'failed'|'skipped',attempt:number,out?:any,error?:string}) => void} [opts.onStep]
+ * @returns {Promise<{ok: boolean, halted: boolean, results: Array}>}
+ */
+export const runPlan = async (plan, ctx = {}, opts = {}) => {
+    const { maxRetries = 3, startAt = 0, onStep } = opts
+    const steps = Array.isArray(plan?.steps) ? plan.steps : []
+    const results = []
+
+    for (const [i, step] of steps.entries()) {
+        if (i < startAt) {
+            results.push({ stepIndex: i, id: step?.id, status: 'skipped' })
+            onStep?.({ stepIndex: i, id: step?.id, status: 'skipped', attempt: 0 })
+            continue
+        }
+        const id = step?.id
+        if (typeof id !== 'string' || id.indexOf('.') < 1) {
+            const error = `[agent] invalid step id at ${i}: ${JSON.stringify(id)}`
+            results.push({ stepIndex: i, id, status: 'failed', error })
+            onStep?.({ stepIndex: i, id, status: 'failed', attempt: 0, error })
+            return { ok: false, halted: true, results }
+        }
+
+        let attempt = 0
+        let lastErr = null
+        let done = false
+        while (attempt <= maxRetries) {
+            try {
+                const out = await runCommand(id, step.args || {}, ctx)
+                results.push({ stepIndex: i, id, status: 'ok', attempt, out })
+                onStep?.({ stepIndex: i, id, status: 'ok', attempt, out })
+                done = true
+                break
+            } catch (e) {
+                lastErr = e
+                attempt += 1
+                if (attempt <= maxRetries) {
+                    onStep?.({ stepIndex: i, id, status: 'retry', attempt, error: String(e?.message || e) })
+                }
+            }
+        }
+        if (!done) {
+            const error = String(lastErr?.message || lastErr)
+            results.push({ stepIndex: i, id, status: 'failed', attempt, error })
+            onStep?.({ stepIndex: i, id, status: 'failed', attempt, error })
+            // Halt: let the critic see partial reality and re-plan.
+            return { ok: false, halted: true, results }
+        }
+    }
+    return { ok: true, halted: false, results }
 }
 
 // Expose immediately (idempotent) so the console / future agent bridge can
