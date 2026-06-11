@@ -95,9 +95,18 @@ const callDepthService = async (imageBuffer) => {
       width: response.headers.get('x-width') || '',
       height: response.headers.get('x-height') || '',
       elapsedMs: response.headers.get('x-elapsed-ms') || '',
+      coldLoad: response.headers.get('x-cold-load') === 'true',
     }
   } catch (e) {
-    return { ok: false, reason: e?.message || String(e) }
+    const reason = e?.message || String(e)
+    const isTimeout = /timeout|abort/i.test(reason)
+    return {
+      ok: false,
+      reason: isTimeout
+        ? 'AI model is loading for the first time (downloading weights). This takes 30–90 seconds — please try again in a moment.'
+        : reason,
+      isModelLoading: isTimeout,
+    }
   }
 }
 
@@ -185,6 +194,7 @@ export async function POST(request) {
         'X-Width': result.width,
         'X-Height': result.height,
         'X-Elapsed-Ms': result.elapsedMs,
+        ...(result.coldLoad ? { 'X-Cold-Load': 'true' } : {}),
       },
     })
   } catch (error) {

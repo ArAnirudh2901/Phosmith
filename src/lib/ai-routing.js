@@ -79,11 +79,15 @@ export const AI_CAPABILITIES = {
     },
     inpaint: {
         label: 'Object fill',
-        hint: 'Fills erased regions with background texture',
-        client: false,
+        hint: 'Fills removed objects with background texture',
+        // "client" here means the LOCAL mask service's LaMa (on this machine),
+        // not in-browser — the closest thing to on-device inpainting we have.
+        // The /api/ai/inpaint route maps the preference to its backend param:
+        // client → lama, server → hf, auto → lama-first with HF fallback.
+        client: true,
         server: true,
-        clientImpl: null,
-        serverImpl: 'LaMa / HF SD (auto)',
+        clientImpl: 'LaMa (local mask service)',
+        serverImpl: 'Stable Diffusion (Hugging Face)',
     },
 }
 
