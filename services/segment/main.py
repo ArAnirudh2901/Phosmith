@@ -1198,6 +1198,13 @@ def _rasterize_shape_mask(width: int, height: int, points: list[tuple[float, flo
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
+@app.get("/")
+async def root() -> dict:
+    return {
+        "status": "ok",
+        "message": "Pixxel Mask Service is running"
+    }
+
 @app.get("/health")
 async def health() -> dict:
     return {
