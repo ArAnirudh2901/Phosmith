@@ -825,6 +825,11 @@ const computePlanForImage = async ({
     // what the user sees, not the original upload. sourceUrl is only the fallback.
     renderedImageBase64 = null,
     renderedImageMime = null,
+    // v6: corrective feedback from the judge/critic loop. Flows straight into
+    // buildEditPlan's criticFeedback channel. Callers fold a hash of it into
+    // promptKey (see POST) so corrective plans never collide with first-pass
+    // cache rows for the same (imageHash, prompt).
+    criticFeedback = null,
 }) => {
     // 1) Exact cache lookup — content-addressable, fast O(1).
     try {
@@ -937,6 +942,7 @@ const computePlanForImage = async ({
         notes: verdict.notes,
         imagekitAi: verdict.imagekitAi,
         directAdjustments,
+        criticFeedback,
     })
 
     try {
@@ -1088,7 +1094,25 @@ export async function POST(request) {
             return NextResponse.json({ error: "projectId required" }, { status: 400 })
         }
 
-        const promptKey = normalizePromptKey(prompt)
+        // v6: corrective feedback from the judge/critic loop (sanitized + size-
+        // capped). When present, a stable token derived from it is folded into
+        // promptKey so corrective plans get their OWN deterministic cache rows
+        // instead of returning the first-pass plan they're trying to fix.
+        const criticFeedback = (() => {
+            const cf = body.criticFeedback
+            if (!cf || typeof cf !== "object") return null
+            const deltas = cf.deltas && typeof cf.deltas === "object" && !Array.isArray(cf.deltas)
+                ? Object.fromEntries(Object.entries(cf.deltas).slice(0, 12))
+                : null
+            const notes = typeof cf.notes === "string" ? cf.notes.slice(0, 500) : ""
+            const axis = typeof cf.axis === "string" ? cf.axis.slice(0, 64) : null
+            if (!deltas && !notes) return null
+            return { axis, deltas, notes }
+        })()
+
+        const promptKey = criticFeedback
+            ? `${normalizePromptKey(prompt)} critic ${normalizePromptKey(JSON.stringify(criticFeedback))}`.slice(0, 512)
+            : normalizePromptKey(prompt)
         const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY
 
         // ── Multi-layer path ──────────────────────────────────────────────
@@ -1205,6 +1229,7 @@ export async function POST(request) {
                 apiKey,
                 renderedImageBase64,
                 renderedImageMime,
+                criticFeedback,
             })
 
         return NextResponse.json({

@@ -60,3 +60,4 @@ skills-lock.json
 *.pt
 *.onnx
 
+.cache/

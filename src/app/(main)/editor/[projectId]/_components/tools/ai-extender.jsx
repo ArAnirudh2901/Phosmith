@@ -21,8 +21,14 @@ import {
     removeExpansionFramesFromCanvas,
     showEdgeControlsOnly,
     silenceImageForExpansion,
+    unionFrameBounds,
     validateExpansion,
 } from '../../../../../../lib/expansion-pipeline'
+import {
+    cancelExtendPoll,
+    hasPendingExtend,
+    startExtendPoll,
+} from '../../../../../../lib/extend-poller'
 
 const isRemoteImageUrl = (url) =>
     typeof url === 'string' &&
@@ -96,7 +102,33 @@ const AIExtender = ({ project }) => {
     const setupGenerationRef = useRef(0)
     const abortControllerRef = useRef(null)
 
-    const activeImage = useMemo(() => getCanvasActiveImage(canvasEditor), [canvasEditor])
+    // Bumped whenever an image is added/removed on the canvas so activeImage
+    // (and the expansion frame built around it) re-resolves after an extension
+    // replaces the image, after the background poller swaps the soft preview
+    // for the real result, and after undo/redo recreates objects. Without it
+    // the panel keeps a stale reference to a removed image and a second
+    // extension silently works from dead pixels.
+    const [imageRevision, setImageRevision] = useState(0)
+    useEffect(() => {
+        if (!canvasEditor) return undefined
+        const bump = (opt) => {
+            if (opt?.target?.type?.toLowerCase?.() === 'image') {
+                setImageRevision((v) => v + 1)
+            }
+        }
+        canvasEditor.on('object:added', bump)
+        canvasEditor.on('object:removed', bump)
+        return () => {
+            canvasEditor.off('object:added', bump)
+            canvasEditor.off('object:removed', bump)
+        }
+    }, [canvasEditor])
+
+    const activeImage = useMemo(
+        () => getCanvasActiveImage(canvasEditor),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [canvasEditor, imageRevision]
+    )
 
     const syncExpansionPreview = useCallback(() => {
         const canvas = canvasEditor
@@ -278,17 +310,10 @@ const AIExtender = ({ project }) => {
         const commitFrameSize = () => {
             const imgBounds = image.getBoundingRect()
             const frameBounds = getFrameBoundsFromFabricRect(frame)
-            const w = Math.max(imgBounds.width, frameBounds.width)
-            const h = Math.max(imgBounds.height, frameBounds.height)
-
-            const left = Math.min(frameBounds.left, imgBounds.left)
-            const top = Math.min(frameBounds.top, imgBounds.top)
+            const union = unionFrameBounds(imgBounds, frameBounds)
 
             frame.set({
-                left,
-                top,
-                width: w,
-                height: h,
+                ...union,
                 scaleX: 1,
                 scaleY: 1,
                 originX: 'left',
@@ -371,6 +396,10 @@ const AIExtender = ({ project }) => {
             abortControllerRef.current.abort()
             abortControllerRef.current = null
         }
+        // Note: a background poll for an ALREADY-applied soft preview is left
+        // running on purpose — cancelling here only stops the in-flight
+        // request; the real result for a previous soft preview should still
+        // swap in when it lands.
         setIsApplying(false)
         setProcessingMessage(null)
         toast.info('Extension cancelled')
@@ -389,6 +418,14 @@ const AIExtender = ({ project }) => {
             return
         }
 
+        // The image can leave the canvas between renders (undo past the
+        // extension, background swap mid-gesture). Never export dead pixels.
+        if (!canvasEditor?.getObjects?.()?.includes(activeImage)) {
+            toast.error('The image changed — adjust the frame and try again')
+            setImageRevision((v) => v + 1)
+            return
+        }
+
         const imageBounds = activeImage.getBoundingRect()
         const frameBounds = getFrameBoundsFromFabricRect(frame)
 
@@ -398,6 +435,29 @@ const AIExtender = ({ project }) => {
         }
         const controller = new AbortController()
         abortControllerRef.current = controller
+
+        // A previous extension's real result may still be cooking. Starting a
+        // new one supersedes it — and the visible pixels being extended are
+        // the soft preview's, so tell the user what they're working from.
+        if (hasPendingExtend(project._id)) {
+            cancelExtendPoll(project._id)
+            toast.warning(
+                'The previous extension was still finalising — this new extension starts from the current preview.'
+            )
+        }
+
+        // Freeze the frame while the request is in flight: a mid-flight resize
+        // would silently disagree with the expansion that was actually sent.
+        frame.set({ selectable: false, evented: false })
+        canvasEditor?.discardActiveObject?.()
+        canvasEditor?.requestRenderAll?.()
+        const unfreezeFrame = () => {
+            const liveFrame = expansionFrameRef.current
+            if (!liveFrame || !isCanvasLive(canvasEditor)) return
+            liveFrame.set({ selectable: true, evented: true })
+            canvasEditor.setActiveObject(liveFrame)
+            canvasEditor.requestRenderAll()
+        }
 
         setIsApplying(true)
         setProcessingMessage('Preparing extension...')
@@ -551,15 +611,30 @@ const AIExtender = ({ project }) => {
             }
 
             if (data.method === 'local-soft-extend') {
-                toast.warning('ImageKit is still preparing, so a soft extension was applied.')
+                if (data.pendingGenfillUrl) {
+                    toast.warning('AI is taking longer than expected — showing a soft preview. The real result will replace it automatically, even if you keep editing.')
+                    // Module-scoped poller: survives tool switches, undo/redo
+                    // (it re-finds the preview by src), and page reloads.
+                    startExtendPoll({
+                        projectId: project._id,
+                        pendingGenfillUrl: data.pendingGenfillUrl,
+                        fallbackUrl: readyUrl,
+                    })
+                } else {
+                    toast.warning('ImageKit is still preparing, so a soft extension was applied.')
+                }
             } else {
                 toast.success('Image extended successfully!')
             }
         } catch (error) {
-            if (error?.name === 'AbortError') return
-            console.warn('AI extender failed:', error)
-            toast.error(error?.message || 'Failed to extend image')
+            if (error?.name !== 'AbortError') {
+                console.warn('AI extender failed:', error)
+                toast.error(error?.message || 'Failed to extend image')
+            }
         } finally {
+            // No-op after success (the frame was removed); restores
+            // interactivity after errors, aborts, and validation bails.
+            unfreezeFrame()
             if (abortControllerRef.current === controller) {
                 abortControllerRef.current = null
             }
@@ -568,7 +643,9 @@ const AIExtender = ({ project }) => {
         }
     }
 
-    // Cleanup abort controller on unmount
+    // Cleanup abort controller on unmount. The extend-poller is deliberately
+    // NOT cancelled here — it outlives the panel so a pending soft preview
+    // still gets its real result.
     useEffect(() => {
         return () => {
             abortControllerRef.current?.abort()

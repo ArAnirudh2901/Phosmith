@@ -21,7 +21,7 @@ const defaultIcons = {
 // (cyan/green/coral/amber) so the toast itself stays consistent.
 const baseToast = cn(
   "neo-toast",
-  "relative isolate flex items-start gap-2.5 overflow-hidden",
+  "relative isolate flex items-start gap-2.5",
   "px-3.5 py-3 text-[#F4F4F5]",
   "border-[1.5px] border-[rgba(244,244,245,0.85)] bg-[#000]",
   "rounded-[4px]",

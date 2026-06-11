@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { FabricImage } from 'fabric'
+import { toast } from 'sonner'
 import {
     PIXEL_MASK_OVERLAY_NAME,
     createMaskCanvas,
@@ -54,6 +55,40 @@ const commitMaskChange = (canvasEditor, img) => {
 }
 
 /**
+ * Fraction of a decoded greyscale mask that's "on" (white). Used to tell an
+ * empty SAM result (no object under the click → all-black) from a real hit,
+ * and to flag a near-full-frame selection. Sampled at ≤128px because only the
+ * rough proportion matters, not the exact area. Same-origin mask, so
+ * getImageData won't taint; the guards just keep a transient failure from
+ * blocking the erase (assume non-empty and proceed).
+ */
+const sampleMaskCoverage = (imageEl) => {
+    const cap = 128
+    const iw = imageEl?.naturalWidth || imageEl?.width || 0
+    const ih = imageEl?.naturalHeight || imageEl?.height || 0
+    if (!iw || !ih) return 1
+    const s = Math.min(1, cap / Math.max(iw, ih))
+    const w = Math.max(1, Math.round(iw * s))
+    const h = Math.max(1, Math.round(ih * s))
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return 1
+    ctx.drawImage(imageEl, 0, 0, w, h)
+    try {
+        const { data } = ctx.getImageData(0, 0, w, h)
+        let on = 0
+        for (let i = 0; i < data.length; i += 4) {
+            if (data[i] > 127) on += 1
+        }
+        return on / (w * h)
+    } catch {
+        return 1
+    }
+}
+
+/**
  * usePixelMaskTool — the shared painting engine behind both the Mask and Erase
  * tools. It owns all brush state, wires canvas pointer events, draws the live
  * on-canvas brush cursor, manages an undo/redo stack, and keeps the per-image
@@ -96,6 +131,11 @@ export default function usePixelMaskTool({
     const [flow, setFlow] = useState(100)
     const [feather, setFeather] = useState(0)
     const [magic, setMagic] = useState(false)
+    // AI object mode (SAM 2): a click segments the WHOLE object under the
+    // pointer and erases/restores it. Mutually exclusive with `magic` (the
+    // colour flood) — each setter below clears the other.
+    const [objectSelect, setObjectSelectState] = useState(false)
+    const [isObjectRunning, setIsObjectRunning] = useState(false)
     const [tolerance, setTolerance] = useState(24)
     const [altActive, setAltActive] = useState(false)
 
@@ -117,6 +157,9 @@ export default function usePixelMaskTool({
     const flowRef = useRef(flow)
     const featherRef = useRef(feather)
     const magicRef = useRef(magic)
+    const objectSelectRef = useRef(objectSelect)
+    const objectAbortRef = useRef(null)
+    const isObjectRunningRef = useRef(false)
     const toleranceRef = useRef(tolerance)
     const altRef = useRef(false)
 
@@ -163,6 +206,7 @@ export default function usePixelMaskTool({
     useEffect(() => { flowRef.current = flow }, [flow])
     useEffect(() => { featherRef.current = feather }, [feather])
     useEffect(() => { magicRef.current = magic }, [magic])
+    useEffect(() => { objectSelectRef.current = objectSelect }, [objectSelect])
     useEffect(() => { deferApplyRef.current = deferApply }, [deferApply])
     useEffect(() => { inferRegionRef.current = inferRegion }, [inferRegion])
     useEffect(() => { showOverlayRef.current = showOverlay }, [showOverlay])
@@ -269,7 +313,9 @@ export default function usePixelMaskTool({
             overlayImageRef.current = overlayImg
             canvasEditor.add(overlayImg)
         } else {
-            overlayImg.set(geometry)
+            // visible:true restores the object after a stroke (it's hidden for
+            // the stroke's duration while contextTop carries the live preview).
+            overlayImg.set({ ...geometry, visible: true })
             overlayImg.set('dirty', true)
         }
 
@@ -953,24 +999,57 @@ export default function usePixelMaskTool({
     }, [effectiveMode])
 
     /* ─── live (in-stroke) sync ───
-     * During an active stroke we run a CHEAP rebuild, coalesced to one per animation
-     * frame: a crisp (un-feathered) clip + overlay, skipping the full-image emptiness
-     * scan and the Gaussian feather blur. The full sync (with feather + emptiness)
-     * runs once on mouse:up. This keeps brushing smooth on large images where a full
-     * rebuild on every mouse:move was unusable.
+     * Two-tier pipeline, the key to a lag-free brush:
      *
-     * When deferApply is true, we ONLY update the overlay preview — no clipPath is
-     * applied, so the image pixels remain fully visible beneath the red selection. */
+     * FAST PATH (during a stroke): the live preview is composited on Fabric's
+     * TOP CANVAS (`contextTop`) — the same layer Fabric's own freehand brush
+     * draws on. The scene below is static while painting, so we never call
+     * requestRenderAll mid-stroke: no full-scene redraw, no re-draw of the
+     * (uncached, full-res) overlay object, and no `after:render` viewport-
+     * chrome DOM sync per frame. Per frame the work is just (a) a dirty-rect
+     * repaint of the overlay bitmap and (b) one composited blit to the top
+     * canvas. The Fabric overlay object is hidden for the stroke's duration
+     * (see onMouseDown) so the tint isn't double-composited.
+     *
+     * SLOW PATH (stroke end / no contextTop): the existing object-based
+     * overlay + one full render. The full clipPath/feather rebuild still only
+     * happens on mouse:up via syncMaskToImage().
+     *
+     * When deferApply is true, we ONLY update the overlay preview — no
+     * clipPath is applied, so pixels stay visible beneath the red selection. */
+    const renderStrokePreviewTop = useCallback((img) => {
+        const canvas = canvasEditor
+        const ctxTop = canvas?.contextTop
+        const overlay = overlayCanvasRef.current
+        if (!ctxTop || !overlay || typeof img?.calcTransformMatrix !== 'function') return false
+        try {
+            canvas.clearContext(ctxTop)
+            ctxTop.save()
+            const retina = canvas.getRetinaScaling?.() || 1
+            const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0]
+            ctxTop.setTransform(
+                retina * vpt[0], retina * vpt[1],
+                retina * vpt[2], retina * vpt[3],
+                retina * vpt[4], retina * vpt[5],
+            )
+            // calcTransformMatrix is centre-based: the bitmap's local origin
+            // sits at (-width/2, -height/2) in object space.
+            const m = img.calcTransformMatrix()
+            ctxTop.transform(m[0], m[1], m[2], m[3], m[4], m[5])
+            ctxTop.drawImage(overlay, -img.width / 2, -img.height / 2)
+            ctxTop.restore()
+            return true
+        } catch {
+            try { ctxTop.restore() } catch { /* unbalanced save */ }
+            return false
+        }
+    }, [canvasEditor])
+
     const liveSync = useCallback((img) => {
         if (!canvasEditor || !img) return
         if (!livePreviewRef.current || !showOverlayRef.current) return
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return
-        // During an active stroke we SKIP the expensive clipPath rebuild
-        // (buildMaskClipCanvas scans every pixel of the full-res mask) and only
-        // update the lightweight red overlay preview. The full clipPath is rebuilt
-        // once on mouse:up via syncMaskToImage(). This keeps the brush responsive
-        // on large images (e.g. 4K = ~12M pixels).
         if (!hasMaskRef.current) setHasMask(true)
         // Repaint only the brush's dirty footprint (set by brushAt/strokeTo),
         // then clear it. Falls back to a full repaint when nothing tracked it.
@@ -979,9 +1058,17 @@ export default function usePixelMaskTool({
             ? { x: dirty.minX, y: dirty.minY, w: dirty.maxX - dirty.minX, h: dirty.maxY - dirty.minY }
             : null
         strokeDirtyRectRef.current = null
+
+        if (isDrawingRef.current) {
+            const overlayCanvas = overlayCanvasRef.current
+            if (overlayCanvas) {
+                paintOverlayFromMask(maskCanvas, overlayCanvas, { threshold: MASK_EMPTY_THRESHOLD, rect })
+                if (renderStrokePreviewTop(img)) return
+            }
+        }
         updateOverlay(img, maskCanvas, rect)
         canvasEditor.requestRenderAll()
-    }, [canvasEditor, updateOverlay])
+    }, [canvasEditor, renderStrokePreviewTop, updateOverlay])
 
     const scheduleLiveSync = useCallback((img) => {
         if (deferApplyRef.current && inferRegionRef.current) {
@@ -1004,6 +1091,185 @@ export default function usePixelMaskTool({
             liveSync(img)
         })
     }, [liveSync])
+
+    /* ─── AI object click (SAM 2) ───
+     * One click = the whole object under the pointer, segmented by SAM 2 and
+     * composited into the erase mask ADDITIVELY — so clicking several subjects
+     * erases each of them in turn (multi-subject by accumulation). The
+     * composite is GPU-blended (darken/lighten), no pixel readbacks. */
+
+    const setObjectSelect = useCallback((value) => {
+        const v = Boolean(value)
+        setObjectSelectState(v)
+        if (v) setMagic(false)
+    }, [])
+
+    const setMagicExclusive = useCallback((value) => {
+        const v = Boolean(value)
+        setMagic(v)
+        if (v) setObjectSelectState(false)
+    }, [])
+
+    const doObjectErase = useCallback(async (local) => {
+        const img = targetImageRef.current
+        const maskCanvas = maskCanvasRef.current
+        const sourceEl = img ? getImageSourceElement(img) : null
+        if (!img || !maskCanvas || !sourceEl) return
+        if (isObjectRunningRef.current) {
+            toast('Still segmenting the previous click…', { icon: '⏳' })
+            return
+        }
+
+        try { objectAbortRef.current?.abort() } catch { /* ignore */ }
+        const controller = new AbortController()
+        objectAbortRef.current = controller
+        isObjectRunningRef.current = true
+        setIsObjectRunning(true)
+
+        try {
+            // The mask canvas and `local` both live in the image's CROPPED
+            // bitmap space (getImageBitmapSize → img.width/height, which is the
+            // crop size for a cropped Fabric image). Build the SAM upload, the
+            // click, and (downstream) the returned mask in that SAME frame so
+            // everything aligns — for a cropped image the naïve full-bitmap
+            // upload would misplace both the click and the result.
+            const { width: bw, height: bh } = getImageBitmapSize(img)
+            const cropX = img.cropX || 0
+            const cropY = img.cropY || 0
+            // An <img> mid-load reports naturalWidth 0; a not-yet-ready bitmap
+            // collapses to a 1px size. Either way SAM would get garbage.
+            const srcW = sourceEl.naturalWidth || sourceEl.width || 0
+            const srcH = sourceEl.naturalHeight || sourceEl.height || 0
+            if (srcW < 1 || srcH < 1 || bw < 2 || bh < 2) {
+                throw new Error('Image is still loading — try again in a moment')
+            }
+            const scale = Math.min(1, 1024 / Math.max(bw, bh))
+            const up = document.createElement('canvas')
+            up.width = Math.max(1, Math.round(bw * scale))
+            up.height = Math.max(1, Math.round(bh * scale))
+            const upCtx = up.getContext('2d')
+            if (!upCtx) throw new Error('Could not allocate an upload canvas')
+            upCtx.drawImage(sourceEl, cropX, cropY, bw, bh, 0, 0, up.width, up.height)
+            let blob
+            try {
+                blob = await new Promise((res, rej) =>
+                    up.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.85))
+            } catch (e) {
+                // A canvas drawn from a cross-origin image without CORS is
+                // tainted, so toBlob throws SecurityError — say so plainly.
+                if (e?.name === 'SecurityError') {
+                    throw new Error('This image is from another site without CORS, so it can’t be read for AI selection')
+                }
+                throw e
+            }
+
+            const form = new FormData()
+            form.append('image', blob, 'image.jpg')
+            form.append('clicks', JSON.stringify([[
+                Math.min(up.width - 1, Math.max(0, local.x * scale)),
+                Math.min(up.height - 1, Math.max(0, local.y * scale)),
+                1,
+            ]]))
+
+            const resp = await fetch('/api/ai/sam2', { method: 'POST', body: form, signal: controller.signal })
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}))
+                throw new Error(err.error || `Object detection failed (${resp.status})`)
+            }
+            const maskBlob = await resp.blob()
+            const decoded = await new Promise((resolve, reject) => {
+                const url = URL.createObjectURL(maskBlob)
+                const image = new Image()
+                image.onload = () => { URL.revokeObjectURL(url); resolve(image) }
+                image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('mask decode failed')) }
+                image.src = url
+            })
+            if (controller.signal.aborted) return
+
+            // Did SAM actually find an object under the click? An all-black
+            // mask composites to a no-op (darken-with-white / lighten-with-
+            // black), so a miss would silently do nothing yet still push a junk
+            // undo state and a misleading toast. Detect the empty result first.
+            const matteFraction = sampleMaskCoverage(decoded)
+            if (matteFraction < 0.0008) {
+                toast('No object found there — click directly on the thing you want to remove', { icon: '🤔' })
+                return
+            }
+
+            // The image (and its mask canvas) can change WHILE SAM runs — the
+            // user might delete/replace it, or undo past it. The `decoded` mask
+            // belongs to the bitmap we uploaded, so applying it to a different
+            // image now would composite the wrong shape. Bail if the target
+            // moved on or left the canvas.
+            if (targetImageRef.current !== img
+                || maskCanvasRef.current !== maskCanvas
+                || !(canvasEditor?.getObjects?.() || []).includes(img)) {
+                return
+            }
+
+            // Pre-commit snapshot for the deferred-session revert path (same
+            // contract as doMagic).
+            if (deferApplyRef.current && !preCommitSnapshotRef.current) {
+                preCommitSnapshotRef.current = snapshot()
+                preCommitUndoDepthRef.current = undoStackRef.current.length
+                preCommitRedoStackRef.current = redoStackRef.current.slice()
+            }
+            pushUndo()
+
+            const w = maskCanvas.width
+            const h = maskCanvas.height
+            const ctx = maskCanvas.getContext('2d')
+            ctx.save()
+            if (effectiveMode() === 'erase') {
+                // erase = min(mask, NOT object): invert the object mask, then
+                // darken-blend so object pixels go black and the rest is kept.
+                const inv = document.createElement('canvas')
+                inv.width = w
+                inv.height = h
+                const ictx = inv.getContext('2d')
+                ictx.fillStyle = '#ffffff'
+                ictx.fillRect(0, 0, w, h)
+                ictx.globalCompositeOperation = 'difference'
+                ictx.drawImage(decoded, 0, 0, w, h)
+                ctx.globalCompositeOperation = 'darken'
+                ctx.drawImage(inv, 0, 0)
+            } else {
+                // restore = max(mask, object).
+                ctx.globalCompositeOperation = 'lighten'
+                ctx.drawImage(decoded, 0, 0, w, h)
+            }
+            ctx.restore()
+
+            if (deferApplyRef.current) {
+                syncMaskToImage(img, { skipClip: true })
+                setHasPending(true)
+            } else {
+                syncMaskToImage(img)
+                commitMaskChange(canvasEditor, img)
+            }
+            if (matteFraction > 0.97) {
+                // SAM occasionally grabs the whole frame (e.g. a click on flat
+                // background). Don't block it — the user may want it — but flag
+                // it so an accidental "erase everything" is obvious.
+                toast(effectiveMode() === 'erase'
+                    ? 'That selected almost the entire image — press undo if it wasn’t what you meant'
+                    : 'That restored almost the entire image — press undo if it wasn’t what you meant',
+                    { icon: '⚠️', duration: 6000 })
+            } else {
+                toast.success(effectiveMode() === 'erase' ? 'Object erased — click another to remove more' : 'Object restored')
+            }
+        } catch (err) {
+            if (err?.name !== 'AbortError') {
+                toast.error(err?.message || 'Object detection failed')
+            }
+        } finally {
+            if (objectAbortRef.current === controller) {
+                objectAbortRef.current = null
+                isObjectRunningRef.current = false
+                setIsObjectRunning(false)
+            }
+        }
+    }, [effectiveMode, pushUndo, snapshot, syncMaskToImage, canvasEditor])
 
     /* ─── canvas lock / unlock (disable selection while painting) ─── */
 
@@ -1135,8 +1401,10 @@ export default function usePixelMaskTool({
             const el = canvasEditor.upperCanvasEl
             if (!el) return
             // Hide the system cursor under the ring for the brush; show a crosshair
-            // for the magic-eraser click mode (no meaningful brush size there).
-            el.style.cursor = magicRef.current ? 'crosshair' : (overCanvasRef.current ? 'none' : 'crosshair')
+            // for the click modes (magic flood / AI object — no brush size there).
+            el.style.cursor = (magicRef.current || objectSelectRef.current)
+                ? 'crosshair'
+                : (overCanvasRef.current ? 'none' : 'crosshair')
         }
 
         const onWindowMouseMove = (e) => {
@@ -1144,7 +1412,7 @@ export default function usePixelMaskTool({
             overCanvasRef.current = inside
             lastClientRef.current = { x: e.clientX, y: e.clientY }
             applyCanvasCursor()
-            if (inside && !magicRef.current) {
+            if (inside && !magicRef.current && !objectSelectRef.current) {
                 positionCursor(e.clientX, e.clientY)
                 // The ring's SIZE only changes with brush/zoom, not on move —
                 // skip the restyle while painting so a heavy stroke can't stall
@@ -1270,10 +1538,16 @@ export default function usePixelMaskTool({
 
             // Snap the ring to the stroke origin immediately so it never trails
             // (or flashes from a stale hover position) on the first dab.
-            if (!magicRef.current) {
+            if (!magicRef.current && !objectSelectRef.current) {
                 overCanvasRef.current = true
                 positionCursor(opt.e.clientX, opt.e.clientY)
                 setCursorVisible(true)
+            }
+
+            if (objectSelectRef.current) {
+                strokePointsRef.current = []
+                doObjectErase(local)
+                return
             }
 
             if (magicRef.current) {
@@ -1294,6 +1568,16 @@ export default function usePixelMaskTool({
             lastPointRef.current = local
             strokePointsRef.current = [local]
             strokeDirtyRectRef.current = null
+            // Hide the object-based overlay for the stroke's duration — the
+            // live preview is composited on contextTop instead (see liveSync),
+            // so leaving the object visible would double-tint painted pixels.
+            // One render here is the ONLY full-scene render until mouse:up.
+            const overlayObj = overlayImageRef.current
+            if (overlayObj && overlayObj.visible !== false
+                && canvasEditor.getObjects?.().includes(overlayObj)) {
+                overlayObj.visible = false
+                canvasEditor.requestRenderAll()
+            }
             brushAt(local.x, local.y)
             scheduleLiveSync(targetImageRef.current)
         }
@@ -1305,23 +1589,39 @@ export default function usePixelMaskTool({
             // in this same handler — a cheap composited transform, so the cursor
             // never trails the stroke.
             if (!magicRef.current && overCanvasRef.current) positionCursor(opt.e.clientX, opt.e.clientY)
-            const local = localFromEvent(opt.e)
-            if (!isPointInImage(local, targetImageRef.current)) {
-                // Pointer briefly left the image bounds mid-stroke. Do NOT clear
-                // lastPointRef — keeping the last in-bounds point means the next
-                // in-bounds move strokes a continuous segment back into the image
-                // instead of dropping a lone disconnected dab.
-                return
+
+            // High-polling mice/styluses deliver several samples per dispatched
+            // pointermove. Stroke through EVERY coalesced sample so fast curves
+            // stay smooth (no chord-cutting between 60Hz frames) — painting a
+            // dab into the mask bitmap is cheap; the visual sync below is still
+            // coalesced to one per animation frame.
+            const events = typeof opt.e.getCoalescedEvents === 'function'
+                ? opt.e.getCoalescedEvents()
+                : null
+            const samples = events && events.length ? events : [opt.e]
+
+            let painted = false
+            for (const ev of samples) {
+                const local = localFromEvent(ev)
+                if (!isPointInImage(local, targetImageRef.current)) {
+                    // Pointer briefly left the image bounds mid-stroke. Do NOT
+                    // clear lastPointRef — keeping the last in-bounds point means
+                    // the next in-bounds sample strokes a continuous segment back
+                    // into the image instead of dropping a disconnected dab.
+                    continue
+                }
+                if (lastPointRef.current) {
+                    strokeTo(lastPointRef.current.x, lastPointRef.current.y, local.x, local.y)
+                } else {
+                    brushAt(local.x, local.y)
+                }
+                lastPointRef.current = local
+                strokePointsRef.current.push(local)
+                painted = true
             }
+            if (!painted) return
             opt.e.preventDefault?.()
             opt.e.stopPropagation?.()
-            if (lastPointRef.current) {
-                strokeTo(lastPointRef.current.x, lastPointRef.current.y, local.x, local.y)
-            } else {
-                brushAt(local.x, local.y)
-            }
-            lastPointRef.current = local
-            strokePointsRef.current.push(local)
             scheduleLiveSync(targetImageRef.current)
         }
 
@@ -1329,6 +1629,9 @@ export default function usePixelMaskTool({
             if (!isDrawingRef.current) return
             isDrawingRef.current = false
             lastPointRef.current = null
+            // The stroke preview lived on contextTop — clear it before the full
+            // sync re-renders the scene with the (re-shown) overlay object.
+            try { canvasEditor.clearContext?.(canvasEditor.contextTop) } catch { /* ignore */ }
             // Cancel any pending cheap frame and run the full sync (feather + emptiness
             // check + overlay) once, then commit to history.
             if (liveSyncRafRef.current) {
@@ -1483,6 +1786,11 @@ export default function usePixelMaskTool({
             delete canvasEditor.__maskCanUndo
             delete canvasEditor.__maskCanRedo
             try { window.dispatchEvent(new CustomEvent('pixxel:mask-history-changed')) } catch { /* SSR */ }
+            // A tool switch can unmount mid-stroke — never leave a stale
+            // stroke preview on the top compositing layer.
+            try { canvasEditor.clearContext?.(canvasEditor.contextTop) } catch { /* ignore */ }
+            isDrawingRef.current = false
+            try { objectAbortRef.current?.abort() } catch { /* ignore */ }
             removeOverlay({ render: false })
             unlockCanvas(canvasEditor)
             if (cursorElRef.current?.parentNode) cursorElRef.current.parentNode.removeChild(cursorElRef.current)
@@ -1501,6 +1809,7 @@ export default function usePixelMaskTool({
         getScenePoint,
         brushAt,
         strokeTo,
+        doObjectErase,
         inferRegionFromCurrentStroke,
         pushUndo,
         snapshot,
@@ -1605,7 +1914,8 @@ export default function usePixelMaskTool({
         hardness, setHardness,
         flow, setFlow,
         feather, setFeather,
-        magic, setMagic,
+        magic, setMagic: setMagicExclusive,
+        objectSelect, setObjectSelect, isObjectRunning,
         tolerance, setTolerance,
         altActive,
         hasMask, undoDepth, redoDepth,

@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
 import { luminanceLayer, colorLayer, linearLayer, radialLayer, semanticLayer, depthLayer, smartBrushLayer, lassoLayer, brushLayer, BLEND_OPS, FILL_MODES, MAX_LAYERS, sanitiseFill } from "@/lib/megashader"
+import { isAgentActing, recordChange } from "@/lib/change-journal"
+
+// Journal a mask-panel edit. Agent-driven chain mutations go through
+// mask-commands (which the command registry already records), so only
+// direct user edits in the panel log here.
+const journalMaskEdit = (label) => {
+    if (!isAgentActing()) recordChange({ label, domain: 'mask' })
+}
 
 /**
  * useMaskLayers
@@ -173,6 +181,7 @@ export const useMaskLayers = () => {
         snapshot()
         dispatch({ type: 'add', layer })
         setSelectedLayerId(layer.id)
+        journalMaskEdit(`Mask: add ${kind} layer`)
         return layer.id
     }, [snapshot])
 
@@ -186,6 +195,7 @@ export const useMaskLayers = () => {
         snapshot()
         dispatch({ type: 'remove', id })
         setSelectedLayerId((cur) => (cur === id ? null : cur))
+        journalMaskEdit('Mask: remove layer')
     }, [snapshot])
 
     const updateLayer = useCallback((id, patch) => {
@@ -239,6 +249,7 @@ export const useMaskLayers = () => {
         snapshot()
         dispatch({ type: 'clear' })
         setSelectedLayerId(null)
+        journalMaskEdit('Mask: clear all layers')
     }, [snapshot])
 
     const selectLayer = useCallback((id) => setSelectedLayerId(id), [])

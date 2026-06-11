@@ -12,6 +12,7 @@ both MIT / Apache 2.0 and free for any use.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -42,7 +43,7 @@ except Exception:  # pragma: no cover - optional accel
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from PIL import Image, ImageDraw, ImageFilter, UnidentifiedImageError
 from rembg import new_session, remove
 from starlette.concurrency import run_in_threadpool
@@ -152,6 +153,18 @@ SUBJECT_SALIENT_AREA_FRAC = float(os.getenv("SUBJECT_SALIENT_AREA_FRAC", "0.005"
 # as scene/background (a couch/wall the subject sits in front of), not a
 # subject, so the salient-include rule won't union it in.
 SUBJECT_SALIENT_AREA_MAX_FRAC = float(os.getenv("SUBJECT_SALIENT_AREA_MAX_FRAC", "0.55").strip())
+# Cap on instances returned by /segment/instances (sorted by area, largest
+# first). Each instance carries a full-res base64 PNG mask, so an uncapped
+# crowd photo could produce a multi-hundred-MB JSON response.
+SUBJECT_INSTANCES_MAX = int(os.getenv("SUBJECT_INSTANCES_MAX", "24").strip())
+# Salient-pass duplicate suppression: with `classes=` unset (salient mode) YOLO
+# can report the SAME physical object under two labels (e.g. "vase" AND "potted
+# plant"). A salient candidate whose mask is at least this contained inside an
+# already-accepted instance's mask is treated as a duplicate and dropped.
+# Containment (intersection / candidate area), NOT IoU — a small prop fully
+# inside a person's mask region still scores low because instance masks rarely
+# share pixels, while a relabelled duplicate shares nearly all of them.
+SUBJECT_DEDUP_CONTAINMENT = float(os.getenv("SUBJECT_DEDUP_CONTAINMENT", "0.85").strip())
 
 # ─── Matte-cleanup tuning ────────────────────────────────────────────────────
 # Only fill interior holes SMALLER than this fraction of the subject's area —
@@ -180,6 +193,52 @@ ALLOWED_ORIGINS = [
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
     if o.strip()
 ]
+
+# ─── Auto-crop tuning ────────────────────────────────────────────────────────
+# Default padding around the union of detected subjects when computing the
+# subject-aware crop, expressed as a fraction of the SHORTER subject-box side.
+# 0.08 keeps a comfortable breathing room without losing too much frame.
+CROP_SUBJECT_PADDING = float(os.getenv("CROP_SUBJECT_PADDING", "0.08").strip())
+# Content-fill (border trim) considers a pixel "content" when its absolute
+# difference from the dominant border colour exceeds this 0..255 threshold.
+CROP_CONTENT_TRIM_THRESH = int(os.getenv("CROP_CONTENT_TRIM_THRESH", "16").strip())
+# Minimum fraction of the image the content-fill crop must keep — guards
+# against accidentally cropping to nothing on a near-solid image.
+CROP_CONTENT_MIN_FRAC = float(os.getenv("CROP_CONTENT_MIN_FRAC", "0.20").strip())
+# Depth-aware foreground = the N percentile of nearest pixels (largest depth).
+# 0.45 typically isolates the foreground plane.
+CROP_DEPTH_FOREGROUND_PCT = float(os.getenv("CROP_DEPTH_FOREGROUND_PCT", "0.45").strip())
+# Snap-to-rule-of-thirds strength when subject centroid is close to a power
+# point (0 = no snap, 1 = always snap).
+CROP_THIRDS_SNAP = float(os.getenv("CROP_THIRDS_SNAP", "0.65").strip())
+# Cap the longest side accepted by /crop/auto. The endpoint composes results
+# from segment + depth, both of which already cap at 2048.
+CROP_MAX_SIDE = int(os.getenv("CROP_MAX_SIDE", "2048").strip())
+
+# ─── Text-grounded masking (/ground/text — Step 9: NL mask pipeline) ────────
+# CLIPSeg turns a free-text phrase ("the red jacket", "the waterfall") into a
+# coarse relevance heatmap; connected components above threshold are then
+# refined with SAM 2 box+point prompts for crisp instance-quality edges.
+# rd64-refined is ~600 MB and lazy-loads exactly like SAM 2 / Depth.
+GROUND_MODEL_ID = os.getenv("GROUND_MODEL_ID", "CIDAS/clipseg-rd64-refined").strip()
+GROUND_MAX_SIDE = int(os.getenv("GROUND_MAX_SIDE", "2048").strip())
+# CLIPSeg's sigmoid map lives in a compressed range (true positives often
+# peak at only 0.35..0.6), so the binarisation threshold is RELATIVE to the
+# map's own peak: pixel >= max(GROUND_FLOOR, GROUND_THRESHOLD * peak). An
+# absolute cut (the naive 0.4) silently drops weak-but-real targets.
+GROUND_THRESHOLD = float(os.getenv("GROUND_THRESHOLD", "0.55").strip())
+# Absolute floor under the relative cut — keeps near-zero noise out of the
+# mask even when the peak itself is tiny.
+GROUND_FLOOR = float(os.getenv("GROUND_FLOOR", "0.10").strip())
+# Below this peak probability the phrase is reported as not found at all.
+GROUND_MIN_PEAK = float(os.getenv("GROUND_MIN_PEAK", "0.25").strip())
+# Ignore components smaller than this fraction of the frame (heatmap noise).
+GROUND_MIN_AREA_FRAC = float(os.getenv("GROUND_MIN_AREA_FRAC", "0.001").strip())
+GROUND_MAX_PHRASES = int(os.getenv("GROUND_MAX_PHRASES", "4").strip())
+GROUND_MAX_COMPONENTS = int(os.getenv("GROUND_MAX_COMPONENTS", "4").strip())
+# SAM 2 refinement is the latency hot spot on CPU — cap how many components
+# get the treatment; the rest fall back to the (cleaned) CLIPSeg mask.
+GROUND_REFINE_TOP = int(os.getenv("GROUND_REFINE_TOP", "2").strip())
 
 # rembg >=2.0.59 model registry.
 # Licenses:  birefnet-*, isnet-*, u2net*, silueta = MIT;
@@ -480,19 +539,21 @@ def clean_matte(matte_u8: np.ndarray, rgb: "np.ndarray | None" = None) -> np.nda
 
 # ─── App lifecycle ───────────────────────────────────────────────────────────
 
-def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" = None):
-    """Detect person/animal INSTANCES with YOLO-seg and return
-    `(union_mask uint8 0/255, instance_count)`, or `(None, 0)` if YOLO is
-    unavailable or no subject is found.
+def _detect_subject_instances(app, pil_img: "Image.Image", matte: "np.ndarray | None" = None):
+    """Detect subject INSTANCES with YOLO-seg and return a list of per-instance
+    dicts, or `[]` if YOLO is unavailable or nothing qualifies as a subject.
 
-    The union of every subject instance handles group photos (all subjects in
-    one mask). Person/animal classes (`SUBJECT_CLASSES`) are always included.
-    When `matte` (the BiRefNet saliency map) is supplied and
-    `SUBJECT_SALIENT_INCLUDE` is on, ANY other detected instance whose own mask
-    is mostly salient and large enough is ALSO included — so multi-subject
-    photos that aren't people (products, multiple objects) keep every subject —
-    while prominent background objects (sky/walls/furniture) score ~0 saliency
-    and are excluded.
+    Each dict: `{class_id, label, confidence, mask (HxW bool), area,
+    source ('class'|'salient')}`. The same gating that previously lived inside
+    `_subject_union_mask` decides what counts as a subject:
+
+      - Person/animal classes (`SUBJECT_CLASSES`) are ALWAYS subjects.
+      - When `matte` (the BiRefNet saliency map) is supplied and
+        `SUBJECT_SALIENT_INCLUDE` is on, ANY other detected instance whose own
+        mask is mostly salient and large enough is ALSO a subject — so
+        multi-subject photos that aren't people (products, multiple objects)
+        keep every subject — while prominent background objects
+        (sky/walls/furniture) score ~0 saliency and are excluded.
 
     Detection recall on small/distant/occluded subjects is driven by
     `SUBJECT_IMGSZ` (letterbox size), `SUBJECT_CONF`, and `SUBJECT_IOU` (kept
@@ -506,7 +567,7 @@ def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" 
     """
     model = getattr(app.state, "yolo", None)
     if model is None:
-        return None, 0
+        return []
     w, h = pil_img.size  # PIL size is (width, height)
 
     # When salient-instance inclusion is on we must SEE every class (so a
@@ -529,21 +590,23 @@ def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" 
         results = model.predict(pil_img, **predict_kwargs)
     except Exception:
         log.exception("YOLO predict failed")
-        return None, 0
+        return []
     if not results:
-        return None, 0
+        return []
     r = results[0]
     if getattr(r, "masks", None) is None or getattr(r, "boxes", None) is None:
-        return None, 0
+        return []
     try:
         cls = r.boxes.cls.cpu().numpy().astype(int)
+        confs = r.boxes.conf.cpu().numpy().astype(float)
         masks = r.masks.data.cpu().numpy()  # (N, mh, mw) in 0..1
     except Exception:
         log.exception("YOLO mask extraction failed")
-        return None, 0
+        return []
+    names = getattr(model, "names", None) or {}
 
     # Resolve every instance mask to a full-res boolean once.
-    instances = []  # (class_id, bool_mask, area)
+    instances = []  # (class_id, conf, bool_mask, area)
     for i, c in enumerate(cls):
         m = masks[i]
         if m.shape != (h, w):
@@ -551,18 +614,23 @@ def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" 
             m_img = Image.fromarray((np.clip(m, 0.0, 1.0) * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)
             m = np.asarray(m_img, dtype=np.float32) / 255.0
         mb = m > 0.5
-        instances.append((int(c), mb, int(mb.sum())))
+        instances.append((int(c), float(confs[i]), mb, int(mb.sum())))
 
-    union = np.zeros((h, w), dtype=np.uint8)
-    count = 0
+    out = []
 
     # Pass 1: person/animal subjects are ALWAYS included. Track the largest so
     # the salient pass can tell props from scenery.
     max_subj_area = 0
-    for c, mb, area in instances:
-        if c in SUBJECT_CLASSES:
-            union[mb] = 255
-            count += 1
+    for c, conf, mb, area in instances:
+        if c in SUBJECT_CLASSES and area > 0:
+            out.append({
+                "class_id": c,
+                "label": str(names.get(c, c)),
+                "confidence": conf,
+                "mask": mb,
+                "area": area,
+                "source": "class",
+            })
             max_subj_area = max(max_subj_area, area)
 
     # Pass 2: generic salient instances (multi-object photos). A salient object
@@ -576,19 +644,54 @@ def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" 
         min_inst_area = SUBJECT_SALIENT_AREA_FRAC * frame_area
         max_inst_area = SUBJECT_SALIENT_AREA_MAX_FRAC * frame_area
         salient_cap = max_inst_area if max_subj_area == 0 else min(max_inst_area, 1.5 * max_subj_area)
-        for c, mb, area in instances:
-            if c in SUBJECT_CLASSES:
-                continue
-            if not (min_inst_area <= area <= salient_cap):
-                continue
-            overlap = float((mb & salient).sum()) / float(area or 1)
-            if overlap >= SUBJECT_SALIENT_OVERLAP:
-                union[mb] = 255
-                count += 1
 
-    if count == 0:
+        def _is_duplicate(mb: np.ndarray, area: int) -> bool:
+            # Same object relabelled under a second class shares nearly all of
+            # its pixels with an already-accepted instance; genuinely distinct
+            # subjects (even touching ones) share very few.
+            for prev in out:
+                inter = float((mb & prev["mask"]).sum())
+                if inter / float(area or 1) >= SUBJECT_DEDUP_CONTAINMENT:
+                    return True
+            return False
+
+        # Highest-confidence candidates first, so when two salient detections
+        # cover the same object the better label is the one that survives.
+        candidates = [
+            (c, conf, mb, area) for c, conf, mb, area in instances
+            if c not in SUBJECT_CLASSES and min_inst_area <= area <= salient_cap
+        ]
+        candidates.sort(key=lambda t: -t[1])
+        for c, conf, mb, area in candidates:
+            overlap = float((mb & salient).sum()) / float(area or 1)
+            if overlap < SUBJECT_SALIENT_OVERLAP:
+                continue
+            if _is_duplicate(mb, area):
+                continue
+            out.append({
+                "class_id": c,
+                "label": str(names.get(c, c)),
+                "confidence": conf,
+                "mask": mb,
+                "area": area,
+                "source": "salient",
+            })
+
+    return out
+
+
+def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" = None):
+    """Union of every subject instance (group photos → one mask). Thin wrapper
+    over `_detect_subject_instances`; returns `(union uint8 0/255, count)` or
+    `(None, 0)` — the exact contract /segment has always used."""
+    instances = _detect_subject_instances(app, pil_img, matte)
+    if not instances:
         return None, 0
-    return union, count
+    h, w = instances[0]["mask"].shape
+    union = np.zeros((h, w), dtype=np.uint8)
+    for inst in instances:
+        union[inst["mask"]] = 255
+    return union, len(instances)
 
 
 def _compose_subject_alpha(matte: np.ndarray, subject: np.ndarray) -> np.ndarray:
@@ -719,6 +822,130 @@ def _ensure_depth(app: FastAPI) -> bool:
         return _load_depth(app)
 
 
+_GROUND_LOCK = threading.Lock()
+
+
+def _load_ground(app: FastAPI) -> bool:
+    """Load CLIPSeg into app.state (blocking). Caller holds _GROUND_LOCK."""
+    try:
+        import torch  # type: ignore  # noqa: F401
+        from transformers import CLIPSegForImageSegmentation, CLIPSegProcessor  # type: ignore
+
+        device, device_label = detect_torch_device()
+        if device is None:
+            raise ImportError("torch not available")
+
+        log.info("loading CLIPSeg model %r onto %s ...", GROUND_MODEL_ID, device_label)
+        t = time.perf_counter()
+        app.state.ground_processor = CLIPSegProcessor.from_pretrained(GROUND_MODEL_ID)
+        app.state.ground_model = CLIPSegForImageSegmentation.from_pretrained(GROUND_MODEL_ID).to(device)
+        app.state.ground_model.eval()
+        app.state.ground_device = device
+        app.state.ground_model_id = GROUND_MODEL_ID
+        app.state.ground_available = True
+        log.info("CLIPSeg ready in %.1fs on %s", time.perf_counter() - t, device_label)
+        return True
+    except ImportError:
+        log.warning("torch / transformers not installed; /ground/text disabled.")
+        app.state.ground_load_failed = True
+        return False
+    except Exception as e:  # pragma: no cover - defensive
+        log.exception("failed to load CLIPSeg: %s", e)
+        app.state.ground_load_failed = True
+        return False
+
+
+def _ensure_ground(app: FastAPI) -> bool:
+    """Lazily load CLIPSeg; return True if it's ready to use."""
+    if getattr(app.state, "ground_available", False):
+        return True
+    if getattr(app.state, "ground_load_failed", False):
+        return False
+    with _GROUND_LOCK:
+        if getattr(app.state, "ground_available", False):
+            return True
+        if getattr(app.state, "ground_load_failed", False):
+            return False
+        return _load_ground(app)
+
+
+def _ground_heatmaps(app, img: Image.Image, phrases: "list[str]") -> np.ndarray:
+    """CLIPSeg relevance maps for `phrases` against `img`.
+
+    Returns float32 array of shape (len(phrases), H, W) in 0..1 at the
+    IMAGE's resolution (the model's 352² logits are bilinearly upsampled).
+    """
+    import torch  # type: ignore
+
+    processor = app.state.ground_processor
+    model = app.state.ground_model
+    device = app.state.ground_device
+
+    inputs = processor(
+        text=phrases,
+        images=[img] * len(phrases),
+        padding=True,
+        return_tensors="pt",
+    ).to(device)
+    with torch.inference_mode():
+        outputs = model(**inputs)
+    logits = outputs.logits  # (N, 352, 352) — or (352, 352) when N == 1
+    if logits.dim() == 2:
+        logits = logits.unsqueeze(0)
+    probs = torch.sigmoid(logits).cpu().numpy().astype(np.float32)
+
+    out = np.empty((len(phrases), img.height, img.width), dtype=np.float32)
+    for i in range(probs.shape[0]):
+        m = Image.fromarray((probs[i] * 255.0).astype(np.uint8), mode="L")
+        m = m.resize((img.width, img.height), Image.BILINEAR)
+        out[i] = np.asarray(m, dtype=np.float32) / 255.0
+    return out
+
+
+def _sam2_refine_box(app, img: Image.Image, box: "tuple[int, int, int, int]",
+                     point: "tuple[float, float] | None" = None) -> "np.ndarray | None":
+    """Refine a coarse region into a crisp SAM 2 mask using a box prompt
+    (plus an optional positive point at the region's confidence peak).
+
+    `box` is (x, y, w, h) in image pixels. Returns a bool (H, W) mask or
+    None when SAM 2 is unavailable or inference fails — callers fall back
+    to the coarse mask.
+    """
+    if not _ensure_sam2(app):
+        return None
+    try:
+        import torch  # type: ignore
+
+        x, y, w, h = box
+        # SAM 2 input_boxes: [image, object, [x0, y0, x1, y1]] = 3 levels.
+        boxes = [[[float(x), float(y), float(x + w), float(y + h)]]]
+        kwargs = dict(images=img, input_boxes=boxes, return_tensors="pt")
+        if point is not None:
+            # input_points: [image, object, point, [x, y]] = 4 levels.
+            kwargs["input_points"] = [[[[float(point[0]), float(point[1])]]]]
+            kwargs["input_labels"] = [[[1]]]
+
+        embeddings, original_sizes = _sam2_encode(app, img)
+        processor = app.state.sam2_processor
+        model = app.state.sam2_model
+        device = app.state.sam2_device
+
+        inputs = processor(**kwargs).to(device)
+        inputs["image_embeddings"] = embeddings
+        inputs.pop("pixel_values", None)
+        with torch.inference_mode():
+            outputs = model(**inputs)
+        masks = processor.image_processor.post_process_masks(
+            outputs.pred_masks.cpu(), original_sizes.cpu(),
+        )
+        scores = outputs.iou_scores.cpu().numpy()[0].reshape(-1)
+        best = int(scores.argmax())
+        return masks[0][0][best].cpu().numpy().astype(bool)
+    except Exception:
+        log.exception("SAM 2 box refinement failed; using coarse mask")
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("loading rembg model %r ...", MODEL_NAME)
@@ -768,6 +995,9 @@ async def lifespan(app: FastAPI):
     app.state.depth_available = False
     app.state.depth_load_failed = False
     app.state.depth_model_id = DEPTH_MODEL_ID
+    app.state.ground_available = False
+    app.state.ground_load_failed = False
+    app.state.ground_model_id = GROUND_MODEL_ID
 
     if SEGMENT_EAGER_MODELS:
         await run_in_threadpool(_ensure_sam2, app)
@@ -931,6 +1161,10 @@ async def health() -> dict:
         or (_torch_stack_loadable() and not app.state.depth_load_failed),
         "depth_loaded": app.state.depth_available,
         "depth_model": app.state.depth_model_id,
+        "ground_available": app.state.ground_available
+        or (_torch_stack_loadable() and not app.state.ground_load_failed),
+        "ground_loaded": app.state.ground_available,
+        "ground_model": app.state.ground_model_id,
         "shape_mask_engine": "opencv-fillpoly" if cv2 is not None else "pillow-polygon",
     }
 
@@ -1088,18 +1322,203 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
     )
 
 
+def _instance_alpha(matte: "np.ndarray | None", inst_mask: np.ndarray) -> np.ndarray:
+    """Per-instance refined soft alpha: same recipe as `_compose_subject_alpha`
+    but scoped to ONE instance. The BiRefNet matte supplies anti-aliased
+    hair/fur edges inside a small dilation of the instance boundary; everything
+    outside stays 0, so a neighbouring subject's matte never leaks in beyond
+    the 15px dilation ring."""
+    subject = (inst_mask.astype(np.uint8)) * 255
+    subj_img = Image.fromarray(subject, "L")
+    dil = np.asarray(subj_img.filter(ImageFilter.MaxFilter(15)))
+    if SUBJECT_REFINE and matte is not None:
+        combined = np.where(dil > 0, np.maximum(matte, subject), 0).astype(np.uint8)
+    else:
+        combined = subject
+    return np.asarray(
+        Image.fromarray(combined, "L").filter(ImageFilter.GaussianBlur(1.2)),
+        dtype=np.uint8,
+    )
+
+
+def _bbox_of(mask: np.ndarray) -> "list[int]":
+    """Tight [x, y, w, h] bounding box of a boolean mask (mask is non-empty)."""
+    ys, xs = np.nonzero(mask)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
+
+
+def _mask_png_b64(alpha: np.ndarray) -> str:
+    buf = io.BytesIO()
+    Image.fromarray(alpha, "L").save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+@app.post("/segment/instances")
+async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSONResponse:
+    """Multi-subject detection: every subject in the photo as its OWN mask.
+
+    Where /segment unions all subjects into one alpha, this returns one
+    refined, soft-edged greyscale mask PER subject instance, with class label,
+    confidence, bounding box and area — so a caller (or the agent) can target
+    "person 2" or "the dog" individually, or recombine any subset.
+
+    Response JSON:
+        {
+          "width": int, "height": int,
+          "model": str, "subject_model": str,
+          "count": int,
+          "instances": [
+            { "index": 0, "label": "person", "class_id": 0,
+              "confidence": 0.94, "source": "class" | "salient",
+              "bbox": [x, y, w, h], "area": int, "area_frac": float,
+              "centroid": [cx, cy],
+              "mask_png": "<base64 greyscale PNG, white=subject>" },
+            ...
+          ],
+          "union_png": "<base64 greyscale PNG of all subjects>"
+        }
+
+    Instances are sorted by area (largest first) and capped at
+    `SUBJECT_INSTANCES_MAX`. Falls back to a single saliency instance when
+    YOLO is unavailable or finds nothing (count=1, source="saliency"), and
+    count=0 with an empty list when the image has no salient subject at all.
+    """
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
+
+    contents = await _read_limited(image)
+    if not contents:
+        raise HTTPException(400, "empty upload")
+
+    t0 = time.perf_counter()
+    try:
+        img = Image.open(io.BytesIO(contents))
+        img.load()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
+        raise HTTPException(400, f"could not decode image: {e}")
+
+    if img.mode not in ("RGB", "RGBA", "L"):
+        img = img.convert("RGB")
+
+    if max(img.width, img.height) > SEGMENT_MAX_SIDE:
+        raise HTTPException(
+            413,
+            f"image too large ({img.width}x{img.height}); "
+            f"max longest side is {SEGMENT_MAX_SIDE}px",
+        )
+
+    img_rgb = img.convert("RGB")
+    w, h = img_rgb.size
+
+    # 1) Saliency matte (same path as /segment) — edge refinement + the
+    #    salient-instance gate both need it.
+    try:
+        matte_img = remove(img, session=app.state.session, only_mask=True)
+    except Exception as e:
+        log.exception("rembg.remove failed")
+        raise HTTPException(500, f"segmentation failed: {e}")
+    raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
+    matte = await run_in_threadpool(clean_matte, raw_matte)
+
+    # 2) Per-instance detection.
+    instances = []
+    if getattr(app.state, "yolo_available", False):
+        try:
+            instances = await run_in_threadpool(_detect_subject_instances, app, img_rgb, matte)
+        except Exception:
+            log.exception("instance detection failed; falling back to saliency")
+            instances = []
+
+    mode = "yolo+matte" if instances else "saliency"
+    if not instances and matte.any():
+        # No YOLO (or nothing detected) but the image HAS a salient subject:
+        # return the whole cleaned matte as a single instance so callers get a
+        # uniform shape regardless of which models are resident.
+        mb = matte > 127
+        if mb.any():
+            instances = [{
+                "class_id": -1,
+                "label": "subject",
+                "confidence": 1.0,
+                "mask": mb,
+                "area": int(mb.sum()),
+                "source": "saliency",
+            }]
+
+    # Largest first; cap the payload.
+    instances.sort(key=lambda i: -i["area"])
+    truncated = len(instances) > SUBJECT_INSTANCES_MAX
+    instances = instances[:SUBJECT_INSTANCES_MAX]
+
+    def _build_payload():
+        frame_area = float(w * h) or 1.0
+        union = np.zeros((h, w), dtype=np.uint8)
+        items = []
+        for idx, inst in enumerate(instances):
+            mb = inst["mask"]
+            alpha = _instance_alpha(matte, mb)
+            union = np.maximum(union, alpha)
+            ys, xs = np.nonzero(mb)
+            items.append({
+                "index": idx,
+                "label": inst["label"],
+                "class_id": inst["class_id"],
+                "confidence": round(float(inst["confidence"]), 4),
+                "source": inst["source"],
+                "bbox": _bbox_of(mb),
+                "area": int(inst["area"]),
+                "area_frac": round(inst["area"] / frame_area, 5),
+                "centroid": [round(float(xs.mean()), 1), round(float(ys.mean()), 1)],
+                "mask_png": _mask_png_b64(alpha),
+            })
+        return items, (_mask_png_b64(union) if items else None)
+
+    items, union_b64 = await run_in_threadpool(_build_payload)
+
+    elapsed = time.perf_counter() - t0
+    log.info(
+        "segment/instances %s (%dx%d) mode=%s count=%d%s in %.2fs",
+        image.filename or "<unnamed>", w, h, mode, len(items),
+        " (truncated)" if truncated else "", elapsed,
+    )
+
+    return JSONResponse(
+        {
+            "width": w,
+            "height": h,
+            "model": app.state.model_name,
+            "subject_model": SUBJECT_MODEL if getattr(app.state, "yolo_available", False) else None,
+            "mode": mode,
+            "count": len(items),
+            "truncated": truncated,
+            "instances": items,
+            "union_png": union_b64,
+            "elapsed_ms": int(elapsed * 1000),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/sam2/click")
 async def sam2_click(
     image: UploadFile = File(..., alias="image"),
-    clicks: str = Form(...),
+    clicks: "str | None" = Form(None),
+    box: "str | None" = Form(None),
 ) -> Response:
-    """Click-to-select semantic masking with SAM 2.
+    """Click- and/or box-prompted semantic masking with SAM 2.
 
     Form fields:
         image:  image file
-        clicks: JSON array of `[x, y, label]` tuples, where `label` is
-                1 (positive / include this point) or 0 (negative / exclude).
+        clicks: optional JSON array of `[x, y, label]` tuples, where `label`
+                is 1 (positive / include this point) or 0 (negative / exclude).
+        box:    optional JSON `[x0, y0, x1, y1]` box prompt — "select the
+                object inside this rectangle". Boxes are SAM 2's strongest
+                single prompt for whole-object selection; clicks can be
+                combined with a box to refine it.
 
+    At least one of `clicks` / `box` is required.
     Returns a greyscale PNG mask: white = include, black = exclude.
     """
     # Lazily load SAM 2 on first use (no-op once loaded).
@@ -1127,13 +1546,35 @@ async def sam2_click(
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    try:
-        clicks_data = json.loads(clicks)
-    except json.JSONDecodeError as e:
-        raise HTTPException(400, f"invalid clicks JSON: {e}")
+    clicks_data = []
+    if clicks is not None and str(clicks).strip():
+        try:
+            clicks_data = json.loads(clicks)
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, f"invalid clicks JSON: {e}")
+        if not isinstance(clicks_data, list):
+            raise HTTPException(400, "clicks must be an array of [x, y, label] tuples")
 
-    if not isinstance(clicks_data, list) or not clicks_data:
-        raise HTTPException(400, "clicks must be a non-empty array of [x, y, label] tuples")
+    box_data = None
+    if box is not None and str(box).strip():
+        try:
+            box_data = json.loads(box)
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, f"invalid box JSON: {e}")
+        if not (isinstance(box_data, list) and len(box_data) == 4):
+            raise HTTPException(400, f"box must be [x0, y0, x1, y1]; got {box_data!r}")
+        for i, v in enumerate(box_data):
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+                raise HTTPException(400, f"box[{i}] must be a finite number; got {v!r}")
+        x0, y0, x1, y1 = box_data
+        if not (0 <= x0 < x1 <= img.width and 0 <= y0 < y1 <= img.height):
+            raise HTTPException(
+                400,
+                f"box {box_data} is degenerate or outside image bounds ({img.width}x{img.height})",
+            )
+
+    if not clicks_data and box_data is None:
+        raise HTTPException(400, "provide clicks and/or a box prompt")
 
     if len(clicks_data) > SAM2_MAX_CLICKS:
         raise HTTPException(
@@ -1161,9 +1602,11 @@ async def sam2_click(
 
     import torch  # type: ignore
     # SAM 2 input_points format: [image, object, point, [x, y]] = 4 levels.
-    points = [[[[c[0], c[1]] for c in clicks_data]]]
+    points = [[[[c[0], c[1]] for c in clicks_data]]] if clicks_data else None
     # SAM 2 input_labels format: [image, object, point_label] = 3 levels.
-    labels = [[[c[2] for c in clicks_data]]]
+    labels = [[[c[2] for c in clicks_data]]] if clicks_data else None
+    # SAM 2 input_boxes format: [image, object, [x0, y0, x1, y1]] = 3 levels.
+    boxes = [[list(map(float, box_data))]] if box_data is not None else None
 
     t0 = time.perf_counter()
     try:
@@ -1172,11 +1615,16 @@ async def sam2_click(
         model = app.state.sam2_model
         device = app.state.sam2_device
 
+        prompt_kwargs = {}
+        if points is not None:
+            prompt_kwargs["input_points"] = points
+            prompt_kwargs["input_labels"] = labels
+        if boxes is not None:
+            prompt_kwargs["input_boxes"] = boxes
         inputs = processor(
             images=img,
-            input_points=points,
-            input_labels=labels,
             return_tensors="pt",
+            **prompt_kwargs,
         ).to(device)
         inputs["image_embeddings"] = embeddings
         inputs.pop("pixel_values", None)
@@ -1311,6 +1759,792 @@ async def depth(image: UploadFile = File(..., alias="image")) -> Response:
             "X-Elapsed-Ms": str(int(elapsed * 1000)),
         },
     )
+
+
+# ─── Auto-crop helpers ──────────────────────────────────────────────────────
+
+
+@app.post("/ground/text")
+async def ground_text(
+    image: UploadFile = File(..., alias="image"),
+    phrases: str = Form(...),
+    threshold: "float | None" = Form(None),
+    refine: str = Form("1"),
+) -> JSONResponse:
+    """Text-grounded masking: free-text phrase(s) → soft mask(s).
+
+    Pipeline per phrase: CLIPSeg relevance heatmap → adaptive threshold →
+    connected components (small/noise dropped) → SAM 2 box+peak-point
+    refinement of the top components (crisp instance edges; falls back to the
+    coarse component when SAM 2 is unavailable) → matte cleanup.
+
+    Form fields:
+        image:     JPEG/PNG/WebP, max MAX_UPLOAD_MB, longest side GROUND_MAX_SIDE.
+        phrases:   JSON array of 1..GROUND_MAX_PHRASES strings.
+        threshold: optional float 0..1 overriding GROUND_THRESHOLD — the
+                   RELATIVE fraction of the heatmap peak a pixel must reach.
+        refine:    "0" to skip SAM 2 refinement (faster, coarser).
+
+    Response:
+        {
+          "width": int, "height": int, "model": str, "refine": bool,
+          "results": [{
+              "phrase": str,
+              "found": bool,
+              "score": float,        # heatmap peak 0..1
+              "coverage": float,     # mask area / frame area
+              "bbox": [x,y,w,h] | null,
+              "components": int,
+              "refined": bool,       # SAM 2 actually used
+              "maskPng": str | null  # base64 greyscale PNG, white = selected
+          }]
+        }
+
+    A phrase that doesn't bind (peak < GROUND_MIN_PEAK) returns found=false
+    with score — callers decide whether to fall back or surface it.
+    """
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
+
+    try:
+        phrase_list = json.loads(phrases)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"invalid phrases JSON: {e}")
+    if not isinstance(phrase_list, list) or not phrase_list:
+        raise HTTPException(400, "phrases must be a non-empty JSON array of strings")
+    phrase_list = [str(p).strip() for p in phrase_list if str(p).strip()]
+    if not phrase_list:
+        raise HTTPException(400, "phrases contained no usable text")
+    if len(phrase_list) > GROUND_MAX_PHRASES:
+        raise HTTPException(400, f"too many phrases: {len(phrase_list)} > {GROUND_MAX_PHRASES}")
+
+    thr = GROUND_THRESHOLD if threshold is None else max(0.05, min(0.95, float(threshold)))
+    do_refine = str(refine).strip() not in ("0", "false", "False")
+
+    if not await run_in_threadpool(_ensure_ground, app):
+        raise HTTPException(
+            501,
+            "Text grounding not available on this server. "
+            "Install torch + transformers and restart, or set GROUND_MODEL_ID "
+            "to a CLIPSeg model in your HF cache.",
+        )
+
+    contents = await _read_limited(image)
+    if not contents:
+        raise HTTPException(400, "empty upload")
+    try:
+        img = Image.open(io.BytesIO(contents))
+        img.load()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
+        raise HTTPException(400, f"could not decode image: {e}")
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    if max(img.width, img.height) > GROUND_MAX_SIDE:
+        raise HTTPException(
+            413,
+            f"image too large ({img.width}x{img.height}); max longest side {GROUND_MAX_SIDE}px",
+        )
+
+    from scipy import ndimage  # transitively available via ultralytics
+
+    W, H = img.size
+    frame_area = float(W * H)
+    rgb = np.asarray(img, dtype=np.uint8)
+
+    t0 = time.perf_counter()
+    heatmaps = await run_in_threadpool(_ground_heatmaps, app, img, phrase_list)
+
+    results = []
+    any_refined = False
+    for pi, phrase in enumerate(phrase_list):
+        heat = heatmaps[pi]
+        peak = float(heat.max())
+        if peak < GROUND_MIN_PEAK:
+            results.append({
+                "phrase": phrase, "found": False, "score": round(peak, 4),
+                "coverage": 0.0, "bbox": None, "components": 0,
+                "refined": False, "maskPng": None,
+            })
+            continue
+
+        # Peak-relative threshold (CLIPSeg sigmoids are range-compressed —
+        # see GROUND_THRESHOLD comment), clamped to an absolute noise floor.
+        eff_thr = max(GROUND_FLOOR, thr * peak)
+        binary = heat >= eff_thr
+        labeled, n = ndimage.label(binary)
+        comps = []
+        for ci in range(1, n + 1):
+            comp = labeled == ci
+            area = int(comp.sum())
+            if area < GROUND_MIN_AREA_FRAC * frame_area:
+                continue
+            mean_heat = float(heat[comp].mean())
+            comps.append((mean_heat * math.sqrt(area), comp, area))
+        comps.sort(key=lambda t: -t[0])
+        comps = comps[:GROUND_MAX_COMPONENTS]
+
+        if not comps:
+            results.append({
+                "phrase": phrase, "found": False, "score": round(peak, 4),
+                "coverage": 0.0, "bbox": None, "components": 0,
+                "refined": False, "maskPng": None,
+            })
+            continue
+
+        union = np.zeros((H, W), dtype=bool)
+        used_refine = False
+        for rank, (_, comp, area) in enumerate(comps):
+            refined_mask = None
+            if do_refine and rank < GROUND_REFINE_TOP:
+                bbox = _bbox_from_mask(comp)
+                # Positive point at the component's confidence peak.
+                comp_heat = np.where(comp, heat, 0.0)
+                py_, px_ = np.unravel_index(int(comp_heat.argmax()), comp_heat.shape)
+                refined_mask = await run_in_threadpool(
+                    _sam2_refine_box, app, img, bbox, (float(px_), float(py_))
+                )
+                if refined_mask is not None:
+                    # Sanity-gate the refinement: a mask that exploded far
+                    # beyond the prompt region (>4x area with little overlap)
+                    # means SAM grabbed the wrong object — keep the coarse one.
+                    r_area = float(refined_mask.sum())
+                    inter = float((refined_mask & comp).sum())
+                    if r_area > 4.0 * area and inter / float(area or 1) < 0.3:
+                        refined_mask = None
+            if refined_mask is not None:
+                union |= refined_mask
+                used_refine = True
+            else:
+                union |= comp
+
+        alpha = (union.astype(np.uint8)) * 255
+        if _MATTE_CLEANUP:
+            try:
+                alpha = await run_in_threadpool(clean_matte, alpha, rgb)
+            except Exception:
+                log.exception("clean_matte failed in /ground/text; using raw mask")
+        any_refined = any_refined or used_refine
+
+        results.append({
+            "phrase": phrase,
+            "found": True,
+            "score": round(peak, 4),
+            "coverage": round(float((alpha > 127).sum()) / frame_area, 4),
+            "bbox": list(_bbox_from_mask(alpha > 127) or ()) or None,
+            "components": len(comps),
+            "refined": used_refine,
+            "maskPng": _mask_png_b64(alpha),
+        })
+
+    elapsed = time.perf_counter() - t0
+    log.info(
+        "ground/text %s (%dx%d) phrases=%s refine=%s in %.2fs",
+        image.filename or "<unnamed>", W, H,
+        [r["phrase"] for r in results], any_refined, elapsed,
+    )
+    return JSONResponse({
+        "width": W,
+        "height": H,
+        "model": app.state.ground_model_id,
+        "refine": any_refined,
+        "elapsed_ms": int(elapsed * 1000),
+        "results": results,
+    }, headers={"Cache-Control": "no-store"})
+
+
+def _parse_aspect(raw: "str | None") -> "float | None":
+    """Parse an aspect ratio from `"W:H"`, `"W/H"`, or a bare float `"1.5"`.
+
+    Returns `None` for falsy / unparseable input (callers treat that as
+    "freeform — no aspect constraint"). Tolerates whitespace and the `x`
+    separator (e.g. `"16x9"`).
+    """
+    if not raw:
+        return None
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    for sep in (":", "/", "x"):
+        if sep in s:
+            a, b = s.split(sep, 1)
+            try:
+                num = float(a.strip())
+                den = float(b.strip())
+                if den <= 0 or num <= 0:
+                    return None
+                return num / den
+            except ValueError:
+                return None
+    try:
+        v = float(s)
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
+def _clip_box_to_image(
+    box: "tuple[float, float, float, float]", W: int, H: int
+) -> "tuple[int, int, int, int]":
+    """Clip `(x, y, w, h)` to the image bounds and round to ints.
+
+    Always returns a box of at least 1×1 inside the image — callers downstream
+    rely on the box being non-degenerate.
+    """
+    x, y, w, h = box
+    x = max(0.0, min(float(W) - 1, x))
+    y = max(0.0, min(float(H) - 1, y))
+    w = max(1.0, min(float(W) - x, w))
+    h = max(1.0, min(float(H) - y, h))
+    return int(round(x)), int(round(y)), int(round(w)), int(round(h))
+
+
+def _bbox_from_mask(mask: np.ndarray) -> "tuple[int, int, int, int] | None":
+    """Tight bbox `(x, y, w, h)` of the True pixels in a boolean mask, or
+    `None` if the mask is entirely empty."""
+    if mask is None or mask.size == 0 or not mask.any():
+        return None
+    ys, xs = np.nonzero(mask)
+    x0 = int(xs.min())
+    y0 = int(ys.min())
+    x1 = int(xs.max())
+    y1 = int(ys.max())
+    return (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
+
+def _expand_box(
+    box: "tuple[int, int, int, int]",
+    W: int,
+    H: int,
+    pad_frac: float,
+) -> "tuple[int, int, int, int]":
+    """Expand a box by `pad_frac` of its SHORTER side, then clip to image."""
+    x, y, w, h = box
+    pad = max(0.0, pad_frac) * float(min(w, h))
+    return _clip_box_to_image((x - pad, y - pad, w + 2 * pad, h + 2 * pad), W, H)
+
+
+def _fit_aspect(
+    box: "tuple[int, int, int, int]",
+    aspect: float,
+    W: int,
+    H: int,
+    *,
+    anchor: "tuple[float, float] | None" = None,
+) -> "tuple[int, int, int, int]":
+    """Fit a box of the requested aspect ratio around `box`, keeping the box
+    fully inside the image. Grows the shorter side (never crops the subject)
+    unless we hit an edge — then shifts the box toward `anchor` to maximise
+    subject inclusion.
+
+    `anchor` is the (cx, cy) the result should try to centre on. Defaults to
+    the input box centre.
+    """
+    x, y, w, h = box
+    cur_aspect = w / float(h)
+    if aspect >= cur_aspect:
+        # Need wider — grow horizontally.
+        new_w = h * aspect
+        new_h = h
+    else:
+        # Need taller — grow vertically.
+        new_w = w
+        new_h = w / aspect
+
+    # If growth exceeds image dims, shrink uniformly to fit (we ALWAYS prefer
+    # the requested aspect over keeping the subject 1:1).
+    scale = min(1.0, W / new_w, H / new_h)
+    new_w *= scale
+    new_h *= scale
+
+    ax = anchor[0] if anchor else x + w / 2.0
+    ay = anchor[1] if anchor else y + h / 2.0
+    new_x = ax - new_w / 2.0
+    new_y = ay - new_h / 2.0
+
+    # Clip to image bounds (this shifts the rect rather than shrinking it).
+    if new_x < 0:
+        new_x = 0
+    if new_y < 0:
+        new_y = 0
+    if new_x + new_w > W:
+        new_x = W - new_w
+    if new_y + new_h > H:
+        new_y = H - new_h
+    return _clip_box_to_image((new_x, new_y, new_w, new_h), W, H)
+
+
+def _rule_of_thirds_anchor(
+    centroid: "tuple[float, float]",
+    box_w: float,
+    box_h: float,
+    snap_strength: float = CROP_THIRDS_SNAP,
+) -> "tuple[float, float]":
+    """Nudge `centroid` toward the nearest rule-of-thirds power point inside a
+    box of size `(box_w, box_h)` centred on it. The snap is proportional —
+    if the centroid is already near a power point, the nudge is gentle.
+
+    Power points sit at the four (⅓, ⅓) intersections of a 3×3 grid; we pick
+    whichever of the four is closest to the input centroid's relative
+    position so portrait orientation and gaze direction aren't broken.
+    """
+    cx, cy = centroid
+    # Power points in normalised crop space.
+    powers = [(1 / 3, 1 / 3), (2 / 3, 1 / 3), (1 / 3, 2 / 3), (2 / 3, 2 / 3)]
+    # The crop box (pre-nudge) is centred on the centroid, so the centroid sits
+    # at (0.5, 0.5) inside it. Pick the nearest power point.
+    nearest = min(powers, key=lambda p: (p[0] - 0.5) ** 2 + (p[1] - 0.5) ** 2)
+    dx = (nearest[0] - 0.5) * box_w
+    dy = (nearest[1] - 0.5) * box_h
+    s = max(0.0, min(1.0, snap_strength))
+    return (cx + dx * s, cy + dy * s)
+
+
+def _compute_subject_crop(
+    subject_mask: "np.ndarray | None",
+    W: int,
+    H: int,
+    *,
+    aspect: "float | None" = None,
+    padding: float = CROP_SUBJECT_PADDING,
+    centroid: "tuple[float, float] | None" = None,
+) -> "dict | None":
+    """Subject-aware crop: tight bbox of the union mask, padded, optionally
+    snapped to rule-of-thirds, and fitted to `aspect` if provided.
+
+    Returns `None` when no usable subject mask is supplied — the caller should
+    fall back to content-fill or to the whole frame.
+    """
+    if subject_mask is None:
+        return None
+    bbox = _bbox_from_mask(subject_mask > 127 if subject_mask.dtype == np.uint8 else subject_mask)
+    if bbox is None:
+        return None
+    padded = _expand_box(bbox, W, H, padding)
+
+    # Compute centroid for thirds-snap.
+    if centroid is None:
+        mask_bool = subject_mask > 127 if subject_mask.dtype == np.uint8 else subject_mask
+        ys, xs = np.nonzero(mask_bool)
+        if xs.size == 0:
+            return None
+        centroid = (float(xs.mean()), float(ys.mean()))
+
+    if aspect is not None:
+        anchor = _rule_of_thirds_anchor(centroid, padded[2], padded[3])
+        final = _fit_aspect(padded, aspect, W, H, anchor=anchor)
+    else:
+        final = padded
+
+    x, y, w, h = final
+    frame_area = float(W * H) or 1.0
+    crop_area = float(w * h)
+    subj_area = float(
+        ((subject_mask > 127) if subject_mask.dtype == np.uint8 else subject_mask).sum()
+    )
+    # Score: higher when subject is well-included AND we're not wasting frame.
+    coverage = subj_area / frame_area
+    tightness = subj_area / crop_area if crop_area > 0 else 0.0
+    score = round(min(1.0, 0.5 + 0.25 * tightness + 0.25 * (1 - abs(coverage - 0.4))), 4)
+    # Flag when the crop box essentially IS the full frame — the image is
+    # already tightly framed around the subject and cropping is a no-op.
+    crop_frame_ratio = crop_area / frame_area if frame_area > 0 else 0.0
+    already_tight = crop_frame_ratio >= 0.92
+    return {
+        "box": [x, y, w, h],
+        "score": score,
+        "aspect_ratio": round(w / float(h), 4) if h else None,
+        "rationale": (
+            f"subject bbox padded {int(padding * 100)}% with thirds anchor"
+            + (f", fitted to {aspect:.3f}:1" if aspect else "")
+        ),
+        "centroid": [round(float(centroid[0]), 1), round(float(centroid[1]), 1)],
+        "subject_coverage": round(coverage, 4),
+        "already_tight": already_tight,
+    }
+
+
+def _compute_content_fill_crop(
+    rgb: np.ndarray,
+    *,
+    aspect: "float | None" = None,
+    thresh: int = CROP_CONTENT_TRIM_THRESH,
+    min_frac: float = CROP_CONTENT_MIN_FRAC,
+) -> "dict | None":
+    """Trim near-solid borders (white/black mats, sky padding, letterboxes).
+
+    Heuristic: sample the dominant colour from a thin border ring, then find
+    the tight bbox of pixels whose max-channel distance from that colour
+    exceeds `thresh`. Falls back to None when the trim would remove more than
+    `1 - min_frac` of the frame (guard against accidental nuke on near-solid
+    images like flatlays).
+    """
+    if rgb is None or rgb.ndim != 3 or rgb.shape[2] < 3:
+        return None
+    H, W = rgb.shape[:2]
+    if W < 16 or H < 16:
+        return None
+
+    # Sample a ~2% border ring for the dominant colour.
+    ring = max(2, int(0.02 * min(W, H)))
+    border = np.concatenate([
+        rgb[:ring].reshape(-1, 3),
+        rgb[-ring:].reshape(-1, 3),
+        rgb[:, :ring].reshape(-1, 3),
+        rgb[:, -ring:].reshape(-1, 3),
+    ], axis=0)
+    bg = np.median(border, axis=0).astype(np.int32)
+
+    # Channel-wise distance from background.
+    diff = np.abs(rgb.astype(np.int32) - bg[None, None, :]).max(axis=2)
+    content = diff > int(thresh)
+
+    if not content.any():
+        return None
+
+    # Cheap denoise: project onto rows & cols and threshold projection to
+    # ignore single-pixel noise speckles in the margins.
+    col_any = content.sum(axis=0) > max(2, H // 200)
+    row_any = content.sum(axis=1) > max(2, W // 200)
+    if not col_any.any() or not row_any.any():
+        return None
+
+    x0 = int(np.argmax(col_any))
+    x1 = int(W - 1 - np.argmax(col_any[::-1]))
+    y0 = int(np.argmax(row_any))
+    y1 = int(H - 1 - np.argmax(row_any[::-1]))
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    box = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+    if (box[2] * box[3]) / float(W * H) < float(min_frac):
+        return None
+
+    if aspect is not None:
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        box = _fit_aspect(box, aspect, W, H, anchor=(cx, cy))
+
+    x, y, w, h = _clip_box_to_image(box, W, H)
+    trimmed = 1.0 - (w * h) / float(W * H)
+    return {
+        "box": [x, y, w, h],
+        "score": round(min(1.0, 0.4 + 0.6 * trimmed), 4),
+        "aspect_ratio": round(w / float(h), 4) if h else None,
+        "rationale": f"trimmed {trimmed * 100:.0f}% near-solid border (Δ>{thresh})",
+        "already_tight": trimmed < 0.08,
+    }
+
+
+def _compute_depth_crop(
+    depth: "np.ndarray | None",
+    W: int,
+    H: int,
+    *,
+    aspect: "float | None" = None,
+    pct: float = CROP_DEPTH_FOREGROUND_PCT,
+    padding: float = CROP_SUBJECT_PADDING,
+) -> "dict | None":
+    """Depth-aware foreground crop. Selects the nearest `pct` fraction of
+    pixels by depth (white = near in Depth Anything V2), bboxes them and pads.
+    """
+    if depth is None or depth.size == 0:
+        return None
+    if depth.shape[0] != H or depth.shape[1] != W:
+        # Resize via PIL — depth maps are smooth so bilinear is fine.
+        d_img = Image.fromarray(depth, mode="L").resize((W, H), Image.BILINEAR)
+        depth = np.asarray(d_img, dtype=np.uint8)
+
+    # Threshold at the top `pct` of depth values.
+    flat = depth.reshape(-1)
+    if flat.size == 0:
+        return None
+    cutoff = int(np.quantile(flat, 1.0 - float(pct)))
+    fg = depth >= max(1, cutoff)
+    bbox = _bbox_from_mask(fg)
+    if bbox is None:
+        return None
+
+    padded = _expand_box(bbox, W, H, padding)
+    if aspect is not None:
+        ys, xs = np.nonzero(fg)
+        cx = float(xs.mean()) if xs.size else (padded[0] + padded[2] / 2.0)
+        cy = float(ys.mean()) if ys.size else (padded[1] + padded[3] / 2.0)
+        final = _fit_aspect(padded, aspect, W, H, anchor=(cx, cy))
+    else:
+        final = padded
+    x, y, w, h = final
+    frame_area = float(W * H) or 1.0
+    crop_area = float(w * h)
+    return {
+        "box": [x, y, w, h],
+        "score": round(min(1.0, 0.45 + 0.55 * (fg.sum() / frame_area)), 4),
+        "aspect_ratio": round(w / float(h), 4) if h else None,
+        "rationale": f"top {int(pct * 100)}% depth percentile padded {int(padding * 100)}%",
+        "already_tight": (crop_area / frame_area) >= 0.92,
+    }
+
+
+def _compute_aspect_crop(
+    W: int,
+    H: int,
+    aspect: float,
+    *,
+    centroid: "tuple[float, float] | None" = None,
+) -> dict:
+    """Maximum-area crop at `aspect`, centred on `centroid` (defaults to image
+    centre). The cheap "preset" mode — no model required."""
+    if W <= 0 or H <= 0 or aspect <= 0:
+        raise ValueError("invalid aspect arguments")
+    if aspect >= W / float(H):
+        new_w = float(W)
+        new_h = W / aspect
+    else:
+        new_h = float(H)
+        new_w = H * aspect
+
+    if centroid is None:
+        cx, cy = W / 2.0, H / 2.0
+    else:
+        cx, cy = centroid
+    box = (cx - new_w / 2.0, cy - new_h / 2.0, new_w, new_h)
+    # Use _fit_aspect's clipping behaviour for free.
+    x, y, w, h = _fit_aspect(
+        _clip_box_to_image(box, W, H), aspect, W, H, anchor=(cx, cy)
+    )
+    return {
+        "box": [x, y, w, h],
+        "score": 0.5,
+        "aspect_ratio": round(w / float(h), 4) if h else None,
+        "rationale": f"max-area fit to {aspect:.3f}:1 around {'subject' if centroid else 'centre'}",
+    }
+
+
+@app.post("/crop/auto")
+async def crop_auto(
+    image: UploadFile = File(..., alias="image"),
+    aspect: "str | None" = Form(None),
+    mode: str = Form("all"),
+    padding: "float | None" = Form(None),
+) -> JSONResponse:
+    """Production auto-crop. Returns one or more crop boxes computed from the
+    input image, all expressed in the input image's ORIGINAL pixel coordinates.
+
+    Form fields:
+        image:   JPEG/PNG/WebP, max MAX_UPLOAD_MB.
+        aspect:  optional `"W:H"` / `"W/H"` / float. When supplied, every
+                 strategy's box is fitted to this ratio.
+        mode:    one of `"subject" | "aspect" | "content" | "depth" | "all"`.
+                 Default `"all"` runs every strategy that's available
+                 (depth-aware needs Depth Anything; subject needs BiRefNet).
+        padding: optional float (0..1) overriding `CROP_SUBJECT_PADDING`.
+
+    Response shape:
+
+        {
+          "width": int, "height": int,
+          "aspect": float | null,
+          "ran": ["subject", "aspect", "content", "depth"],
+          "crops": {
+            "subject": { "box": [x,y,w,h], "score": 0..1,
+                         "aspect_ratio": float, "rationale": str,
+                         "centroid": [cx,cy] } | null,
+            "aspect":  { ... } | null,
+            "content": { ... } | null,
+            "depth":   { ... } | null
+          },
+          "subjects": [ { index, label, confidence, bbox } ],
+          "recommended": "subject" | "depth" | "content" | "aspect",
+          "elapsed_ms": int
+        }
+
+    The endpoint NEVER raises on a per-strategy failure — it just emits `null`
+    for that strategy and continues. The caller picks whichever box best fits
+    its UX; `"recommended"` is the highest-scoring one.
+    """
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
+
+    mode = (mode or "all").strip().lower()
+    if mode not in {"subject", "aspect", "content", "depth", "all"}:
+        raise HTTPException(400, f"invalid mode: {mode}")
+
+    aspect_value = _parse_aspect(aspect)
+    if aspect_value is None and mode == "aspect":
+        raise HTTPException(400, "mode=aspect requires an `aspect` field (e.g. 16:9)")
+
+    pad = CROP_SUBJECT_PADDING if padding is None else max(0.0, min(1.0, float(padding)))
+
+    contents = await _read_limited(image)
+    if not contents:
+        raise HTTPException(400, "empty upload")
+
+    t0 = time.perf_counter()
+    try:
+        img = Image.open(io.BytesIO(contents))
+        img.load()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
+        raise HTTPException(400, f"could not decode image: {e}")
+
+    if img.mode not in ("RGB", "RGBA", "L"):
+        img = img.convert("RGB")
+
+    if max(img.width, img.height) > CROP_MAX_SIDE:
+        raise HTTPException(
+            413,
+            f"image too large ({img.width}x{img.height}); max longest side {CROP_MAX_SIDE}px",
+        )
+
+    rgb_img = img.convert("RGB")
+    W, H = rgb_img.size
+    rgb = np.asarray(rgb_img, dtype=np.uint8)
+
+    crops: "dict[str, dict | None]" = {}
+    ran: list[str] = []
+    subjects_payload: list[dict] = []
+
+    # Cheap modes first.
+    if mode in ("aspect", "all") and aspect_value is not None:
+        try:
+            crops["aspect"] = _compute_aspect_crop(W, H, aspect_value)
+            ran.append("aspect")
+        except Exception:
+            log.exception("aspect crop failed")
+            crops["aspect"] = None
+
+    if mode in ("content", "all"):
+        try:
+            crops["content"] = await run_in_threadpool(
+                _compute_content_fill_crop, rgb, aspect=aspect_value
+            )
+            ran.append("content")
+        except Exception:
+            log.exception("content-fill crop failed")
+            crops["content"] = None
+
+    # Subject-aware: reuse the segment pipeline (matte + YOLO).
+    if mode in ("subject", "all"):
+        try:
+            matte_img = remove(img, session=app.state.session, only_mask=True)
+            raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
+            matte = await run_in_threadpool(clean_matte, raw_matte, rgb)
+
+            union_mask = matte.copy()
+            subject_centroid: "tuple[float, float] | None" = None
+            if getattr(app.state, "yolo_available", False):
+                try:
+                    instances = await run_in_threadpool(
+                        _detect_subject_instances, app, rgb_img, matte
+                    )
+                except Exception:
+                    log.exception("instance detection failed in /crop/auto")
+                    instances = []
+
+                if instances:
+                    instances.sort(key=lambda i: -i["area"])
+                    for idx, inst in enumerate(instances[:SUBJECT_INSTANCES_MAX]):
+                        ys, xs = np.nonzero(inst["mask"])
+                        if xs.size == 0:
+                            continue
+                        subjects_payload.append({
+                            "index": idx,
+                            "label": inst["label"],
+                            "class_id": inst["class_id"],
+                            "confidence": round(float(inst["confidence"]), 4),
+                            "source": inst["source"],
+                            "bbox": _bbox_of(inst["mask"]),
+                            "centroid": [
+                                round(float(xs.mean()), 1),
+                                round(float(ys.mean()), 1),
+                            ],
+                        })
+
+                    union = np.zeros((H, W), dtype=np.uint8)
+                    for inst in instances[:SUBJECT_INSTANCES_MAX]:
+                        union = np.maximum(union, (inst["mask"].astype(np.uint8)) * 255)
+                    # Gate the matte to the detected subjects' neighbourhood
+                    # (same recipe as /segment's _compose_subject_alpha) instead
+                    # of a blanket union with the WHOLE matte — otherwise any
+                    # salient background content drags the subject crop box out
+                    # to cover it, defeating the point of instance detection.
+                    union_mask = _compose_subject_alpha(matte, union)
+                    # Centroid: area-weighted mean of instance centroids,
+                    # which is more stable for multi-subject photos than the
+                    # global matte centroid.
+                    total = 0.0
+                    sx = 0.0
+                    sy = 0.0
+                    for inst in instances[:SUBJECT_INSTANCES_MAX]:
+                        a = float(inst["area"])
+                        ys, xs = np.nonzero(inst["mask"])
+                        if xs.size == 0:
+                            continue
+                        sx += xs.mean() * a
+                        sy += ys.mean() * a
+                        total += a
+                    if total > 0:
+                        subject_centroid = (sx / total, sy / total)
+
+            crops["subject"] = _compute_subject_crop(
+                union_mask, W, H,
+                aspect=aspect_value, padding=pad, centroid=subject_centroid,
+            )
+            ran.append("subject")
+        except Exception:
+            log.exception("subject crop failed")
+            crops["subject"] = None
+
+    # Depth-aware: only run when explicitly asked or in "all" AND the model
+    # is loaded — don't trigger a 500MB lazy load just for an opportunistic
+    # alternative.
+    if mode == "depth" or (mode == "all" and getattr(app.state, "depth_available", False)):
+        try:
+            if mode == "depth":
+                # User explicitly asked → ensure depth is loaded.
+                if not await run_in_threadpool(_ensure_depth, app):
+                    raise HTTPException(
+                        501,
+                        "Depth Anything V2 not available on this server.",
+                    )
+            if getattr(app.state, "depth_available", False):
+                depth_arr = await run_in_threadpool(_depth_predict, app, rgb_img)
+                crops["depth"] = await run_in_threadpool(
+                    _compute_depth_crop, depth_arr, W, H, aspect=aspect_value, padding=pad
+                )
+                ran.append("depth")
+        except HTTPException:
+            raise
+        except Exception:
+            log.exception("depth crop failed")
+            crops["depth"] = None
+
+    # Pick a recommendation: prefer subject > depth > content > aspect, but
+    # break ties on score and skip nulls.
+    PREFERENCE = ["subject", "depth", "content", "aspect"]
+    candidates = [(k, crops[k]) for k in PREFERENCE if crops.get(k)]
+    recommended = None
+    if candidates:
+        recommended = max(
+            candidates, key=lambda kv: (kv[1].get("score") or 0.0, -PREFERENCE.index(kv[0]))
+        )[0]
+
+    elapsed = time.perf_counter() - t0
+    log.info(
+        "crop/auto %s (%dx%d) mode=%s ran=%s rec=%s aspect=%s in %.2fs",
+        image.filename or "<unnamed>", W, H, mode, ran, recommended,
+        f"{aspect_value:.3f}" if aspect_value else "—", elapsed,
+    )
+
+    return JSONResponse({
+        "width": W,
+        "height": H,
+        "aspect": round(aspect_value, 6) if aspect_value else None,
+        "mode": mode,
+        "ran": ran,
+        "crops": crops,
+        "subjects": subjects_payload,
+        "recommended": recommended,
+        "elapsed_ms": int(elapsed * 1000),
+    }, headers={"Cache-Control": "no-store"})
 
 
 if __name__ == "__main__":  # pragma: no cover

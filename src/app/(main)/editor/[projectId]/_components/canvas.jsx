@@ -58,6 +58,8 @@ if (typeof window !== "undefined" && InteractiveFabricObject?.ownDefaults) {
 }
 import { normalizeCanvasState, serializeCanvasState } from "../../../../../lib/canvas-state"
 import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../lib/canvas-history"
+import { registerExtendHost } from "../../../../../lib/extend-poller"
+import { isAgentActing, recordChange, setJournalProject } from "../../../../../lib/change-journal"
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
 import { addImageFilesToCanvas } from "../../../../../lib/canvas-images"
 import {
@@ -239,7 +241,7 @@ const CanvasEditor = ({ project }) => {
         })
     }
 
-    const pushHistoryState = useCallback((canvas) => {
+    const pushHistoryState = useCallback((canvas, meta) => {
         if (!canvas || isRestoringRef.current) return
         const nextState = serializeCanvasState(canvas)
         if (!nextState?.canvas) return
@@ -255,6 +257,16 @@ const CanvasEditor = ({ project }) => {
         }
         historyIndexRef.current = historyRef.current.length - 1
         emitHistoryChange(canvas)
+        // Journal AFTER the dedup check, so no-op pushes never log. While an
+        // agent command runs, runCommand already records the SPECIFIC command
+        // — skip the generic entry to avoid double-logging the same change.
+        if (!isAgentActing()) {
+            recordChange({
+                label: meta?.label || 'Canvas edit',
+                source: 'user',
+                domain: meta?.domain || 'canvas',
+            })
+        }
     }, [])
 
     const restoreCanvasState = useCallback(async (canvas, state) => {
@@ -279,6 +291,7 @@ const CanvasEditor = ({ project }) => {
         if (!canvas || historyIndexRef.current <= 0) return false
         historyIndexRef.current -= 1
         await restoreCanvasState(canvas, historyRef.current[historyIndexRef.current])
+        recordChange({ label: 'Undo', domain: 'history' })
         return true
     }, [restoreCanvasState])
 
@@ -287,6 +300,7 @@ const CanvasEditor = ({ project }) => {
         if (!canvas || historyIndexRef.current >= historyRef.current.length - 1) return false
         historyIndexRef.current += 1
         await restoreCanvasState(canvas, historyRef.current[historyIndexRef.current])
+        recordChange({ label: 'Redo', domain: 'history' })
         return true
     }, [restoreCanvasState])
 
@@ -354,45 +368,49 @@ const CanvasEditor = ({ project }) => {
         toast.warning("This project was edited on another device.", {
             id: "canvas-conflict",
             duration: Infinity,
-            // Require an explicit choice — dismissing without resolving would leave
-            // the manager holding all saves with no way to resume.
-            dismissible: false,
+            dismissible: true,
             description: "Your version is saved in version history. Reload the latest, or keep yours (overwrites the other copy).",
+            // "Keep mine" must be the `action` — Sonner v2's action.onClick fires
+            // reliably, but cancel.onClick is broken (auto-dismiss kills it).
             action: {
-                label: "Reload latest",
-                onClick: async () => {
-                    // Point every cache at the remote so the reload shows it, then
-                    // reuse the normal mount/rehydration path.
-                    try { await clearLocalState(proj._id) } catch { /* ignore */ }
-                    try {
-                        if (serverProject?.canvasState) {
-                            await snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision)
-                        }
-                    } catch { /* ignore */ }
-                    if (typeof window !== "undefined") window.location.reload()
+                label: "Keep mine",
+                onClick: () => {
+                    // overwriteRemote() is synchronous — clears the `conflicted`
+                    // flag and force-flushes our local state to Neon.
+                    syncRef.current?.overwriteRemote()
+                    toast.dismiss("canvas-conflict")
+
+                    // Fire-and-forget: preserve the other device's version in
+                    // revision history (non-critical, best-effort).
+                    if (serverProject?.canvasState) {
+                        createProjectRevisionMut({
+                            projectId: proj._id,
+                            canvasState: serverProject.canvasState,
+                            width: serverProject.width || proj.width,
+                            height: serverProject.height || proj.height,
+                            currentImageUrl: serverProject.currentImageUrl || undefined,
+                            title: "Other device's version (edit conflict)",
+                            summary: "Preserved before overwriting with your version.",
+                        }).catch((error) => {
+                            console.warn("[canvas] failed to preserve remote conflict copy:", error?.message || error)
+                        })
+                    }
                 },
             },
             cancel: {
-                label: "Keep mine",
-                onClick: async () => {
-                    // Preserve the OTHER device's version too before we overwrite it.
-                    try {
-                        if (serverProject?.canvasState) {
-                            await createProjectRevisionMut({
-                                projectId: proj._id,
-                                canvasState: serverProject.canvasState,
-                                width: serverProject.width || proj.width,
-                                height: serverProject.height || proj.height,
-                                currentImageUrl: serverProject.currentImageUrl || undefined,
-                                title: "Other device's version (edit conflict)",
-                                summary: "Preserved before overwriting with your version.",
-                            })
-                        }
-                    } catch (error) {
-                        console.warn("[canvas] failed to preserve remote conflict copy:", error?.message || error)
-                    }
-                    syncRef.current?.overwriteRemote()
-                    toast.dismiss("canvas-conflict")
+                label: "Reload latest",
+                onClick: () => {
+                    // Best-effort: cache the remote state before reloading.
+                    Promise.resolve()
+                        .then(() => clearLocalState(proj._id).catch(() => {}))
+                        .then(() => {
+                            if (serverProject?.canvasState) {
+                                return snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision).catch(() => {})
+                            }
+                        })
+                        .finally(() => {
+                            if (typeof window !== "undefined") window.location.reload()
+                        })
                 },
             },
         })
@@ -510,9 +528,38 @@ const CanvasEditor = ({ project }) => {
         return () => {
             manager.flushNow()
             manager.destroy()
+            // Dismiss the conflict toast so it doesn't persist on navigation
+            // (it has duration: Infinity and would follow the user to the dashboard).
+            toast.dismiss("canvas-conflict")
             if (syncRef.current === manager) syncRef.current = null
         }
     }, [project?._id, handleSyncStatus])
+
+    // Host the AI Extend background poller. Lives at canvas level (not in the
+    // extender panel) so a pending genfill keeps polling and can swap the soft
+    // preview for the real result no matter which tool is open — and resumes
+    // after a reload (the poller persists pending jobs to sessionStorage).
+    // Bind the change journal to this project so the History panel shows the
+    // right log (persisted per project in sessionStorage).
+    useEffect(() => {
+        if (project?._id) setJournalProject(project._id)
+    }, [project?._id])
+
+    useEffect(() => {
+        const projectId = project?._id
+        if (!canvasEditor || !projectId) return
+        return registerExtendHost({
+            projectId,
+            getCanvas: () => canvasEditor,
+            save: async (id, currentImageUrl, canvas) => {
+                await updateProject({
+                    projectId: id,
+                    currentImageUrl,
+                    canvasState: serializeCanvasState(canvas),
+                })
+            },
+        })
+    }, [canvasEditor, project?._id, updateProject])
 
     // beforeunload + pagehide: capture the very latest state before the user
     // navigates away. The manager beacons it to Redis (surviving unload) and
@@ -1130,12 +1177,14 @@ const CanvasEditor = ({ project }) => {
     // src/lib/agent/). Resolves the active primary image from the live canvas
     // on each call so commands always target the current image.
     useEffect(() => {
-        let unregister = () => {}
+        let unregisterMask = () => {}
+        let unregisterCrop = () => {}
         let cancelled = false
         Promise.all([
             import('@/lib/agent/command-registry'),
             import('@/lib/agent/mask-commands'),
-        ]).then(([reg, mask]) => {
+            import('@/lib/agent/crop-commands'),
+        ]).then(([reg, mask, crop]) => {
             if (cancelled) return
             const getPrimaryImage = () => {
                 const canvas = canvasInstanceRef.current
@@ -1145,9 +1194,11 @@ const CanvasEditor = ({ project }) => {
                     (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPixxelMaskOverlay(obj)
                 ) || null
             }
-            unregister = reg.registerDomain('mask', mask.createMaskCommands({ getPrimaryImage }))
+            const getCanvas = () => canvasInstanceRef.current
+            unregisterMask = reg.registerDomain('mask', mask.createMaskCommands({ getPrimaryImage }))
+            unregisterCrop = reg.registerDomain('crop', crop.createCropCommands({ getPrimaryImage, getCanvas }))
         }).catch(() => { /* agent layer optional */ })
-        return () => { cancelled = true; unregister() }
+        return () => { cancelled = true; unregisterMask(); unregisterCrop() }
     }, [])
 
     // Track the last-hydrated URL so we skip redundant re-hydrations when

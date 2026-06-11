@@ -164,6 +164,28 @@ export function getCanvasScale(imageBounds, pixelDims) {
 }
 
 /**
+ * Union of the image and frame rects, edge by edge. Used to clamp the
+ * expansion frame after a resize gesture: the frame must always cover the
+ * image, but each edge is clamped INDEPENDENTLY — recomputing from
+ * min(left)/max(width) instead would shift the opposite edge when one handle
+ * is dragged inward past the image boundary (pulling the left handle back
+ * would silently shrink a right-side extension).
+ */
+export function unionFrameBounds(imageBounds, frameBounds) {
+  const left = Math.min(frameBounds.left, imageBounds.left)
+  const top = Math.min(frameBounds.top, imageBounds.top)
+  const right = Math.max(
+    frameBounds.left + frameBounds.width,
+    imageBounds.left + imageBounds.width
+  )
+  const bottom = Math.max(
+    frameBounds.top + frameBounds.height,
+    imageBounds.top + imageBounds.height
+  )
+  return { left, top, width: right - left, height: bottom - top }
+}
+
+/**
  * Fabric bounding rects → pixel-space expansion spec.
  */
 export function frameToPixelExpansion(imageBounds, frameBounds, pixelDims) {

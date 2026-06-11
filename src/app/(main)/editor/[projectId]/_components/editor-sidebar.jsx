@@ -12,6 +12,7 @@ import { extractDominantColors, getContrastingColor, adjustColorBrightness } fro
 // panels below stay split out.
 import MaskControls from "./tools/mask"
 import EraseControls from "./tools/erase"
+import HistoryPanel from "./history-panel"
 
 // Lazy-load each tool panel so the editor's initial bundle stays small — only the
 // active tool's code is fetched (on first use, then cached). The heaviest panels
@@ -98,10 +99,13 @@ export default function EditorSidebar({ project: projectProp, width }) {
     }, [project?.currentImageUrl, project?.originalImageUrl])
 
     if (!activeTool) return (
-        <div className="flex flex-col items-center justify-center h-full text-center p-6" style={{ color: 'var(--text-muted)' }}>
-            <div className="text-4xl mb-4 opacity-50">🖌️</div>
-            <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Select a tool to begin</p>
-            <p className="text-[11px]">Choose from the toolbar above to start editing</p>
+        <div className="flex flex-col h-full">
+            <div className="flex flex-col items-center justify-center flex-1 text-center p-6" style={{ color: 'var(--text-muted)' }}>
+                <div className="text-4xl mb-4 opacity-50">🖌️</div>
+                <p className="text-sm font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Select a tool to begin</p>
+                <p className="text-[11px]">Choose from the toolbar above to start editing</p>
+            </div>
+            <HistoryPanel />
         </div>
     )
 
@@ -168,6 +172,10 @@ export default function EditorSidebar({ project: projectProp, width }) {
             <div className={contentClass}>
                 {renderContent()}
             </div>
+            {/* The agent panel owns its full height (chat log + composer +
+                resizable edits dock) and has its own thread history — pinning
+                the journal footer under it squeezes the composer. */}
+            {activeTool !== "ai_agent" && <HistoryPanel />}
         </aside>
     )
 }
