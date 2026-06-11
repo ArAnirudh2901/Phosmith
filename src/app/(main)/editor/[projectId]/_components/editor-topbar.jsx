@@ -367,10 +367,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                 sits the same distance apart. Dividers contribute only their 1px
                 width; per-element mx-* margins were removed to keep spacing
                 gap-only and predictable. */}
-            <div className="editor-topbar flex items-center justify-between gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 px-2 lg:px-3 min-w-0">
+            <div className="editor-topbar grid items-center gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 px-2 lg:px-3 min-w-0 w-full" style={{ gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr)' }}>
 
                 {/* Left section: navigation chrome + project identity */}
-                <div className="flex flex-none items-center gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 min-w-0 max-w-[42%]">
+                <div className="flex items-center justify-start gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 min-w-0">
                     {/* Sidebar toggle — visible only when the parent is in overlay-mode
                         (<lg viewport), where the sidebar is hidden by default. Icon flips
                         to PanelRight when the agent sidebar (right side) is active so the
@@ -440,7 +440,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     screen) and overflows horizontally when content is too wide.
                     Active tool auto-scrolls into view via the effect below. */}
                 <div
-                    className="editor-topbar-tools flex flex-1 min-w-0 items-center justify-start gap-1 lg:gap-1.5 xl:gap-2 min-[1700px]:gap-2.5 min-[2000px]:gap-3 overflow-x-auto scrollbar-hide"
+                    className="editor-topbar-tools flex items-center justify-center gap-1 lg:gap-1.5 xl:gap-2 min-[1700px]:gap-2.5 min-[2000px]:gap-3 overflow-x-auto scrollbar-hide max-w-[100vw]"
                     ref={toolsScrollRef}
                 >
                     {ALL_TOOLS.map((tool) => {
@@ -480,7 +480,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     by the topbar bounds. Non-essential icons (zoom reset, keyboard
                     shortcuts) collapse out at narrow widths since they have
                     keyboard shortcuts (⌘0, ?). */}
-                <div className="flex flex-none items-center justify-end gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3" style={{ overflow: 'visible' }}>
+                <div className="flex items-center justify-end gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3" style={{ overflow: 'visible' }}>
                     {/* Undo / Redo — always visible (core workflow) */}
                     <motion.button
                         onClick={handleUndo}
