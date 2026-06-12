@@ -126,7 +126,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
         if (commit) {
             setCurrentSize({ width: safeWidth, height: safeHeight })
             canvasEditor.fire('object:modified', { target: selectedImage })
-            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__pushHistoryState?.({ label: 'Resized image', domain: 'resize' })
             canvasEditor.__saveCanvasState?.()
         }
     }, [canvasEditor, selectedImage])
@@ -209,7 +209,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
                 height,
                 canvasState: serializeCanvasState(canvasEditor),
             })
-            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__pushHistoryState?.({ label: 'Resized canvas', domain: 'resize' })
             toast.success('Canvas size updated', { id: toastId })
         } catch (error) {
             console.error('[Resize] Failed to update canvas size:', error)

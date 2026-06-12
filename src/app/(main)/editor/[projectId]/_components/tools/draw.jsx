@@ -43,9 +43,9 @@ const isPathObject = (obj) => {
     return type === 'path' || type === 'pathgroup'
 }
 
-const commitDrawChange = (canvasEditor) => {
+const commitDrawChange = (canvasEditor, meta) => {
     canvasEditor?.requestRenderAll()
-    canvasEditor?.__pushHistoryState?.()
+    canvasEditor?.__pushHistoryState?.(meta)
     canvasEditor?.__saveCanvasState?.()
 }
 
@@ -162,7 +162,7 @@ const DrawControls = ({ dominantColor }) => {
             const onEraserUp = () => {
                 if (!erasingRef.current) return
                 erasingRef.current = false
-                commitDrawChange(canvasEditor)
+                commitDrawChange(canvasEditor, { label: 'Erased stroke', domain: 'draw', coalesceKey: 'draw-erase' })
             }
 
             canvasEditor.on('mouse:down', onEraserDown)
@@ -230,7 +230,7 @@ const DrawControls = ({ dominantColor }) => {
         }
         paths.forEach((p) => canvasEditor.remove(p))
         strokeStackRef.current = []
-        commitDrawChange(canvasEditor)
+        commitDrawChange(canvasEditor, { label: 'Cleared all drawings', domain: 'draw' })
         syncPathCount()
         toast.success(`Cleared ${paths.length} stroke(s)`)
     }
@@ -254,7 +254,7 @@ const DrawControls = ({ dominantColor }) => {
 
         canvasEditor.remove(path)
         strokeStackRef.current = strokeStackRef.current.filter((p) => p !== path)
-        commitDrawChange(canvasEditor)
+        commitDrawChange(canvasEditor, { label: 'Undid last stroke', domain: 'draw' })
         syncPathCount()
     }
 

@@ -590,7 +590,7 @@ const AIExtender = ({ project }) => {
             const outputH = nextImage.height || expansion.targetHeight
 
             canvasEditor.__fitCanvasToProject?.({ width: outputW, height: outputH })
-            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__pushHistoryState?.({ label: 'AI extended image', domain: 'extend' })
 
             try {
                 await updateProject({

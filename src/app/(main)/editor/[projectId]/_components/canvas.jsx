@@ -60,6 +60,7 @@ import { normalizeCanvasState, serializeCanvasState } from "../../../../../lib/c
 import { hydrateCanvasImages, restoreCanvasFromHistory } from "../../../../../lib/canvas-history"
 import { registerExtendHost } from "../../../../../lib/extend-poller"
 import { isAgentActing, recordChange, setJournalProject } from "../../../../../lib/change-journal"
+import { describeCanvasChange } from "../../../../../lib/canvas-change-describe"
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
 import { addImageFilesToCanvas } from "../../../../../lib/canvas-images"
 import {
@@ -82,6 +83,24 @@ const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
 const MIN_PERSISTED_HISTORY_ENTRIES = 3
 const MAX_NEON_STATE_CHARS = 900_000
+// Tiered autosave: MAJOR changes (real edits) save on the fast debounce as
+// before; MINOR ones (sub-threshold nudges — see canvas-change-describe) ride
+// a slow trickle so fidgeting can't generate a stream of snapshot/flush API
+// calls. Minor edits are still durable immediately via the IndexedDB mirror
+// and the unload beacon, and any pending major save carries them for free.
+const MAJOR_SAVE_DEBOUNCE_MS = 2000
+const MINOR_SAVE_TRICKLE_MS = 30_000
+// 'text:changed' fires per keystroke. Without a debounce every keystroke
+// became its own undo state and evicted the whole 30-entry history while
+// typing a sentence — push ONE history state per typing pause instead.
+const TEXT_HISTORY_DEBOUNCE_MS = 900
+// How long the network snapshot (Redis write-behind) is allowed to lag the
+// freshest state — see minSnapshotIntervalMs in canvas-sync.
+const MIN_SNAPSHOT_INTERVAL_MS = 4000
+// Neon flush debounce. Was 8s; 15s halves database writes in active sessions
+// with no durability cost (Redis snapshot + IndexedDB hold the latest state,
+// and tab-hide/unload force a flush anyway).
+const FLUSH_DEBOUNCE_MS = 15_000
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
 const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
 const getPrimaryRemoteImageUrl = (canvas) => {
@@ -260,11 +279,15 @@ const CanvasEditor = ({ project }) => {
         // Journal AFTER the dedup check, so no-op pushes never log. While an
         // agent command runs, runCommand already records the SPECIFIC command
         // — skip the generic entry to avoid double-logging the same change.
-        if (!isAgentActing()) {
+        // meta.silent pushes the undo state WITHOUT a journal entry (used by
+        // the initial rehydration push, which isn't a user change).
+        if (!isAgentActing() && !meta?.silent) {
             recordChange({
                 label: meta?.label || 'Canvas edit',
+                detail: meta?.detail,
                 source: 'user',
                 domain: meta?.domain || 'canvas',
+                coalesceKey: meta?.coalesceKey,
             })
         }
     }, [])
@@ -522,7 +545,8 @@ const CanvasEditor = ({ project }) => {
             onStatus: handleSyncStatus,
             onConflict: (serverProject) => onConflictRef.current(serverProject),
             initialRevision: Number(projectRef.current?.revision) || 0,
-            flushDebounceMs: 8000,
+            flushDebounceMs: FLUSH_DEBOUNCE_MS,
+            minSnapshotIntervalMs: MIN_SNAPSHOT_INTERVAL_MS,
         })
         syncRef.current = manager
         return () => {
@@ -978,7 +1002,7 @@ const CanvasEditor = ({ project }) => {
             }
             canvas.__undoCanvasState = () => undoCanvasState()
             canvas.__redoCanvasState = () => redoCanvasState()
-            canvas.__pushHistoryState = () => pushHistoryState(canvas)
+            canvas.__pushHistoryState = (meta) => pushHistoryState(canvas, meta)
             canvas.__saveCanvasState = (opts) => saveCanvasState(opts)
             canvas.__getHistoryState = () => ({
                 canUndo: historyIndexRef.current > 0,
@@ -1043,7 +1067,10 @@ const CanvasEditor = ({ project }) => {
                     historyRef.current.length - 1
                 )
             } else {
-                pushHistoryState(canvas)
+                // Seed the undo baseline without journaling — opening a project
+                // is not a user change ("Canvas edit" used to appear on every
+                // fresh project open).
+                pushHistoryState(canvas, { silent: true })
             }
             emitHistoryChange(canvas)
             setIsLoading(false)
@@ -1075,7 +1102,7 @@ const CanvasEditor = ({ project }) => {
         if (!canvas) return
         canvas.__undoCanvasState = () => undoCanvasState()
         canvas.__redoCanvasState = () => redoCanvasState()
-        canvas.__pushHistoryState = () => pushHistoryState(canvas)
+        canvas.__pushHistoryState = (meta) => pushHistoryState(canvas, meta)
         canvas.__saveCanvasState = () => saveCanvasState()
         canvas.__getHistoryState = () => ({
             canUndo: historyIndexRef.current > 0,
@@ -1403,21 +1430,71 @@ const CanvasEditor = ({ project }) => {
 
     useEffect(() => {
         if (!canvasEditor) return
-        let saveTimeout
-        let historyTimeout
+        let saveTimeout = null
+        let historyTimeout = null
+        let historyDueAt = Infinity
 
-        const scheduleHistoryPush = () => {
-            clearTimeout(historyTimeout)
-            historyTimeout = setTimeout(() => pushHistoryState(canvasEditor), 0)
+        // Sooner-wins scheduling with one exception: a pending push for the
+        // SAME action (matching coalesceKey — e.g. consecutive text:changed
+        // keystrokes) is debounced properly, the timer resets so exactly one
+        // undo state lands per typing pause. Across different actions a
+        // sooner pending push survives (a 900ms text push must never cancel
+        // an immediate push from another event), while an equal-or-sooner new
+        // push replaces it so the freshest label wins.
+        let historyPendingKey = null
+        const scheduleHistoryPush = (meta, delay = 0) => {
+            const due = Date.now() + delay
+            const key = meta?.coalesceKey || null
+            if (historyTimeout) {
+                const samePending = key !== null && historyPendingKey === key
+                if (!samePending && historyDueAt < due) return
+                clearTimeout(historyTimeout)
+            }
+            historyPendingKey = key
+            historyDueAt = due
+            historyTimeout = setTimeout(() => {
+                historyTimeout = null
+                historyDueAt = Infinity
+                historyPendingKey = null
+                pushHistoryState(canvasEditor, meta)
+            }, delay)
         }
 
-        const handleCanvasChange = (event) => {
+        // Tiered autosave (see MAJOR_SAVE_DEBOUNCE_MS / MINOR_SAVE_TRICKLE_MS):
+        // majors debounce-reset the fast timer; minors only arm the slow
+        // trickle when NOTHING is pending — whatever save is already scheduled
+        // carries them, and repeated nudges must not keep pushing the deadline
+        // out (a fidgety user would otherwise never save).
+        const scheduleSave = (tier) => {
+            if (tier === 'minor') {
+                if (saveTimeout) return
+                saveTimeout = setTimeout(() => {
+                    saveTimeout = null
+                    saveCanvasState()
+                }, MINOR_SAVE_TRICKLE_MS)
+                return
+            }
+            clearTimeout(saveTimeout)
+            saveTimeout = setTimeout(() => {
+                saveTimeout = null
+                saveCanvasState()
+            }, MAJOR_SAVE_DEBOUNCE_MS)
+        }
+
+        const makeChangeHandler = (eventName) => (event) => {
             // Guard: when restoring from undo/redo, canvas events fire (object:added,
             // object:modified, etc.) but they must NOT push a new history entry —
             // otherwise the redo stack is truncated immediately after an undo.
             if (isRestoringRef.current) return
             if (isExpansionFrameLike(event?.target)) return
             if (isPixxelMaskOverlay(event?.target)) return
+
+            const change = describeCanvasChange(eventName, event)
+            // Zero-delta gesture (click without movement) — nothing happened.
+            // Checked BEFORE the grade mirror so a sub-epsilon event can't
+            // mutate the background with no save scheduled to persist it.
+            if (change.significance === 'none') return
+
             // When "color grade background" is on, mirror the photo's grade onto the
             // canvas background. Gated to image edits (skip text/shape moves) and to
             // when a background actually exists; change-detected inside.
@@ -1428,23 +1505,35 @@ const CanvasEditor = ({ project }) => {
             ) {
                 try { syncBackgroundGrade(canvasEditor, true, event.target) } catch { /* ignore */ }
             }
-            scheduleHistoryPush()
-            clearTimeout(saveTimeout)
-            saveTimeout = setTimeout(() => { saveCanvasState() }, 2000)
+            // Sub-threshold nudge: a real state change that must persist, but
+            // not a "main change" — no undo entry, no journal noise, no fast
+            // network save. The trickle (or any already-pending save / the
+            // unload beacon) carries it; the next major push captures it in
+            // the undo stack.
+            if (change.significance === 'minor') {
+                scheduleSave('minor')
+                return
+            }
+
+            scheduleHistoryPush(
+                { label: change.label, coalesceKey: change.coalesceKey },
+                eventName === 'text:changed' ? TEXT_HISTORY_DEBOUNCE_MS : 0,
+            )
+            scheduleSave('major')
         }
 
-        canvasEditor.on("object:modified", handleCanvasChange)
-        canvasEditor.on("object:added", handleCanvasChange)
-        canvasEditor.on("object:removed", handleCanvasChange)
-        canvasEditor.on("text:changed", handleCanvasChange)
+        const handlers = [
+            ['object:modified', makeChangeHandler('object:modified')],
+            ['object:added', makeChangeHandler('object:added')],
+            ['object:removed', makeChangeHandler('object:removed')],
+            ['text:changed', makeChangeHandler('text:changed')],
+        ]
+        handlers.forEach(([name, handler]) => canvasEditor.on(name, handler))
 
         return () => {
             clearTimeout(saveTimeout)
             clearTimeout(historyTimeout)
-            canvasEditor.off("object:modified", handleCanvasChange)
-            canvasEditor.off("object:added", handleCanvasChange)
-            canvasEditor.off("object:removed", handleCanvasChange)
-            canvasEditor.off("text:changed", handleCanvasChange)
+            handlers.forEach(([name, handler]) => canvasEditor.off(name, handler))
         }
     }, [canvasEditor, project?._id, pushHistoryState, saveCanvasState])
 

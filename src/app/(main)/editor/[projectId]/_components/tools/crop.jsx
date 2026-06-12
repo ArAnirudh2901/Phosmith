@@ -808,7 +808,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
             canvasEditor.requestRenderAll()
             resetCropState()
 
-            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__pushHistoryState?.({ label: 'Applied crop', domain: 'crop' })
             canvasEditor.__saveCanvasState?.()
             toast.success("Crop applied", { id: toastId })
         } catch (error) {

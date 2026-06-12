@@ -51,7 +51,7 @@ const commitMaskChange = (canvasEditor, img) => {
     img?.set?.('dirty', true)
     if (img) canvasEditor.fire?.('object:modified', { target: img })
     canvasEditor.requestRenderAll()
-    canvasEditor.__pushHistoryState?.()
+    canvasEditor.__pushHistoryState?.({ label: 'Painted mask', domain: 'mask', coalesceKey: 'mask-brush' })
     canvasEditor.__saveCanvasState?.()
 }
 
@@ -1987,7 +1987,7 @@ export default function usePixelMaskTool({
         })
         clearTimeout(featherCommitTimerRef.current)
         featherCommitTimerRef.current = setTimeout(() => {
-            canvasEditor?.__pushHistoryState?.()
+            canvasEditor?.__pushHistoryState?.({ label: 'Adjusted mask feather', domain: 'mask', coalesceKey: 'mask-feather' })
             canvasEditor?.__saveCanvasState?.()
         }, 350)
         return () => clearTimeout(featherCommitTimerRef.current)
