@@ -134,7 +134,11 @@ const SLIDER_CONFIGS = [
 ]
 
 const WHEEL_CONFIGS = [
-    { key: "shadowTone", colorKey: "shadowColor", label: "Shadows", defaultColor: "#2342ff", mode: "multiply" },
+    // NOTE: "multiply" can't be used here — Fabric's BlendColor.applyTo2d bakes
+    // alpha into the color BEFORE multiplying (tr = color * alpha), producing
+    // near-black pixels instead of a subtle tint. "overlay" gives a similar
+    // shadow-darkening effect that actually works in the Canvas2D pipeline.
+    { key: "shadowTone", colorKey: "shadowColor", label: "Shadows", defaultColor: "#2342ff", mode: "overlay" },
     { key: "midtoneTone", colorKey: "midtoneColor", label: "Midtones", defaultColor: "#00c2a8", mode: "overlay" },
     { key: "highlightTone", colorKey: "highlightColor", label: "Highlights", defaultColor: "#ffd76d", mode: "screen" },
     { key: "colorizeIntensity", colorKey: "colorizeColor", label: "Colorize", defaultColor: "#ff3f7f", mode: "tint" },
@@ -496,12 +500,42 @@ const buildFabricFilters = (values) => {
     const curvesFilter = buildCurvesFilter(values)
     if (curvesFilter) next.push(markFilter(curvesFilter, "curves"))
 
+    // ── Highlights / Shadows / Whites / Blacks ──────────────────────────
+    // Fabric's BlendColor "multiply" mode does NOT lerp between the original
+    // pixel and the blended result — it bakes alpha into the blend color first
+    // (tr = color_channel * alpha) and then does pixel*tr/255. With dark blend
+    // colors (#000000, #050505, #1b1b1b) this drives every pixel to near-zero
+    // (black) at any noticeable alpha. The fix: use a ColorMatrix that linearly
+    // scales pixel brightness — `lerp(1.0, darkFactor, strength)` — so the
+    // image darkens smoothly instead of crushing to black.
+    //
+    // Positive values (lighten) still use BlendColor "screen" which works fine
+    // because screen with bright colors correctly lifts pixel values.
+
     if (values.highlights > 0) addBlend(next, "highlights", "#ffffff", "screen", values.highlights / 260)
-    if (values.highlights < 0) addBlend(next, "highlights", "#1b1b1b", "multiply", Math.abs(values.highlights) / 320)
+    if (values.highlights < 0) {
+        // Darken highlights: scale brightness toward ~0.7 at max (-100)
+        const s = 1 - Math.abs(values.highlights) / 330
+        next.push(markFilter(new filters.ColorMatrix({
+            matrix: [s, 0, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, 1, 0],
+        }), "highlights"))
+    }
     if (values.shadows > 0) addBlend(next, "shadows", "#cdd8ff", "screen", values.shadows / 360)
-    if (values.shadows < 0) addBlend(next, "shadows", "#050505", "multiply", Math.abs(values.shadows) / 260)
+    if (values.shadows < 0) {
+        // Darken shadows: scale brightness toward ~0.62 at max (-100)
+        const s = 1 - Math.abs(values.shadows) / 260
+        next.push(markFilter(new filters.ColorMatrix({
+            matrix: [s, 0, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, 1, 0],
+        }), "shadows"))
+    }
     if (values.whites > 0) addBlend(next, "whites", "#ffffff", "screen", values.whites / 340)
-    if (values.blacks > 0) addBlend(next, "blacks", "#000000", "multiply", values.blacks / 300)
+    if (values.blacks > 0) {
+        // Crush blacks: scale brightness toward ~0.67 at max (100)
+        const s = 1 - values.blacks / 300
+        next.push(markFilter(new filters.ColorMatrix({
+            matrix: [s, 0, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, 1, 0],
+        }), "blacks"))
+    }
 
     for (const wheel of WHEEL_CONFIGS) {
         const amount = Number(values[wheel.key] || 0)

@@ -726,16 +726,20 @@ a:focus-visible,
   contain: layout style;
 }
 
-.project-pixel-canvas,
+.project-pixel-canvas {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  /* Promote to its own compositor layer so the rAF draw loop doesn't
+     trigger repaints on other elements. */
+  will-change: contents;
+}
+
 .project-pixel-tile {
   position: absolute;
   pointer-events: none;
   transform-origin: center;
   will-change: transform, opacity, filter;
-}
-
-.project-pixel-canvas {
-  inset: 0;
 }
 
 .project-pixel-tile {
