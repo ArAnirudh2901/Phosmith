@@ -34,6 +34,7 @@ import {
     MousePointerSquareDashed,
 } from "lucide-react"
 import { ActiveSelection } from "fabric"
+import { describeObjectKind } from "../../../../../lib/canvas-change-describe"
 import { useCanvas } from "../../../../../../context/context"
 import useEditorShortcuts from "../../../../../../hooks/useEditorShortcuts"
 
@@ -168,23 +169,25 @@ const CommandPalette = ({ isOpen, onClose, onExecute }) => {
                 case "action-delete": {
                     const active = canvasEditor?.getActiveObject?.()
                     if (active) {
+                        const activeKind = describeObjectKind(active)
                         canvasEditor.remove(active)
                         canvasEditor.discardActiveObject()
                         canvasEditor.requestRenderAll()
-                        canvasEditor.__pushHistoryState?.()
+                        canvasEditor.__pushHistoryState?.({ label: `Deleted ${activeKind}`, domain: "canvas" })
                     }
                     break
                 }
                 case "action-duplicate": {
                     const activeObj = canvasEditor?.getActiveObject?.()
                     if (activeObj) {
+                        const activeObjKind = describeObjectKind(activeObj)
                         activeObj.clone().then((cloned) => {
                             cloned.set({ left: (cloned.left || 0) + 20, top: (cloned.top || 0) + 20 })
                             cloned.setCoords()
                             canvasEditor.add(cloned)
                             canvasEditor.setActiveObject(cloned)
                             canvasEditor.requestRenderAll()
-                            canvasEditor.__pushHistoryState?.()
+                            canvasEditor.__pushHistoryState?.({ label: `Duplicated ${activeObjKind}`, domain: "canvas" })
                         })
                     }
                     break

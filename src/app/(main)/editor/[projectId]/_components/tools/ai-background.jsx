@@ -397,7 +397,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         canvasEditor.backgroundColor = backgroundColor
         canvasEditor.__pixxelGradeBackground = false
         canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__pushHistoryState?.({ label: 'Set background color', domain: 'background' })
         canvasEditor.__saveCanvasState?.()
         setPendingMerge(false)
         setGradeBackground(false)
@@ -410,7 +410,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
             // Sizes the background to EXACTLY the canvas (cover-crop, no overflow,
             // no distortion) while keeping the remote URL so saves stay small.
             await applyCanvasSizedBackground(canvasEditor, FabricImage, imageUrl, project)
-            canvasEditor.__pushHistoryState?.()
+            canvasEditor.__pushHistoryState?.({ label: 'Applied image background', domain: 'background' })
             canvasEditor.__saveCanvasState?.()
             // If there's a photo on the canvas, offer to merge the background into it.
             setPendingMerge(getForegroundImages(canvasEditor).length >= 1)
@@ -449,7 +449,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         setGradeBackground(next)
         canvasEditor.__pixxelGradeBackground = next
         syncBackgroundGrade(canvasEditor, next)
-        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__pushHistoryState?.({ label: 'Toggled background grade', domain: 'background' })
         canvasEditor.__saveCanvasState?.()
     }
 
@@ -629,7 +629,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         canvasEditor.backgroundImage = null
         canvasEditor.__pixxelGradeBackground = false
         canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__pushHistoryState?.({ label: 'Removed background', domain: 'background' })
         canvasEditor.__saveCanvasState?.()
         setPendingMerge(false)
         setGradeBackground(false)

@@ -1261,7 +1261,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     canvasEditor.requestRenderAll();
     liveSnapshotRef.current = keepSnapshot ? snapshot : null;
     if (!keepSnapshot) clearLivePreviewSession();
-    if (pushHistory) canvasEditor.__pushHistoryState?.();
+    if (pushHistory) canvasEditor.__pushHistoryState?.({ label: "Restore agent preview", domain: "imagekit" });
     setImageRevision((value) => value + 1);
   };
 
@@ -1421,7 +1421,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     applyProfessionalFilters(targetImage, effectivePlan?.fabricAdjustments);
     canvasEditor.setActiveObject?.(targetImage);
     canvasEditor.requestRenderAll();
-    canvasEditor.__pushHistoryState?.();
+    canvasEditor.__pushHistoryState?.({ label: isUpscalePlan ? "Upscale image" : "Apply AI transform", domain: "imagekit" });
     if (isMountedRef.current) setImageRevision((value) => value + 1);
     return previewToken;
     })();
@@ -1517,7 +1517,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       applyProfessionalFilters(target, adjustments);
     }
     canvasEditor.requestRenderAll();
-    canvasEditor.__pushHistoryState?.();
+    canvasEditor.__pushHistoryState?.({ label: "Apply multi-layer adjustments", domain: "imagekit" });
     setImageRevision((value) => value + 1);
     return previewToken;
   };
@@ -1775,7 +1775,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         });
         canvasEditor.setActiveObject?.(extendedImage);
         canvasEditor.requestRenderAll();
-        canvasEditor.__pushHistoryState?.();
+        canvasEditor.__pushHistoryState?.({ label: "Generative image extend", domain: "imagekit" });
 
         setMessages((current) => [
           ...current,
@@ -2110,7 +2110,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         },
       });
       canvasEditor.__fitCanvasToProject?.({ width: restored.width, height: restored.height });
-      canvasEditor.__pushHistoryState?.();
+      canvasEditor.__pushHistoryState?.({ label: "Restore saved version", domain: "imagekit" });
       setImageRevision((value) => value + 1);
       toast.success("Version restored", { id: toastId });
     } catch (error) {
@@ -2179,7 +2179,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         effectivePlan = result.effectivePlan;
       }
 
-      canvasEditor.__pushHistoryState?.();
+      canvasEditor.__pushHistoryState?.({ label: "Apply agent edit set", domain: "imagekit" });
       const canvasState = serializeCanvasState(canvasEditor);
       currentImageUrl = currentImageUrl || getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.currentImageUrl || project.originalImageUrl;
 
@@ -2272,7 +2272,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           canvasSize: { width: project.width, height: project.height },
         },
       });
-      canvasEditor.__pushHistoryState?.();
+      canvasEditor.__pushHistoryState?.({ label: "Remove agent edit set", domain: "imagekit" });
       const canvasState = serializeCanvasState(canvasEditor);
       const restoredImageUrl = editSet.currentImageUrlBefore || getSourceUrl(getCanvasActiveImage(canvasEditor), project) || project.originalImageUrl;
       const restoredTransformations = editSet.activeTransformationsBefore || "";

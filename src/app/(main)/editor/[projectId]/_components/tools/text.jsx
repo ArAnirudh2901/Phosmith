@@ -407,7 +407,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
         preset.apply(selectedText)
         selectedText.setCoords()
         canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__pushHistoryState?.({ label: 'Applied word art', domain: 'text' })
         updateSelectedText()
     }
 
@@ -767,7 +767,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                         <label className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Letter Spacing</label>
                                         <ProRulerSlider label="Spacing" value={letterSpacing} min={-200} max={1000} step={10}
                                             onChange={applyLetterSpacing}
-                                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.()}
+                                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.({ label: 'Adjusted letter spacing', domain: 'text', coalesceKey: 'text-style-slider' })}
                                             visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}
                                         />
                                     </div>
@@ -777,7 +777,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                         <label className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Line Height</label>
                                         <ProRulerSlider label="Height" value={lineHeight} min={0.5} max={3} step={0.05} suffix="×"
                                             onChange={applyLineHeight}
-                                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.()}
+                                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.({ label: 'Adjusted line height', domain: 'text', coalesceKey: 'text-style-slider' })}
                                             visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}
                                         />
                                     </div>
@@ -787,7 +787,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                         <label className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Opacity</label>
                                         <ProRulerSlider label="Opacity" value={textOpacity} min={0} max={100} step={1} suffix="%"
                                             onChange={applyOpacity}
-                                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.()}
+                                            onChangeEnd={() => canvasEditor?.__pushHistoryState?.({ label: 'Adjusted opacity', domain: 'text', coalesceKey: 'text-style-slider' })}
                                             visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}
                                         />
                                     </div>
@@ -800,7 +800,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                                 placeholder="No stroke" className="panel-input flex-1 min-w-0" />
                                             <ProRulerSlider className="flex-1 min-w-0" label="Width" value={strokeWidth} min={0} max={10} step={0.5} suffix="px"
                                                 onChange={(v) => applyStroke(strokeColor, v)}
-                                                onChangeEnd={() => canvasEditor?.__pushHistoryState?.()}
+                                                onChangeEnd={() => canvasEditor?.__pushHistoryState?.({ label: 'Adjusted stroke width', domain: 'text', coalesceKey: 'text-style-slider' })}
                                                 visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}
                                             />
                                         </div>

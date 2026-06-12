@@ -27,11 +27,31 @@ const SNAPSHOT_TTL_SECONDS = 24 * 60 * 60
 
 const stateKey = (projectId) => `canvas:state:${projectId}`
 const metaKey = (projectId) => `canvas:meta:${projectId}`
+const ownerKey = (projectId) => `canvas:owner:${projectId}`
+
+// Ownership rarely changes, but this route runs on EVERY autosave — without a
+// cache each snapshot costs a Neon read just to re-verify the same owner.
+const OWNER_CACHE_TTL_SECONDS = 60 * 60
 
 const ensureOwnership = async (projectId, neonAuth) => {
     const project = await runNeonQuery("projects.getProject", { projectId }, { auth: neonAuth })
     if (!project) throw new Error("Project not found or access denied")
     return project
+}
+
+// Redis-cached ownership check. A cache hit for the SAME user skips the Neon
+// read entirely; a miss or a different cached owner falls through to the full
+// Neon check (so revoked/transferred access is still enforced by the source
+// of truth) and re-caches on success.
+const ensureOwnershipCached = async (projectId, userId, neonAuth, redis) => {
+    try {
+        const cached = await redis.get(ownerKey(projectId))
+        if (cached && String(cached) === userId) return
+    } catch { /* cache unavailable — fall through to Neon */ }
+    await ensureOwnership(projectId, neonAuth)
+    try {
+        await redis.set(ownerKey(projectId), userId, { ex: OWNER_CACHE_TTL_SECONDS })
+    } catch { /* best-effort */ }
 }
 
 export async function POST(request) {
@@ -66,11 +86,11 @@ export async function POST(request) {
             return NextResponse.json({ error: "projectId and canvasState required" }, { status: 400 })
         }
 
-        // Cheap ownership check — re-uses the existing project read auth so a
-        // malicious client can't spam another user's project keys.
-        await ensureOwnership(projectId, neonAuth)
-
         const redis = getRedis()
+        // Cheap ownership check — re-uses the existing project read auth so a
+        // malicious client can't spam another user's project keys. Redis-cached
+        // so steady-state autosaves don't pay a Neon read each time.
+        await ensureOwnershipCached(projectId, userId, neonAuth, redis)
         // Stamp a SERVER-authoritative time alongside the client one. Rehydration
         // compares this against Neon's (also server-set) updatedAt, so a skewed
         // client clock can't make a Redis snapshot wrongly win/lose vs Neon.

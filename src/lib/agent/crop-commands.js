@@ -236,7 +236,7 @@ const replaceImageWithCrop = async (canvas, image, box) => {
     canvas.setActiveObject(cropped)
     cropped.setCoords()
     canvas.requestRenderAll()
-    canvas.__pushHistoryState?.()
+    canvas.__pushHistoryState?.({ label: 'Applied crop', domain: 'crop' })
     canvas.__saveCanvasState?.()
     window?.dispatchEvent?.(new CustomEvent('pixxel:image-replaced', { detail: { reason: 'crop' } }))
     return cropped

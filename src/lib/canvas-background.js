@@ -254,7 +254,7 @@ export const mergeBackgroundWithImages = async (canvasEditor, FabricImage, proje
   else canvasEditor.add(mergedImage)
   canvasEditor.setActiveObject?.(mergedImage)
   canvasEditor.requestRenderAll()
-  canvasEditor.__pushHistoryState?.()
+  canvasEditor.__pushHistoryState?.({ label: 'Merged background with photos', domain: 'background' })
   canvasEditor.__saveCanvasState?.()
   return mergedImage
 }

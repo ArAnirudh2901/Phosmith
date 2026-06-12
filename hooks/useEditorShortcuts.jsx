@@ -130,7 +130,7 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                         canvasEditor.add(cloned)
                         canvasEditor.setActiveObject(cloned)
                         canvasEditor.requestRenderAll()
-                        canvasEditor.__pushHistoryState?.()
+                        canvasEditor.__pushHistoryState?.({ label: 'Duplicated object', domain: 'canvas' })
                     }).catch(() => {})
                 }
                 return
@@ -217,7 +217,7 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                     canvasEditor.remove(activeObject)
                     canvasEditor.discardActiveObject()
                     canvasEditor.requestRenderAll()
-                    canvasEditor.__pushHistoryState?.()
+                    canvasEditor.__pushHistoryState?.({ label: 'Deleted object', domain: 'canvas' })
                 }
                 return
             }
