@@ -1,7 +1,7 @@
 "use client"
 
 import { useParams } from "next/navigation"
-import React, { useEffect, useState, useCallback, useRef } from "react"
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { CanvasContext, DynamicAccentContext } from "../../../../../context/context"
 import { Database, Monitor } from "lucide-react"
 import { useDatabaseQuery } from "../../../../../hooks/useDatabaseQuery"
@@ -44,6 +44,18 @@ const Editor = () => {
     const [canvasEditor, setCanvasEditor] = useState(null)
     const [processingMessage, setProcessingMessage] = useState(null)
     const [processingPhase, setProcessingPhase] = useState("initial")
+    const processingAbortRef = useRef(null)
+
+    const cancelProcessing = useCallback(() => {
+        processingAbortRef.current?.abort?.()
+        processingAbortRef.current = null
+        setProcessingMessage(null)
+        setProcessingPhase("initial")
+    }, [])
+
+    const registerProcessingAbort = useCallback((controller) => {
+        processingAbortRef.current = controller
+    }, [])
     const [showCommandPalette, setShowCommandPalette] = useState(false)
     const [showRadialMenu, setShowRadialMenu] = useState(false)
     const [radialMenuPosition, setRadialMenuPosition] = useState({ x: 0, y: 0 })
@@ -329,7 +341,7 @@ const Editor = () => {
     }
 
     const editorContent = (
-        <CanvasContext.Provider value={{ canvasEditor, setCanvasEditor, activeTool, onToolChange: handleActiveToolChange, processingMessage, setProcessingMessage, setProcessingPhase, expansionPreview, setExpansionPreview }}>
+        <CanvasContext.Provider value={{ canvasEditor, setCanvasEditor, activeTool, onToolChange: handleActiveToolChange, processingMessage, setProcessingMessage, setProcessingPhase, cancelProcessing, registerProcessingAbort, expansionPreview, setExpansionPreview }}>
             {/* editor-shell is hidden below md (768px) — the editor is too cramped
                 on phones. At md–lg (768–1023px, tablet) the sidebar enters overlay
                 mode via data-sidebar-mode="overlay"; at lg+ it's persistent. */}
@@ -344,13 +356,32 @@ const Editor = () => {
                 <AnimatePresence>
                     {processingMessage && (
                         <motion.div
-                            className="neo-loader-surface fixed inset-0 z-50 flex items-center justify-center"
+                            className="neo-loader-surface fixed inset-0 z-50 flex flex-col items-center justify-center gap-5"
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             transition={{ duration: 0.2 }}
                         >
                             <AuroraLoader message={processingMessage} phase={processingPhase} />
+                            <motion.button
+                                type="button"
+                                onClick={cancelProcessing}
+                                initial={{ opacity: 0, y: 8 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: 0.4, duration: 0.25 }}
+                                className="px-5 py-2 rounded-lg text-xs font-semibold tracking-wide uppercase"
+                                style={{
+                                    background: 'rgba(244, 63, 94, 0.12)',
+                                    border: '1px solid rgba(244, 63, 94, 0.3)',
+                                    color: 'rgba(244, 63, 94, 0.9)',
+                                    cursor: 'pointer',
+                                    transition: 'background 150ms ease, border-color 150ms ease',
+                                }}
+                                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(244, 63, 94, 0.22)'; e.currentTarget.style.borderColor = 'rgba(244, 63, 94, 0.5)' }}
+                                onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(244, 63, 94, 0.12)'; e.currentTarget.style.borderColor = 'rgba(244, 63, 94, 0.3)' }}
+                            >
+                                Cancel
+                            </motion.button>
                         </motion.div>
                     )}
                 </AnimatePresence>

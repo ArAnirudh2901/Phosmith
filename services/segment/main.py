@@ -891,11 +891,26 @@ def _lama_loadable() -> bool:
 def _load_lama(app: FastAPI) -> bool:
     """Load LaMa into app.state (blocking). Caller holds _LAMA_LOCK."""
     try:
+        import torch  # type: ignore
         from simple_lama_inpainting import SimpleLama  # type: ignore
 
         log.info("loading LaMa inpainting model ...")
         t0 = time.perf_counter()
-        app.state.lama_model = SimpleLama()
+
+        # The LaMa checkpoint was saved with CUDA tensors. On machines without
+        # CUDA (e.g. Mac / CPU-only Linux) torch.jit.load fails because it
+        # tries to deserialise onto the CUDA backend which doesn't exist.
+        # Monkey-patch torch.jit.load to force map_location='cpu' so the
+        # checkpoint is remapped transparently.
+        _orig_jit_load = torch.jit.load
+        def _cpu_jit_load(f, _map_location=None, **kw):
+            return _orig_jit_load(f, map_location="cpu", **kw)
+        torch.jit.load = _cpu_jit_load
+        try:
+            app.state.lama_model = SimpleLama()
+        finally:
+            torch.jit.load = _orig_jit_load
+
         app.state.lama_available = True
         log.info("LaMa ready in %.1fs", time.perf_counter() - t0)
         return True

@@ -104,7 +104,7 @@ const fetchProcessedImage = async (url, { attempts = 7, signal, onStatus } = {})
 }
 
 const EraseControls = ({ project, dominantColor }) => {
-    const { canvasEditor, processingMessage, setProcessingMessage } = useCanvas()
+    const { canvasEditor, processingMessage, setProcessingMessage, registerProcessingAbort } = useCanvas()
     const { hasAccess } = usePlanAccess()
 
     const tool = usePixelMaskTool({
@@ -197,6 +197,7 @@ const EraseControls = ({ project, dominantColor }) => {
 
         setIsAutoErasing(true)
         setProcessingMessage('AI is isolating the subject…')
+        registerProcessingAbort?.(controller)
         let objectUrl = null
         try {
             let lastError = null
@@ -350,44 +351,7 @@ const EraseControls = ({ project, dominantColor }) => {
                 </motion.button>
             </div>
 
-            {/* Magic eraser toggle */}
-            <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                <label className="panel-label">Magic Eraser</label>
-                <motion.button
-                    type="button"
-                    onClick={() => tool.setMagic(!tool.magic)}
-                    whileTap={{ scale: 0.97 }}
-                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left editor-interactive"
-                    style={{
-                        background: tool.magic ? 'rgba(6, 184, 212, 0.1)' : 'transparent',
-                        border: `1px solid ${tool.magic ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                        color: tool.magic ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                    }}
-                >
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0"
-                        style={{
-                            background: tool.magic ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
-                            border: `1px solid ${tool.magic ? 'var(--accent-primary)' : 'var(--border-default)'}`,
-                        }}>
-                        <Wand2 className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0">
-                        <div className="text-xs font-semibold">{tool.magic ? 'Click-to-erase: ON' : 'Click-to-erase: OFF'}</div>
-                        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Erase a contiguous color region</div>
-                    </div>
-                </motion.button>
-                {tool.magic && (
-                    <LabeledSlider
-                        label="Tolerance"
-                        value={tool.tolerance}
-                        min={1}
-                        max={100}
-                        suffix="%"
-                        onChange={tool.setTolerance}
-                        dominantColor={dominantColor}
-                    />
-                )}
-            </div>
+
 
             {/* Mode */}
             <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
@@ -421,7 +385,6 @@ const EraseControls = ({ project, dominantColor }) => {
             <TipCard>
                 <p>• <strong>Paint</strong> over what you want to erase — the exact stroke is removed when you release</p>
                 <p>• <strong>AI object remover</strong>: click an object and AI removes it + fills the background — click each subject to remove several</p>
-                <p>• <strong>Magic eraser</strong>: click a contiguous color region to remove it</p>
                 <p>• Hold <strong>Alt</strong> to temporarily switch Erase ↔ Restore</p>
                 <p>• <strong>[</strong> / <strong>]</strong> resize the brush; raise feather for soft edges</p>
             </TipCard>
