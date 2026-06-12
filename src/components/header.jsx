@@ -141,39 +141,12 @@ const Header = () => {
         }}
       >
         <nav className="flex items-center gap-3 sm:gap-6 px-5 sm:px-8 h-16 w-full max-w-7xl mx-auto">
-          <Link href="/" className="flex items-center gap-3 shrink-0 group">
-            <div
-              style={{
-                width: 36,
-                height: 36,
-                background: '#06B8D4',
-                border: '2px solid #F4F4F5',
-                boxShadow: '3px 3px 0 0 #F4F4F5',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
-                fontWeight: 900,
-                fontSize: 18,
-                color: '#03050A',
-                transition: 'transform 120ms ease, box-shadow 120ms ease',
-              }}
-              className="group-hover:translate-x-[2px] group-hover:translate-y-[2px] group-hover:shadow-[1px_1px_0_0_#F4F4F5]"
-            >
-              P
-            </div>
-            <span
-              style={{
-                fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
-                fontSize: 18,
-                fontWeight: 900,
-                color: '#F4F4F5',
-                letterSpacing: '0.02em',
-                textTransform: 'uppercase',
-              }}
-            >
-              Pixxel
-            </span>
+          <Link href="/" className="flex items-center shrink-0 group">
+            <img 
+              src="/Logo.png" 
+              alt="Pixxel" 
+              className="h-9 w-auto transition-opacity group-hover:opacity-90"
+            />
           </Link>
 
           <div className="hidden md:flex items-center gap-1 ml-4">
