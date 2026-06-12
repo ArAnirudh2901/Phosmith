@@ -9,8 +9,9 @@ import { clearChanges, getChanges, subscribeChanges } from '@/lib/change-journal
  *
  * Lists every change recorded in the change journal (newest first). Entries
  * made by the AI agent carry a Bot badge so agent edits are visually
- * distinguishable from the user's own; entries persist per project for the
- * session (sessionStorage) and survive tool switches.
+ * distinguishable from the user's own; entries persist per project in
+ * localStorage, surviving tool switches, reloads, and browser restarts.
+ * Bursts of the same action coalesce into one entry with a ×count badge.
  */
 
 const relativeTime = (at) => {
@@ -107,6 +108,15 @@ export default function HistoryPanel() {
                                         title={e.detail ? `${e.label} — ${e.detail}` : e.label}
                                     >
                                         {e.label}
+                                        {(e.count || 1) > 1 && (
+                                            <span
+                                                className="ml-1 text-[9px] font-mono"
+                                                style={{ color: 'var(--text-muted)' }}
+                                                title={`Repeated ${e.count} times`}
+                                            >
+                                                ×{e.count}
+                                            </span>
+                                        )}
                                     </p>
                                 </div>
                                 <span className="shrink-0 text-[9px]" style={{ color: 'var(--text-muted)' }}>

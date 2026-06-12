@@ -403,7 +403,7 @@ export default function CollageControls({ project }) {
         })
 
         canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.()
+        canvasEditor.__pushHistoryState?.({ label: 'Applied collage layout', detail: layout.label, domain: 'collage' })
         canvasEditor.__saveCanvasState?.()
 
         const extraCount = images.length - cells.length

@@ -125,7 +125,7 @@ export async function addImageFileToCanvas(canvasEditor, file, project, options 
     canvasEditor.setActiveObject(img)
     canvasEditor.requestRenderAll()
     if (!silent) {
-      canvasEditor.__pushHistoryState?.()
+      canvasEditor.__pushHistoryState?.({ label: 'Added image', domain: 'images' })
       canvasEditor.__saveCanvasState?.()
       toast.success('Image added', { id: toastId })
     }
@@ -157,7 +157,7 @@ export async function addImageFilesToCanvas(canvasEditor, files, project) {
     if (result) added += 1
   }
   if (added > 0) {
-    canvasEditor.__pushHistoryState?.()
+    canvasEditor.__pushHistoryState?.({ label: 'Added images', domain: 'images', detail: `${added} images` })
     canvasEditor.__saveCanvasState?.()
   }
   if (added === files.length) {
