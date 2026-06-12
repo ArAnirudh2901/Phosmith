@@ -1,4 +1,21 @@
 import { requirePrisma } from "@/lib/prisma";
+import { getRedis, isRedisConfigured } from "@/lib/redis";
+
+// The canvas-snapshot route caches project ownership in Redis (1h TTL,
+// canvas:owner:<projectId>) to spare a Neon read per autosave. Deleting a
+// project must fence that cache immediately, so a deleted project can't keep
+// accepting snapshot writes for the rest of the TTL. Best-effort — Redis
+// being unavailable never blocks a delete.
+const dropOwnerCache = async (projectIds) => {
+  if (!isRedisConfigured()) return;
+  try {
+    const redis = getRedis();
+    const ids = Array.isArray(projectIds) ? projectIds : [projectIds];
+    await Promise.all(ids.map((id) => redis.del(`canvas:owner:${id}`)));
+  } catch {
+    /* best-effort */
+  }
+};
 
 const REVISION_LIMIT = 40;
 
@@ -281,6 +298,7 @@ const functions = {
         },
       }),
     ]);
+    await dropOwnerCache(args.projectId);
     return { success: true };
   },
 
@@ -306,6 +324,7 @@ const functions = {
         },
       }),
     ]);
+    await dropOwnerCache(ownedIds);
 
     return { success: true, deletedCount: ownedIds.length };
   },

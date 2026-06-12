@@ -201,7 +201,7 @@ const applyResult = async (job) => {
     }
     replacement.setCoords()
     canvas.requestRenderAll()
-    canvas.__pushHistoryState?.()
+    canvas.__pushHistoryState?.({ label: 'AI extended image', domain: 'extend' })
     toast.success('AI extension finished — the preview was replaced with the real result')
 
     try {

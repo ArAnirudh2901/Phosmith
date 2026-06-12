@@ -120,6 +120,12 @@ export const createCanvasSync = ({
     onStatus,         // (status, detail) => void
     onConflict,       // (serverProject) => void   another session advanced the revision
     flushDebounceMs = 8000,
+    // Floor between two network snapshots (0 = legacy behavior, every new
+    // hash ships immediately). Bursts of distinct states within the interval
+    // collapse to ONE trailing snapshot carrying the newest state — the
+    // IndexedDB mirror is always current and the Neon flush carries content
+    // inline, so durability and flush timing are unaffected.
+    minSnapshotIntervalMs = 0,
     initialRevision = 0,
 }) => {
     let lastSentHash = null      // last state successfully written to Redis
@@ -128,6 +134,8 @@ export const createCanvasSync = ({
     let latest = null            // most recent { fullState, currentImageUrl, hash, updatedAt }
     let pendingSync = false      // latest hasn't been confirmed flushed to Neon
     let flushHandle = null
+    let lastSnapshotAt = 0       // when the last network snapshot was sent
+    let snapshotHoldHandle = null // trailing-edge timer for a held snapshot
     let destroyed = false
     let online = getOnlineStatus()
     // Optimistic-concurrency token: the project revision this client is editing
@@ -148,6 +156,16 @@ export const createCanvasSync = ({
     const scheduleFlush = () => {
         if (flushHandle) clearTimeout(flushHandle)
         flushHandle = setTimeout(() => { flushHandle = null; doFlush() }, flushDebounceMs)
+    }
+    // Re-run processPending once the snapshot interval elapses. One timer is
+    // enough: it always ships whatever `pending` holds by then (the newest
+    // coalesced state), so re-arming on every held job is unnecessary.
+    const scheduleSnapshotHold = (wait) => {
+        if (snapshotHoldHandle) return
+        snapshotHoldHandle = setTimeout(() => {
+            snapshotHoldHandle = null
+            processPending()
+        }, wait)
     }
 
     const markIdb = (dirty) => {
@@ -215,6 +233,7 @@ export const createCanvasSync = ({
         pending = null
         inFlight = true
         let toThrow = null
+        let heldForSnapshotInterval = false
         try {
             if (!online) {
                 // Offline: the durable IDB mirror already holds `latest`; the
@@ -234,11 +253,32 @@ export const createCanvasSync = ({
                 return
             }
 
+            if (needsSnapshot && !job.immediate && !job.force && minSnapshotIntervalMs > 0) {
+                const wait = lastSnapshotAt + minSnapshotIntervalMs - Date.now()
+                if (wait > 0) {
+                    // Too soon after the last network snapshot — hold the job and
+                    // ship the NEWEST state once the interval elapses (a newer
+                    // save() simply replaces `pending` in the meantime). The flush
+                    // is scheduled NOW so Neon persistence timing is unchanged;
+                    // it carries content inline and doesn't depend on the snapshot.
+                    if (!pending) pending = job
+                    heldForSnapshotInterval = true
+                    setStatus("saving")
+                    scheduleSnapshotHold(wait)
+                    scheduleFlush()
+                    return
+                }
+            }
+
             setStatus("saving")
             if (needsSnapshot) {
                 // Best-effort cache write for cross-device read-through + the unload
                 // path. The flush carries content, so we don't gate on this.
+                // lastSnapshotAt deliberately tracks the ATTEMPT, not success — it
+                // rate-limits the network path; re-sends are governed by content
+                // changing (lastSentHash), matching the fire-and-forget semantics.
                 snapshotFn(projectId, job.fullState, job.currentImageUrl, baseRevision).catch(() => {})
+                lastSnapshotAt = Date.now()
                 lastSentHash = job.hash
             }
 
@@ -260,7 +300,9 @@ export const createCanvasSync = ({
             }
         } finally {
             inFlight = false
-            if (pending && !conflicted) processPending()
+            // A held job intentionally sits in `pending` for the hold timer —
+            // re-entering here would spin on the interval check forever.
+            if (pending && !conflicted && !heldForSnapshotInterval) processPending()
         }
         if (toThrow) throw toThrow
     }
@@ -433,6 +475,7 @@ export const createCanvasSync = ({
         destroy() {
             destroyed = true
             cancelFlush()
+            if (snapshotHoldHandle) { clearTimeout(snapshotHoldHandle); snapshotHoldHandle = null }
             unsubscribe()
         },
     }
