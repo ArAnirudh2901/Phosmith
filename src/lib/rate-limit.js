@@ -29,6 +29,7 @@ const LIMITERS = {
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute
     "canvas-snapshot":   { count: 240, windowSec: 60 },  // 240/ minute — write-behind cache
+    "canvas-presence":   { count: 60,  windowSec: 60 },  // 60 / minute — concurrent-device heartbeat (~6/min/tab steady state)
 }
 
 export const enforceRateLimit = async (kind, identifier) => {
