@@ -16,6 +16,7 @@ import {
     ToolEmptyState,
 } from './_pixel-tool-ui'
 import { buildImageKitBackgroundRemovalUrls } from '@/lib/imagekit-ai'
+import { getRoutingMode, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
 
 
 const MAX_BG_DIMENSION = 1600
@@ -118,6 +119,12 @@ const EraseControls = ({ project, dominantColor }) => {
     })
     const [isAutoErasing, setIsAutoErasing] = useState(false)
     const [maskServiceStatus, setMaskServiceStatus] = useState(null) // null | 'checking' | 'warm' | 'cold' | 'warming' | 'unavailable'
+    const [inpaintMode, setInpaintMode] = useState(() => getRoutingMode('inpaint'))
+
+    useEffect(() => {
+        setInpaintMode(getRoutingMode('inpaint'))
+        return subscribeRouting(() => setInpaintMode(getRoutingMode('inpaint')))
+    }, [])
     const abortRef = useRef(null)
     const warmupTriggeredRef = useRef(false)
     const { setMagic, setMode, setObjectSelect } = tool
@@ -291,7 +298,24 @@ const EraseControls = ({ project, dominantColor }) => {
                 the WHOLE object under the pointer and erases it. Click more
                 objects to erase each (multi-subject by accumulation). */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                <label className="panel-label">AI Object Remover</label>
+                <div className="flex items-center justify-between gap-2">
+                    <label className="panel-label" style={{ margin: 0 }}>AI Object Remover</label>
+                    <div className="mask-fill-modes" style={{ marginTop: 0 }}>
+                        {(['auto', 'client', 'server']).map((mode) => (
+                            <button
+                                key={mode}
+                                type="button"
+                                onClick={() => setRoutingMode('inpaint', mode)}
+                                className={`mask-fill-mode-btn ${inpaintMode === mode ? 'mask-fill-mode-btn--active' : ''}`}
+                                title={mode === 'client' ? 'LaMa (local mask service)'
+                                    : mode === 'server' ? 'Stable Diffusion (Hugging Face)'
+                                    : 'LaMa first, SD fallback'}
+                            >
+                                {mode === 'auto' ? 'Auto' : mode === 'client' ? 'Local' : 'Cloud'}
+                            </button>
+                        ))}
+                    </div>
+                </div>
 
                 {/* Warmup status banner */}
                 {maskServiceStatus === 'warming' && (

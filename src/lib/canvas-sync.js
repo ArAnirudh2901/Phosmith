@@ -130,6 +130,7 @@ export const createCanvasSync = ({
 }) => {
     let lastSentHash = null      // last state successfully written to Redis
     let inFlight = false
+    let flushActive = false      // doFlush() is in flight (separate from inFlight so flushNow() can't race with processPending → doFlush())
     let pending = null           // latest coalesced job waiting for the in-flight one
     let latest = null            // most recent { fullState, currentImageUrl, hash, updatedAt }
     let pendingSync = false      // latest hasn't been confirmed flushed to Neon
@@ -184,47 +185,57 @@ export const createCanvasSync = ({
     // content is carried inline so it's authoritative for this client (immune to
     // the shared Redis key). NOT gated on `destroyed` so the unmount flushNow()
     // can still complete.
+    //
+    // `flushActive` prevents two concurrent doFlush() executions (e.g. a
+    // flushNow() racing with processPending→doFlush on a visibility-change event),
+    // which would both send the same baseRevision and the second would see a
+    // spurious conflict once the first bumped the server revision.
     const doFlush = async ({ keepalive = false, force = false } = {}) => {
-        if (!online || !latest) return { flushed: false }
+        if (flushActive || !online || !latest) return { flushed: false }
+        flushActive = true
         console.log(`[canvas-sync] doFlush baseRevision=${baseRevision}, force=${force}`)
         const flushHash = latest.hash
         let res
         try {
-            res = await flushFn(projectId, {
-                keepalive,
-                canvasState: latest.fullState,
-                currentImageUrl: latest.currentImageUrl,
-                baseRevision,
-                force,
-            })
-        } catch (err) {
-            setStatus("error", err?.message || String(err))
-            return { flushed: false }
-        }
-        if (res?.conflict) {
-            console.warn(`[canvas-sync] CONFLICT! baseRevision=${baseRevision}, serverRevision=${res.project?.revision}`, res)
-            conflicted = true
-            cancelFlush()
-            setStatus("conflict")
-            try { onConflict?.(res.project) } catch { /* UI cb must not break sync */ }
-            return res
-        }
-        if (res && !res.flushed && !res.conflict) {
-            console.warn(`[canvas-sync] flush returned non-flushed, non-conflict:`, res)
-        }
-        if (res?.flushed) {
-            if (typeof res.revision === "number") baseRevision = res.revision
-            conflicted = false
-            // Only declare clean if nothing newer slipped in while we flushed.
-            if (latest && latest.hash === flushHash) {
-                pendingSync = false
-                markIdb(false)
-                setStatus("saved")
-            } else {
-                setStatus("saving")
+            try {
+                res = await flushFn(projectId, {
+                    keepalive,
+                    canvasState: latest.fullState,
+                    currentImageUrl: latest.currentImageUrl,
+                    baseRevision,
+                    force,
+                })
+            } catch (err) {
+                setStatus("error", err?.message || String(err))
+                return { flushed: false }
             }
+            if (res?.conflict) {
+                console.warn(`[canvas-sync] CONFLICT! baseRevision=${baseRevision}, serverRevision=${res.project?.revision}`, res)
+                conflicted = true
+                cancelFlush()
+                setStatus("conflict")
+                try { onConflict?.(res.project) } catch { /* UI cb must not break sync */ }
+                return res
+            }
+            if (res && !res.flushed && !res.conflict) {
+                console.warn(`[canvas-sync] flush returned non-flushed, non-conflict:`, res)
+            }
+            if (res?.flushed) {
+                if (typeof res.revision === "number") baseRevision = res.revision
+                conflicted = false
+                // Only declare clean if nothing newer slipped in while we flushed.
+                if (latest && latest.hash === flushHash) {
+                    pendingSync = false
+                    markIdb(false)
+                    setStatus("saved")
+                } else {
+                    setStatus("saving")
+                }
+            }
+            return res
+        } finally {
+            flushActive = false
         }
-        return res
     }
 
     const processPending = async () => {
@@ -248,7 +259,13 @@ export const createCanvasSync = ({
             }
 
             const needsSnapshot = job.hash !== lastSentHash
-            if (!needsSnapshot && !job.immediate && !job.force) {
+            // Nothing new to write and not a forced overwrite — skip regardless
+            // of the `immediate` flag. `immediate` bypasses the debounce timer
+            // but doesn't mean "flush even if the content is identical." Without
+            // this guard, every tab/window switch triggered an unnecessary Neon
+            // write (via persistWhileAlive), bumping the revision and producing
+            // spurious "edited elsewhere" conflicts for multi-tab sessions.
+            if (!needsSnapshot && !job.force) {
                 setStatus("saved")
                 return
             }

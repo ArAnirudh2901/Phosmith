@@ -375,6 +375,83 @@ const loadSegmentModel = () => {
     return segmentPromise
 }
 
+/* ─── Background prefetch ────────────────────────────────────────────────── */
+
+// Map a routing capability → the loader that downloads + caches its model.
+// 'ground' and 'subjects' share CLIPSeg (the on-device subjects path is text
+// grounding). 'maskPlan' (JS rule parser) and 'inpaint' (the LOCAL mask
+// service's LaMa, not in-browser) have no browser model, so they're absent —
+// prefetch silently skips any capability without an entry here.
+const CAPABILITY_LOADERS = {
+    ground: { load: loadGroundModel, pending: () => groundPromise != null, ready: () => state.groundReady },
+    subjects: { load: loadGroundModel, pending: () => groundPromise != null, ready: () => state.groundReady },
+    depth: { load: loadDepthModel, pending: () => depthPromise != null, ready: () => state.depthReady },
+    segment: { load: loadSegmentModel, pending: () => segmentPromise != null, ready: () => state.segmentReady },
+}
+
+// Run during browser idle time so a multi-hundred-MB download + ONNX compile
+// never competes with canvas rendering or the user's actual edits.
+const onIdle = (fn, timeout = 3000) => {
+    if (hasWindow() && typeof window.requestIdleCallback === 'function') {
+        try { window.requestIdleCallback(fn, { timeout }); return } catch { /* fall through */ }
+    }
+    setTimeout(fn, 200)
+}
+
+// Don't burn a metered / very slow connection on a speculative download —
+// the model still lazy-loads on first real use if the user goes there.
+const connectionAllowsPrefetch = () => {
+    if (!hasWindow()) return false
+    try {
+        const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection
+        if (!conn) return true
+        if (conn.saveData) return false
+        if (typeof conn.effectiveType === 'string' && /(^|-)2g$/.test(conn.effectiveType)) return false
+    } catch { /* unknown — allow */ }
+    return true
+}
+
+/**
+ * Warm the in-browser models for the given capabilities in the BACKGROUND, so
+ * the first on-device request doesn't block on the ~50–150 MB download + ONNX
+ * compile. The HF hub files land in the browser Cache API, so the cost is paid
+ * once per device and survives reloads.
+ *
+ * Safe to call repeatedly: the model singletons dedupe (a concurrent real
+ * request reuses the same in-flight load — no double download), and loaders
+ * already loading/loaded are skipped. Loads run one-at-a-time during idle
+ * time. A failed prefetch stays silent; the real call path re-attempts and
+ * surfaces the error there.
+ *
+ * @param {string[]} capabilities  routing capability ids to warm
+ * @param {{ force?: boolean }} [opts]  force=true ignores the connection check
+ */
+export const prefetchClientModels = (capabilities, { force = false } = {}) => {
+    if (!hasWindow()) return
+    if (!force && !connectionAllowsPrefetch()) return
+
+    const tasks = []
+    const seen = new Set()
+    for (const cap of capabilities || []) {
+        const entry = CAPABILITY_LOADERS[cap]
+        if (!entry || seen.has(entry.load)) continue
+        seen.add(entry.load)
+        if (entry.ready() || entry.pending()) continue
+        tasks.push(entry.load)
+    }
+    if (!tasks.length) return
+
+    let i = 0
+    const runNext = () => {
+        if (i >= tasks.length) return
+        const load = tasks[i++]
+        onIdle(() => {
+            Promise.resolve().then(load).catch(() => {}).finally(runNext)
+        })
+    }
+    runNext()
+}
+
 /* ─── Image plumbing ─────────────────────────────────────────────────────── */
 
 /** Draw an image-like element to a capped canvas (model input). */

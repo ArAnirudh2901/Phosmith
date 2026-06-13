@@ -18,6 +18,8 @@ import ContextualActionBar from "./_components/ContextualActionBar"
 import useEditorShortcuts from "../../../../../hooks/useEditorShortcuts"
 import { motion, AnimatePresence } from "framer-motion"
 import { duration, easeOut } from "@/lib/motion"
+import { getClientPreferredCapabilities, subscribeRouting } from "@/lib/ai-routing"
+import { prefetchClientModels } from "@/lib/client-ai"
 
 const SIDEBAR_WIDTH_KEY = "pixxel-editor-sidebar-width"
 const AGENT_SIDEBAR_WIDTH_KEY = "pixxel-editor-agent-sidebar-width"
@@ -289,6 +291,24 @@ const Editor = () => {
     const activeProject = project || (cachedProject?._id === projectId ? cachedProject : null)
     const isLoading = (isAuthLoading || isProjectLoading) && !activeProject
     const dynamicAccent = useImageAccent(activeProject?.currentImageUrl || activeProject?.originalImageUrl)
+
+    // Background-download the in-browser AI models for any capability the user
+    // has routed to "Device", so the first on-device request isn't blocked on a
+    // ~50–150 MB download. Runs once the editor has a project (deferred so it
+    // doesn't compete with canvas init / hydration) and again whenever the user
+    // switches a capability to Device in the Mask tool's AI Processing panel.
+    // No-op for auto/server routing and on metered/slow connections.
+    const warmProjectId = activeProject?._id
+    useEffect(() => {
+        if (!warmProjectId) return undefined
+        const warm = () => prefetchClientModels(getClientPreferredCapabilities())
+        const settleTimer = setTimeout(warm, 1500)
+        const unsubscribe = subscribeRouting(warm)
+        return () => {
+            clearTimeout(settleTimer)
+            unsubscribe()
+        }
+    }, [warmProjectId])
 
     if (isLoading) return (
         <div className="neo-loader-surface relative min-h-screen flex items-center justify-center">

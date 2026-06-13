@@ -191,6 +191,16 @@ export const resolveOrder = (capability) => {
 /** Convenience: is the preferred side for `capability` the client? */
 export const prefersClient = (capability) => resolveOrder(capability)[0] === 'client'
 
+/**
+ * Capability ids the user has explicitly routed to the CLIENT (Device). These
+ * are the ones whose in-browser models are worth downloading ahead of time —
+ * 'auto' (server-first) and 'server' need no client model up front, so they're
+ * excluded to avoid pulling hundreds of MB the user didn't ask for. Drives the
+ * background model prefetch (see prefetchClientModels in client-ai.js).
+ */
+export const getClientPreferredCapabilities = () =>
+    Object.keys(AI_CAPABILITIES).filter((cap) => getRoutingMode(cap) === 'client')
+
 /** Subscribe to policy changes (returns unsubscribe). */
 export const subscribeRouting = (cb) => {
     if (!hasWindow() || typeof cb !== 'function') return () => {}

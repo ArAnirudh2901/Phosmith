@@ -556,10 +556,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                             : <Save className="h-3.5 w-3.5" />}
                     </motion.button>
 
-                    {/* Keyboard shortcuts — hide below xl (still openable via the ? key) */}
+                    {/* Keyboard shortcuts — always visible; also openable via the ? key */}
                     <motion.button
                         onClick={() => setShowShortcuts(true)}
-                        className="editor-icon-button hidden xl:flex items-center justify-center flex-none"
+                        className="editor-icon-button flex items-center justify-center flex-none"
                         title="Keyboard shortcuts (?)"
                         aria-label="Show keyboard shortcuts"
                     >

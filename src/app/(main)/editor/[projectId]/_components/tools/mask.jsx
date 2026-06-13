@@ -18,7 +18,7 @@ import { rgbToHsb } from '@/lib/color-utils'
 import { setMaskTexture } from '@/lib/megashader'
 import { expandLayerBoundary } from '@/lib/mask-grow'
 import { AI_CAPABILITIES, getRoutingPolicy, resetRoutingPolicy, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
-import { runClientAISelfTest } from '@/lib/client-ai'
+import { getClientAIState, runClientAISelfTest, subscribeClientAI } from '@/lib/client-ai'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 import {
     BrushSizeControl,
@@ -256,6 +256,23 @@ const MaskControls = ({ dominantColor }) => {
         return subscribeRouting(setRoutingPolicyState)
     }, [])
     const routingBadge = Object.values(routingPolicy).some((m) => m !== 'auto') ? 'Custom' : 'Auto'
+
+    // On-device model download/readiness, surfaced so the background prefetch is
+    // observable (per-capability "Ready" / "Downloading…" hints below).
+    const [clientAI, setClientAI] = useState(getClientAIState)
+    useEffect(() => {
+        setClientAI(getClientAIState())
+        return subscribeClientAI(setClientAI)
+    }, [])
+    // Map a routing capability to its in-browser readiness flag. Capabilities
+    // with no browser model (maskPlan rule-parser, inpaint LaMa-on-service) are
+    // absent — they need no download.
+    const CLIENT_READY = {
+        ground: clientAI.groundReady,
+        subjects: clientAI.groundReady,
+        depth: clientAI.depthReady,
+        segment: clientAI.segmentReady,
+    }
 
     // On-device AI self-test: runs the REAL in-browser models on a synthetic
     // scene with a known answer (see runClientAISelfTest). First run also
@@ -2884,6 +2901,21 @@ const MaskControls = ({ dominantColor }) => {
                                 ))}
                             </div>
                         </div>
+                        {/* Device-model readiness: this capability is set to run
+                            on-device and has a downloadable browser model. The
+                            background prefetch downloads it; show its progress. */}
+                        {routingPolicy[cap] === 'client' && cap in CLIENT_READY && (
+                            <span
+                                className="text-[9px]"
+                                style={{ color: CLIENT_READY[cap] ? '#4ade80' : 'var(--text-muted)' }}
+                            >
+                                {CLIENT_READY[cap]
+                                    ? '✓ Model ready on device'
+                                    : clientAI.loading
+                                        ? `Downloading ${clientAI.loading}…`
+                                        : 'Model downloads in the background'}
+                            </span>
+                        )}
                     </div>
                 ))}
                 <div className="flex items-center justify-between gap-2">

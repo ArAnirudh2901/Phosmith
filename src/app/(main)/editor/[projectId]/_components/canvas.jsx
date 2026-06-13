@@ -69,6 +69,7 @@ import {
     snapshotToCache,
 } from "../../../../../lib/canvas-cache"
 import { createCanvasSync, loadLocalState, clearLocalState } from "../../../../../lib/canvas-sync"
+import { createPresenceChannel } from "../../../../../lib/canvas-presence"
 import { toast } from "sonner"
 import { isPixxelMaskOverlay } from "../../../../../lib/canvas-mask"
 import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
@@ -172,6 +173,7 @@ const CanvasEditor = ({ project }) => {
     activeToolRef.current = activeTool
     const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
     const { mutate: createProjectRevisionMut } = useDatabaseMutation(api.projects.createProjectRevision)
+    const { mutate: createProjectMut } = useDatabaseMutation(api.projects.create)
 
     const disposeCanvasInstance = useCallback(() => {
         const existing = canvasInstanceRef.current
@@ -357,6 +359,44 @@ const CanvasEditor = ({ project }) => {
         }
     }, [])
 
+    // Save the CURRENT live canvas (with its history) as a brand-new project and
+    // return the new project's id (null on failure, e.g. the free-plan limit).
+    // Shared by the proactive concurrent-device path (presence) and the reactive
+    // flush-conflict path, so "your work becomes its own copy" behaves identically.
+    const forkLiveCanvasToProject = useCallback(async (titleSuffix) => {
+        const canvas = canvasInstanceRef.current
+        const proj = projectRef.current
+        if (!proj) return null
+        let localCanvasState
+        let localCurrentImageUrl
+        if (canvas) {
+            const localState = serializeCanvasState(canvas)
+            localCurrentImageUrl = getPrimaryRemoteImageUrl(canvas) || undefined
+            localCanvasState = {
+                ...localState,
+                history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
+                historyIndex: historyIndexRef.current,
+            }
+        } else {
+            // Canvas not initialised yet (concurrency detected mid-load) — fork
+            // from the loaded project state, which is exactly what this device sees.
+            localCanvasState = proj.canvasState || null
+            localCurrentImageUrl = proj.currentImageUrl || undefined
+        }
+        try {
+            return await createProjectMut({
+                title: `${proj.title || "Project"} — ${titleSuffix}`,
+                canvasState: localCanvasState,
+                currentImageUrl: localCurrentImageUrl || proj.currentImageUrl,
+                width: proj.width,
+                height: proj.height,
+            })
+        } catch (forkErr) {
+            console.warn("[canvas] fork to new project failed:", forkErr?.message || forkErr)
+            return null
+        }
+    }, [createProjectMut])
+
     // Conflict handler: another session (device/tab) advanced the project's
     // revision while we were editing, so the flush was rejected (no overwrite).
     // We resolve it NON-DESTRUCTIVELY — both versions land in version history —
@@ -367,20 +407,23 @@ const CanvasEditor = ({ project }) => {
         const proj = projectRef.current
         if (!canvas || !proj) return
 
+        const localState = serializeCanvasState(canvas)
+        const localCurrentImageUrl = getPrimaryRemoteImageUrl(canvas) || undefined
+        const localCanvasState = {
+            ...localState,
+            history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
+            historyIndex: historyIndexRef.current,
+        }
+
         // Always preserve OUR working copy in version history first, so it's
         // recoverable no matter which way the user resolves.
         try {
-            const localState = serializeCanvasState(canvas)
             await createProjectRevisionMut({
                 projectId: proj._id,
-                canvasState: {
-                    ...localState,
-                    history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
-                    historyIndex: historyIndexRef.current,
-                },
+                canvasState: localCanvasState,
                 width: proj.width,
                 height: proj.height,
-                currentImageUrl: getPrimaryRemoteImageUrl(canvas) || undefined,
+                currentImageUrl: localCurrentImageUrl,
                 title: "Your version (edit conflict)",
                 summary: "Auto-saved because this project was edited on another device.",
             })
@@ -388,61 +431,153 @@ const CanvasEditor = ({ project }) => {
             console.warn("[canvas] failed to preserve local conflict copy:", error?.message || error)
         }
 
-        toast.warning("This project was edited on another device.", {
-            id: "canvas-conflict",
-            duration: Infinity,
-            dismissible: true,
-            description: "Your version is saved in version history. Reload the latest, or keep yours (overwrites the other copy).",
-            // "Keep mine" must be the `action` — Sonner v2's action.onClick fires
-            // reliably, but cancel.onClick is broken (auto-dismiss kills it).
-            action: {
-                label: "Keep mine",
-                onClick: () => {
-                    // overwriteRemote() is synchronous — clears the `conflicted`
-                    // flag and force-flushes our local state to Neon.
-                    syncRef.current?.overwriteRemote()
-                    toast.dismiss("canvas-conflict")
+        // Auto-save the local diverged state as a NEW PROJECT so both versions
+        // coexist independently — each device can continue on its own copy
+        // without either overwriting the other.
+        const forkProjectId = await forkLiveCanvasToProject("your device's copy")
 
-                    // Fire-and-forget: preserve the other device's version in
-                    // revision history (non-critical, best-effort).
-                    if (serverProject?.canvasState) {
-                        createProjectRevisionMut({
-                            projectId: proj._id,
-                            canvasState: serverProject.canvasState,
-                            width: serverProject.width || proj.width,
-                            height: serverProject.height || proj.height,
-                            currentImageUrl: serverProject.currentImageUrl || undefined,
-                            title: "Other device's version (edit conflict)",
-                            summary: "Preserved before overwriting with your version.",
-                        }).catch((error) => {
-                            console.warn("[canvas] failed to preserve remote conflict copy:", error?.message || error)
-                        })
-                    }
+        if (forkProjectId) {
+            // Fork succeeded: auto-reload this tab to the server's version so the
+            // two devices no longer compete for the same project. The user can open
+            // the forked project separately at any time.
+            toast.success("Conflict detected — your version saved as a new project.", {
+                id: "canvas-conflict",
+                duration: Infinity,
+                dismissible: true,
+                description: `"${proj.title || "Project"} — your device's copy" has been created. Reload this tab to see the other version, or open your copy.`,
+                action: {
+                    label: "Open my copy",
+                    onClick: () => {
+                        if (typeof window !== "undefined") {
+                            window.open(`/editor/${forkProjectId}`, "_blank")
+                        }
+                    },
                 },
-            },
-            cancel: {
-                label: "Reload latest",
-                onClick: () => {
-                    // Best-effort: cache the remote state before reloading.
-                    Promise.resolve()
-                        .then(() => clearLocalState(proj._id).catch(() => {}))
-                        .then(() => {
-                            if (serverProject?.canvasState) {
-                                return snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision).catch(() => {})
-                            }
-                        })
-                        .finally(() => {
-                            if (typeof window !== "undefined") window.location.reload()
-                        })
+                cancel: {
+                    label: "Reload this tab",
+                    onClick: () => {
+                        Promise.resolve()
+                            .then(() => clearLocalState(proj._id).catch(() => {}))
+                            .then(() => {
+                                if (serverProject?.canvasState) {
+                                    return snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision).catch(() => {})
+                                }
+                            })
+                            .finally(() => {
+                                if (typeof window !== "undefined") window.location.reload()
+                            })
+                    },
                 },
-            },
-        })
-    }, [createProjectRevisionMut])
+            })
+        } else {
+            // Fallback: fork failed (plan limit etc.) — show the original dialog
+            // so the user can manually choose which version to keep.
+            toast.warning("This project was edited on another device.", {
+                id: "canvas-conflict",
+                duration: Infinity,
+                dismissible: true,
+                description: "Your version is saved in version history. Reload the latest, or keep yours (overwrites the other copy).",
+                // "Keep mine" must be the `action` — Sonner v2's action.onClick fires
+                // reliably, but cancel.onClick is broken (auto-dismiss kills it).
+                action: {
+                    label: "Keep mine",
+                    onClick: () => {
+                        syncRef.current?.overwriteRemote()
+                        toast.dismiss("canvas-conflict")
+
+                        if (serverProject?.canvasState) {
+                            createProjectRevisionMut({
+                                projectId: proj._id,
+                                canvasState: serverProject.canvasState,
+                                width: serverProject.width || proj.width,
+                                height: serverProject.height || proj.height,
+                                currentImageUrl: serverProject.currentImageUrl || undefined,
+                                title: "Other device's version (edit conflict)",
+                                summary: "Preserved before overwriting with your version.",
+                            }).catch((error) => {
+                                console.warn("[canvas] failed to preserve remote conflict copy:", error?.message || error)
+                            })
+                        }
+                    },
+                },
+                cancel: {
+                    label: "Reload latest",
+                    onClick: () => {
+                        Promise.resolve()
+                            .then(() => clearLocalState(proj._id).catch(() => {}))
+                            .then(() => {
+                                if (serverProject?.canvasState) {
+                                    return snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision).catch(() => {})
+                                }
+                            })
+                            .finally(() => {
+                                if (typeof window !== "undefined") window.location.reload()
+                            })
+                    },
+                },
+            })
+        }
+    }, [createProjectRevisionMut, forkLiveCanvasToProject])
 
     // Stable indirection so the per-project sync manager always calls the latest
     // conflict handler without being torn down when it changes identity.
     const onConflictRef = useRef(() => {})
     onConflictRef.current = handleConflict
+
+    // Proactive concurrent-device handler (driven by the presence heartbeat).
+    // Unlike handleConflict (which only fires once a flush is REJECTED), this
+    // fires the moment a different device opens the same project — before either
+    // side has overwritten the other.
+    //   - Newcomer (joined later): immediately fork our work into its own project
+    //     and move this tab to it, so the two devices never compete for one project.
+    //   - Keeper (joined first): just inform the user; we keep the original.
+    const handleConcurrentDevice = useCallback(async ({ others, isNewcomer }) => {
+        const proj = projectRef.current
+        if (!proj) return
+        const otherLabel = others?.[0]?.deviceLabel || "another device"
+
+        if (!isNewcomer) {
+            // We were here first — keep the original project, just let the user know.
+            toast.info("This project was opened on another device.", {
+                id: "canvas-presence",
+                duration: 8000,
+                description: `${otherLabel} is now editing a separate copy, so your work here is safe.`,
+            })
+            return
+        }
+
+        // We're the newcomer: fork our state into its own project and switch to it.
+        toast.loading("This project is open on another device — saving your work as a separate copy…", {
+            id: "canvas-presence",
+            duration: Infinity,
+        })
+        const forkProjectId = await forkLiveCanvasToProject("this device's copy")
+        if (forkProjectId) {
+            toast.success("Saved as a separate copy to avoid conflicts.", {
+                id: "canvas-presence",
+                duration: 6000,
+                description: "Opening your own copy so both devices keep their work.",
+            })
+            // Let the toast paint, then move this tab onto the fork. A full
+            // navigation rebinds the editor cleanly to the new project id.
+            setTimeout(() => {
+                if (typeof window !== "undefined") window.location.href = `/editor/${forkProjectId}`
+            }, 1200)
+        } else {
+            // Couldn't fork (e.g. free-plan project limit) — fall back to a warning
+            // so the user can resolve it manually; the reactive flush-conflict path
+            // is still the backstop if they keep editing.
+            toast.warning("This project is open on another device.", {
+                id: "canvas-presence",
+                duration: Infinity,
+                dismissible: true,
+                description: "Editing it here too may overwrite the other device's changes. Couldn't auto-create a separate copy (project limit reached).",
+            })
+        }
+    }, [forkLiveCanvasToProject])
+
+    const onConcurrentRef = useRef(() => {})
+    onConcurrentRef.current = handleConcurrentDevice
 
     const saveCanvasState = useCallback(async ({ rethrow = false, immediate = false } = {}) => {
         const canvas = canvasInstanceRef.current
@@ -559,6 +694,21 @@ const CanvasEditor = ({ project }) => {
         }
     }, [project?._id, handleSyncStatus])
 
+    // Concurrent-device presence: heartbeat so we learn the instant the same
+    // project is opened on another device, and react via the stable ref handler.
+    useEffect(() => {
+        const projectId = project?._id
+        if (!projectId) return
+        const channel = createPresenceChannel({
+            projectId,
+            onConcurrent: (info) => onConcurrentRef.current(info),
+        })
+        return () => {
+            channel.stop()
+            toast.dismiss("canvas-presence")
+        }
+    }, [project?._id])
+
     // Host the AI Extend background poller. Lives at canvas level (not in the
     // extender panel) so a pending genfill keeps polling and can swap the soft
     // preview for the real result no matter which tool is open — and resumes
@@ -593,36 +743,21 @@ const CanvasEditor = ({ project }) => {
         const projectId = project?._id
         if (!projectId) return
 
-        // Push the CURRENT canvas into the manager FIRST — the autosave debounce
-        // may not have fired yet, so without this the manager's `latest` would
-        // carry stale state. save() updates `latest`/`pendingSync` synchronously.
-        // Returns whether there's unsynced work worth flushing.
-        const captureLatest = () => {
-            try { saveCanvasState() } catch { /* ignore */ }
-            try { return Boolean(syncRef.current?.hasPendingSync?.()) } catch { return false }
-        }
-
-        // Page is going away for good (real navigation / tab close): the manager
-        // is about to be destroyed, so use the fire-and-forget beacon + keepalive
-        // flush. It can't await, so it intentionally does NOT advance baseRevision
-        // — fine, because nothing here will flush again.
+        // Page is going away for good (real navigation / tab close): fire-and-forget
+        // IDB update then beacon whatever latest the manager holds. Can't await in
+        // unload handlers — the beacon + IDB mirror are the backstops.
         const persistOnUnload = () => {
-            captureLatest()
+            saveCanvasState().catch(() => {})
             try { syncRef.current?.beaconUnload() } catch { /* ignore */ }
         }
 
-        // Page is hidden but STILL ALIVE (tab/app switch, or a bfcache navigation
-        // that may restore it). Do a NORMAL flush, which advances the manager's
-        // baseRevision on success. Using the unload beacon here was the bug behind
-        // repeated "edited on another device" conflicts on a single window: its
-        // keepalive flush bumped the server revision without updating our base, so
-        // the next edit flushed against a stale revision and spuriously conflicted
-        // every time the user tabbed away and back. Only flush when there's
-        // actually unsynced work, so idle tab-switches don't churn the revision.
         const persistWhileAlive = () => {
-            if (captureLatest()) {
-                try { syncRef.current?.flushNow() } catch { /* ignore */ }
-            }
+            // Only flush when there's actually dirty/unsynced state. Skipping
+            // when nothing is pending avoids bumping the server revision on every
+            // tab/window/screen switch, which was the root cause of spurious
+            // "edited elsewhere" conflict notifications in single-session use.
+            if (!syncRef.current?.hasPendingSync()) return
+            saveCanvasState({ immediate: true }).catch(() => {})
         }
 
         const onBeforeUnload = () => persistOnUnload()

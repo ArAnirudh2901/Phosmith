@@ -4426,38 +4426,43 @@ a:focus-visible,
 .mask-fill-modes {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 3px;
-  padding: 3px;
+  gap: 8px;
+  padding: 4px;
   border-radius: 9px;
-  background: rgba(244, 244, 245, 0.03);
-  border: 1px solid rgba(244, 244, 245, 0.06);
+  background: rgba(244, 244, 245, 0.02);
 }
 
 .mask-fill-mode-btn {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
-  padding: 5px 0;
-  border-radius: 6px;
-  border: none;
-  background: transparent;
+  padding: 7px 6px;
+  border-radius: 7px;
+  border: 1.5px solid rgba(244, 244, 245, 0.12);
+  background: rgba(244, 244, 245, 0.03);
   color: var(--text-muted);
   cursor: pointer;
   transition: all 150ms ease;
+  text-transform: capitalize;
+  letter-spacing: 0.3px;
 }
 
 .mask-fill-mode-btn:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
+  border-color: rgba(244, 244, 245, 0.2);
+  transform: translateY(-1px);
 }
 
 .mask-fill-mode-btn--active {
-  background: rgba(6, 184, 212, 0.12);
-  color: var(--accent-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  background: rgba(6, 184, 212, 0.18);
+  color: #06d6d6;
+  border-color: rgba(6, 184, 212, 0.4);
+  box-shadow: 0 4px 12px rgba(6, 184, 212, 0.15), inset 0 1px 2px rgba(255, 255, 255, 0.08);
+  font-weight: 700;
 }
 
 .mask-fill-mode-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
