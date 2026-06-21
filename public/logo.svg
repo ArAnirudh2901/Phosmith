@@ -1,0 +1,228 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Phosmith">
+  <title>Phosmith</title>
+  <defs>
+
+    <!-- ─── Backgrounds ─── -->
+    <radialGradient id="bg" cx="36%" cy="50%" r="78%" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#0F1622"/>
+      <stop offset="100%" stop-color="#08090D"/>
+    </radialGradient>
+
+    <!-- Subtle dot-grid -->
+    <pattern id="dots" x="0" y="0" width="18" height="18" patternUnits="userSpaceOnUse">
+      <circle cx="9" cy="9" r="0.72" fill="#FFFFFF" opacity="0.065"/>
+    </pattern>
+
+    <!-- Clip to rounded rect so glows stay contained -->
+    <clipPath id="clip">
+      <rect width="240" height="240" rx="28" ry="28"/>
+    </clipPath>
+
+    <!-- ─── Glow filters ─── -->
+    <!-- Blur-only (halo layers) -->
+    <filter id="fB3"  x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="3"/></filter>
+    <filter id="fB6"  x="-300%" y="-300%" width="700%" height="700%"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="fB10" x="-300%" y="-300%" width="700%" height="700%"><feGaussianBlur stdDeviation="10"/></filter>
+    <filter id="fB16" x="-400%" y="-400%" width="900%" height="900%"><feGaussianBlur stdDeviation="16"/></filter>
+
+    <!-- Blur + source merge (crisp glow: adds blur layer beneath the original) -->
+    <filter id="fG3" x="-250%" y="-250%" width="600%" height="600%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="fG5" x="-300%" y="-300%" width="700%" height="700%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- ─── Stream path gradients (userSpaceOnUse for true path-angle color) ─── -->
+
+    <!-- Stream 1 — top arc, violet -->
+    <linearGradient id="lg1" x1="58" y1="120" x2="195" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#7C3AED" stop-opacity="0"/>
+      <stop offset="16%"  stop-color="#7C3AED" stop-opacity="0.72"/>
+      <stop offset="68%"  stop-color="#7C3AED" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.10"/>
+    </linearGradient>
+
+    <!-- Stream 2 — upper accent, violet → cyan -->
+    <linearGradient id="lg2" x1="58" y1="120" x2="198" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#7C3AED" stop-opacity="0"/>
+      <stop offset="20%"  stop-color="#7C3AED" stop-opacity="0.48"/>
+      <stop offset="62%"  stop-color="#06B8D4" stop-opacity="0.52"/>
+      <stop offset="100%" stop-color="#06B8D4" stop-opacity="0.07"/>
+    </linearGradient>
+
+    <!-- Stream 3 — center, cyan (hero stream) -->
+    <linearGradient id="lg3" x1="58" y1="120" x2="204" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#06B8D4" stop-opacity="0"/>
+      <stop offset="13%"  stop-color="#06B8D4" stop-opacity="1"/>
+      <stop offset="70%"  stop-color="#06B8D4" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#22D3EE" stop-opacity="0.26"/>
+    </linearGradient>
+
+    <!-- Stream 4 — lower accent, cyan → violet -->
+    <linearGradient id="lg4" x1="58" y1="120" x2="198" y2="154" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#06B8D4" stop-opacity="0"/>
+      <stop offset="20%"  stop-color="#06B8D4" stop-opacity="0.48"/>
+      <stop offset="62%"  stop-color="#7C3AED" stop-opacity="0.52"/>
+      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.07"/>
+    </linearGradient>
+
+    <!-- Stream 5 — bottom arc, violet -->
+    <linearGradient id="lg5" x1="58" y1="120" x2="195" y2="188" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#7C3AED" stop-opacity="0"/>
+      <stop offset="16%"  stop-color="#7C3AED" stop-opacity="0.72"/>
+      <stop offset="68%"  stop-color="#7C3AED" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.10"/>
+    </linearGradient>
+
+  </defs>
+
+  <!-- ═══════════════════════════════════════
+       BACKGROUND
+  ═══════════════════════════════════════ -->
+  <rect width="240" height="240" rx="28" fill="url(#bg)"/>
+  <rect width="240" height="240" rx="28" fill="url(#dots)"/>
+
+  <!-- Everything below clips to the rounded rect -->
+  <g clip-path="url(#clip)">
+
+    <!-- ─── Ambient origin pulse (large soft halo) ─── -->
+    <circle cx="58" cy="120" r="50" fill="#06B8D4" opacity="0.032" filter="url(#fB16)"/>
+    <circle cx="58" cy="120" r="28" fill="#7C3AED" opacity="0.028" filter="url(#fB16)"/>
+
+    <!-- ─── Secondary ambient glow at stream endpoints (right side) ─── -->
+    <ellipse cx="200" cy="120" rx="28" ry="62" fill="#06B8D4" opacity="0.018" filter="url(#fB16)"/>
+
+    <!-- ═══════════════════════════════════════
+         STREAMS
+         Origin: (58, 120)
+         Fan: top-right to bottom-right
+    ═══════════════════════════════════════ -->
+
+    <!-- Stream 1 — top arc, violet, 1.8px -->
+    <path d="M 58,120 C 78,62 142,36 195,52"
+          stroke="url(#lg1)" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+    <!-- Stream 2 — upper accent, 1.2px -->
+    <path d="M 58,120 C 88,92 148,76 198,86"
+          stroke="url(#lg2)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+
+    <!-- Stream 3 — center hero, 2.8px + glow halo -->
+    <!-- Soft halo underneath -->
+    <path d="M 58,120 C 106,118 158,120 204,120"
+          stroke="#06B8D4" stroke-width="7" fill="none" stroke-linecap="round"
+          opacity="0.13" filter="url(#fB3)"/>
+    <!-- Main stroke -->
+    <path d="M 58,120 C 106,118 158,120 204,120"
+          stroke="url(#lg3)" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+
+    <!-- Stream 4 — lower accent, 1.2px -->
+    <path d="M 58,120 C 88,148 148,164 198,154"
+          stroke="url(#lg4)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+
+    <!-- Stream 5 — bottom arc, violet, 1.8px -->
+    <path d="M 58,120 C 78,178 142,204 195,188"
+          stroke="url(#lg5)" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+    <!-- ═══════════════════════════════════════
+         NODES
+         Calculated from Bézier B(t) parametric positions.
+         Each node = glow halo + crisp core.
+    ═══════════════════════════════════════ -->
+
+    <!--
+      Stream 1 (top arc) at t=0.50 → (114, 58)
+      P0=(58,120) P1=(78,62) P2=(142,36) P3=(195,52)
+      x=(1/8)*58+(3/8)*78+(3/8)*142+(1/8)*195 = 7.25+29.25+53.25+24.4 = 114.2
+      y=(1/8)*120+(3/8)*62+(3/8)*36+(1/8)*52 = 15+23.25+13.5+6.5 = 58.3
+    -->
+    <circle cx="114" cy="58" r="5"   fill="#7C3AED" opacity="0.18" filter="url(#fB6)"/>
+    <circle cx="114" cy="58" r="2.8" fill="#7C3AED" opacity="1"    filter="url(#fG3)"/>
+
+    <!--
+      Stream 1 (top arc) at t=0.72 → (150, 47)
+      coeff: 0.022, 0.169, 0.436, 0.373
+      x=0.022*58+0.169*78+0.436*142+0.373*195 = 1.3+13.2+61.9+72.7 = 149.1
+      y=0.022*120+0.169*62+0.436*36+0.373*52 = 2.6+10.5+15.7+19.4 = 48.2
+    -->
+    <!-- Pixel-square node (rotated 45°, diamond shape) -->
+    <rect x="148" y="46" width="4.5" height="4.5" rx="0.6"
+          fill="#8B5CF6" opacity="0.72"
+          transform="rotate(45 150.25 48.25)"
+          filter="url(#fG3)"/>
+
+    <!--
+      Stream 2 (upper accent) at t=0.54 → (130, 84)
+      P0=(58,120) P1=(88,92) P2=(148,76) P3=(198,86)
+      coeff at t=0.54: (0.46)^3=0.097, 3*(0.46)^2*0.54=0.344, 3*0.46*0.54^2=0.402, 0.54^3=0.157
+      x=0.097*58+0.344*88+0.402*148+0.157*198 = 5.6+30.3+59.5+31.1 = 126.5
+      y=0.097*120+0.344*92+0.402*76+0.157*86 = 11.6+31.6+30.6+13.5 = 87.3
+    -->
+    <circle cx="127" cy="87" r="1.8" fill="#8B5CF6" opacity="0.62"/>
+
+    <!--
+      Stream 3 (center) at t=0.50 → (132, 119)
+      P0=(58,120) P1=(106,118) P2=(158,120) P3=(204,120)
+      x=(1/8)*58+(3/8)*106+(3/8)*158+(1/8)*204 = 7.25+39.75+59.25+25.5 = 131.75
+      y=(1/8)*120+(3/8)*118+(3/8)*120+(1/8)*120 = 15+44.25+45+15 = 119.25
+    -->
+    <!-- Large main focal node -->
+    <circle cx="132" cy="119" r="10"  fill="#06B8D4" opacity="0.10" filter="url(#fB10)"/>
+    <circle cx="132" cy="119" r="6"   fill="#06B8D4" opacity="0.22" filter="url(#fB6)"/>
+    <circle cx="132" cy="119" r="4"   fill="#06B8D4" opacity="1"    filter="url(#fG5)"/>
+
+    <!--
+      Stream 3 (center) at t=0.76 → (169, 120)
+      coeff: (0.24)^3=0.014, 3*(0.24)^2*0.76=0.131, 3*0.24*0.76^2=0.416, 0.76^3=0.439
+      x=0.014*58+0.131*106+0.416*158+0.439*204 = 0.8+13.9+65.7+89.6 = 170
+    -->
+    <circle cx="170" cy="120" r="2.4" fill="#22D3EE" opacity="0.8"  filter="url(#fG3)"/>
+
+    <!--
+      Stream 4 (lower accent) at t=0.54 → (127, 153)
+      By symmetry with stream 2 (mirrored around y=120): y = 120+(120-87) = 153
+    -->
+    <circle cx="127" cy="153" r="1.8" fill="#8B5CF6" opacity="0.62"/>
+
+    <!--
+      Stream 5 (bottom arc) at t=0.50 → (114, 182)
+      P0=(58,120) P1=(78,178) P2=(142,204) P3=(195,188)
+      x=114.2 (same x structure as stream 1)
+      y=(1/8)*120+(3/8)*178+(3/8)*204+(1/8)*188 = 15+66.75+76.5+23.5 = 181.75
+    -->
+    <circle cx="114" cy="182" r="5"   fill="#7C3AED" opacity="0.18" filter="url(#fB6)"/>
+    <circle cx="114" cy="182" r="2.8" fill="#7C3AED" opacity="1"    filter="url(#fG3)"/>
+
+    <!--
+      Stream 5 (bottom arc) at t=0.72 → (150, 193)
+      coeff same as stream 1 t=0.72
+      y=0.022*120+0.169*178+0.436*204+0.373*188 = 2.6+30.1+88.9+70.1 = 191.7
+    -->
+    <rect x="148" y="190" width="4.5" height="4.5" rx="0.6"
+          fill="#8B5CF6" opacity="0.72"
+          transform="rotate(45 150.25 192.25)"
+          filter="url(#fG3)"/>
+
+    <!-- ═══════════════════════════════════════
+         ORIGIN NODE
+         The single point where all streams converge.
+    ═══════════════════════════════════════ -->
+
+    <!-- Outer ring halos (concentric) -->
+    <circle cx="58" cy="120" r="22" fill="none" stroke="#06B8D4" stroke-width="0.6" opacity="0.16"/>
+    <circle cx="58" cy="120" r="14" fill="none" stroke="#06B8D4" stroke-width="0.5" opacity="0.11"/>
+
+    <!-- Glow fill layers -->
+    <circle cx="58" cy="120" r="12" fill="#06B8D4" opacity="0.07" filter="url(#fB10)"/>
+    <circle cx="58" cy="120" r="7"  fill="#06B8D4" opacity="0.80" filter="url(#fB16)"/>
+
+    <!-- Core -->
+    <circle cx="58" cy="120" r="4.5" fill="#06B8D4" opacity="1"/>
+    <!-- Bright specular highlight -->
+    <circle cx="58" cy="120" r="2.4" fill="#FFFFFF"  opacity="0.86"/>
+
+  </g><!-- end clip -->
+
+</svg>
