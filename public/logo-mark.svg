@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Phosmith">
+  <title>Phosmith</title>
+  <defs>
+
+    <!-- Glow filters -->
+    <filter id="fB3"  x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="3"/></filter>
+    <filter id="fB6"  x="-300%" y="-300%" width="700%" height="700%"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="fB10" x="-300%" y="-300%" width="700%" height="700%"><feGaussianBlur stdDeviation="10"/></filter>
+    <filter id="fB16" x="-400%" y="-400%" width="900%" height="900%"><feGaussianBlur stdDeviation="16"/></filter>
+    <filter id="fG3" x="-250%" y="-250%" width="600%" height="600%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="fG5" x="-300%" y="-300%" width="700%" height="700%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <!-- Stream gradients -->
+    <linearGradient id="lg1" x1="58" y1="120" x2="195" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#7C3AED" stop-opacity="0"/>
+      <stop offset="16%"  stop-color="#7C3AED" stop-opacity="0.85"/>
+      <stop offset="68%"  stop-color="#7C3AED" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.15"/>
+    </linearGradient>
+    <linearGradient id="lg2" x1="58" y1="120" x2="198" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#7C3AED" stop-opacity="0"/>
+      <stop offset="20%"  stop-color="#7C3AED" stop-opacity="0.55"/>
+      <stop offset="62%"  stop-color="#06B8D4" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#06B8D4" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="lg3" x1="58" y1="120" x2="204" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#06B8D4" stop-opacity="0"/>
+      <stop offset="13%"  stop-color="#06B8D4" stop-opacity="1"/>
+      <stop offset="70%"  stop-color="#06B8D4" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#22D3EE" stop-opacity="0.35"/>
+    </linearGradient>
+    <linearGradient id="lg4" x1="58" y1="120" x2="198" y2="154" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#06B8D4" stop-opacity="0"/>
+      <stop offset="20%"  stop-color="#06B8D4" stop-opacity="0.55"/>
+      <stop offset="62%"  stop-color="#7C3AED" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="lg5" x1="58" y1="120" x2="195" y2="188" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#7C3AED" stop-opacity="0"/>
+      <stop offset="16%"  stop-color="#7C3AED" stop-opacity="0.85"/>
+      <stop offset="68%"  stop-color="#7C3AED" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#7C3AED" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Ambient origin pulse -->
+  <circle cx="58" cy="120" r="50" fill="#06B8D4" opacity="0.06" filter="url(#fB16)"/>
+
+  <!-- ═══ Streams ═══ -->
+  <path d="M 58,120 C 78,62 142,36 195,52"
+        stroke="url(#lg1)" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+  <path d="M 58,120 C 88,92 148,76 198,86"
+        stroke="url(#lg2)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <!-- Center glow halo -->
+  <path d="M 58,120 C 106,118 158,120 204,120"
+        stroke="#06B8D4" stroke-width="8" fill="none" stroke-linecap="round"
+        opacity="0.18" filter="url(#fB3)"/>
+  <!-- Center main -->
+  <path d="M 58,120 C 106,118 158,120 204,120"
+        stroke="url(#lg3)" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+  <path d="M 58,120 C 88,148 148,164 198,154"
+        stroke="url(#lg4)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <path d="M 58,120 C 78,178 142,204 195,188"
+        stroke="url(#lg5)" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+  <!-- ═══ Nodes ═══ -->
+  <!-- Top arc midpoint (114, 58) -->
+  <circle cx="114" cy="58" r="5"   fill="#7C3AED" opacity="0.22" filter="url(#fB6)"/>
+  <circle cx="114" cy="58" r="2.8" fill="#7C3AED" opacity="1"    filter="url(#fG3)"/>
+  <!-- Top arc pixel diamond (149, 48) -->
+  <rect x="147" y="46" width="4.5" height="4.5" rx="0.6"
+        fill="#8B5CF6" opacity="0.8"
+        transform="rotate(45 149.25 48.25)" filter="url(#fG3)"/>
+  <!-- Upper accent midpoint -->
+  <circle cx="127" cy="87"  r="1.8" fill="#8B5CF6" opacity="0.7"/>
+  <!-- Center main focal node (132, 119) -->
+  <circle cx="132" cy="119" r="10"  fill="#06B8D4" opacity="0.12" filter="url(#fB10)"/>
+  <circle cx="132" cy="119" r="6"   fill="#06B8D4" opacity="0.28" filter="url(#fB6)"/>
+  <circle cx="132" cy="119" r="4"   fill="#06B8D4" opacity="1"    filter="url(#fG5)"/>
+  <!-- Center secondary node (170, 120) -->
+  <circle cx="170" cy="120" r="2.4" fill="#22D3EE" opacity="0.9"  filter="url(#fG3)"/>
+  <!-- Lower accent midpoint -->
+  <circle cx="127" cy="153" r="1.8" fill="#8B5CF6" opacity="0.7"/>
+  <!-- Bottom arc midpoint (114, 182) -->
+  <circle cx="114" cy="182" r="5"   fill="#7C3AED" opacity="0.22" filter="url(#fB6)"/>
+  <circle cx="114" cy="182" r="2.8" fill="#7C3AED" opacity="1"    filter="url(#fG3)"/>
+  <!-- Bottom arc pixel diamond (149, 192) -->
+  <rect x="147" y="190" width="4.5" height="4.5" rx="0.6"
+        fill="#8B5CF6" opacity="0.8"
+        transform="rotate(45 149.25 192.25)" filter="url(#fG3)"/>
+
+  <!-- ═══ Origin node ═══ -->
+  <circle cx="58" cy="120" r="22" fill="none" stroke="#06B8D4" stroke-width="0.7" opacity="0.22"/>
+  <circle cx="58" cy="120" r="14" fill="none" stroke="#06B8D4" stroke-width="0.5" opacity="0.15"/>
+  <circle cx="58" cy="120" r="9"  fill="#06B8D4" opacity="0.1"  filter="url(#fB10)"/>
+  <circle cx="58" cy="120" r="6"  fill="#06B8D4" opacity="0.9"  filter="url(#fB16)"/>
+  <circle cx="58" cy="120" r="4.5" fill="#06B8D4" opacity="1"/>
+  <circle cx="58" cy="120" r="2.4" fill="#FFFFFF"  opacity="0.9"/>
+
+</svg>
