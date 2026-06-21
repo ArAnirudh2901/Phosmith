@@ -360,11 +360,12 @@ a:focus-visible,
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
-/* Loading toast — cyan accent shadow matching info/default for consistency.
+/* Loading toast — white offset shadow matching the EXPORT button and active tool
+   buttons so the loading state reads as part of the same neo-brutalist system.
    Explicit flex-row with gap prevents the spinner icon from overlapping text. */
 .neo-toast.neo-toast--loading {
   box-shadow:
-    4px 4px 0 0 rgba(6, 184, 212, 0.70),
+    4px 4px 0 0 rgba(244, 244, 245, 0.85),
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
   display: flex !important;
   flex-direction: row !important;
@@ -373,7 +374,7 @@ a:focus-visible,
   flex-wrap: nowrap !important;
 }
 .neo-toast.neo-toast--loading .neo-toast-icon {
-  background: #06B8D4;
+  background: #F4F4F5;
   color: #03050A;
   flex-shrink: 0 !important;
   position: relative !important;
@@ -1318,27 +1319,18 @@ a:focus-visible,
 }
 
 .editor-logo-button {
-  --editor-logo-edge-shadow: 2px 2px 0 0 rgba(6, 184, 212, 0.75);
-  width: 2rem;
-  height: 2rem;
-  border-radius: 4px;
   color: #F4F4F5;
-  border: 1.5px solid rgba(244, 244, 245, 0.75);
-  background: rgba(14, 17, 24, 0.82);
   text-decoration: none;
-  box-shadow: var(--editor-logo-edge-shadow);
-  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 140ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms ease, border-color 140ms ease;
+  transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1), opacity 140ms ease;
+  opacity: 0.9;
 }
 
 .editor-logo-button:hover {
-  --editor-logo-edge-shadow: 3px 3px 0 0 #06B8D4;
-  background: rgba(14, 17, 24, 0.96);
-  border-color: #F4F4F5;
+  opacity: 1;
 }
 
 .editor-logo-button:active {
-  transform: none;
-  box-shadow: var(--editor-logo-edge-shadow);
+  transform: scale(0.95);
 }
 
 /* ── Wordmark variant ──

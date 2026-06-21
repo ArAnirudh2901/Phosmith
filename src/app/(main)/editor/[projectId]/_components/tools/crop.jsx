@@ -1,11 +1,12 @@
 "use client"
 
 import { CheckCheck, Crop, Loader2, Maximize, Mountain, RectangleHorizontal, RectangleVertical, Scissors, Smartphone, Sparkles, Square, Users, X } from 'lucide-react'
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useCanvas } from '../../../../../../../context/context'
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { createPortal } from 'react-dom'
+import { adaptiveTextColor } from '@/lib/color-extraction'
 
 /**
  * Auto-Crop strategies surfaced to the user. Each strategy is one click; the
@@ -17,7 +18,7 @@ const AUTO_CROP_MODES = [
     {
         id: "subject",
         label: "Subject-Aware",
-        sub: "Detects every subject + thirds composition",
+        sub: "Composes around the subject, keeping context",
         icon: Users,
     },
     {
@@ -53,6 +54,13 @@ const CROP_PRESETS = [
 
 const HANDLE_SIZE = 10
 const MIN_CROP_PX = 20
+
+// Baseline of the editor's --bg-elevated panel. The active/selected UI states
+// paint the photo's dominant color at ACTIVE_TINT_ALPHA over it (the `…1a` hex
+// fills below) — text contrast must be measured against THAT composite, not the
+// raw dominant color, or light photos produce black-on-dark labels.
+const PANEL_SURFACE = '#0E1118'
+const ACTIVE_TINT_ALPHA = 0.10
 
 /**
  * Convert canvas-space coordinates to screen-space DOM coordinates
@@ -199,7 +207,7 @@ const uploadCroppedCanvas = async (canvas) => {
 // Renders as an HTML overlay on top of the canvas. Handles are attached
 // to the crop region's borders, just like Photoshop / Canva.
 
-const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl, interactionMode }) => {
+const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, onCropChangeStart, containerEl, interactionMode }) => {
     const draggingRef = useRef(null) // { type: 'move'|'handle', handle?, startMouse, startBox }
 
     if (!canvasEditor || !image || !cropBox || !containerEl) return null
@@ -239,6 +247,9 @@ const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl, 
     const handlePointerDown = (e, type, handleId) => {
         e.preventDefault()
         e.stopPropagation()
+
+        // Snapshot the pre-gesture box once so a whole drag is one undo step.
+        onCropChangeStart?.()
 
         const startMouse = { x: e.clientX, y: e.clientY }
         const startBox = { ...cropBox }
@@ -424,8 +435,21 @@ const CropOverlay = ({ canvasEditor, image, cropBox, onCropChange, containerEl, 
 
 // ─── Main Crop Content ───────────────────────────────────────────────────────
 
-const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
+const CropContent = ({ dominantColor }) => {
     const { canvasEditor, activeTool } = useCanvas()
+
+    // Text colors that adapt to the photo. `activeTextColor` is measured against
+    // the REAL composited background of the faint-tint active/selected states;
+    // `solidTextColor` against the dominant color at full opacity (Start Crop /
+    // Crop fills). Both maximize WCAG contrast so labels never wash out.
+    const activeTextColor = useMemo(
+        () => (dominantColor ? adaptiveTextColor(dominantColor, PANEL_SURFACE, ACTIVE_TINT_ALPHA).color : 'var(--text-primary)'),
+        [dominantColor],
+    )
+    const solidTextColor = useMemo(
+        () => (dominantColor ? adaptiveTextColor(dominantColor, PANEL_SURFACE, 1).color : '#fff'),
+        [dominantColor],
+    )
     const [selectedImage, setSelectedImage] = useState(null)
     const [isCropMode, setIsCropMode] = useState(false)
     const [selectedPresetId, setSelectedPresetId] = useState("freeform")
@@ -433,6 +457,72 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
     const [cropBox, setCropBox] = useState(null) // { left, top, width, height } in canvas-space
     const [originalProps, setOriginalProps] = useState(null)
     const [containerEl, setContainerEl] = useState(null)
+
+    // ── Crop-box undo stack (scoped to crop mode) ────────────────────────────
+    // Auto-crop / preset buttons replace the crop-box PREVIEW without committing
+    // pixels, so canvas history can't revert them. We keep a small past/future
+    // stack of boxes and expose __cropToolUndo/__cropToolRedo (mirroring the
+    // Mask tool) so the topbar Undo button — and ⌘Z while cropping — step back
+    // through crop-box changes, falling through to canvas history when empty.
+    const cropBoxRef = useRef(null)
+    const cropHistoryRef = useRef({ past: [], future: [] })
+
+    const syncCropHistoryFlags = useCallback(() => {
+        if (canvasEditor) {
+            canvasEditor.__cropCanUndo = cropHistoryRef.current.past.length > 0
+            canvasEditor.__cropCanRedo = cropHistoryRef.current.future.length > 0
+        }
+        // Reuse the topbar's history-resync signal so Undo/Redo enable state
+        // tracks the crop stack the same way it tracks the mask stack.
+        window.dispatchEvent(new Event('phosmith:mask-history-changed'))
+    }, [canvasEditor])
+
+    // The single writer for the crop box. `history: true` records the prior box
+    // on the undo stack (discrete actions: presets, auto-crop). Drag-moves pass
+    // history:false and rely on recordCropHistory() captured at gesture start.
+    const applyCropBox = useCallback((next, { history = false } = {}) => {
+        const prev = cropBoxRef.current
+        if (history && prev) {
+            cropHistoryRef.current.past.push(prev)
+            cropHistoryRef.current.future = []
+        }
+        cropBoxRef.current = next
+        setCropBox(next)
+        if (history) syncCropHistoryFlags()
+    }, [syncCropHistoryFlags])
+
+    // Snapshot the current box onto the undo stack (used at drag start, before
+    // the stream of history:false move updates).
+    const recordCropHistory = useCallback(() => {
+        if (!cropBoxRef.current) return
+        cropHistoryRef.current.past.push(cropBoxRef.current)
+        cropHistoryRef.current.future = []
+        syncCropHistoryFlags()
+    }, [syncCropHistoryFlags])
+
+    const undoCropBox = useCallback(() => {
+        const h = cropHistoryRef.current
+        if (!h.past.length) return false
+        const prevBox = h.past.pop()
+        if (cropBoxRef.current) h.future.push(cropBoxRef.current)
+        cropBoxRef.current = prevBox
+        setCropBox(prevBox)
+        setInteractionMode('frame')
+        syncCropHistoryFlags()
+        return true
+    }, [syncCropHistoryFlags])
+
+    const redoCropBox = useCallback(() => {
+        const h = cropHistoryRef.current
+        if (!h.future.length) return false
+        const nextBox = h.future.pop()
+        if (cropBoxRef.current) h.past.push(cropBoxRef.current)
+        cropBoxRef.current = nextBox
+        setCropBox(nextBox)
+        setInteractionMode('frame')
+        syncCropHistoryFlags()
+        return true
+    }, [syncCropHistoryFlags])
 
     // Find the canvas container DOM element
     useEffect(() => {
@@ -453,6 +543,8 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
 
     const resetCropState = useCallback(() => {
         setCropBox(null)
+        cropBoxRef.current = null
+        cropHistoryRef.current = { past: [], future: [] }
         setSelectedImage(null)
         setSelectedPresetId("freeform")
         setInteractionMode("frame")
@@ -504,17 +596,19 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         setIsCropMode(true)
 
         const box = getCropBoxForPreset(image, preset.value)
-        if (box) setCropBox(box)
+        cropHistoryRef.current = { past: [], future: [] }
+        if (box) applyCropBox(box)
+        syncCropHistoryFlags()
 
         // Disable image interaction while cropping
         image.set({ selectable: false, evented: false, hasControls: false, hasBorders: false })
         canvasEditor.discardActiveObject()
         canvasEditor.requestRenderAll()
-    }, [isCropMode, canvasEditor])
+    }, [isCropMode, canvasEditor, applyCropBox, syncCropHistoryFlags])
 
     const handleCropChange = useCallback((newBox) => {
-        setCropBox(newBox)
-    }, [])
+        applyCropBox(newBox, { history: false })
+    }, [applyCropBox])
 
     const applyCropPreset = useCallback((preset) => {
         if (!canvasEditor || !selectedImage) return
@@ -522,9 +616,9 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         setSelectedPresetId(preset.id)
 
         const box = getCropBoxForPreset(selectedImage, preset.value)
-        if (box) setCropBox(box)
+        if (box) applyCropBox(box, { history: true })
         setInteractionMode("frame")
-    }, [canvasEditor, selectedImage])
+    }, [canvasEditor, selectedImage, applyCropBox])
 
     const handlePresetSelect = useCallback((preset) => {
         const image = selectedImage || getActiveImage(canvasEditor)
@@ -548,11 +642,28 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
     const [autoStrategy, setAutoStrategy] = useState(null)
     const autoAbortRef = useRef(null)
 
-    /** Convert an image-pixel `[x,y,w,h]` box to a canvas-space cropBox. */
-    const imagePixelBoxToCropBox = useCallback((image, [x, y, w, h]) => {
+    /**
+     * Convert an API-returned `[x,y,w,h]` box to a canvas-space cropBox.
+     *
+     * The API box is expressed in the coordinate space of the image the service
+     * received (client downscales to max-2048 before upload, so apiWidth/apiHeight
+     * may be smaller than the source element's naturalWidth/Height). We normalise
+     * via fractions so the result is always correct regardless of the two scale
+     * factors involved.
+     */
+    const imagePixelBoxToCropBox = useCallback((image, [x, y, w, h], apiWidth = 0, apiHeight = 0) => {
         if (!image) return null
         const imgBounds = getImageCanvasBounds(image)
         if (!imgBounds) return null
+        if (apiWidth > 0 && apiHeight > 0) {
+            return {
+                left: imgBounds.left + (x / apiWidth) * imgBounds.width,
+                top: imgBounds.top + (y / apiHeight) * imgBounds.height,
+                width: (w / apiWidth) * imgBounds.width,
+                height: (h / apiHeight) * imgBounds.height,
+            }
+        }
+        // Fallback for callers that already supply original-pixel coords.
         const sx = Math.abs(image.scaleX || 1)
         const sy = Math.abs(image.scaleY || 1)
         return {
@@ -572,6 +683,53 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         const image = selectedImage || getActiveImage(canvasEditor)
         if (!image) { toast.error("Select an image first"); return }
 
+        // ── "aspect" is purely geometric — no model or network trip required. ──
+        // getCropBoxForPreset already computes the max-area fit in canvas-space,
+        // which is inherently correct regardless of image scale or zoom level.
+        if (modeId === 'aspect') {
+            // Cancel any in-flight AI request so its result doesn't race us.
+            autoAbortRef.current?.abort?.()
+            setAutoBusy(null)
+
+            let aspectValue = getActivePresetAspect()
+            let presetId = selectedPresetId
+
+            // No ratio selected → default to YouTube Thumb (16:9).
+            if (!aspectValue) {
+                const fallback = CROP_PRESETS.find((p) => p.id === 'youtube-thumbnail')
+                if (fallback) { presetId = fallback.id; aspectValue = fallback.value; setSelectedPresetId(fallback.id) }
+            }
+
+            if (!aspectValue) {
+                toast.error("Pick an aspect preset first (e.g. Square Post or YouTube Thumb).")
+                return
+            }
+
+            const activePreset = CROP_PRESETS.find((p) => p.id === presetId)
+            const ratioLabel = activePreset?.ratio ?? aspectValue.toFixed(3) + ':1'
+
+            if (!isCropMode) {
+                initializeCropMode(image, activePreset || CROP_PRESETS[0])
+                // initializeCropMode already applies getCropBoxForPreset with the preset,
+                // so the box is already correct — just update the strategy label.
+            } else {
+                const box = getCropBoxForPreset(image, aspectValue)
+                if (box) applyCropBox(box, { history: true })
+                setInteractionMode('frame')
+            }
+
+            setAutoStrategy('aspect')
+            setAutoResults({ recommended: 'aspect', crops: { aspect: { score: 0.5 } } })
+            toast.success(`Auto-crop ready (max-area fit to ${ratioLabel} around centre)`)
+
+            if (autoApply) {
+                requestAnimationFrame(() => {
+                    document.dispatchEvent(new CustomEvent('phosmith:crop-auto-apply'))
+                })
+            }
+            return
+        }
+
         const sourceEl =
             image._originalElement || image.getElement?.() || image._element
         if (!sourceEl) { toast.error("Image not ready"); return }
@@ -584,7 +742,6 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
         const ac = new AbortController()
         autoAbortRef.current = ac
 
-        const aspect = getActivePresetAspect()
         setAutoBusy(modeId)
         const toastId = toast.loading(`Auto-crop (${modeId})…`)
 
@@ -602,10 +759,12 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                 off.toBlob((b) => (b ? res(b) : rej(new Error("encode failed"))), 'image/jpeg', 0.88),
             )
 
+            const activeAspect = getActivePresetAspect()
+
             const form = new FormData()
             form.append('image', blob, 'image.jpg')
-            form.append('mode', modeId === 'subject' || modeId === 'aspect' || modeId === 'content' || modeId === 'depth' ? modeId : 'all')
-            if (aspect) form.append('aspect', String(aspect))
+            form.append('mode', modeId === 'subject' || modeId === 'content' || modeId === 'depth' ? modeId : 'all')
+            if (activeAspect) form.append('aspect', String(activeAspect))
 
             const resp = await fetch('/api/ai/auto-crop', { method: 'POST', body: form, signal: ac.signal })
             const data = await resp.json().catch(() => ({}))
@@ -615,11 +774,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
 
             const chosen = data.crops?.[modeId]
             if (!chosen?.box) {
-                throw new Error(
-                    modeId === 'aspect' && !aspect
-                        ? "Pick an aspect preset first (e.g. Square or YouTube Thumb)."
-                        : `Couldn't compute a ${modeId} crop for this image — try another strategy.`,
-                )
+                throw new Error(`Couldn't compute a ${modeId} crop for this image — try another strategy.`)
             }
 
             setAutoResults(data)
@@ -627,45 +782,47 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
 
             // ── "Already tight" detection ──────────────────────────────────
             // Backend flags `already_tight` when the crop box covers ≥ 92% of
-            // the frame. Client-side fallback: compare box area to image dims.
-            const [bx, by, bw, bh] = chosen.box
+            // the frame (the subject already fills the photo). We STILL place
+            // the box so the user can drag the handles to recompose — bailing
+            // out here is what left the crop window un-adjustable on photos
+            // already framed around their subject.
+            const [, , bw, bh] = chosen.box
             const imgArea = (data.width || sw) * (data.height || sh)
             const boxArea = bw * bh
             const isAlreadyTight =
                 chosen.already_tight === true ||
                 (imgArea > 0 && (boxArea / imgArea) >= 0.92)
 
-            if (isAlreadyTight) {
-                // Check if any OTHER strategy returned a non-tight result we
-                // can suggest as an alternative.
-                const alternatives = Object.entries(data.crops || {})
-                    .filter(([k, v]) => k !== modeId && v?.box && !v.already_tight)
-                    .map(([k]) => k)
-
-                let message = `Photo is already tightly framed around the subject — no further ${modeId} cropping needed`
-                if (alternatives.length > 0) {
-                    message += `. Try ${alternatives.map((a) => a.charAt(0).toUpperCase() + a.slice(1)).join(' or ')} instead`
-                }
-                toast.info(message, { id: toastId, duration: 5000 })
-                return
-            }
-
-            const newBox = imagePixelBoxToCropBox(image, chosen.box)
+            const newBox = imagePixelBoxToCropBox(image, chosen.box, data.width, data.height)
             if (!newBox) throw new Error("Could not place crop box on canvas")
 
             if (!isCropMode) {
                 initializeCropMode(image, CROP_PRESETS.find((p) => p.id === selectedPresetId) || CROP_PRESETS[0])
             }
-            setCropBox(newBox)
+            applyCropBox(newBox, { history: true })
             setInteractionMode("frame")
 
             const sub = data.subjects?.length
                 ? `${data.subjects.length} subject${data.subjects.length === 1 ? '' : 's'}`
                 : null
-            toast.success(
-                `Auto-crop ready (${chosen.rationale}${sub ? ' · ' + sub : ''})`,
-                { id: toastId },
-            )
+
+            if (isAlreadyTight) {
+                // Box is placed and editable; just tell the user it's full-frame
+                // and point at any strategy that would trim more.
+                const alternatives = Object.entries(data.crops || {})
+                    .filter(([k, v]) => k !== modeId && v?.box && !v.already_tight)
+                    .map(([k]) => k.charAt(0).toUpperCase() + k.slice(1))
+                let message = `Already framed around the subject — placed a full-frame box you can drag to recompose`
+                if (alternatives.length > 0) {
+                    message += `. ${alternatives.join(' or ')} would trim more`
+                }
+                toast.info(message, { id: toastId, duration: 5000 })
+            } else {
+                toast.success(
+                    `Auto-crop ready (${chosen.rationale}${sub ? ' · ' + sub : ''})`,
+                    { id: toastId },
+                )
+            }
 
             if (autoApply) {
                 // Defer one frame so cropBox state is committed before applyCrop reads it.
@@ -682,11 +839,57 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
             console.error('[crop.auto]', err)
             toast.error(err?.message || "Auto-crop failed", { id: toastId })
         } finally {
-            setAutoBusy(null)
+            // Only the latest request owns the busy state. A request that was
+            // aborted because the user picked another mode must NOT clear the
+            // spinner for the newer in-flight request that replaced it.
+            if (autoAbortRef.current === ac) setAutoBusy(null)
         }
-    }, [canvasEditor, selectedImage, getActiveImage, getActivePresetAspect, imagePixelBoxToCropBox, initializeCropMode, isCropMode, selectedPresetId])
+    }, [canvasEditor, selectedImage, getActiveImage, getActivePresetAspect, imagePixelBoxToCropBox, initializeCropMode, isCropMode, selectedPresetId, applyCropBox])
 
     useEffect(() => () => autoAbortRef.current?.abort?.(), [])
+
+    // Expose the crop-box undo stack to the topbar Undo/Redo (and ⌘Z below)
+    // while crop mode is active; fall back to canvas history when it's empty.
+    useEffect(() => {
+        if (!canvasEditor || !isCropMode) return undefined
+        canvasEditor.__cropToolUndo = () => undoCropBox()
+        canvasEditor.__cropToolRedo = () => redoCropBox()
+        canvasEditor.__cropCanUndo = cropHistoryRef.current.past.length > 0
+        canvasEditor.__cropCanRedo = cropHistoryRef.current.future.length > 0
+        window.dispatchEvent(new Event('phosmith:mask-history-changed'))
+        return () => {
+            delete canvasEditor.__cropToolUndo
+            delete canvasEditor.__cropToolRedo
+            canvasEditor.__cropCanUndo = false
+            canvasEditor.__cropCanRedo = false
+            window.dispatchEvent(new Event('phosmith:mask-history-changed'))
+        }
+    }, [canvasEditor, isCropMode, undoCropBox, redoCropBox])
+
+    // ⌘Z / ⌘⇧Z revert crop-box previews; Esc cancels crop mode. Capture phase
+    // so these win over canvas-level handlers, but only preventDefault when we
+    // actually consumed the event (empty stack → let it bubble to canvas undo).
+    useEffect(() => {
+        if (!isCropMode) return undefined
+        const onKeyDown = (e) => {
+            const t = e.target
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+            if (e.key === 'Escape') {
+                e.preventDefault()
+                exitCropMode()
+                return
+            }
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+                const handled = e.shiftKey ? redoCropBox() : undoCropBox()
+                if (handled) {
+                    e.preventDefault()
+                    e.stopPropagation()
+                }
+            }
+        }
+        window.addEventListener('keydown', onKeyDown, true)
+        return () => window.removeEventListener('keydown', onKeyDown, true)
+    }, [isCropMode, exitCropMode, undoCropBox, redoCropBox])
 
     useEffect(() => {
         if (!canvasEditor || !selectedImage || !isCropMode) return
@@ -866,7 +1069,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                         className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
                         style={{
                             background: dominantColor || 'var(--accent-primary)',
-                            color: contrastingColor || '#fff',
+                            color: solidTextColor,
                             border: 'none',
                             boxShadow: `0 0 30px ${dominantColor}40`
                         }}
@@ -892,20 +1095,22 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                                 const Icon = mode.icon
                                 const busy = autoBusy === mode.id
                                 const active = autoStrategy === mode.id
-                                const disabledAspect = mode.id === 'aspect' && !getActivePresetAspect()
                                 return (
                                     <button
                                         key={mode.id}
                                         type='button'
                                         onClick={() => runAutoCrop(mode.id)}
-                                        disabled={busy || disabledAspect}
-                                        title={disabledAspect ? 'Select an aspect preset below first' : mode.sub}
+                                        disabled={busy}
+                                        title={mode.sub}
                                         className='rounded-lg p-2.5 text-left editor-interactive disabled:opacity-50 disabled:cursor-not-allowed'
                                         style={{
                                             border: `1px solid ${active ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                             background: active
                                                 ? (dominantColor ? `${dominantColor}1a` : 'rgba(6,184,212,0.14)')
                                                 : 'var(--bg-elevated)',
+                                            boxShadow: active
+                                                ? `3px 3px 0 0 ${dominantColor || 'var(--accent-primary)'}`
+                                                : '3px 3px 0 0 rgba(244, 244, 245, 0.55)',
                                         }}
                                     >
                                         <div className='flex items-start gap-2'>
@@ -918,7 +1123,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                                             )}
                                             <div className='min-w-0'>
                                                 <div className='truncate text-[11px] font-semibold'
-                                                    style={{ color: active ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
+                                                    style={{ color: active ? activeTextColor : 'var(--text-primary)' }}>
                                                     {mode.label}
                                                 </div>
                                                 <div className='mt-0.5 text-[9.5px] leading-tight' style={{ color: 'var(--text-muted)' }}>
@@ -964,7 +1169,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                                         <div className="flex items-center gap-2">
                                             <IconComponent className="h-4 w-4 flex-none" style={{ color: isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--text-secondary)' }} />
                                             <div className="min-w-0">
-                                                <div className="truncate text-[10px] font-semibold" style={{ color: isSelected ? contrastingColor || 'var(--text-primary)' : 'var(--text-primary)' }}>
+                                                <div className="truncate text-[10px] font-semibold" style={{ color: isSelected ? activeTextColor : 'var(--text-primary)' }}>
                                                     {preset.label}
                                                 </div>
                                                 <div className="mt-0.5 text-[9px]" style={{ color: 'var(--text-muted)' }}>
@@ -997,7 +1202,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                                         style={{
                                             border: `1px solid ${isSelected ? dominantColor || 'var(--accent-primary)' : 'var(--border-subtle)'}`,
                                             background: isSelected ? (dominantColor ? `${dominantColor}1a` : 'rgba(6,184,212,0.14)') : 'var(--bg-elevated)',
-                                            color: isSelected ? contrastingColor || 'var(--text-primary)' : 'var(--text-secondary)',
+                                            color: isSelected ? activeTextColor : 'var(--text-secondary)',
                                         }}
                                     >
                                         {label}
@@ -1015,7 +1220,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                             className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
                             style={{
                                 background: dominantColor || 'var(--accent-primary)',
-                                color: contrastingColor || '#fff',
+                                color: solidTextColor,
                                 border: 'none',
                                 boxShadow: `0 0 30px ${dominantColor}40`
                             }}
@@ -1057,6 +1262,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                     image={selectedImage}
                     cropBox={cropBox}
                     onCropChange={handleCropChange}
+                    onCropChangeStart={recordCropHistory}
                     containerEl={containerEl}
                     interactionMode={interactionMode}
                 />,

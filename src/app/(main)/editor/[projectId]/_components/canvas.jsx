@@ -12,6 +12,7 @@ import {
     Point,
     config as fabricConfig,
 } from "fabric"
+import { bindDoodlesToImage, followDoodles } from "@/lib/canvas-doodle-bind"
 // Side-effect import: registers PhosmithCurves filter in Fabric's classRegistry so
 // loadFromJSON can rehydrate saved canvas state that contains it.
 import "../../../../../lib/curves-filter"
@@ -153,7 +154,6 @@ const CanvasEditor = ({ project }) => {
     const [previewZoomPercent, setPreviewZoomPercent] = useState(100)
     const projectFrameStyleRef = useRef({ left: 0, top: 0, width: 0, height: 0 })
     const [projectFrameStyle, setProjectFrameStyle] = useState({ left: 0, top: 0, width: 0, height: 0 })
-    const [imageNativeSize, setImageNativeSize] = useState(null)
     const lastPointerRef = useRef(null)
     const historyRef = useRef([])
     const historyIndexRef = useRef(-1)
@@ -1159,6 +1159,11 @@ const CanvasEditor = ({ project }) => {
             }
             canvas.__setPreviewZoom = (percent) => setCanvasPreviewZoom(canvas, percent)
             canvas.__getPreviewZoom = () => readPreviewZoomPercent(canvas)
+            // Doodle ↔ image binding — strokes drawn on a photo follow it when
+            // it moves/scales/rotates. Exposed so the Resize tool (which scales
+            // the image programmatically) can snapshot before and replay after.
+            canvas.__bindDoodles = (image) => bindDoodlesToImage(canvas, image)
+            canvas.__followDoodles = (image) => followDoodles(canvas, image)
 
             const syncProjectFrame = () => {
                 const proj = projectRef.current
@@ -1473,31 +1478,34 @@ const CanvasEditor = ({ project }) => {
         }
     }, [activeTool, canvasEditor])
 
+    // Keep doodles glued to the image they were drawn on. On pointer-down over an
+    // image we snapshot every stroke sitting on it (relative to the image); as the
+    // image is dragged/scaled/rotated we replay that relationship so the strokes
+    // travel with the photo as one. The programmatic Resize tool handles its own
+    // bind/follow via canvas.__bindDoodles / __followDoodles.
     useEffect(() => {
-        if (!canvasEditor) return
-        const readPrimaryImageSize = () => {
-            const objects = canvasEditor.getObjects?.() || []
-            const image = objects.find((obj) => obj?.type?.toLowerCase() === 'image')
-            if (!image) {
-                setImageNativeSize(null)
-                return
+        if (!canvasEditor) return undefined
+        const onPointerDown = (opt) => {
+            if (opt?.target?.type?.toLowerCase() === 'image') {
+                bindDoodlesToImage(canvasEditor, opt.target)
             }
-            const w = Math.round(image._originalElement?.naturalWidth || image.width || 0)
-            const h = Math.round(image._originalElement?.naturalHeight || image.height || 0)
-            if (!w || !h) {
-                setImageNativeSize(null)
-                return
-            }
-            setImageNativeSize((prev) => (prev?.width === w && prev?.height === h ? prev : { width: w, height: h }))
         }
-        readPrimaryImageSize()
-        canvasEditor.on('object:added', readPrimaryImageSize)
-        canvasEditor.on('object:removed', readPrimaryImageSize)
-        canvasEditor.on('object:modified', readPrimaryImageSize)
+        const onImageTransform = (opt) => {
+            if (opt?.target?.type?.toLowerCase() === 'image') {
+                followDoodles(canvasEditor, opt.target)
+            }
+        }
+        canvasEditor.on('mouse:down', onPointerDown)
+        canvasEditor.on('object:moving', onImageTransform)
+        canvasEditor.on('object:scaling', onImageTransform)
+        canvasEditor.on('object:rotating', onImageTransform)
+        canvasEditor.on('object:modified', onImageTransform)
         return () => {
-            canvasEditor.off('object:added', readPrimaryImageSize)
-            canvasEditor.off('object:removed', readPrimaryImageSize)
-            canvasEditor.off('object:modified', readPrimaryImageSize)
+            canvasEditor.off('mouse:down', onPointerDown)
+            canvasEditor.off('object:moving', onImageTransform)
+            canvasEditor.off('object:scaling', onImageTransform)
+            canvasEditor.off('object:rotating', onImageTransform)
+            canvasEditor.off('object:modified', onImageTransform)
         }
     }, [canvasEditor])
 
@@ -1864,19 +1872,6 @@ const CanvasEditor = ({ project }) => {
                     {previewZoomPercent}%
                 </output>
             </div>
-
-            {!isBusy && project?.width && project?.height && (
-                <div className="editor-canvas-resolution-hud">
-                    <span>{imageNativeSize ? "Image Resolution" : "Document"}</span>
-                    <strong>
-                        {activeTool === "ai_extender" && expansionPreview?.targetWidth
-                            ? `${expansionPreview.targetWidth} × ${expansionPreview.targetHeight} px`
-                            : imageNativeSize
-                                ? `${imageNativeSize.width} × ${imageNativeSize.height} px`
-                                : `${project.width} × ${project.height} px`}
-                    </strong>
-                </div>
-            )}
 
             {(syncStatus === "offline" || syncStatus === "error" || syncStatus === "saving" || syncStatus === "conflict") && (
                 <div

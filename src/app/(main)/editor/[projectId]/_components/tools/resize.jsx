@@ -115,11 +115,16 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
         const base = getBaseSize(selectedImage)
         const safeWidth = clamp(Math.round(width) || 1, 1, 20000)
         const safeHeight = clamp(Math.round(height) || 1, 1, 20000)
+        // Snapshot any strokes drawn on this image BEFORE rescaling — Resize
+        // changes the scale programmatically (no pointer-down to auto-bind), so
+        // we bind here and replay after so doodles scale together with the photo.
+        canvasEditor.__bindDoodles?.(selectedImage)
         selectedImage.set({
             scaleX: safeWidth / base.width,
             scaleY: safeHeight / base.height,
         })
         selectedImage.setCoords()
+        canvasEditor.__followDoodles?.(selectedImage)
         canvasEditor.setActiveObject(selectedImage)
         canvasEditor.requestRenderAll()
 
