@@ -10,7 +10,7 @@ import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
 import { addImageFilesToCanvas } from '@/lib/canvas-images'
 import ProBadge from '@/components/pro-badge'
-import PixxelWordmark from '@/components/pixxel-wordmark'
+import PhosmithWordmark from '@/components/phosmith-wordmark'
 import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
 import { motion, AnimatePresence } from 'framer-motion'
 import { snapshotCanvasToBlobSafe, isTaintError } from '@/lib/canvas-snapshot'
@@ -109,7 +109,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
 
     const { canvasEditor, activeTool, onToolChange } = useCanvas()
     const { hasAccess, isPro, isPlanReady } = usePlanAccess()
-    const { accentRgb } = useDynamicAccent()
+    const { accent, accentRgb, textOnAccent } = useDynamicAccent()
 
     const exportResolutionLabel = useMemo(() => {
         if (!project?.width || !project?.height) return ''
@@ -191,10 +191,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
 
         syncHistory()
         canvasEditor.on('history:changed', syncHistory)
-        window.addEventListener('pixxel:mask-history-changed', syncHistory)
+        window.addEventListener('phosmith:mask-history-changed', syncHistory)
         return () => {
             canvasEditor.off('history:changed', syncHistory)
-            window.removeEventListener('pixxel:mask-history-changed', syncHistory)
+            window.removeEventListener('phosmith:mask-history-changed', syncHistory)
         }
     }, [canvasEditor])
 
@@ -396,7 +396,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
-                        <PixxelWordmark />
+                        <PhosmithWordmark />
                     </Link>
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).
@@ -579,9 +579,9 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                             aria-label={isExporting ? 'Exporting…' : 'Open export menu'}
                             className="flex items-center gap-1.5 editor-interactive pill-control"
                             style={{
-                                background: '#A8794E',
+                                background: accent,
                                 border: '2px solid #F4F4F5',
-                                color: '#03050A',
+                                color: textOnAccent,
                                 boxShadow: '4px 4px 0 0 #F4F4F5',
                                 fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
                                 letterSpacing: '0.12em',
@@ -590,11 +590,9 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                 fontSize: '0.7rem',
                                 padding: '0.5rem 0.85rem',
                                 borderRadius: 0,
-                                // Visually mute the trigger while an export is in
-                                // flight so users get feedback that further clicks
-                                // are no-ops (the disabled attr handles the actual block).
                                 opacity: isExporting ? 0.55 : 1,
                                 cursor: isExporting ? 'wait' : 'pointer',
+                                transition: 'background 400ms cubic-bezier(0.22, 1, 0.36, 1), color 400ms cubic-bezier(0.22, 1, 0.36, 1)',
                             }}
                         >
                             {isExporting
@@ -616,7 +614,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                         background: '#000',
                                         border: '2px solid rgba(244, 244, 245, 0.85)',
                                         borderRadius: '4px',
-                                        boxShadow: '5px 5px 0 0 rgba(168, 121, 78, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
+                                        boxShadow: `5px 5px 0 0 rgba(${accentRgb}, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.08)`,
                                         transformOrigin: 'top right',
                                     }}
                                     initial={{ opacity: 0, y: -8, scale: 0.96 }}
@@ -704,16 +702,16 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                             padding: '0.2rem 0.45rem',
                                                             borderRadius: '2px',
                                                             border: selected
-                                                                ? '1.5px solid #A8794E'
+                                                                ? `1.5px solid ${accent}`
                                                                 : '1.5px solid rgba(244, 244, 245, 0.3)',
-                                                            background: selected ? '#A8794E' : 'transparent',
-                                                            color: selected ? '#03050A' : '#F4F4F5',
+                                                            background: selected ? accent : 'transparent',
+                                                            color: selected ? textOnAccent : '#F4F4F5',
                                                             fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
                                                             fontSize: '0.6rem',
                                                             fontWeight: 800,
                                                             letterSpacing: '0.06em',
                                                             cursor: isExporting ? 'wait' : 'pointer',
-                                                            transition: 'background 120ms, border-color 120ms, color 120ms',
+                                                            transition: 'background 300ms cubic-bezier(0.22, 1, 0.36, 1), border-color 300ms, color 300ms',
                                                         }}
                                                     >
                                                         {opt.label}
@@ -753,9 +751,9 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                 marginBottom: '0.2rem',
                                             }}
                                             onMouseEnter={e => {
-                                                e.currentTarget.style.background = 'rgba(168, 121, 78, 0.12)'
-                                                e.currentTarget.style.borderColor = 'rgba(168, 121, 78, 0.5)'
-                                                e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                                e.currentTarget.style.background = `rgba(${accentRgb}, 0.12)`
+                                                e.currentTarget.style.borderColor = `rgba(${accentRgb}, 0.5)`
+                                                e.currentTarget.style.boxShadow = `2px 2px 0 0 rgba(${accentRgb}, 0.4)`
                                             }}
                                             onMouseLeave={e => {
                                                 e.currentTarget.style.background = 'transparent'
@@ -768,7 +766,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                             }}
                                             onMouseUp={e => {
                                                 e.currentTarget.style.transform = ''
-                                                e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                                e.currentTarget.style.boxShadow = `2px 2px 0 0 rgba(${accentRgb}, 0.4)`
                                             }}
                                         >
                                             <div
@@ -780,10 +778,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                     flexShrink: 0,
                                                     borderRadius: '3px',
                                                     border: '1.5px solid rgba(244, 244, 245, 0.5)',
-                                                    background: copyState === 'copied' ? '#9BF95B' : '#A8794E',
-                                                    color: '#03050A',
+                                                    background: copyState === 'copied' ? '#9BF95B' : accent,
+                                                    color: copyState === 'copied' ? '#03050A' : textOnAccent,
                                                     boxShadow: '1.5px 1.5px 0 0 rgba(244, 244, 245, 0.3)',
-                                                    transition: 'background 160ms',
+                                                    transition: 'background 300ms cubic-bezier(0.22, 1, 0.36, 1)',
                                                 }}
                                             >
                                                 {copyState === 'copying'
@@ -856,9 +854,9 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                     transition: 'background 120ms, border-color 120ms, box-shadow 120ms',
                                                 }}
                                                 onMouseEnter={e => {
-                                                    e.currentTarget.style.background = 'rgba(168, 121, 78, 0.12)'
-                                                    e.currentTarget.style.borderColor = 'rgba(168, 121, 78, 0.5)'
-                                                    e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                                    e.currentTarget.style.background = `rgba(${accentRgb}, 0.12)`
+                                                    e.currentTarget.style.borderColor = `rgba(${accentRgb}, 0.5)`
+                                                    e.currentTarget.style.boxShadow = `2px 2px 0 0 rgba(${accentRgb}, 0.4)`
                                                 }}
                                                 onMouseLeave={e => {
                                                     e.currentTarget.style.background = 'transparent'
@@ -871,7 +869,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                 }}
                                                 onMouseUp={e => {
                                                     e.currentTarget.style.transform = ''
-                                                    e.currentTarget.style.boxShadow = '2px 2px 0 0 rgba(168, 121, 78, 0.4)'
+                                                    e.currentTarget.style.boxShadow = `2px 2px 0 0 rgba(${accentRgb}, 0.4)`
                                                 }}
                                             >
                                                 {/* Icon tile */}
@@ -884,9 +882,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                         flexShrink: 0,
                                                         borderRadius: '3px',
                                                         border: '1.5px solid rgba(244, 244, 245, 0.5)',
-                                                        background: '#A8794E',
-                                                        color: '#03050A',
+                                                        background: accent,
+                                                        color: textOnAccent,
                                                         boxShadow: '1.5px 1.5px 0 0 rgba(244, 244, 245, 0.3)',
+                                                        transition: 'background 300ms cubic-bezier(0.22, 1, 0.36, 1)',
                                                     }}
                                                 >
                                                     <Download className="h-3 w-3" strokeWidth={2.5} />

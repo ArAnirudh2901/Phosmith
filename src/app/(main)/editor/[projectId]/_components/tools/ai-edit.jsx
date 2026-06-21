@@ -385,7 +385,7 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                     onClick={handleApply}
                     disabled={!activeImage || isApplying || isPreviewing}
                     className='flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40'
-                    style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: !isApplying ? 'var(--shadow-glow)' : 'none' }}
+                    style={{ background: dominantColor || 'var(--accent-primary)', color: contrastingColor || '#fff', border: 'none', boxShadow: !isApplying ? (dominantColor ? `0 0 15px ${dominantColor}40` : 'var(--shadow-glow)') : 'none' }}
                 >
                     {isApplying ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : <BadgeCheck className='h-3.5 w-3.5' />}
                     {isApplying ? 'Applying' : 'Apply'}

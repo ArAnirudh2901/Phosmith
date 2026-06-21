@@ -6,7 +6,7 @@ import { toast } from "sonner"
 import { filters, Gradient, Rect } from "fabric"
 import { LineChart, RotateCcw, SlidersHorizontal, Sparkles, WandSparkles } from "lucide-react"
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider"
-import { PixxelCurvesFilter, buildLut, buildCurveSvgPath, arePointsIdentity } from "@/lib/curves-filter"
+import { PhosmithCurvesFilter, buildLut, buildCurveSvgPath, arePointsIdentity } from "@/lib/curves-filter"
 import { useCanvas } from "../../../../../../../context/context"
 import {
     buildImageKitChainedTransformUrl,
@@ -17,7 +17,7 @@ import {
 
 const TEMP_WARM = "#ffb45f"
 const TEMP_COOL = "#72b7ff"
-const VIGNETTE_LAYER_NAME = "pixxel-vignette-overlay"
+const VIGNETTE_LAYER_NAME = "phosmith-vignette-overlay"
 const HISTOGRAM_BUCKETS = 256
 const HISTOGRAM_SAMPLE_SIZE = 260
 const CURVE_GRAPH = {
@@ -246,10 +246,10 @@ const getAdjustmentSourceImage = (canvasEditor) =>
 
 const ensureAdjustmentObjectId = (imageObject) => {
     if (!imageObject) return null
-    const existing = imageObject.pixxelAdjustmentId || imageObject._pixxelAdjustmentId || imageObject.__uid
+    const existing = imageObject.phosmithAdjustmentId || imageObject._phosmithAdjustmentId || imageObject.__uid
     const id = existing || `image-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-    imageObject.pixxelAdjustmentId = id
-    imageObject._pixxelAdjustmentId = id
+    imageObject.phosmithAdjustmentId = id
+    imageObject._phosmithAdjustmentId = id
     return id
 }
 
@@ -353,9 +353,9 @@ const normalizeStoredValues = (values) => {
 }
 
 const filterMatchesManagedKey = (filter) =>
-    filter?._pixxelAdjustmentManaged === true ||
-    ALL_VALUE_KEYS.has(filter?._pixxelAdjustmentKey) ||
-    filter?._pixxelAgentFilter === true ||
+    filter?._phosmithAdjustmentManaged === true ||
+    ALL_VALUE_KEYS.has(filter?._phosmithAdjustmentKey) ||
+    filter?._phosmithAgentFilter === true ||
     [
         filters.Brightness.type,
         filters.Contrast.type,
@@ -379,7 +379,7 @@ const filterMatchesManagedKey = (filter) =>
     ].includes(filter?.type)
 
 const getValuesFromImageFilters = (imageObject) => {
-    const stored = imageObject?.pixxelAdjustValues || imageObject?._pixxelAdjustValues
+    const stored = imageObject?.phosmithAdjustValues || imageObject?._phosmithAdjustValues
     if (stored) return normalizeStoredValues(stored)
 
     const next = { ...DEFAULT_VALUES }
@@ -399,8 +399,8 @@ const getValuesFromImageFilters = (imageObject) => {
 }
 
 const markFilter = (filter, key) => {
-    filter._pixxelAdjustmentManaged = true
-    filter._pixxelAdjustmentKey = key
+    filter._phosmithAdjustmentManaged = true
+    filter._phosmithAdjustmentKey = key
     return filter
 }
 
@@ -446,7 +446,7 @@ const buildCurvesFilter = (values) => {
     ) {
         return null
     }
-    return new PixxelCurvesFilter({
+    return new PhosmithCurvesFilter({
         lutR: buildLut(redPts),
         lutG: buildLut(greenPts),
         lutB: buildLut(bluePts),
@@ -559,15 +559,15 @@ const buildFabricFilters = (values) => {
 
 const isVignetteLayer = (obj) =>
     obj?.name === VIGNETTE_LAYER_NAME ||
-    obj?.pixxelAdjustmentOverlay === "vignette" ||
-    obj?._pixxelAdjustmentOverlay === "vignette"
+    obj?.phosmithAdjustmentOverlay === "vignette" ||
+    obj?._phosmithAdjustmentOverlay === "vignette"
 
 const removeVignetteLayers = (canvasEditor, targetId = null) => {
     const objects = canvasEditor?.getObjects?.() || []
     const layers = objects.filter((obj) => {
         if (!isVignetteLayer(obj)) return false
         if (!targetId) return true
-        const layerTarget = obj.pixxelAdjustmentTargetId || obj._pixxelAdjustmentTargetId
+        const layerTarget = obj.phosmithAdjustmentTargetId || obj._phosmithAdjustmentTargetId
         return layerTarget === targetId || !layerTarget
     })
     layers.forEach((layer) => canvasEditor.remove(layer))
@@ -624,10 +624,10 @@ const applyVignetteLayer = (canvasEditor, imageObject, values) => {
         hasBorders: false,
         objectCaching: false,
         name: VIGNETTE_LAYER_NAME,
-        pixxelAdjustmentOverlay: "vignette",
-        _pixxelAdjustmentOverlay: "vignette",
-        pixxelAdjustmentTargetId: targetId,
-        _pixxelAdjustmentTargetId: targetId,
+        phosmithAdjustmentOverlay: "vignette",
+        _phosmithAdjustmentOverlay: "vignette",
+        phosmithAdjustmentTargetId: targetId,
+        _phosmithAdjustmentTargetId: targetId,
     })
 
     canvasEditor.add(vignette)
@@ -652,8 +652,8 @@ const applyAdjustmentFilters = (canvasEditor, values, sigRef, { commit = false }
             const preservedFilters = currentFilters.filter((filter) => !filterMatchesManagedKey(filter))
             const managedFilters = buildFabricFilters(normalized)
             img.filters = [...preservedFilters, ...managedFilters]
-            img.pixxelAdjustValues = normalized
-            img._pixxelAdjustValues = normalized
+            img.phosmithAdjustValues = normalized
+            img._phosmithAdjustValues = normalized
             img.applyFilters()
             img.set("dirty", true)
             applyVignetteLayer(canvasEditor, img, normalized)
@@ -1389,7 +1389,7 @@ const AdjustControls = () => {
             return
         }
 
-        let baseUrl = img._pixxelImageKitAdjustBaseSrc || img.pixxelImageKitAdjustBaseSrc || sourceUrl
+        let baseUrl = img._phosmithImageKitAdjustBaseSrc || img.phosmithImageKitAdjustBaseSrc || sourceUrl
 
         // AI transforms (e-retouch, e-upscale) must be separate chained steps,
         // not comma-joined in a single step. Split them out.
@@ -1410,9 +1410,9 @@ const AdjustControls = () => {
             }
         }
 
-        img._pixxelImageKitAdjustBaseSrc = baseUrl
-        img.pixxelImageKitAdjustBaseSrc = baseUrl
-        img.pixxelImageKitAdjustValues = imageKitValues
+        img._phosmithImageKitAdjustBaseSrc = baseUrl
+        img.phosmithImageKitAdjustBaseSrc = baseUrl
+        img.phosmithImageKitAdjustValues = imageKitValues
 
         // Build: existing-transforms : regular-tokens : ai-token-1 : ai-token-2
         const base = normalizeImageKitUrl(baseUrl)

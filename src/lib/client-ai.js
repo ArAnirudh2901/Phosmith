@@ -33,8 +33,8 @@ import {
     withTimeout,
 } from './client-ai-core'
 
-const ENABLED_KEY = 'pixxel:client-ai'
-const CHANGED_EVENT = 'pixxel:client-ai-changed'
+const ENABLED_KEY = 'phosmith:client-ai'
+const CHANGED_EVENT = 'phosmith:client-ai-changed'
 
 const GROUND_MODEL = 'Xenova/clipseg-rd64-refined'
 const DEPTH_MODEL = 'onnx-community/depth-anything-v2-small'
@@ -135,8 +135,8 @@ const recordDiag = (capability, startedAt, ok, error) => {
     if (state.diagnostics.length > DIAG_MAX) state.diagnostics.shift()
     // Mirror for devtools debugging (read-only convention).
     if (hasWindow()) {
-        window.__pixxel = window.__pixxel || {}
-        window.__pixxel.clientAI = getClientAIState()
+        window.__phosmith = window.__phosmith || {}
+        window.__phosmith.clientAI = getClientAIState()
     }
 }
 

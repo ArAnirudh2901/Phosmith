@@ -18,7 +18,7 @@
 
 const HEARTBEAT_MS = 10_000
 const ENDPOINT = "/api/canvas/presence"
-const CLIENT_ID_KEY = "pixxel:client-id"
+const CLIENT_ID_KEY = "phosmith:client-id"
 
 const hasWindow = () => typeof window !== "undefined"
 
@@ -126,7 +126,9 @@ export const createPresenceChannel = ({ projectId, onConcurrent } = {}) => {
             if (newDevices.length > 0 && selfJoinedAt != null) {
                 for (const o of others) if (o.clientId) seenClientIds.add(o.clientId)
                 const isNewcomer = computeIsNewcomer(selfJoinedAt, clientId, others)
-                try { onConcurrent?.({ others, isNewcomer, newDevices }) } catch { /* caller cb must not break the channel */ }
+                // onConcurrent may be async — attach a no-op .catch so a rejected
+            // Promise doesn't surface as an unhandledRejection in the browser.
+            try { onConcurrent?.({ others, isNewcomer, newDevices })?.catch?.(() => {}) } catch { /* caller cb must not break the channel */ }
             }
         } catch { /* network blip — try again next beat */ } finally {
             inFlight = false

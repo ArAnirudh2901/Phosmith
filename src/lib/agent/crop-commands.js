@@ -19,7 +19,7 @@
  *   crop.contentFill  — trim near-solid borders.
  *   crop.applyBox     — apply an arbitrary `[x, y, w, h]` image-pixel box.
  *
- * Every command dispatches `pixxel:image-replaced` after a successful crop so
+ * Every command dispatches `phosmith:image-replaced` after a successful crop so
  * other mounted tools can re-sync against the new Fabric object.
  *
  * NOT wired to any agent yet — registered by canvas.jsx the same way the
@@ -238,7 +238,7 @@ const replaceImageWithCrop = async (canvas, image, box) => {
     canvas.requestRenderAll()
     canvas.__pushHistoryState?.({ label: 'Applied crop', domain: 'crop' })
     canvas.__saveCanvasState?.()
-    window?.dispatchEvent?.(new CustomEvent('pixxel:image-replaced', { detail: { reason: 'crop' } }))
+    window?.dispatchEvent?.(new CustomEvent('phosmith:image-replaced', { detail: { reason: 'crop' } }))
     return cropped
 }
 
@@ -249,7 +249,7 @@ const replaceImageWithCrop = async (canvas, image, box) => {
  */
 const fetchAutoCrop = async (image, { mode = 'all', aspect = null, padding = null, refresh = false } = {}) => {
     const key = `${mode}|${aspect || ''}|${padding ?? ''}`
-    if (!refresh && image.__pixxelAutoCrop?.[key]) return image.__pixxelAutoCrop[key]
+    if (!refresh && image.__phosmithAutoCrop?.[key]) return image.__phosmithAutoCrop[key]
     const { blob } = await imageToUploadBlob(image)
     const form = new FormData()
     form.append('image', blob, 'image.jpg')
@@ -262,8 +262,8 @@ const fetchAutoCrop = async (image, { mode = 'all', aspect = null, padding = nul
         throw new Error(err.error || `/api/ai/auto-crop failed (${resp.status})`)
     }
     const data = await resp.json()
-    image.__pixxelAutoCrop = image.__pixxelAutoCrop || {}
-    image.__pixxelAutoCrop[key] = data
+    image.__phosmithAutoCrop = image.__phosmithAutoCrop || {}
+    image.__phosmithAutoCrop[key] = data
     return data
 }
 

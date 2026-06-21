@@ -154,7 +154,7 @@ export const expandLayerBoundary = (image, layerId, px) => {
         maskOverlay: filter?.maskOverlay ?? false,
     })
     try { image.canvas?.requestRenderAll?.() } catch { /* headless */ }
-    try { window.dispatchEvent(new CustomEvent('pixxel:mask-chain-replaced', { detail: { stack } })) } catch { /* SSR */ }
+    try { window.dispatchEvent(new CustomEvent('phosmith:mask-chain-replaced', { detail: { stack } })) } catch { /* SSR */ }
     // The agent path (mask.expandLayer) is journaled by the command registry;
     // only the panel's Boundary slider logs here.
     if (!isAgentActing()) {

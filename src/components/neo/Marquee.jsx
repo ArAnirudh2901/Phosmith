@@ -12,7 +12,7 @@ const Marquee = ({
     height = 64,
 }) => {
     const looped = [...items, ...items]
-    const animationName = direction === "right" ? "pixxel-marquee-right" : "pixxel-marquee-left"
+    const animationName = direction === "right" ? "phosmith-marquee-right" : "phosmith-marquee-left"
 
     return (
         <div

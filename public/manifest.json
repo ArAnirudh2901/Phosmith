@@ -1,0 +1,17 @@
+{
+  "name": "Phosmith",
+  "short_name": "Phosmith",
+  "description": "Professional AI-powered image editing. Generative fill, collage maker, background removal, AI agent chat.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0B0D12",
+  "theme_color": "#06B8D4",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -7,7 +7,7 @@ import { getNeonFunctionName } from "@/lib/neon-api"
 
 const QUERY_ENDPOINT = "/api/neon/query"
 const MUTATION_ENDPOINT = "/api/neon/mutation"
-const MUTATION_EVENT = "pixxel:neon-mutated"
+const MUTATION_EVENT = "phosmith:neon-mutated"
 
 const createDatabaseRequestError = (body, status, fallbackMessage) => {
     const error = new Error(body.error || fallbackMessage)

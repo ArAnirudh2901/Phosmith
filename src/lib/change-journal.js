@@ -38,9 +38,9 @@ const COALESCE_WINDOW_MS = 10_000
 // How many projects keep a persisted journal before the least-recently-used
 // ones are pruned from localStorage.
 const MAX_PERSISTED_PROJECTS = 20
-const EVENT_NAME = 'pixxel:journal-changed'
-const INDEX_KEY = 'pixxel:journal-index'
-const storageKey = (projectId) => `pixxel:journal:${projectId || 'default'}`
+const EVENT_NAME = 'phosmith:journal-changed'
+const INDEX_KEY = 'phosmith:journal-index'
+const storageKey = (projectId) => `phosmith:journal:${projectId || 'default'}`
 
 const hasWindow = () => typeof window !== 'undefined'
 

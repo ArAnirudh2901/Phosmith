@@ -395,7 +395,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         if (!canvasEditor) return
         canvasEditor.backgroundImage = null
         canvasEditor.backgroundColor = backgroundColor
-        canvasEditor.__pixxelGradeBackground = false
+        canvasEditor.__phosmithGradeBackground = false
         canvasEditor.requestRenderAll()
         canvasEditor.__pushHistoryState?.({ label: 'Set background color', domain: 'background' })
         canvasEditor.__saveCanvasState?.()
@@ -447,7 +447,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         if (!canvasEditor) return
         const next = !gradeBackground
         setGradeBackground(next)
-        canvasEditor.__pixxelGradeBackground = next
+        canvasEditor.__phosmithGradeBackground = next
         syncBackgroundGrade(canvasEditor, next)
         canvasEditor.__pushHistoryState?.({ label: 'Toggled background grade', domain: 'background' })
         canvasEditor.__saveCanvasState?.()
@@ -460,7 +460,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
     useEffect(() => {
         if (!canvasEditor) return undefined
         const sync = () => {
-            setGradeBackground(Boolean(canvasEditor.__pixxelGradeBackground))
+            setGradeBackground(Boolean(canvasEditor.__phosmithGradeBackground))
             if (!canvasEditor.backgroundImage) setPendingMerge(false)
             setBgRevision((v) => v + 1)
         }
@@ -627,7 +627,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
         if (!canvasEditor) return
         canvasEditor.backgroundColor = null
         canvasEditor.backgroundImage = null
-        canvasEditor.__pixxelGradeBackground = false
+        canvasEditor.__phosmithGradeBackground = false
         canvasEditor.requestRenderAll()
         canvasEditor.__pushHistoryState?.({ label: 'Removed background', domain: 'background' })
         canvasEditor.__saveCanvasState?.()
@@ -648,7 +648,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                     onClick={handleBackgroundRemoval}
                     disabled={Boolean(processingMessage) || !mainImage}
                     className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
-                    style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
+                    style={{ background: dominantColor || 'var(--accent-primary)', color: contrastingColor || '#fff', border: 'none', boxShadow: dominantColor ? `0 0 15px ${dominantColor}40` : 'var(--shadow-glow)' }}
                 >
                     <Trash2 className="h-3.5 w-3.5" />
                     Remove Image Background
@@ -801,7 +801,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                     <button
                         onClick={handleColorBackground}
                         className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-medium editor-interactive"
-                        style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none' }}
+                        style={{ background: dominantColor || 'var(--accent-primary)', color: contrastingColor || '#fff', border: 'none' }}
                     >
                         <Palette className="h-3.5 w-3.5" />
                         Apply Color
@@ -827,7 +827,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                         onClick={searchUnsplashImages}
                         disabled={isSearching || !searchQuery.trim()}
                         className="flex items-center justify-center rounded-lg px-3 editor-interactive disabled:opacity-40"
-                        style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none' }}
+                        style={{ background: dominantColor || 'var(--accent-primary)', color: contrastingColor || '#fff', border: 'none' }}
                     >
                         {isSearching ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -918,7 +918,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
               onClick={generateAiBackground}
               disabled={isGeneratingBackground || Boolean(processingMessage) || !generationPrompt.trim()}
               className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-40"
-              style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
+              style={{ background: dominantColor || 'var(--accent-primary)', color: contrastingColor || '#fff', border: 'none', boxShadow: dominantColor ? `0 0 15px ${dominantColor}40` : 'var(--shadow-glow)' }}
             >
               {isGeneratingBackground ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />

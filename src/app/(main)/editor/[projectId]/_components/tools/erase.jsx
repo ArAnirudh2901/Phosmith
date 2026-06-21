@@ -181,8 +181,8 @@ const EraseControls = ({ project, dominantColor }) => {
             else if (subId === 'restore') { setMagic(false); setObjectSelect(false); setMode('restore') }
             else if (subId === 'auto') handleAutoEraseRef.current?.()
         }
-        window.addEventListener('pixxel:tool-sub', onSub)
-        return () => window.removeEventListener('pixxel:tool-sub', onSub)
+        window.addEventListener('phosmith:tool-sub', onSub)
+        return () => window.removeEventListener('phosmith:tool-sub', onSub)
         // setMagic/setMode/setObjectSelect are stable and handleAutoEraseRef is a
         // ref, so the listener binds once instead of re-binding every render.
     }, [setMagic, setMode, setObjectSelect])

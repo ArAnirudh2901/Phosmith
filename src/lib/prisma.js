@@ -13,10 +13,10 @@ export const getPrisma = async () => {
   const adapter = new PrismaNeon({
     connectionString: process.env.DATABASE_URL,
   });
-  prisma = globalThis.__pixxelPrisma || new PrismaClient({ adapter });
+  prisma = globalThis.__phosmithPrisma || new PrismaClient({ adapter });
 
   if (process.env.NODE_ENV !== "production") {
-    globalThis.__pixxelPrisma = prisma;
+    globalThis.__phosmithPrisma = prisma;
   }
 
   return prisma;

@@ -77,13 +77,13 @@ const fitImageToCanvas = (obj, replacement, canvasSize) => {
 }
 
 const restoreSerializedMask = (FabricImage, obj) => {
-  const encodedMask = obj?.pixxelMask || obj?._pixxelMask
+  const encodedMask = obj?.phosmithMask || obj?._phosmithMask
   if (!encodedMask) return
 
   const maskCanvas = decodeMaskCanvas(encodedMask)
   if (!maskCanvas) return
 
-  const feather = Math.max(0, Math.round(obj?.pixxelMaskFeather || obj?._pixxelMaskFeather || 0))
+  const feather = Math.max(0, Math.round(obj?.phosmithMaskFeather || obj?._phosmithMaskFeather || 0))
 
   // The mask was authored at the saved bitmap size. If the image was rehydrated to
   // a different-resolution source, resize the decoded CRISP mask to the live bitmap
@@ -106,11 +106,11 @@ const restoreSerializedMask = (FabricImage, obj) => {
     editableMask = resized
   }
 
-  obj._pixxelMaskCanvas = editableMask
-  obj._pixxelHasMask = true
-  obj.pixxelHasMask = true
-  obj.pixxelMaskFeather = feather
-  obj._pixxelMaskFeather = feather
+  obj._phosmithMaskCanvas = editableMask
+  obj._phosmithHasMask = true
+  obj.phosmithHasMask = true
+  obj.phosmithMaskFeather = feather
+  obj._phosmithMaskFeather = feather
   // Build the clip from the size-matched crisp mask so feather stays a live,
   // non-destructive parameter and the clip already covers the live image exactly.
   obj.clipPath = createMaskClipPath(FabricImage, editableMask, { feather })
@@ -192,7 +192,7 @@ export async function restoreCanvasFromHistory(canvas, state, { imageUrl, setVie
   const nextState = normalizeCanvasState(state)
   await canvas.loadFromJSON(nextState.canvas || nextState)
   // Keep the "grade background" intent in sync across undo/redo restores.
-  canvas.__pixxelGradeBackground = Boolean(nextState.gradeBackground)
+  canvas.__phosmithGradeBackground = Boolean(nextState.gradeBackground)
 
   if (nextState.viewport && setViewportState) {
     setViewportState(canvas, nextState.viewport, fallbackCenter)

@@ -1,6 +1,6 @@
-# Pixxel GPT - Project Overview for Agents
+# Phosmith — Project Overview for Agents
 
-Welcome! This document provides an architectural overview of the **Pixxel GPT** codebase to help AI agents understand the stack, folder structure, key paradigms, and layout constraints.
+Welcome! This document provides an architectural overview of the **Phosmith** codebase to help AI agents understand the stack, folder structure, key paradigms, and layout constraints.
 
 ## Tech Stack
 

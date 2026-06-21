@@ -37,10 +37,10 @@ const sweep = () => {
     }
 }
 
-if (typeof globalThis !== "undefined" && !globalThis.__pixxelCacheSweep) {
+if (typeof globalThis !== "undefined" && !globalThis.__phosmithCacheSweep) {
     const handle = setInterval(sweep, SWEEP_INTERVAL_MS)
     if (typeof handle.unref === "function") handle.unref()
-    globalThis.__pixxelCacheSweep = handle
+    globalThis.__phosmithCacheSweep = handle
 }
 
 export const cacheGet = (key) => {

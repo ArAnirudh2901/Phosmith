@@ -1,4 +1,4 @@
-# Pixxel mask service
+# Phosmith mask service
 
 A tiny FastAPI service that runs three SOTA open models locally:
 
@@ -233,7 +233,7 @@ pixel-content hash, so clicking again on the same image is sub-100ms.
 Hardware (via `torch`): CUDA > MPS (Apple Silicon) > CPU. The image
 encoder takes ~5-10s on CPU; the decoder is sub-100ms.
 
-The "Semantic" tool UI in Pixxel will (Step 5) call this endpoint as
+The "Semantic" tool UI in Phosmith will (Step 5) call this endpoint as
 the user clicks, accumulating positive/negative points to refine the
 mask in real time.
 
@@ -253,7 +253,7 @@ for typical 1-2 MP images. Depth maps are LRU-cached (`DEPTH_CACHE_MAX`,
 default 20) by pixel-content hash, so re-asking for the same image is
 sub-100ms.
 
-The "Depth" tool UI in Pixxel calls this endpoint once per image (the
+The "Depth" tool UI in Phosmith calls this endpoint once per image (the
 depth map is whole-image, not click-driven), then layers a depth-range
 mask on top via the megashader. Users pick a near/far range to select
 foreground, midground, or background for adjustments.

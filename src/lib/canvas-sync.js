@@ -19,7 +19,7 @@
 // UI-decoupled on purpose: the editor wires it; the in-app agent (or any other
 // driver) can reuse the same manager.
 
-const DB_NAME = "pixxel-canvas-sync"
+const DB_NAME = "phosmith-canvas-sync"
 const STORE = "states"
 const DB_VERSION = 1
 
@@ -214,7 +214,10 @@ export const createCanvasSync = ({
                 conflicted = true
                 cancelFlush()
                 setStatus("conflict")
-                try { onConflict?.(res.project) } catch { /* UI cb must not break sync */ }
+                // onConflict is async — the try/catch only covers sync throws.
+                // Attach a no-op catch so the floating Promise never surfaces as
+                // an unhandledRejection if the UI callback unexpectedly rejects.
+                try { onConflict?.(res.project)?.catch?.(() => {}) } catch { /* UI cb must not break sync */ }
                 return res
             }
             if (res && !res.flushed && !res.conflict) {

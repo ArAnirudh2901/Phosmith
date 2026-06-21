@@ -1,8 +1,8 @@
 import { isExpansionFrameLike } from './expansion-pipeline'
-import { encodeMaskCanvas, isMaskCanvasEmpty, isPixxelMaskOverlay, maskCanvasFromClipPath } from './canvas-mask'
+import { encodeMaskCanvas, isMaskCanvasEmpty, isPhosmithMaskOverlay, maskCanvasFromClipPath } from './canvas-mask'
 
 const isMaskOverlayLike = (serializedObj, liveObj) =>
-    isPixxelMaskOverlay(serializedObj) || isPixxelMaskOverlay(liveObj)
+    isPhosmithMaskOverlay(serializedObj) || isPhosmithMaskOverlay(liveObj)
 
 export const getCanvasViewportState = (canvas) => {
     if (!canvas) return null
@@ -42,22 +42,22 @@ export const serializeCanvasState = (canvas) => {
 
         json.objects = objectPairs.map(({ obj, liveObj: indexedObj }) => {
             if (
-                indexedObj?._pixxelAdjustmentOverlay ||
-                indexedObj?.pixxelAdjustmentOverlay ||
-                indexedObj?.name === 'pixxel-vignette-overlay'
+                indexedObj?._phosmithAdjustmentOverlay ||
+                indexedObj?.phosmithAdjustmentOverlay ||
+                indexedObj?.name === 'phosmith-vignette-overlay'
             ) {
                 return {
                     ...obj,
-                    name: indexedObj.name || 'pixxel-vignette-overlay',
-                    pixxelAdjustmentOverlay:
-                        indexedObj.pixxelAdjustmentOverlay ||
-                        indexedObj._pixxelAdjustmentOverlay ||
+                    name: indexedObj.name || 'phosmith-vignette-overlay',
+                    phosmithAdjustmentOverlay:
+                        indexedObj.phosmithAdjustmentOverlay ||
+                        indexedObj._phosmithAdjustmentOverlay ||
                         'vignette',
-                    ...(indexedObj.pixxelAdjustmentTargetId || indexedObj._pixxelAdjustmentTargetId
+                    ...(indexedObj.phosmithAdjustmentTargetId || indexedObj._phosmithAdjustmentTargetId
                         ? {
-                            pixxelAdjustmentTargetId:
-                                indexedObj.pixxelAdjustmentTargetId ||
-                                indexedObj._pixxelAdjustmentTargetId,
+                            phosmithAdjustmentTargetId:
+                                indexedObj.phosmithAdjustmentTargetId ||
+                                indexedObj._phosmithAdjustmentTargetId,
                         }
                         : {}),
                 }
@@ -82,33 +82,33 @@ export const serializeCanvasState = (canvas) => {
                     ) ||
                     canvasObjects.find((o) => o.type === 'image' || o.type === 'Image')
 
-                if (matchingObj?.pixxelAdjustValues || matchingObj?._pixxelAdjustValues) {
-                    cleaned.pixxelAdjustValues =
-                        matchingObj.pixxelAdjustValues || matchingObj._pixxelAdjustValues
+                if (matchingObj?.phosmithAdjustValues || matchingObj?._phosmithAdjustValues) {
+                    cleaned.phosmithAdjustValues =
+                        matchingObj.phosmithAdjustValues || matchingObj._phosmithAdjustValues
                 }
 
-                if (matchingObj?.pixxelAdjustmentId || matchingObj?._pixxelAdjustmentId) {
-                    cleaned.pixxelAdjustmentId =
-                        matchingObj.pixxelAdjustmentId || matchingObj._pixxelAdjustmentId
+                if (matchingObj?.phosmithAdjustmentId || matchingObj?._phosmithAdjustmentId) {
+                    cleaned.phosmithAdjustmentId =
+                        matchingObj.phosmithAdjustmentId || matchingObj._phosmithAdjustmentId
                 }
 
-                if (matchingObj?.pixxelImageKitAdjustBaseSrc || matchingObj?._pixxelImageKitAdjustBaseSrc) {
-                    cleaned.pixxelImageKitAdjustBaseSrc =
-                        matchingObj.pixxelImageKitAdjustBaseSrc ||
-                        matchingObj._pixxelImageKitAdjustBaseSrc
+                if (matchingObj?.phosmithImageKitAdjustBaseSrc || matchingObj?._phosmithImageKitAdjustBaseSrc) {
+                    cleaned.phosmithImageKitAdjustBaseSrc =
+                        matchingObj.phosmithImageKitAdjustBaseSrc ||
+                        matchingObj._phosmithImageKitAdjustBaseSrc
                 }
 
-                if (matchingObj?.pixxelImageKitAdjustValues) {
-                    cleaned.pixxelImageKitAdjustValues = matchingObj.pixxelImageKitAdjustValues
+                if (matchingObj?.phosmithImageKitAdjustValues) {
+                    cleaned.phosmithImageKitAdjustValues = matchingObj.phosmithImageKitAdjustValues
                 }
 
-                if (matchingObj?.pixxelCollageSource || matchingObj?._pixxelCollageSource) {
-                    cleaned.pixxelCollageSource =
-                        matchingObj.pixxelCollageSource || matchingObj._pixxelCollageSource
+                if (matchingObj?.phosmithCollageSource || matchingObj?._phosmithCollageSource) {
+                    cleaned.phosmithCollageSource =
+                        matchingObj.phosmithCollageSource || matchingObj._phosmithCollageSource
                 }
 
                 const maskCanvas =
-                    matchingObj?._pixxelMaskCanvas ||
+                    matchingObj?._phosmithMaskCanvas ||
                     (matchingObj?.clipPath
                         ? maskCanvasFromClipPath(matchingObj.clipPath, matchingObj.width || cleaned.width || 1, matchingObj.height || cleaned.height || 1)
                         : null)
@@ -116,24 +116,24 @@ export const serializeCanvasState = (canvas) => {
                     ? encodeMaskCanvas(maskCanvas)
                     : null
                 if (encodedMask) {
-                    cleaned.pixxelMask = encodedMask
-                    cleaned.pixxelHasMask = true
-                    const feather = matchingObj?.pixxelMaskFeather ?? matchingObj?._pixxelMaskFeather
-                    if (feather) cleaned.pixxelMaskFeather = feather
+                    cleaned.phosmithMask = encodedMask
+                    cleaned.phosmithHasMask = true
+                    const feather = matchingObj?.phosmithMaskFeather ?? matchingObj?._phosmithMaskFeather
+                    if (feather) cleaned.phosmithMaskFeather = feather
                     delete cleaned.clipPath
                 } else if (
                     // Detect the mask clip off the LIVE object — toJSON() emits no custom
                     // props, so the serialized clipPath has no marker. Without this a
                     // now-empty mask would leave a full raw-image clipPath in the JSON.
-                    matchingObj?.clipPath?.pixxelMaskClipPath ||
-                    matchingObj?.clipPath?.name === 'pixxel-mask-clip' ||
-                    cleaned.clipPath?.pixxelMaskClipPath ||
-                    cleaned.clipPath?.name === 'pixxel-mask-clip'
+                    matchingObj?.clipPath?.phosmithMaskClipPath ||
+                    matchingObj?.clipPath?.name === 'phosmith-mask-clip' ||
+                    cleaned.clipPath?.phosmithMaskClipPath ||
+                    cleaned.clipPath?.name === 'phosmith-mask-clip'
                 ) {
                     delete cleaned.clipPath
-                    delete cleaned.pixxelMask
-                    delete cleaned.pixxelHasMask
-                    delete cleaned.pixxelMaskFeather
+                    delete cleaned.phosmithMask
+                    delete cleaned.phosmithHasMask
+                    delete cleaned.phosmithMaskFeather
                 }
 
                 // Only strip if the src is a Base64 data URL (can be several MB)
@@ -182,7 +182,7 @@ export const serializeCanvasState = (canvas) => {
         viewport: getCanvasViewportState(canvas),
         // Persist the "grade background with the photo" intent so it keeps tracking
         // after reload (runtime flag set by the AI Background tool).
-        gradeBackground: Boolean(canvas.__pixxelGradeBackground),
+        gradeBackground: Boolean(canvas.__phosmithGradeBackground),
     }
 }
 
