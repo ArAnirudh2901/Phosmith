@@ -89,14 +89,14 @@ const HeroSection = () => {
                 >
                     <ScrambleText
                         as="span"
-                        text="EDIT PIXELS"
+                        text="SHAPE LIGHT"
                         durationMs={700}
                         className="liquid-reactive-text"
                         style={{ display: "block" }}
                     />
                     <ScrambleText
                         as="span"
-                        text="WITH INTENT "
+                        text="FORGE PHOTOS"
                         durationMs={900}
                         delay={250}
                         className="liquid-reactive-text-stroke"
