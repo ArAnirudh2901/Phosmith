@@ -209,9 +209,15 @@ export async function POST(request) {
     )
   } catch (error) {
     console.error('[ai-auto-crop] ✗', error?.message)
-    const timeout = /abort|timeout/i.test(error?.message || '')
+    const msg = error?.message || ''
+    const timeout = /abort|timeout/i.test(msg)
+    const connRefused = /ECONNREFUSED|fetch failed|ENOTFOUND|ECONNRESET/i.test(msg)
     return NextResponse.json(
-      { error: error?.message || 'Auto-crop failed' },
+      {
+        error: connRefused
+          ? 'Mask service is not running — start it with `bun run mask:dev` and try again'
+          : msg || 'Auto-crop failed',
+      },
       { status: timeout ? 504 : 500 },
     )
   }

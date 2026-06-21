@@ -196,9 +196,23 @@ ALLOWED_ORIGINS = [
 
 # ─── Auto-crop tuning ────────────────────────────────────────────────────────
 # Default padding around the union of detected subjects when computing the
-# subject-aware crop, expressed as a fraction of the SHORTER subject-box side.
+# DEPTH-aware crop, expressed as a fraction of the SHORTER box side.
 # 0.08 keeps a comfortable breathing room without losing too much frame.
 CROP_SUBJECT_PADDING = float(os.getenv("CROP_SUBJECT_PADDING", "0.08").strip())
+# Subject-aware crop is a COMPOSITION, not a subject extraction: the crop is
+# sized so the subject's longer side spans ~this fraction of the crop, leaving
+# deliberate breathing room / context around it. 0.62 ≈ subject fills ~⅔ of the
+# frame with ~⅓ context — a natural hero composition. Lower = more context.
+CROP_SUBJECT_TARGET_FRAC = float(os.getenv("CROP_SUBJECT_TARGET_FRAC", "0.62").strip())
+# When there is NO distinct subject (YOLO found nothing → diffuse BiRefNet
+# saliency) and the salient bbox sprawls across at least this fraction of the
+# frame, the image is a scene, not a subject. Subject-aware then composes the
+# WHOLE scene (max-area aspect fit, gently biased toward the salient region)
+# instead of zooming into a saliency blob.
+CROP_SCENE_SPREAD = float(os.getenv("CROP_SCENE_SPREAD", "0.45").strip())
+# How far a scene crop is biased toward the salient centroid (0 = image centre,
+# 1 = fully on the salient region). A gentle pull keeps the composition balanced.
+CROP_SCENE_BIAS = float(os.getenv("CROP_SCENE_BIAS", "0.35").strip())
 # Content-fill (border trim) considers a pixel "content" when its absolute
 # difference from the dominant border colour exceeds this 0..255 threshold.
 CROP_CONTENT_TRIM_THRESH = int(os.getenv("CROP_CONTENT_TRIM_THRESH", "16").strip())
@@ -1455,7 +1469,9 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
     #    backlit leaf (or any under-segmented subject) come back solid and
     #    complete instead of Swiss-cheesed.
     try:
-        matte_img = remove(img, session=app.state.session, only_mask=True)
+        matte_img = await run_in_threadpool(
+            remove, img, session=app.state.session, only_mask=True
+        )
     except Exception as e:
         log.exception("rembg.remove failed")
         raise HTTPException(500, f"segmentation failed: {e}")
@@ -1603,7 +1619,9 @@ async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSO
     # 1) Saliency matte (same path as /segment) — edge refinement + the
     #    salient-instance gate both need it.
     try:
-        matte_img = remove(img, session=app.state.session, only_mask=True)
+        matte_img = await run_in_threadpool(
+            remove, img, session=app.state.session, only_mask=True
+        )
     except Exception as e:
         log.exception("rembg.remove failed")
         raise HTTPException(500, f"segmentation failed: {e}")
@@ -2275,30 +2293,63 @@ def _fit_aspect(
     return _clip_box_to_image((new_x, new_y, new_w, new_h), W, H)
 
 
-def _rule_of_thirds_anchor(
+def _compose_anchor(
     centroid: "tuple[float, float]",
-    box_w: float,
-    box_h: float,
+    bbox: "tuple[float, float, float, float]",
+    crop_w: float,
+    crop_h: float,
+    W: int,
+    H: int,
     snap_strength: float = CROP_THIRDS_SNAP,
 ) -> "tuple[float, float]":
-    """Nudge `centroid` toward the nearest rule-of-thirds power point inside a
-    box of size `(box_w, box_h)` centred on it. The snap is proportional —
-    if the centroid is already near a power point, the nudge is gentle.
+    """Where a crop of size `(crop_w, crop_h)` should be CENTRED to compose the
+    subject professionally.
 
-    Power points sit at the four (⅓, ⅓) intersections of a 3×3 grid; we pick
-    whichever of the four is closest to the input centroid's relative
-    position so portrait orientation and gaze direction aren't broken.
+    Two ideas a senior photo tool gets right and a naive "nudge to a fixed
+    power point" gets wrong:
+
+    1. **Lead room (a.k.a. nose room).** A subject sitting in the left half of
+       the frame is almost always facing/moving toward the open space on its
+       right, so the crop should leave room on THAT side — i.e. place the
+       subject on the left third, not shove it against the right edge. We infer
+       facing from the subject's position in the frame (the photographer's
+       original placement) and pull it toward the corresponding third.
+
+    2. **Never cut the subject, never trim lopsidedly.** The pull is clamped so
+       the whole subject stays inside the crop with a small margin. When the
+       crop is simply too small to contain the subject on an axis (a wide group
+       forced to 1:1), we centre on the subject bbox on that axis so the
+       unavoidable trim is symmetric instead of dropping everyone on one side.
     """
     cx, cy = centroid
-    # Power points in normalised crop space.
-    powers = [(1 / 3, 1 / 3), (2 / 3, 1 / 3), (1 / 3, 2 / 3), (2 / 3, 2 / 3)]
-    # The crop box (pre-nudge) is centred on the centroid, so the centroid sits
-    # at (0.5, 0.5) inside it. Pick the nearest power point.
-    nearest = min(powers, key=lambda p: (p[0] - 0.5) ** 2 + (p[1] - 0.5) ** 2)
-    dx = (nearest[0] - 0.5) * box_w
-    dy = (nearest[1] - 0.5) * box_h
+    bx, by, bw, bh = bbox
     s = max(0.0, min(1.0, snap_strength))
-    return (cx + dx * s, cy + dy * s)
+
+    def axis(c, b0, bdim, cdim, dim, strength):
+        # Lead-room target third, chosen from the subject's side of the frame.
+        third = (1.0 / 3.0) if (b0 + bdim / 2.0) < dim / 2.0 else (2.0 / 3.0)
+        a = c + (0.5 - third) * cdim * strength
+        margin = 0.04 * cdim
+        if cdim >= bdim + 2 * margin:
+            # Clamp so the subject (plus margin) stays fully inside the crop.
+            lo = b0 + bdim + margin - cdim / 2.0
+            hi = b0 - margin + cdim / 2.0
+            a = min(max(a, lo), hi)
+        else:
+            # Crop can't hold the subject on this axis → balanced centre cut.
+            a = b0 + bdim / 2.0
+        # Keep the crop itself inside the image.
+        if cdim <= dim:
+            a = min(max(a, cdim / 2.0), dim - cdim / 2.0)
+        else:
+            a = dim / 2.0
+        return a
+
+    # Horizontal lead room is the strong cue; vertical gets a gentler pull so we
+    # don't shove a standing subject's feet against the bottom edge.
+    ax = axis(cx, bx, bw, crop_w, W, s)
+    ay = axis(cy, by, bh, crop_h, H, s * 0.5)
+    return ax, ay
 
 
 def _compute_subject_crop(
@@ -2307,60 +2358,112 @@ def _compute_subject_crop(
     H: int,
     *,
     aspect: "float | None" = None,
-    padding: float = CROP_SUBJECT_PADDING,
+    target_frac: float = CROP_SUBJECT_TARGET_FRAC,
     centroid: "tuple[float, float] | None" = None,
+    has_subject: bool = True,
 ) -> "dict | None":
-    """Subject-aware crop: tight bbox of the union mask, padded, optionally
-    snapped to rule-of-thirds, and fitted to `aspect` if provided.
+    """Subject-aware crop = a COMPOSITION around the subject, not a subject
+    extraction.
+
+    Two regimes:
+
+    1. A distinct subject (YOLO instance, or a saliency blob that doesn't sprawl
+       across the frame): size the crop so the subject's longer side spans
+       ~`target_frac` of it — leaving deliberate breathing room/context — then
+       nudge to rule-of-thirds and fit `aspect`. This is the fix for "subject-
+       aware shouldn't crop ONLY the subject": the surrounding scene is kept.
+
+    2. No distinct subject (`has_subject=False`) and the salient region sprawls
+       across the frame (a landscape/scene): DON'T zoom into the saliency blob.
+       Compose the whole scene — a max-area `aspect` fit gently biased toward
+       the salient centroid, or the full frame when freeform. This is the fix
+       for scenes like a canyon-and-sky where there is no single subject.
 
     Returns `None` when no usable subject mask is supplied — the caller should
     fall back to content-fill or to the whole frame.
     """
     if subject_mask is None:
         return None
-    bbox = _bbox_from_mask(subject_mask > 127 if subject_mask.dtype == np.uint8 else subject_mask)
+    mask_bool = subject_mask > 127 if subject_mask.dtype == np.uint8 else subject_mask
+    bbox = _bbox_from_mask(mask_bool)
     if bbox is None:
         return None
-    padded = _expand_box(bbox, W, H, padding)
 
-    # Compute centroid for thirds-snap.
+    # Centroid drives both thirds-snap and the scene bias.
     if centroid is None:
-        mask_bool = subject_mask > 127 if subject_mask.dtype == np.uint8 else subject_mask
         ys, xs = np.nonzero(mask_bool)
         if xs.size == 0:
             return None
         centroid = (float(xs.mean()), float(ys.mean()))
+    cx, cy = centroid
 
-    if aspect is not None:
-        anchor = _rule_of_thirds_anchor(centroid, padded[2], padded[3])
-        final = _fit_aspect(padded, aspect, W, H, anchor=anchor)
-    else:
-        final = padded
-
-    x, y, w, h = final
+    bx, by, bw, bh = bbox
     frame_area = float(W * H) or 1.0
-    crop_area = float(w * h)
-    subj_area = float(
-        ((subject_mask > 127) if subject_mask.dtype == np.uint8 else subject_mask).sum()
+    subj_area = float(mask_bool.sum())
+    spread = (bw * bh) / frame_area  # how much of the frame the subject bbox spans
+
+    # ── Regime 2: scene composition (no distinct subject) ───────────────────
+    is_scene = (not has_subject) and spread >= CROP_SCENE_SPREAD
+    if is_scene:
+        if aspect is not None:
+            bias = max(0.0, min(1.0, CROP_SCENE_BIAS))
+            ax = cx * bias + (W / 2.0) * (1.0 - bias)
+            ay = cy * bias + (H / 2.0) * (1.0 - bias)
+            x, y, w, h = _compute_aspect_crop(W, H, aspect, centroid=(ax, ay))["box"]
+        else:
+            x, y, w, h = 0, 0, W, H
+        crop_area = float(w * h)
+        return {
+            "box": [x, y, w, h],
+            "score": round(min(1.0, 0.45 + 0.2 * (1.0 - abs(spread - 0.6))), 4),
+            "aspect_ratio": round(w / float(h), 4) if h else None,
+            "rationale": (
+                "scene composition (no distinct subject)"
+                + (f", fitted to {aspect:.3f}:1" if aspect else "")
+            ),
+            "centroid": [round(float(cx), 1), round(float(cy), 1)],
+            "subject_coverage": round(subj_area / frame_area, 4),
+            "already_tight": (crop_area / frame_area) >= 0.92,
+        }
+
+    # ── Regime 1: compose AROUND the subject with breathing room ────────────
+    # Size the crop so the subject occupies ~target_frac of it (context kept,
+    # not extracted); fit the aspect; then PLACE it for lead room without ever
+    # cutting the subject or trimming a group lopsidedly.
+    f = max(0.2, min(0.95, target_frac))
+    crop_w = min(float(W), bw / f)
+    crop_h = min(float(H), bh / f)
+    if aspect is not None:
+        # Reuse the tested aspect fitter for SIZE only; we re-place below.
+        fitted = _fit_aspect(
+            _clip_box_to_image((bx, by, crop_w, crop_h), W, H), aspect, W, H
+        )
+        crop_w, crop_h = float(fitted[2]), float(fitted[3])
+
+    ax, ay = _compose_anchor((cx, cy), (bx, by, bw, bh), crop_w, crop_h, W, H)
+    x, y, w, h = _clip_box_to_image(
+        (ax - crop_w / 2.0, ay - crop_h / 2.0, crop_w, crop_h), W, H
     )
-    # Score: higher when subject is well-included AND we're not wasting frame.
-    coverage = subj_area / frame_area
-    tightness = subj_area / crop_area if crop_area > 0 else 0.0
-    score = round(min(1.0, 0.5 + 0.25 * tightness + 0.25 * (1 - abs(coverage - 0.4))), 4)
-    # Flag when the crop box essentially IS the full frame — the image is
-    # already tightly framed around the subject and cropping is a no-op.
+    crop_area = float(w * h)
+    # Score: higher when the subject is well-included AND well-placed (not the
+    # whole frame, not a tight zoom). Peak around the target share.
     crop_frame_ratio = crop_area / frame_area if frame_area > 0 else 0.0
+    subj_share = subj_area / crop_area if crop_area > 0 else 0.0
+    score = round(min(1.0, 0.55 + 0.25 * (1.0 - abs(subj_share - f)) + 0.2 * (1.0 - crop_frame_ratio)), 4)
+    # Flag when the crop box essentially IS the full frame — the subject already
+    # fills the frame, so there's little to gain. The client still PLACES this
+    # box (adjustable) rather than skipping it.
     already_tight = crop_frame_ratio >= 0.92
     return {
         "box": [x, y, w, h],
         "score": score,
         "aspect_ratio": round(w / float(h), 4) if h else None,
         "rationale": (
-            f"subject bbox padded {int(padding * 100)}% with thirds anchor"
+            f"composed around subject (~{int(f * 100)}% frame share, lead-room placed)"
             + (f", fitted to {aspect:.3f}:1" if aspect else "")
         ),
-        "centroid": [round(float(centroid[0]), 1), round(float(centroid[1]), 1)],
-        "subject_coverage": round(coverage, 4),
+        "centroid": [round(float(cx), 1), round(float(cy), 1)],
+        "subject_coverage": round(subj_area / frame_area, 4),
         "already_tight": already_tight,
     }
 
@@ -2521,6 +2624,40 @@ def _compute_aspect_crop(
     }
 
 
+def _subjects_from_instances(
+    instances: "list[dict]", W: int, H: int
+) -> "tuple[list[dict], np.ndarray, tuple[float, float] | None]":
+    """Reduce YOLO instance dicts to the three things /crop/auto's subject
+    strategy needs: the JSON `subjects` payload, a uint8 union mask over the
+    top-N instances, and an area-weighted centroid (more stable than a global
+    matte centroid for multi-subject photos). Shared by the fast (matte-free)
+    path and the BiRefNet fallback so both build identical metadata."""
+    top = sorted(instances, key=lambda i: -i["area"])[:SUBJECT_INSTANCES_MAX]
+    payload: "list[dict]" = []
+    union = np.zeros((H, W), dtype=np.uint8)
+    total = sx = sy = 0.0
+    for idx, inst in enumerate(top):
+        ys, xs = np.nonzero(inst["mask"])
+        if xs.size == 0:
+            continue
+        payload.append({
+            "index": idx,
+            "label": inst["label"],
+            "class_id": inst["class_id"],
+            "confidence": round(float(inst["confidence"]), 4),
+            "source": inst["source"],
+            "bbox": _bbox_of(inst["mask"]),
+            "centroid": [round(float(xs.mean()), 1), round(float(ys.mean()), 1)],
+        })
+        union = np.maximum(union, inst["mask"].astype(np.uint8) * 255)
+        a = float(inst["area"])
+        sx += xs.mean() * a
+        sy += ys.mean() * a
+        total += a
+    centroid = (sx / total, sy / total) if total > 0 else None
+    return payload, union, centroid
+
+
 @app.post("/crop/auto")
 async def crop_auto(
     image: UploadFile = File(..., alias="image"),
@@ -2623,72 +2760,70 @@ async def crop_auto(
             log.exception("content-fill crop failed")
             crops["content"] = None
 
-    # Subject-aware: reuse the segment pipeline (matte + YOLO).
+    # Subject-aware: YOLO-first. The crop box only needs a subject REGION, not
+    # a pixel-perfect alpha — so for the common case (people/pets/objects YOLO
+    # recognises) we detect instances WITHOUT the ~25-60s BiRefNet matte and
+    # build the region straight from the instance masks. The matte is only
+    # computed as a fallback when YOLO finds nothing (a non-COCO subject, or
+    # YOLO disabled), which keeps the slow path available without paying for it
+    # on every subject crop — and stops one subject-aware request from pinning
+    # the worker for a minute while every other mode waits.
     if mode in ("subject", "all"):
         try:
-            matte_img = remove(img, session=app.state.session, only_mask=True)
-            raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
-            matte = await run_in_threadpool(clean_matte, raw_matte, rgb)
-
-            union_mask = matte.copy()
+            union_mask: "np.ndarray | None" = None
             subject_centroid: "tuple[float, float] | None" = None
+
+            # Fast path — matte-free YOLO instances.
             if getattr(app.state, "yolo_available", False):
                 try:
                     instances = await run_in_threadpool(
-                        _detect_subject_instances, app, rgb_img, matte
+                        _detect_subject_instances, app, rgb_img, None
                     )
                 except Exception:
                     log.exception("instance detection failed in /crop/auto")
                     instances = []
-
                 if instances:
-                    instances.sort(key=lambda i: -i["area"])
-                    for idx, inst in enumerate(instances[:SUBJECT_INSTANCES_MAX]):
-                        ys, xs = np.nonzero(inst["mask"])
-                        if xs.size == 0:
-                            continue
-                        subjects_payload.append({
-                            "index": idx,
-                            "label": inst["label"],
-                            "class_id": inst["class_id"],
-                            "confidence": round(float(inst["confidence"]), 4),
-                            "source": inst["source"],
-                            "bbox": _bbox_of(inst["mask"]),
-                            "centroid": [
-                                round(float(xs.mean()), 1),
-                                round(float(ys.mean()), 1),
-                            ],
-                        })
+                    payload, union, subject_centroid = _subjects_from_instances(
+                        instances, W, H
+                    )
+                    subjects_payload.extend(payload)
+                    # The YOLO instance union already isolates the subject(s)
+                    # from the background, so no matte gating is needed.
+                    union_mask = union
 
-                    union = np.zeros((H, W), dtype=np.uint8)
-                    for inst in instances[:SUBJECT_INSTANCES_MAX]:
-                        union = np.maximum(union, (inst["mask"].astype(np.uint8)) * 255)
-                    # Gate the matte to the detected subjects' neighbourhood
-                    # (same recipe as /segment's _compose_subject_alpha) instead
-                    # of a blanket union with the WHOLE matte — otherwise any
-                    # salient background content drags the subject crop box out
-                    # to cover it, defeating the point of instance detection.
-                    union_mask = _compose_subject_alpha(matte, union)
-                    # Centroid: area-weighted mean of instance centroids,
-                    # which is more stable for multi-subject photos than the
-                    # global matte centroid.
-                    total = 0.0
-                    sx = 0.0
-                    sy = 0.0
-                    for inst in instances[:SUBJECT_INSTANCES_MAX]:
-                        a = float(inst["area"])
-                        ys, xs = np.nonzero(inst["mask"])
-                        if xs.size == 0:
-                            continue
-                        sx += xs.mean() * a
-                        sy += ys.mean() * a
-                        total += a
-                    if total > 0:
-                        subject_centroid = (sx / total, sy / total)
+            # Fallback — only when the fast path found no subject. Run the
+            # BiRefNet saliency matte and gate it to any salient instances
+            # (same recipe as /segment's _compose_subject_alpha) so non-COCO
+            # subjects still get a sensible crop.
+            if union_mask is None:
+                matte_img = await run_in_threadpool(
+                    remove, img, session=app.state.session, only_mask=True
+                )
+                raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
+                matte = await run_in_threadpool(clean_matte, raw_matte, rgb)
+                union_mask = matte.copy()
+                if getattr(app.state, "yolo_available", False):
+                    try:
+                        instances = await run_in_threadpool(
+                            _detect_subject_instances, app, rgb_img, matte
+                        )
+                    except Exception:
+                        log.exception("instance detection failed in /crop/auto")
+                        instances = []
+                    if instances:
+                        payload, union, subject_centroid = _subjects_from_instances(
+                            instances, W, H
+                        )
+                        subjects_payload.extend(payload)
+                        union_mask = _compose_subject_alpha(matte, union)
 
+            # `has_subject` is True only when YOLO actually found instances —
+            # the fallback BiRefNet matte alone (no instances) means "diffuse
+            # saliency", which the subject crop treats as a scene, not a target.
             crops["subject"] = _compute_subject_crop(
                 union_mask, W, H,
-                aspect=aspect_value, padding=pad, centroid=subject_centroid,
+                aspect=aspect_value, centroid=subject_centroid,
+                has_subject=bool(subjects_payload),
             )
             ran.append("subject")
         except Exception:

@@ -127,7 +127,10 @@ const DrawControls = ({ dominantColor }) => {
         syncPathCount()
 
         const onPathCreated = (e) => {
-            if (e?.path) strokeStackRef.current.push(e.path)
+            if (e?.path) {
+                e.path.set({ selectable: false, evented: false, hasControls: false, hasBorders: false })
+                strokeStackRef.current.push(e.path)
+            }
             syncPathCount()
         }
 
@@ -150,6 +153,19 @@ const DrawControls = ({ dominantColor }) => {
             canvasEditor.defaultCursor = 'crosshair'
             canvasEditor.hoverCursor = 'crosshair'
             if (canvasEditor.upperCanvasEl) canvasEditor.upperCanvasEl.style.cursor = 'crosshair'
+
+            // With drawing mode off, Fabric's default pointer behaviour returns —
+            // a click would select (and let you drag/resize) the underlying image
+            // instead of erasing. Suppress hit-testing + group-select for the
+            // eraser session and drop any live selection so the stroke eraser is
+            // the only thing reacting to clicks. erasePathsAtPointer walks objects
+            // manually, so it's unaffected by skipTargetFind.
+            const prevSelection = canvasEditor.selection
+            const prevSkipTargetFind = canvasEditor.skipTargetFind
+            canvasEditor.selection = false
+            canvasEditor.skipTargetFind = true
+            canvasEditor.discardActiveObject()
+            canvasEditor.requestRenderAll()
 
             const onEraserDown = (opt) => {
                 erasingRef.current = true
@@ -174,6 +190,8 @@ const DrawControls = ({ dominantColor }) => {
                 canvasEditor.off('mouse:down', onEraserDown)
                 canvasEditor.off('mouse:move', onEraserMove)
                 canvasEditor.off('mouse:up', onEraserUp)
+                canvasEditor.selection = prevSelection
+                canvasEditor.skipTargetFind = prevSkipTargetFind
                 canvasEditor.defaultCursor = 'default'
                 canvasEditor.hoverCursor = 'default'
                 if (canvasEditor.upperCanvasEl) canvasEditor.upperCanvasEl.style.cursor = 'default'

@@ -185,8 +185,12 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
             // staying disabled after a mask-stack undo.
             const maskUndo = Boolean(canvasEditor.__maskCanUndo)
             const maskRedo = Boolean(canvasEditor.__maskCanRedo)
-            setCanUndo(Boolean(state?.canUndo) || maskUndo)
-            setCanRedo(Boolean(state?.canRedo) || maskRedo)
+            // The Crop tool owns a crop-box preview stack while crop mode is
+            // active (same fall-through-to-global contract as the mask stack).
+            const cropUndo = Boolean(canvasEditor.__cropCanUndo)
+            const cropRedo = Boolean(canvasEditor.__cropCanRedo)
+            setCanUndo(Boolean(state?.canUndo) || maskUndo || cropUndo)
+            setCanRedo(Boolean(state?.canRedo) || maskRedo || cropRedo)
         }
 
         syncHistory()
@@ -199,6 +203,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
     }, [canvasEditor])
 
     const handleUndo = async () => {
+        // The Crop tool owns a crop-box preview stack while crop mode is active.
+        // Revert the last preview change first; it returns false (and does
+        // nothing) once the stack is empty, so we fall through to canvas history.
+        if (canvasEditor?.__cropToolUndo?.()) return
         // When the Mask/Erase tool is mounted it owns a per-stroke undo stack and
         // exposes __maskToolUndo (the same path as ⌘Z). Route the button through
         // it so a one-shot action like "Select Subject" is reverted by the SAME
@@ -216,6 +224,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
     }
 
     const handleRedo = async () => {
+        if (canvasEditor?.__cropToolRedo?.()) return
         if (canvasEditor?.__maskToolRedo) {
             canvasEditor.__maskToolRedo()
             await canvasEditor.__saveCanvasState?.()
@@ -396,7 +405,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
-                        <PhosmithWordmark />
+                        <PhosmithWordmark showText={false} height={24} markScale={2.1} />
                     </Link>
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).
@@ -416,22 +425,13 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         smoothly from a 60px stub on narrow tablets up to 280px on
                         ultrawide, with no discrete jumps that re-flow the row. */}
                     <span className="text-sm font-semibold truncate flex-none"
-                          style={{ color: 'var(--text-primary)', maxWidth: 'clamp(60px, 12vw, 280px)' }}
-                          title={project.title}>
+                        style={{ color: 'var(--text-primary)', maxWidth: 'clamp(60px, 12vw, 280px)' }}
+                        title={project.title}>
                         {project.title}
                     </span>
 
                     <ProBadge size="sm" />
 
-                    {/* Resolution badge — hidden below xl. Already surfaced inside
-                        the Export menu header, so removing it from the topbar at
-                        narrow widths costs no information. */}
-                    {exportResolutionLabel && (
-                        <span className="hidden xl:inline-flex text-[10px] px-1.5 py-0.5 rounded flex-none"
-                              style={{ color: 'var(--text-secondary)', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)' }}>
-                            {exportResolutionLabel}
-                        </span>
-                    )}
                 </div>
 
                 {/* Center: Tool buttons.
