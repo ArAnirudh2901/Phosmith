@@ -12,11 +12,11 @@ const PhosmithWordmark = memo(function PhosmithWordmark({ height = 22, showText 
     return (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap, flex: '0 0 auto', lineHeight: 1 }}>
             <img
-                src="/logo.svg"
+                src="/logo-mark.svg"
                 alt="Phosmith"
                 width={height}
                 height={height}
-                style={{ display: 'block', borderRadius, flexShrink: 0 }}
+                style={{ display: 'block', flexShrink: 0 }}
             />
             {showText && (
                 <span
