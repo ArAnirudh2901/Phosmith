@@ -45,20 +45,6 @@ const HeroSection = () => {
                 initial="hidden"
                 animate="visible"
             >
-                {/* Logo mark */}
-                <motion.div variants={item} className="mb-6 flex justify-center">
-                    <motion.img
-                        src="/logo.svg"
-                        alt="Phosmith"
-                        width={96}
-                        height={96}
-                        style={{ borderRadius: 18, display: 'block' }}
-                        initial={{ opacity: 0, scale: 0.88 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
-                    />
-                </motion.div>
-
                 <motion.div variants={item} className="mb-8 inline-flex">
                     <div
                         style={{
