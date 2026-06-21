@@ -10,7 +10,7 @@
  * types, so no other file needs to be touched when a new mask kind is added.
  *
  * Why JSDoc and not TypeScript:
- * The pixxel-gpt codebase is pure JavaScript (see AGENTS.md / jsconfig.json).
+ * The phosmith codebase is pure JavaScript (see AGENTS.md / jsconfig.json).
  * JSDoc gives editor-time IntelliSense in any TS-aware IDE without forcing
  * a build-tooling migration. If the project later moves to TS, these typedefs
  * are the only place that needs renaming.

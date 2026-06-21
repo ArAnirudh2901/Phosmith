@@ -49,6 +49,7 @@ import { extractImageFeatures } from "@/lib/image-features";
 import { flattenLiveCanvasForAnalysis, renderFabricObjectElement } from "@/lib/canvas-snapshot";
 import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
 import { STYLE_LABELS } from "@/lib/style-profiles";
+import { isPhosmithMaskOverlay } from "@/lib/canvas-mask";
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
@@ -58,7 +59,35 @@ const QUICK_PROMPTS = [
   { label: "Cinematic", prompt: "Give it a cinematic color grade with crisp depth", hint: "Tone, drama, focus" },
   { label: "Studio", prompt: "Polish this for ecommerce with crisp studio detail", hint: "Clean product finish" },
   { label: "Extend", prompt: "Extend all sides by 20%", hint: "AI outpaint edges" },
+  { label: "Collage", prompt: "Make a rounded collage of these photos with a soft drop shadow", hint: "Arrange photos in a template" },
 ];
+
+// Collage intent → routed to the `collage.*` agent commands instead of the
+// edit-plan flow. Matches explicit collage words, or a layout/grid/template
+// request that mentions the photos.
+const COLLAGE_INTENT_RE =
+  /\b(collage|montage|scrapbook|mosaic|photo[\s-]?grid)\b|\b(grid|template|layout|arrange)\b[^.]*\b(photo|photos|pic|pics|picture|pictures|image|images)\b|\b(photo|photos|pic|pics|picture|pictures|image|images)\b[^.]*\b(grid|template|collage)\b/i;
+
+const isCollageIntent = (prompt) => COLLAGE_INTENT_RE.test(String(prompt || ""));
+
+// Turn a collage.fromDescription result into a friendly assistant message.
+const summarizeCollageResult = (r) => {
+  if (!r) return "Built the collage.";
+  const layoutLabel = String(r.layout || "collage").replace(/-/g, " ");
+  const parts = [`Built a ${layoutLabel} collage with ${r.placed} photo${r.placed === 1 ? "" : "s"}.`];
+  if (r.style?.shape === "circle") parts.push("Circular frames.");
+  else if (r.style?.radiusPct) parts.push("Rounded corners.");
+  if (r.style?.shadow) parts.push("Drop shadow on.");
+  if (r.generatedBackground?.applied) {
+    parts.push(`Generated a ${r.generatedBackground.theme || "decorative"} background that fits the photos.`);
+  } else if (r.generatedBackground && r.generatedBackground.applied === false) {
+    parts.push("(Couldn't generate the themed background — kept the plain backdrop.)");
+  } else if (r.background && r.background.type && r.background.type !== "none") {
+    parts.push("Applied a background.");
+  }
+  if (r.extras) parts.push(`${r.extras} extra photo${r.extras === 1 ? "" : "s"} left for you to place.`);
+  return parts.join(" ");
+};
 
 const SAMPLE_SIZE = 48;
 
@@ -185,8 +214,8 @@ const newMessage = (role, content, extra = {}) => ({
 // Plan/preview blobs can be large, so per-thread we cap message count and
 // strip heavy fields from older messages.
 const CHAT_STORAGE_VERSION = 2;
-const CHAT_STORAGE_PREFIX = `pixxel-agent-chat-v${CHAT_STORAGE_VERSION}`;
-const CHAT_LEGACY_V1_PREFIX = "pixxel-agent-chat-v1";
+const CHAT_STORAGE_PREFIX = `phosmith-agent-chat-v${CHAT_STORAGE_VERSION}`;
+const CHAT_LEGACY_V1_PREFIX = "phosmith-agent-chat-v1";
 const CHAT_MAX_PERSISTED_MESSAGES = 60;
 const CHAT_KEEP_PLANS_ON_RECENT = 6;
 const CHAT_MAX_THREADS = 24;
@@ -400,7 +429,7 @@ const collectLayersForTargeting = (canvasEditor, project) => {
     const pHash = computePerceptualHash(analysisSource);
     const thumb = computeLayerThumbnail(analysisSource, 256);
     const layerName =
-      (typeof img.pixxelLayerName === "string" && img.pixxelLayerName.trim()) ||
+      (typeof img.phosmithLayerName === "string" && img.phosmithLayerName.trim()) ||
       (typeof img.name === "string" && img.name.trim()) ||
       `Image ${idx + 1}`;
     return {
@@ -1233,6 +1262,13 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   const activeImage = getCanvasActiveImage(canvasEditor);
   const sourceUrl = getSourceUrl(activeImage, project);
   const canChat = Boolean(activeImage && sourceUrl && isImageKitUrl(sourceUrl));
+  // Collage works on the canvas photos directly (≥2 visible images), so it can
+  // run even when there's no single ImageKit-hosted active image to "chat" about.
+  const collageImageCount = (canvasEditor?.getObjects?.() || []).filter(
+    (obj) => obj?.type?.toLowerCase?.() === "image" && obj.visible !== false && !isPhosmithMaskOverlay(obj)
+  ).length;
+  const canCollage = collageImageCount >= 2;
+  const canSend = canChat || canCollage;
 
   const activeChangeSummary = useMemo(() => {
     if (!activePlan) return "No preview yet";
@@ -1522,9 +1558,64 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     return previewToken;
   };
 
+  // Build a collage from a natural-language prompt via the `collage.*` agent
+  // commands (parse → create template → insert the canvas photos → optionally
+  // generate a fit-to-photos background). Lives outside the edit-plan flow.
+  const runCollagePrompt = async (cleanPrompt) => {
+    if (!canvasEditor) return;
+    if (collageImageCount < 2) {
+      setMessages((current) => [
+        ...current,
+        newMessage("user", cleanPrompt),
+        newMessage(
+          "assistant",
+          `Add at least 2 photos to the canvas first — I found ${collageImageCount}. Then ask me to build the collage.`
+        ),
+      ]);
+      setInput("");
+      return;
+    }
+
+    const toastId = toast.loading("Building collage", { description: truncate(cleanPrompt, 70) });
+    setMessages((current) => [...current, newMessage("user", cleanPrompt)]);
+    setInput("");
+    setPendingPrompt(cleanPrompt);
+    setIsThinking(true);
+    try {
+      const { runCommand } = await import("@/lib/agent/command-registry");
+      const result = await runCommand("collage.fromDescription", { prompt: cleanPrompt });
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", summarizeCollageResult(result))]);
+      }
+      toast.success("Collage built", { id: toastId });
+    } catch (error) {
+      const msg = String(error?.message || "Could not build the collage").replace(/^\[agent\.collage\]\s*/, "");
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", msg)]);
+      }
+      toast.error(msg, { id: toastId });
+    } finally {
+      if (isMountedRef.current) {
+        setIsThinking(false);
+        setPendingPrompt(null);
+        setImageRevision((value) => value + 1);
+      }
+    }
+  };
+
   const requestPlan = async (prompt, options = {}) => {
     const cleanPrompt = prompt.trim();
     if (!cleanPrompt) return;
+
+    // Collage requests are handled by the `collage.*` agent commands, which
+    // build a template and place the canvas photos into it — a different flow
+    // from the per-image edit planner, and one that doesn't need an active
+    // ImageKit image.
+    if (isCollageIntent(cleanPrompt)) {
+      await runCollagePrompt(cleanPrompt);
+      return;
+    }
+
     if (!canChat) {
       toast.error("Select an ImageKit-hosted image first");
       return;
@@ -2344,10 +2435,14 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
           <WandSparkles className="h-3.5 w-3.5" />
         </div>
         <div className="min-w-0 flex-1 agent-command-info">
-          <h3>{canChat ? "Ready" : "Waiting for image"}</h3>
-          <p className={`agent-command-sub ${canChat ? "is-ready" : ""}`}>
+          <h3>{canChat ? "Ready" : canCollage ? "Collage ready" : "Waiting for image"}</h3>
+          <p className={`agent-command-sub ${canSend ? "is-ready" : ""}`}>
             <span className="agent-command-dot" aria-hidden="true" />
-            {canChat ? activeChangeSummary : "Select an image to begin"}
+            {canChat
+              ? activeChangeSummary
+              : canCollage
+                ? `${collageImageCount} photos — ask me to build a collage`
+                : "Select an image to begin"}
           </p>
         </div>
         <div className="agent-header-actions">
@@ -2391,20 +2486,23 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       </motion.div>
 
       <div className="agent-quick-rail">
-        {QUICK_PROMPTS.map((item) => (
-          <motion.button
-            key={item.label}
-            type="button"
-            onClick={() => requestPlan(item.prompt)}
-            disabled={!canChat || isThinking}
-            className="agent-quick-card"
-            whileHover={{ y: -2 }}
-            whileTap={{ scale: 0.97 }}
-          >
-            <span>{item.label}</span>
-            <small>{item.hint}</small>
-          </motion.button>
-        ))}
+        {QUICK_PROMPTS.map((item) => {
+          const itemEnabled = isCollageIntent(item.prompt) ? canSend : canChat;
+          return (
+            <motion.button
+              key={item.label}
+              type="button"
+              onClick={() => requestPlan(item.prompt)}
+              disabled={!itemEnabled || isThinking}
+              className="agent-quick-card"
+              whileHover={{ y: -2 }}
+              whileTap={{ scale: 0.97 }}
+            >
+              <span>{item.label}</span>
+              <small>{item.hint}</small>
+            </motion.button>
+          );
+        })}
       </div>
 
       <div className="agent-chat-area">
@@ -2920,7 +3018,9 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       {!canChat && (
         <div className="agent-empty-note">
           <ImageIcon className="h-3.5 w-3.5" />
-          Select an ImageKit-hosted canvas image.
+          {canCollage
+            ? "Select an ImageKit image to edit, or ask me to build a collage."
+            : "Select an ImageKit-hosted canvas image."}
         </div>
       )}
 
@@ -2945,7 +3045,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
         />
         <motion.button
           type="submit"
-          disabled={!canChat || isThinking}
+          disabled={!canSend || isThinking}
           className="agent-send-button"
           whileHover={{ scale: 1.04, rotate: 1 }}
           whileTap={{ scale: 0.95 }}

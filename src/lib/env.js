@@ -47,7 +47,7 @@ const collect = (names) => {
 // + route handlers + proxy.ts), each with its own module instance. A plain
 // module-level `let validated = false` would log the warning once per instance.
 // Hoist the dedupe flag to `globalThis` so all instances share it.
-const VALIDATED_KEY = Symbol.for("pixxel.env.validated")
+const VALIDATED_KEY = Symbol.for("phosmith.env.validated")
 const markValidated = () => {
   globalThis[VALIDATED_KEY] = true
 }

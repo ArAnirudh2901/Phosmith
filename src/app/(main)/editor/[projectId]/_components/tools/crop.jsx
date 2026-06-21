@@ -671,7 +671,7 @@ const CropContent = ({ dominantColor, contrastingColor, lighterColor }) => {
                 // Defer one frame so cropBox state is committed before applyCrop reads it.
                 requestAnimationFrame(() => {
                     // applyCrop is defined below — guard against undefined during tree-shaking.
-                    document.dispatchEvent(new CustomEvent('pixxel:crop-auto-apply'))
+                    document.dispatchEvent(new CustomEvent('phosmith:crop-auto-apply'))
                 })
             }
         } catch (err) {

@@ -1,13 +1,13 @@
-export const PIXEL_MASK_OVERLAY_NAME = 'pixxel-mask-overlay'
-export const PIXEL_MASK_CLIP_NAME = 'pixxel-mask-clip'
+export const PIXEL_MASK_OVERLAY_NAME = 'phosmith-mask-overlay'
+export const PIXEL_MASK_CLIP_NAME = 'phosmith-mask-clip'
 
-const MASK_RLE_TYPE = 'pixxel-mask-rle'
+const MASK_RLE_TYPE = 'phosmith-mask-rle'
 const MASK_RLE_VERSION = 1
 
-export const isPixxelMaskOverlay = (obj) =>
+export const isPhosmithMaskOverlay = (obj) =>
   obj?.name === PIXEL_MASK_OVERLAY_NAME ||
-  obj?.pixxelMaskOverlay ||
-  obj?._pixxelMaskOverlay
+  obj?.phosmithMaskOverlay ||
+  obj?._phosmithMaskOverlay
 
 const bytesToBase64 = (bytes) => {
   let binary = ''
@@ -206,8 +206,8 @@ export const createMaskClipPath = (FabricImage, maskCanvas, { feather = 0 } = {}
     evented: false,
     objectCaching: false,
     name: PIXEL_MASK_CLIP_NAME,
-    pixxelMaskClipPath: true,
-    _pixxelMaskClipPath: true,
+    phosmithMaskClipPath: true,
+    _phosmithMaskClipPath: true,
   })
 
 export const encodeMaskCanvas = (maskCanvas) => {
@@ -329,13 +329,13 @@ export const isImageObject = (obj) => obj?.type?.toLowerCase?.() === 'image'
 export const getMaskTargetImage = (canvasEditor) => {
   if (!canvasEditor) return null
   const active = canvasEditor.getActiveObject?.()
-  if (isImageObject(active) && !isPixxelMaskOverlay(active)) return active
+  if (isImageObject(active) && !isPhosmithMaskOverlay(active)) return active
 
   const objects = canvasEditor.getObjects?.() || []
   return (
     [...objects]
       .reverse()
-      .find((obj) => isImageObject(obj) && !isPixxelMaskOverlay(obj) && obj.visible !== false) || null
+      .find((obj) => isImageObject(obj) && !isPhosmithMaskOverlay(obj) && obj.visible !== false) || null
   )
 }
 

@@ -470,7 +470,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                 <button
                     onClick={addText}
                     className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive"
-                    style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none', boxShadow: 'var(--shadow-glow)' }}
+                    style={{ background: dominantColor || 'var(--accent-primary)', color: contrastingColor || '#fff', border: 'none', boxShadow: dominantColor ? `0 0 15px ${dominantColor}40` : 'var(--shadow-glow)' }}
                 >
                     <Type className="h-3.5 w-3.5" />
                     Add Text

@@ -1,8 +1,11 @@
 <p align="center">
-  <img src="public/Logo.png" alt="Pixxel Logo" width="120" />
+  <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 32 32">
+    <rect width="32" height="32" rx="7" fill="#0B0D12"/>
+    <path d="M16 3 C 16.7 9.6, 22.4 15.3, 29 16 C 22.4 16.7, 16.7 22.4, 16 29 C 15.3 22.4, 9.6 16.7, 3 16 C 9.6 15.3, 15.3 9.6, 16 3 Z" fill="#06B8D4"/>
+  </svg>
 </p>
 
-<h1 align="center">Pixxel — AI Image Studio</h1>
+<h1 align="center">Phosmith — AI Image Studio</h1>
 
 <p align="center">
   <strong>A professional-grade, AI-powered image editor built for the browser.</strong><br />
@@ -22,7 +25,7 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Pixxel Landing Page — Edit Pixels with Intent" width="100%" />
+  <img src="docs/screenshots/hero.png" alt="Phosmith Landing Page — Edit Pixels with Intent" width="100%" />
 </p>
 
 ---
@@ -50,7 +53,7 @@
 
 ## Overview
 
-Pixxel is a state-of-the-art web-based image editor that seamlessly blends professional-grade adjustment tools with advanced AI capabilities. It features a custom WebGL2 compositing engine (the **Megashader**), non-destructive mask layers, an AI agentic editing assistant, and support for local large language models (LLMs) and computer vision models.
+Phosmith is a state-of-the-art web-based image editor that seamlessly blends professional-grade adjustment tools with advanced AI capabilities. It features a custom WebGL2 compositing engine (the **Megashader**), non-destructive mask layers, an AI agentic editing assistant, and support for local large language models (LLMs) and computer vision models.
 
 The editor runs entirely in the browser — image processing is handled by the GPU via WebGL2 shaders, and AI inference is offloaded to a local Python FastAPI service. No cloud GPU required.
 
@@ -338,8 +341,8 @@ The dashboard provides a grid view of all projects with:
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-username/pixxel-gpt.git
-cd pixxel-gpt
+git clone https://github.com/your-username/phosmith.git
+cd phosmith
 
 # Install dependencies
 bun install
@@ -524,7 +527,7 @@ The agent has a persistent chat interface with conversation history stored per-p
 ---
 
 <p align="center">
-  <img src="public/Logo.png" alt="Pixxel" width="40" /><br />
+  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0B0D12"/><path d="M16 3 C 16.7 9.6, 22.4 15.3, 29 16 C 22.4 16.7, 16.7 22.4, 16 29 C 15.3 22.4, 9.6 16.7, 3 16 C 9.6 15.3, 15.3 9.6, 16 3 Z" fill="#06B8D4"/></svg><br />
   Built with ❤️ using Next.js, Fabric.js, WebGL2, and a lot of GLSL.
 </p>
 

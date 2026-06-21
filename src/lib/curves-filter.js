@@ -144,7 +144,7 @@ const packLutsRgba = (lutR, lutG, lutB, lutM) => {
     return packed
 }
 
-const CURVES_FILTER_TYPE = "PixxelCurves"
+const CURVES_FILTER_TYPE = "PhosmithCurves"
 
 const FRAGMENT_SOURCE = `
 precision highp float;
@@ -169,7 +169,7 @@ void main() {
 }
 `
 
-export class PixxelCurvesFilter extends filters.BaseFilter {
+export class PhosmithCurvesFilter extends filters.BaseFilter {
     constructor(options = {}) {
         super(options)
         this.lutR = options.lutR || identityLut()
@@ -292,7 +292,7 @@ export class PixxelCurvesFilter extends filters.BaseFilter {
             for (let i = 0; i < LUT_SIZE; i++) out[i] = arr[i] | 0
             return out
         }
-        return new PixxelCurvesFilter({
+        return new PhosmithCurvesFilter({
             ...rest,
             lutR: asTyped(lutR),
             lutG: asTyped(lutG),
@@ -302,12 +302,12 @@ export class PixxelCurvesFilter extends filters.BaseFilter {
     }
 }
 
-Object.defineProperty(PixxelCurvesFilter, "type", { value: CURVES_FILTER_TYPE })
-Object.defineProperty(PixxelCurvesFilter, "uniformLocations", { value: ["uLut"] })
+Object.defineProperty(PhosmithCurvesFilter, "type", { value: CURVES_FILTER_TYPE })
+Object.defineProperty(PhosmithCurvesFilter, "uniformLocations", { value: ["uLut"] })
 
 // Register with Fabric's class registry so loadFromJSON / enliveObjects can rehydrate
 // saved canvas state that includes this filter. Without this, projects saved after
-// applying curves fail to load with "No class registered for PixxelCurves".
+// applying curves fail to load with "No class registered for PhosmithCurves".
 // Calling setClass with no second arg registers BOTH the original type name AND its
 // lowercase form, so saved JSON works regardless of which casing Fabric emitted.
-classRegistry.setClass(PixxelCurvesFilter)
+classRegistry.setClass(PhosmithCurvesFilter)

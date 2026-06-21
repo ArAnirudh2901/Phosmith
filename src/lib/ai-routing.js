@@ -18,8 +18,8 @@
  *     instances, Gemini planning), client as the fallback. This is also what
  *     makes the editor work out-of-the-box without the Python service.
  *
- * Persistence: localStorage `pixxel:ai-routing` (JSON map). The legacy
- * boolean `pixxel:client-ai` (the old all-or-nothing "On-device AI" toggle)
+ * Persistence: localStorage `phosmith:ai-routing` (JSON map). The legacy
+ * boolean `phosmith:client-ai` (the old all-or-nothing "On-device AI" toggle)
  * migrates on first read: when set, every client-capable capability starts
  * as 'client'.
  *
@@ -91,9 +91,9 @@ export const AI_CAPABILITIES = {
     },
 }
 
-const STORAGE_KEY = 'pixxel:ai-routing'
-const LEGACY_CLIENT_KEY = 'pixxel:client-ai'
-const CHANGED_EVENT = 'pixxel:ai-routing-changed'
+const STORAGE_KEY = 'phosmith:ai-routing'
+const LEGACY_CLIENT_KEY = 'phosmith:client-ai'
+const CHANGED_EVENT = 'phosmith:ai-routing-changed'
 
 const hasWindow = () => typeof window !== 'undefined'
 

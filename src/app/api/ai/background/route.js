@@ -54,9 +54,9 @@ const getHuggingFaceEndpoint = () => {
     return `${baseUrl}/${HF_MODEL}`
 }
 
-async function generateImageWithHuggingFace(prompt) {
+async function generateImageWithHuggingFace(prompt, { raw = false } = {}) {
     const apiToken = process.env.HUGGINGFACE_API_TOKEN
-    
+
     if (!apiToken) {
         throw new Error('Hugging Face API token is not configured')
     }
@@ -65,7 +65,13 @@ async function generateImageWithHuggingFace(prompt) {
         throw new Error('Hugging Face API token is not set. Please configure HUGGINGFACE_API_TOKEN in .env.local')
     }
 
-    const enhancedPrompt = `${prompt}. High quality, professional background, clean, no text, no logos, no watermark, photorealistic.`
+    // `raw` callers (e.g. the collage "fit the photos" decorative themes) own the
+    // full style description — appending "photorealistic" would fight an
+    // illustration/watercolor/chalk look, so only the photo-style generator gets
+    // the photoreal quality suffix.
+    const enhancedPrompt = raw
+        ? `${prompt} High quality, clean composition.`
+        : `${prompt}. High quality, professional background, clean, no text, no logos, no watermark, photorealistic.`
 
     try {
         const response = await fetchWithTimeout(
@@ -223,7 +229,7 @@ export async function POST(request) {
         )
     }
 
-    const { prompt } = body || {}
+    const { prompt, raw } = body || {}
 
     // Prompt validation
     const validation = validatePrompt(prompt)
@@ -244,7 +250,7 @@ export async function POST(request) {
 
         // Generate image with Hugging Face
         const startTime = Date.now()
-        const buffer = await generateImageWithHuggingFace(validation.prompt)
+        const buffer = await generateImageWithHuggingFace(validation.prompt, { raw: raw === true })
         const generationTime = Date.now() - startTime
 
         console.info('[AI Background] Image generated successfully', {

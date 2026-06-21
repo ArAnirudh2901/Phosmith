@@ -14,13 +14,13 @@
 // over a Fabric canvas) so the command-registry / agent layer can call it without
 // the React topbar.
 
-import { isPixxelMaskOverlay } from "@/lib/canvas-mask"
+import { isPhosmithMaskOverlay } from "@/lib/canvas-mask"
 
 // Transient objects that must never appear in a flattened render: the mask
 // tool's live overlay and anything explicitly flagged excludeFromExport.
 export const isExportTransientObject = (obj) =>
     obj?.excludeFromExport ||
-    isPixxelMaskOverlay(obj)
+    isPhosmithMaskOverlay(obj)
 
 export const isTaintError = (error) =>
     /taint|insecure|securityerror|cross-?origin/i.test(

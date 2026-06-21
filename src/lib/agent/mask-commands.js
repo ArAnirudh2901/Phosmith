@@ -9,7 +9,7 @@
  * source of truth — the `MegashaderFilter` that lives on the Fabric image
  * (which already survives tool switches + save/reload).
  *
- * Reconciliation: after every mutation we dispatch `pixxel:mask-chain-replaced`
+ * Reconciliation: after every mutation we dispatch `phosmith:mask-chain-replaced`
  * so a mounted Mask tool can re-sync its panel (see `useMaskLayers`). When the
  * tool is NOT mounted (true headless agent run), the direct
  * `applyMegashaderFilter` call is what renders — no UI needed.
@@ -106,7 +106,7 @@ const decodeBase64Png = (b64) => new Promise((resolve, reject) => {
  * space every other mask command uses.
  */
 const fetchSubjectInstances = async (image, { refresh = false } = {}) => {
-    if (!refresh && image.__pixxelSubjectInstances) return image.__pixxelSubjectInstances
+    if (!refresh && image.__phosmithSubjectInstances) return image.__phosmithSubjectInstances
     const { blob, scale } = await imageToUploadBlob(image)
     const form = new FormData()
     form.append('image', blob, 'image.jpg')
@@ -123,7 +123,7 @@ const fetchSubjectInstances = async (image, { refresh = false } = {}) => {
         centroidImage: (inst.centroid || []).map((v) => Math.round(v * inv)),
     }))
     const out = { ...data, instances }
-    image.__pixxelSubjectInstances = out
+    image.__phosmithSubjectInstances = out
     return out
 }
 
@@ -244,7 +244,7 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
             ...extraOpts,
         })
         try { image.canvas?.requestRenderAll?.() } catch { /* no canvas */ }
-        try { window.dispatchEvent(new CustomEvent('pixxel:mask-chain-replaced', { detail: { stack } })) } catch { /* SSR */ }
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-chain-replaced', { detail: { stack } })) } catch { /* SSR */ }
         return stack
     }
 
@@ -396,17 +396,17 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
         setOverlay: {
             description: 'Toggle the "show mask" red overlay visualisation.',
             params: { on: 'boolean' },
-            run: ({ on }) => { apply(getStack(requireImage()), { maskOverlay: !!on }); try { window.dispatchEvent(new CustomEvent('pixxel:mask-overlay', { detail: { value: !!on } })) } catch {} return { ok: true } },
+            run: ({ on }) => { apply(getStack(requireImage()), { maskOverlay: !!on }); try { window.dispatchEvent(new CustomEvent('phosmith:mask-overlay', { detail: { value: !!on } })) } catch {} return { ok: true } },
         },
         setInvert: {
             description: 'Toggle global invert of the whole mask.',
             params: { on: 'boolean' },
-            run: ({ on }) => { apply(getStack(requireImage()), { globalInvert: !!on }); try { window.dispatchEvent(new CustomEvent('pixxel:mask-invert', { detail: { value: !!on } })) } catch {} return { ok: true } },
+            run: ({ on }) => { apply(getStack(requireImage()), { globalInvert: !!on }); try { window.dispatchEvent(new CustomEvent('phosmith:mask-invert', { detail: { value: !!on } })) } catch {} return { ok: true } },
         },
         setGlobalAlpha: {
             description: 'Set the overall mask strength (0..1).',
             params: { value: 'number 0..1' },
-            run: ({ value }) => { apply(getStack(requireImage()), { globalMaskAlpha: Math.max(0, Math.min(1, Number(value))) }); try { window.dispatchEvent(new CustomEvent('pixxel:mask-global-alpha', { detail: { value } })) } catch {} return { ok: true } },
+            run: ({ value }) => { apply(getStack(requireImage()), { globalMaskAlpha: Math.max(0, Math.min(1, Number(value))) }); try { window.dispatchEvent(new CustomEvent('phosmith:mask-global-alpha', { detail: { value } })) } catch {} return { ok: true } },
         },
         selectSubject: {
             description: 'AI: detect the photo subject(s) and add them as a mask layer. Follows the AI routing policy — BiRefNet on the service, or RMBG-1.4 in the browser.',

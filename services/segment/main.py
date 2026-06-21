@@ -1,4 +1,4 @@
-"""Pixxel mask service.
+"""Phosmith mask service.
 
 Wraps `rembg` (BiRefNet default) and Hugging Face `transformers` SAM 2
 (Hiera-Small) in a tiny FastAPI HTTP API so the Next.js AI routes can
@@ -1092,7 +1092,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Pixxel Mask Service",
+    title="Phosmith Mask Service",
     version="1.1.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -1217,7 +1217,7 @@ def _rasterize_shape_mask(width: int, height: int, points: list[tuple[float, flo
 async def root() -> dict:
     return {
         "status": "ok",
-        "message": "Pixxel Mask Service is running"
+        "message": "Phosmith Mask Service is running"
     }
 
 @app.get("/health")

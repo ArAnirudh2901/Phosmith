@@ -34,7 +34,7 @@ import { isCanvasLive } from './expansion-pipeline'
 const POLL_INTERVAL_MS = 6 * 1000
 const MAX_POLL_MS = 10 * 60 * 1000
 const MAX_CONSECUTIVE_FAILURES = 10
-const STORAGE_KEY = 'pixxel:pending-extends'
+const STORAGE_KEY = 'phosmith:pending-extends'
 
 /** projectId → job. Job: { projectId, pendingGenfillUrl, fallbackUrl,
  *  startedAt, resultUrl, timer, abort, failures } */
@@ -113,13 +113,13 @@ const findSoftPreview = (canvas, fallbackUrl) => {
  *  the same keys canvas-state.js persists — anything the user edited on the
  *  soft preview must follow it onto the real result. */
 const CARRY_PROPS = [
-    'pixxelAdjustValues', '_pixxelAdjustValues',
-    'pixxelAdjustmentId', '_pixxelAdjustmentId',
-    'pixxelImageKitAdjustBaseSrc', '_pixxelImageKitAdjustBaseSrc',
-    'pixxelImageKitAdjustValues',
-    'pixxelCollageSource', '_pixxelCollageSource',
-    '_pixxelMaskCanvas', '_pixxelHasMask', 'pixxelHasMask',
-    'pixxelMaskFeather', '_pixxelMaskFeather',
+    'phosmithAdjustValues', '_phosmithAdjustValues',
+    'phosmithAdjustmentId', '_phosmithAdjustmentId',
+    'phosmithImageKitAdjustBaseSrc', '_phosmithImageKitAdjustBaseSrc',
+    'phosmithImageKitAdjustValues',
+    'phosmithCollageSource', '_phosmithCollageSource',
+    '_phosmithMaskCanvas', '_phosmithHasMask', 'phosmithHasMask',
+    'phosmithMaskFeather', '_phosmithMaskFeather',
 ]
 
 /** Swap the soft preview for the real result, preserving placement, z-order,

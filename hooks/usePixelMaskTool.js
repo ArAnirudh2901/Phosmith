@@ -16,7 +16,7 @@ import {
     getMaskTargetImage,
     growMaskRegionFromStroke,
     isMaskCanvasEmpty,
-    isPixxelMaskOverlay,
+    isPhosmithMaskOverlay,
     maskCanvasFromClipPath,
     maskFromImageAlpha,
     paintOverlayFromMask,
@@ -35,7 +35,7 @@ const MAX_HISTORY = 40
 const BRACKET_STEP = 4
 const DEFERRED_REGION_PREVIEW_MS = 90
 
-const isMaskOverlay = (obj) => isPixxelMaskOverlay(obj)
+const isMaskOverlay = (obj) => isPhosmithMaskOverlay(obj)
 
 const isTypingTarget = () => {
     if (typeof document === 'undefined') return false
@@ -136,7 +136,7 @@ const sampleMaskCoverage = (imageEl) => {
  * usePixelMaskTool — the shared painting engine behind both the Mask and Erase
  * tools. It owns all brush state, wires canvas pointer events, draws the live
  * on-canvas brush cursor, manages an undo/redo stack, and keeps the per-image
- * `_pixxelMaskCanvas` → Fabric clipPath in sync (so transparency survives
+ * `_phosmithMaskCanvas` → Fabric clipPath in sync (so transparency survives
  * save/export). Each tool renders its own controls bound to the returned state.
  *
  * @param {object}  opts
@@ -268,7 +268,7 @@ export default function usePixelMaskTool({
         if (!canvasEditor) return
         canvasEditor.__maskCanUndo = undoDepth > 0
         canvasEditor.__maskCanRedo = redoDepth > 0
-        try { window.dispatchEvent(new CustomEvent('pixxel:mask-history-changed')) } catch { /* SSR */ }
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-history-changed')) } catch { /* SSR */ }
     }, [canvasEditor, undoDepth, redoDepth])
 
     const effectiveMode = useCallback(() => {
@@ -284,7 +284,7 @@ export default function usePixelMaskTool({
         const { width, height } = getImageBitmapSize(img)
 
         let maskCanvas = null
-        const attached = img._pixxelMaskCanvas
+        const attached = img._phosmithMaskCanvas
         if (attached?.width === width && attached?.height === height) {
             maskCanvas = attached
         } else if (
@@ -297,7 +297,7 @@ export default function usePixelMaskTool({
             maskCanvas = maskCanvasFromClipPath(img.clipPath, width, height) || createMaskCanvas(width, height)
         }
 
-        img._pixxelMaskCanvas = maskCanvas
+        img._phosmithMaskCanvas = maskCanvas
         maskCanvasRef.current = maskCanvas
 
         if (
@@ -349,8 +349,8 @@ export default function usePixelMaskTool({
             excludeFromExport: true,
             opacity: 1,
             name: PIXEL_MASK_OVERLAY_NAME,
-            pixxelMaskOverlay: true,
-            _pixxelMaskOverlay: true,
+            phosmithMaskOverlay: true,
+            _phosmithMaskOverlay: true,
         }
 
         let overlayImg = overlayImageRef.current
@@ -381,8 +381,8 @@ export default function usePixelMaskTool({
 
         if (empty && !skipClip) {
             img.clipPath = undefined
-            img._pixxelHasMask = false
-            img.pixxelHasMask = false
+            img._phosmithHasMask = false
+            img.phosmithHasMask = false
             removeOverlay({ render: false })
             canvasEditor.requestRenderAll()
             return
@@ -399,11 +399,11 @@ export default function usePixelMaskTool({
         if (!skipClip) {
             const clipImg = createMaskClipPath(FabricImage, maskCanvas, { feather: featherRef.current })
             img.clipPath = clipImg
-            img._pixxelHasMask = true
-            img.pixxelHasMask = true
-            img._pixxelMaskCanvas = maskCanvas
-            img.pixxelMaskFeather = featherRef.current
-            img._pixxelMaskFeather = featherRef.current
+            img._phosmithHasMask = true
+            img.phosmithHasMask = true
+            img._phosmithMaskCanvas = maskCanvas
+            img.phosmithMaskFeather = featherRef.current
+            img._phosmithMaskFeather = featherRef.current
             img.set?.('dirty', true)
             img.setCoords?.()
         }
@@ -580,8 +580,8 @@ export default function usePixelMaskTool({
         ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height)
         if (targetImageRef.current) {
             targetImageRef.current.clipPath = undefined
-            targetImageRef.current._pixxelHasMask = false
-            targetImageRef.current.pixxelHasMask = false
+            targetImageRef.current._phosmithHasMask = false
+            targetImageRef.current.phosmithHasMask = false
         }
         removeOverlay()
         setHasMask(false)
@@ -1490,7 +1490,7 @@ export default function usePixelMaskTool({
         ensureMaskCanvas(targetImage)
         // Seed feather from any previously-stored value so reopening the tool on a
         // soft-edged mask shows the right slider position and rebuilds soft edges.
-        const storedFeather = Math.max(0, Math.round(targetImage.pixxelMaskFeather || targetImage._pixxelMaskFeather || 0))
+        const storedFeather = Math.max(0, Math.round(targetImage.phosmithMaskFeather || targetImage._phosmithMaskFeather || 0))
         featherRef.current = storedFeather
         setFeather(storedFeather)
         // Restore any undo/redo history stashed on this image from a previous visit,
@@ -1501,8 +1501,8 @@ export default function usePixelMaskTool({
         const seedStackFits = (stack) =>
             Array.isArray(stack) &&
             stack.every((snap) => snap?.width === seedW && snap?.height === seedH)
-        undoStackRef.current = seedStackFits(targetImage._pixxelUndoStack) ? targetImage._pixxelUndoStack : []
-        redoStackRef.current = seedStackFits(targetImage._pixxelRedoStack) ? targetImage._pixxelRedoStack : []
+        undoStackRef.current = seedStackFits(targetImage._phosmithUndoStack) ? targetImage._phosmithUndoStack : []
+        redoStackRef.current = seedStackFits(targetImage._phosmithRedoStack) ? targetImage._phosmithRedoStack : []
         setUndoDepth(undoStackRef.current.length)
         setRedoDepth(redoStackRef.current.length)
         lockCanvas(canvasEditor, targetImage)
@@ -1511,12 +1511,12 @@ export default function usePixelMaskTool({
 
         // Build the floating brush-cursor ring (outer ring + inner hardness ring).
         const cursorEl = document.createElement('div')
-        cursorEl.className = 'pixxel-brush-cursor'
+        cursorEl.className = 'phosmith-brush-cursor'
         // Seed the transform off-screen so the ring can never flash at (0,0)
         // before the first positionCursor() call sets its real location.
         cursorEl.style.transform = 'translate3d(-9999px, -9999px, 0) translate(-50%, -50%)'
         const innerEl = document.createElement('div')
-        innerEl.className = 'pixxel-brush-cursor-inner'
+        innerEl.className = 'phosmith-brush-cursor-inner'
         cursorEl.appendChild(innerEl)
         document.body.appendChild(cursorEl)
         cursorElRef.current = cursorEl
@@ -1821,11 +1821,11 @@ export default function usePixelMaskTool({
                 const stackFits = (stack) =>
                     Array.isArray(stack) &&
                     stack.every((snap) => snap?.width === nextW && snap?.height === nextH)
-                undoStackRef.current = stackFits(next._pixxelUndoStack) ? next._pixxelUndoStack : []
-                redoStackRef.current = stackFits(next._pixxelRedoStack) ? next._pixxelRedoStack : []
+                undoStackRef.current = stackFits(next._phosmithUndoStack) ? next._phosmithUndoStack : []
+                redoStackRef.current = stackFits(next._phosmithRedoStack) ? next._phosmithRedoStack : []
                 setUndoDepth(undoStackRef.current.length)
                 setRedoDepth(redoStackRef.current.length)
-                const f = Math.max(0, Math.round(next.pixxelMaskFeather || next._pixxelMaskFeather || 0))
+                const f = Math.max(0, Math.round(next.phosmithMaskFeather || next._phosmithMaskFeather || 0))
                 featherRef.current = f
                 setFeather(f)
                 lockCanvas(canvasEditor, next)
@@ -1868,8 +1868,8 @@ export default function usePixelMaskTool({
         window.addEventListener('keydown', onBracketKey)
         window.addEventListener('blur', resetModifiers)
         document.addEventListener('visibilitychange', onVisibilityChange)
-        window.addEventListener('pixxel:mask-undo', onMaskUndo)
-        window.addEventListener('pixxel:mask-redo', onMaskRedo)
+        window.addEventListener('phosmith:mask-undo', onMaskUndo)
+        window.addEventListener('phosmith:mask-redo', onMaskRedo)
 
         // Expose live updaters so param-change effects can restyle the cursor.
         cursorElRef.current.__restyle = styleCursor
@@ -1890,10 +1890,10 @@ export default function usePixelMaskTool({
                 // (RLE-encoded) snapshots can be garbage-collected.
                 const undoTail = undoStackRef.current.slice(-MAX_HISTORY)
                 const redoTail = redoStackRef.current.slice(-MAX_HISTORY)
-                if (undoTail.length) stashImg._pixxelUndoStack = undoTail
-                else delete stashImg._pixxelUndoStack
-                if (redoTail.length) stashImg._pixxelRedoStack = redoTail
-                else delete stashImg._pixxelRedoStack
+                if (undoTail.length) stashImg._phosmithUndoStack = undoTail
+                else delete stashImg._phosmithUndoStack
+                if (redoTail.length) stashImg._phosmithRedoStack = redoTail
+                else delete stashImg._phosmithRedoStack
             }
             canvasEditor.off('mouse:down', onMouseDown)
             canvasEditor.off('mouse:move', onMouseMove)
@@ -1907,8 +1907,8 @@ export default function usePixelMaskTool({
             window.removeEventListener('keydown', onBracketKey)
             window.removeEventListener('blur', resetModifiers)
             document.removeEventListener('visibilitychange', onVisibilityChange)
-            window.removeEventListener('pixxel:mask-undo', onMaskUndo)
-            window.removeEventListener('pixxel:mask-redo', onMaskRedo)
+            window.removeEventListener('phosmith:mask-undo', onMaskUndo)
+            window.removeEventListener('phosmith:mask-redo', onMaskRedo)
             // Only relinquish the topbar routing if it's still ours (guards the
             // rare Mask↔Erase remount overlap from deleting the new handler).
             if (canvasEditor.__maskToolUndo === onMaskUndo) delete canvasEditor.__maskToolUndo
@@ -1917,7 +1917,7 @@ export default function usePixelMaskTool({
             // back to the global history once no pixel tool is mounted.
             delete canvasEditor.__maskCanUndo
             delete canvasEditor.__maskCanRedo
-            try { window.dispatchEvent(new CustomEvent('pixxel:mask-history-changed')) } catch { /* SSR */ }
+            try { window.dispatchEvent(new CustomEvent('phosmith:mask-history-changed')) } catch { /* SSR */ }
             // A tool switch can unmount mid-stroke — never leave a stale
             // stroke preview on the top compositing layer.
             try { canvasEditor.clearContext?.(canvasEditor.contextTop) } catch { /* ignore */ }

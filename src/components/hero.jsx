@@ -110,7 +110,7 @@ const HeroSection = () => {
                     style={{ color: "#A1A8B4" }}
                 >
                     {(
-                        "Pixxel is a browser-native photo editor with a built-in AI agent. Upscale, extend, retouch, mask, and recompose images using a Photoshop-class canvas — or just describe the edit and let the agent do it."
+                        "Phosmith is a browser-native photo editor with a built-in AI agent. Upscale, extend, retouch, mask, and recompose images using a Photoshop-class canvas — or just describe the edit and let the agent do it."
                     )
                         .split(" ")
                         .map((word, idx) => (

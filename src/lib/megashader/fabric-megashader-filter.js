@@ -20,7 +20,7 @@
  *      via `loadFromJSON`. `fromObject` is the inverse.
  *
  * Why the filter does not subclass the existing `BaseFilter` directly:
- *   The codebase already has a custom `PixxelCurvesFilter` extending
+ *   The codebase already has a custom `PhosmithCurvesFilter` extending
  *   `fabric.Image.filters.BaseFilter`. We mirror that pattern but keep this
  *   filter in its own file so the curves work and the megashader work can
  *   evolve independently.

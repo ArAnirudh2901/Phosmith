@@ -2142,8 +2142,8 @@ const MaskControls = ({ dominantColor }) => {
             const max = e?.detail?.max || 8
             toast.error(`Mask layer limit reached (${max}). Remove a layer to add more.`)
         }
-        try { window.addEventListener('pixxel:mask-layer-limit', onLimit) } catch { /* SSR */ }
-        return () => { try { window.removeEventListener('pixxel:mask-layer-limit', onLimit) } catch { /* SSR */ } }
+        try { window.addEventListener('phosmith:mask-layer-limit', onLimit) } catch { /* SSR */ }
+        return () => { try { window.removeEventListener('phosmith:mask-layer-limit', onLimit) } catch { /* SSR */ } }
     }, [])
 
     // Remove any stray lasso overlay objects when the canvas changes or the
@@ -2511,7 +2511,7 @@ const MaskControls = ({ dominantColor }) => {
             lastInstancesImageRef.current = fabricObj
             // Cache on the Fabric image so other tools (and the agent's
             // mask-commands cache) can reuse the same payload.
-            try { fabricObj.__pixxelSubjectInstances = { ...data, instances: data.instances } } catch { /* ignore */ }
+            try { fabricObj.__phosmithSubjectInstances = { ...data, instances: data.instances } } catch { /* ignore */ }
 
             // Auto-apply the union so the panel shows immediate masking feedback.
             if (data.unionPng) {
@@ -2553,7 +2553,7 @@ const MaskControls = ({ dominantColor }) => {
 
     const handleApplyAllSubjectsUnion = useCallback(async () => {
         if (!tool.mainImage) return
-        const cached = tool.mainImage.__pixxelSubjectInstances || subjectInstances && { unionPng: null, instances: subjectInstances }
+        const cached = tool.mainImage.__phosmithSubjectInstances || subjectInstances && { unionPng: null, instances: subjectInstances }
         if (cached?.unionPng) {
             try {
                 const blob = base64PngToBlob(cached.unionPng)

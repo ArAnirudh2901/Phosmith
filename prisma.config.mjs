@@ -10,6 +10,6 @@ export default defineConfig({
     url:
       process.env.DIRECT_URL ||
       process.env.DATABASE_URL ||
-      "postgresql://postgres:postgres@localhost:5432/pixxel_gpt?schema=public",
+      "postgresql://postgres:postgres@localhost:5432/phosmith_gpt?schema=public",
   },
 });

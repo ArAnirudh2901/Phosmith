@@ -21,8 +21,8 @@ import { duration, easeOut } from "@/lib/motion"
 import { getClientPreferredCapabilities, subscribeRouting } from "@/lib/ai-routing"
 import { prefetchClientModels } from "@/lib/client-ai"
 
-const SIDEBAR_WIDTH_KEY = "pixxel-editor-sidebar-width"
-const AGENT_SIDEBAR_WIDTH_KEY = "pixxel-editor-agent-sidebar-width"
+const SIDEBAR_WIDTH_KEY = "phosmith-editor-sidebar-width"
+const AGENT_SIDEBAR_WIDTH_KEY = "phosmith-editor-agent-sidebar-width"
 const DEFAULT_SIDEBAR_WIDTH = 320
 const DEFAULT_AGENT_SIDEBAR_WIDTH = 476
 const MIN_SIDEBAR_WIDTH = 260
@@ -98,10 +98,10 @@ const Editor = () => {
         }
         if (subId) {
             // Sub-action hint: broadcast on window so individual tools can react
-            // without prop-drilling. Tools listen for "pixxel:tool-sub" with
+            // without prop-drilling. Tools listen for "phosmith:tool-sub" with
             // { detail: { toolId, subId } } and apply their own preset.
             try {
-                window.dispatchEvent(new CustomEvent("pixxel:tool-sub", { detail: { toolId, subId } }))
+                window.dispatchEvent(new CustomEvent("phosmith:tool-sub", { detail: { toolId, subId } }))
             } catch { /* SSR safe */ }
         }
     }, [])
@@ -353,11 +353,28 @@ const Editor = () => {
     )
 
     const accentCSS = {
+        // Accent
         "--accent-ink": dynamicAccent.accent,
         "--accent-primary": dynamicAccent.accent,
         "--accent-ink-glow": `rgba(${dynamicAccent.accentRgb}, 0.35)`,
         "--accent-ink-dim": `rgba(${dynamicAccent.accentRgb}, 0.12)`,
         "--shadow-glow": `0 0 20px rgba(${dynamicAccent.accentRgb}, 0.15)`,
+        // Chrome surfaces — tinted to the image's dominant hue
+        "--editor-chrome-bg": dynamicAccent.panelBg,
+        "--bg-panel": dynamicAccent.panelBg,
+        "--bg-elevated": dynamicAccent.elevatedBg,
+        "--bg-surface": dynamicAccent.surfaceBg,
+        // Text — slightly hue-tinted, always high-contrast on dark surfaces
+        "--text-primary": dynamicAccent.textPrimary,
+        "--text-secondary": dynamicAccent.textSecondary,
+        "--text-muted": dynamicAccent.textMuted,
+        "--text-on-accent": dynamicAccent.textOnAccent,
+        // Borders — mid-saturation hue tint at varying opacities
+        "--border-subtle": dynamicAccent.borderSubtle,
+        "--border-default": dynamicAccent.borderDefault,
+        "--border-strong": dynamicAccent.borderStrong,
+        "--border-accent": `rgba(${dynamicAccent.accentRgb}, 0.25)`,
+        "--accent-wash": dynamicAccent.accentWash,
     }
 
     const editorContent = (

@@ -4,7 +4,7 @@ import { useEffect, useCallback } from "react"
 import { ActiveSelection } from "fabric"
 
 /**
- * Global keyboard shortcut hook for the Pixxel editor.
+ * Global keyboard shortcut hook for the Phosmith editor.
  *
  * Immediately bypasses shortcut logic when the user is typing inside
  * an <input>, <textarea>, or contentEditable element.
@@ -109,7 +109,7 @@ const useEditorShortcuts = (canvasEditor, activeTool, onToolChange, onToggleComm
                 // its own per-stroke stack first (it falls back to the global history
                 // when its stack is empty). Avoids the confusing dual-stack behaviour.
                 if (activeTool === "mask" || activeTool === "erase") {
-                    window.dispatchEvent(new CustomEvent(event.shiftKey ? "pixxel:mask-redo" : "pixxel:mask-undo"))
+                    window.dispatchEvent(new CustomEvent(event.shiftKey ? "phosmith:mask-redo" : "phosmith:mask-undo"))
                     return
                 }
                 if (event.shiftKey) {

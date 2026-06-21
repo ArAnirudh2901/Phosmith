@@ -202,6 +202,9 @@ const Dashboard = () => {
     const [deletingProjectId, setDeletingProjectId] = useState(null)
     const [isBulkDeleting, setIsBulkDeleting] = useState(false)
     const [pendingDeleteIds, setPendingDeleteIds] = useState([])
+    // IDs whose disintegration animation has finished — cards are immediately
+    // hidden so the grid reflows, while the actual DB delete runs in background.
+    const [optimisticallyRemovedIds, setOptimisticallyRemovedIds] = useState([])
     const [deleteConfirm, setDeleteConfirm] = useState(emptyDeleteConfirm)
     const [showShortcuts, setShowShortcuts] = useState(false)
 
@@ -230,6 +233,10 @@ const Dashboard = () => {
         )
         setPendingDeleteIds((currentIds) =>
             currentIds.filter((projectId) => availableProjectIds.has(projectId))
+        )
+        // Retire optimistic IDs that the server has confirmed gone.
+        setOptimisticallyRemovedIds((current) =>
+            current.filter((id) => availableProjectIds.has(id))
         )
     }, [projects])
 
@@ -403,26 +410,29 @@ const Dashboard = () => {
                 finalized = true
                 const stagedEffect = await stagedEffectPromise
                 await stagedEffect.finished
-                try {
-                    await performDelete(type, projectId, ids)
-                    cleanupProjectPixels(ids)
-                } catch (error) {
+                // Animation done — collapse the card slots in the grid immediately
+                // so surrounding cards rearrange now, rather than after the DB round-trip.
+                setOptimisticallyRemovedIds((current) => [...new Set([...current, ...ids])])
+                cleanupProjectPixels(ids)
+                // DB delete runs in the background; restore on failure.
+                performDelete(type, projectId, ids).catch(async (error) => {
+                    setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
                     await restoreProjectIntegration(ids)
                     toast.error(error?.message || "Failed to delete project")
-                }
+                })
             },
             onDismiss: async () => {
                 if (undone || finalized) return
                 finalized = true
                 const stagedEffect = await stagedEffectPromise
                 await stagedEffect.finished
-                try {
-                    await performDelete(type, projectId, ids)
-                    cleanupProjectPixels(ids)
-                } catch (error) {
+                setOptimisticallyRemovedIds((current) => [...new Set([...current, ...ids])])
+                cleanupProjectPixels(ids)
+                performDelete(type, projectId, ids).catch(async (error) => {
+                    setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
                     await restoreProjectIntegration(ids)
                     toast.error(error?.message || "Failed to delete project")
-                }
+                })
             },
         })
     }, [
@@ -577,7 +587,7 @@ const Dashboard = () => {
                         </section>
                     ) : hasProjects ? (
                         <section className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                            {projects.map((project, index) => {
+                            {projects.filter((p) => !optimisticallyRemovedIds.includes(p._id)).map((project, index) => {
                                 const isSelected = selectedProjectIds.includes(project._id)
                                 const isPendingDelete = pendingDeleteIds.includes(project._id)
                                 const isDeletingThisProject = deletingProjectId === project._id

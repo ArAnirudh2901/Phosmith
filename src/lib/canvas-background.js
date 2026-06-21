@@ -13,7 +13,7 @@
 //    background (a single, change-detected sync — safe with the Canvas2D filter
 //    backend this app uses).
 
-import { isPixxelMaskOverlay } from './canvas-mask'
+import { isPhosmithMaskOverlay } from './canvas-mask'
 import { uploadImageBlobToImageKit } from './canvas-images'
 
 const isImageObject = (obj) => obj?.type?.toLowerCase?.() === 'image'
@@ -22,7 +22,7 @@ const MAX_MERGE_DIMENSION = 4096
 
 export const getForegroundImages = (canvasEditor) =>
   (canvasEditor?.getObjects?.() || []).filter(
-    (obj) => isImageObject(obj) && obj.visible !== false && !isPixxelMaskOverlay(obj),
+    (obj) => isImageObject(obj) && obj.visible !== false && !isPhosmithMaskOverlay(obj),
   )
 
 export const hasCanvasBackground = (canvasEditor) => {
@@ -85,7 +85,7 @@ export const applyCanvasSizedBackground = async (canvasEditor, FabricImage, url,
   fitBackgroundToCanvasExactly(fabricImage, W, H)
   canvasEditor.backgroundColor = null
   canvasEditor.backgroundImage = fabricImage
-  if (canvasEditor.__pixxelGradeBackground) syncBackgroundGrade(canvasEditor, true)
+  if (canvasEditor.__phosmithGradeBackground) syncBackgroundGrade(canvasEditor, true)
   canvasEditor.requestRenderAll()
   return fabricImage
 }
@@ -117,23 +117,23 @@ export const syncBackgroundGrade = (canvasEditor, enabled, sourceImage = null) =
       try { bg.applyFilters() } catch { /* element may be gone */ }
       canvasEditor.requestRenderAll()
     }
-    bg.__pixxelGradeSig = ''
+    bg.__phosmithGradeSig = ''
     return
   }
 
   // Grade from the photo that actually changed when one is provided; otherwise
   // fall back to the first foreground image.
   const foreground =
-    (isImageObject(sourceImage) && sourceImage.visible !== false && !isPixxelMaskOverlay(sourceImage)
+    (isImageObject(sourceImage) && sourceImage.visible !== false && !isPhosmithMaskOverlay(sourceImage)
       ? sourceImage
       : null) || getForegroundImages(canvasEditor)[0]
   const filters = foreground?.filters || []
   const sig = filtersSignature(filters)
-  if (bg.__pixxelGradeSig === sig) return
+  if (bg.__phosmithGradeSig === sig) return
 
   bg.filters = Array.isArray(filters) ? filters.slice() : []
   try { bg.applyFilters() } catch { /* element may be gone */ }
-  bg.__pixxelGradeSig = sig
+  bg.__phosmithGradeSig = sig
   canvasEditor.requestRenderAll()
 }
 
@@ -167,11 +167,11 @@ export const mergeBackgroundWithImages = async (canvasEditor, FabricImage, proje
     // Hide everything that is NOT the background or a photo layer, so the flatten
     // captures only bg + images and leaves text/drawings editable on top.
     for (const obj of canvasEditor.getObjects?.() || []) {
-      const keep = isImageObject(obj) && obj.visible !== false && !isPixxelMaskOverlay(obj)
+      const keep = isImageObject(obj) && obj.visible !== false && !isPhosmithMaskOverlay(obj)
       if (!keep && obj.visible !== false) {
         obj.visible = false
         hidden.push(obj)
-      } else if (isPixxelMaskOverlay(obj) && obj.visible !== false) {
+      } else if (isPhosmithMaskOverlay(obj) && obj.visible !== false) {
         obj.visible = false
         hidden.push(obj)
       }
@@ -240,7 +240,7 @@ export const mergeBackgroundWithImages = async (canvasEditor, FabricImage, proje
     selectable: true,
     evented: true,
     name: 'Background + photo',
-    pixxelLayerName: 'Background + photo',
+    phosmithLayerName: 'Background + photo',
   })
   mergedImage.setCoords?.()
 
@@ -249,7 +249,7 @@ export const mergeBackgroundWithImages = async (canvasEditor, FabricImage, proje
   for (const obj of foreground) canvasEditor.remove(obj)
   canvasEditor.backgroundImage = null
   canvasEditor.backgroundColor = null
-  canvasEditor.__pixxelGradeBackground = false
+  canvasEditor.__phosmithGradeBackground = false
   if (typeof canvasEditor.insertAt === 'function') canvasEditor.insertAt(0, mergedImage)
   else canvasEditor.add(mergedImage)
   canvasEditor.setActiveObject?.(mergedImage)

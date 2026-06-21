@@ -51,7 +51,7 @@ const ImageManager = ({ project, dominantColor }) => {
     const [, setRevision] = useState(0)
 
     const getLayerName = (img, fallbackIndex) =>
-        (typeof img?.pixxelLayerName === "string" && img.pixxelLayerName.trim()) ||
+        (typeof img?.phosmithLayerName === "string" && img.phosmithLayerName.trim()) ||
         (typeof img?.name === "string" && img.name.trim()) ||
         `Image ${fallbackIndex}`
 
@@ -292,7 +292,7 @@ const ImageManager = ({ project, dominantColor }) => {
         }
         const trimmed = (renameDraft || "").trim()
         if (trimmed) {
-            img.pixxelLayerName = trimmed
+            img.phosmithLayerName = trimmed
             // Mirror to Fabric's built-in `name` so saved/serialized canvas state keeps the rename.
             img.set?.("name", trimmed)
             commitLayerState(img)
@@ -368,7 +368,7 @@ const ImageManager = ({ project, dominantColor }) => {
                 top: minTop,
                 originX: "left",
                 originY: "top",
-                pixxelLayerName: `Merged (${sources.length})`,
+                phosmithLayerName: `Merged (${sources.length})`,
                 name: `Merged (${sources.length})`,
             })
 
@@ -399,14 +399,14 @@ const ImageManager = ({ project, dominantColor }) => {
         if (willShow) {
             img.set({
                 visible: true,
-                selectable: img._pixxelSelectableBeforeHide ?? true,
-                evented: img._pixxelEventedBeforeHide ?? true,
+                selectable: img._phosmithSelectableBeforeHide ?? true,
+                evented: img._phosmithEventedBeforeHide ?? true,
             })
             canvasEditor.setActiveObject(img)
             setSelectedImage(img)
         } else {
-            img._pixxelSelectableBeforeHide = img.selectable !== false
-            img._pixxelEventedBeforeHide = img.evented !== false
+            img._phosmithSelectableBeforeHide = img.selectable !== false
+            img._phosmithEventedBeforeHide = img.evented !== false
             if (canvasEditor.getActiveObject() === img) {
                 canvasEditor.discardActiveObject()
             }

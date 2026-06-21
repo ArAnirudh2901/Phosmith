@@ -85,8 +85,8 @@ export const useMaskLayers = () => {
     }, [])
 
     // Notify subscribers on EVERY stack change. We use a custom event on
-    // `window` (matching the codebase's pixxel:* convention — see page.jsx's
-    // "pixxel:tool-sub").
+    // `window` (matching the codebase's phosmith:* convention — see page.jsx's
+    // "phosmith:tool-sub").
     //
     // We deliberately do NOT gate on `computeSignature` here. The signature
     // only tracks structural fields (kind/op/inverted/visible/lock), so a
@@ -99,7 +99,7 @@ export const useMaskLayers = () => {
     useEffect(() => {
         lastSignatureRef.current = computeSignature(stack)
         try {
-            window.dispatchEvent(new CustomEvent('pixxel:mask-layers-changed', { detail: { stack } }))
+            window.dispatchEvent(new CustomEvent('phosmith:mask-layers-changed', { detail: { stack } }))
         } catch { /* SSR safe */ }
     }, [stack])
 
@@ -109,7 +109,7 @@ export const useMaskLayers = () => {
         // be silently truncated by the shader compiler — wiping the user's new
         // selection with no feedback — so refuse and signal the UI to toast.
         if ((stackRef.current?.chain?.length || 0) >= MAX_LAYERS) {
-            try { window.dispatchEvent(new CustomEvent('pixxel:mask-layer-limit', { detail: { max: MAX_LAYERS } })) } catch { /* SSR */ }
+            try { window.dispatchEvent(new CustomEvent('phosmith:mask-layer-limit', { detail: { max: MAX_LAYERS } })) } catch { /* SSR */ }
             return null
         }
         // For kinds with real per-kind parameters (luminance, color in Step 2;
@@ -256,7 +256,7 @@ export const useMaskLayers = () => {
 
     // Undo/redo the STACK structure. Dispatches a wholesale `set` of the
     // chain; the canvas effect re-applies the megashader on the resulting
-    // change. Bound to the same pixxel:mask-undo/redo events below so the
+    // change. Bound to the same phosmith:mask-undo/redo events below so the
     // global Ctrl+Z path can drive them when the Mask tool owns undo.
     const undo = useCallback(() => {
         if (pastRef.current.length === 0) return false
@@ -291,16 +291,16 @@ export const useMaskLayers = () => {
 
     // Reconcile with the agent command layer: when an agent (or any non-UI
     // caller) mutates the chain on the image via src/lib/agent/mask-commands,
-    // it dispatches `pixxel:mask-chain-replaced` so this panel re-syncs. The
-    // dispatch is distinct from `pixxel:mask-layers-changed` (which WE emit),
+    // it dispatches `phosmith:mask-chain-replaced` so this panel re-syncs. The
+    // dispatch is distinct from `phosmith:mask-layers-changed` (which WE emit),
     // so there's no feedback loop.
     useEffect(() => {
         const onReplaced = (e) => {
             const chain = e?.detail?.stack?.chain
             if (Array.isArray(chain)) setChain(chain)
         }
-        try { window.addEventListener('pixxel:mask-chain-replaced', onReplaced) } catch { /* SSR */ }
-        return () => { try { window.removeEventListener('pixxel:mask-chain-replaced', onReplaced) } catch { /* SSR */ } }
+        try { window.addEventListener('phosmith:mask-chain-replaced', onReplaced) } catch { /* SSR */ }
+        return () => { try { window.removeEventListener('phosmith:mask-chain-replaced', onReplaced) } catch { /* SSR */ } }
     }, [setChain])
 
     const setGlobalAlpha = useCallback((value) => {
@@ -310,7 +310,7 @@ export const useMaskLayers = () => {
         // piece of state. Step 1 stores it in the test panel's local
         // state; the canvas reads it through a window event.
         try {
-            window.dispatchEvent(new CustomEvent('pixxel:mask-global-alpha', { detail: { value } }))
+            window.dispatchEvent(new CustomEvent('phosmith:mask-global-alpha', { detail: { value } }))
         } catch { /* SSR safe */ }
     }, [])
 
@@ -323,12 +323,12 @@ export const useMaskLayers = () => {
     const setShowMaskOverlay = useCallback((value) => {
         const v = !!value
         setShowMaskOverlayState(v)
-        try { window.dispatchEvent(new CustomEvent('pixxel:mask-overlay', { detail: { value: v } })) } catch { /* SSR safe */ }
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-overlay', { detail: { value: v } })) } catch { /* SSR safe */ }
     }, [])
     const setGlobalInvert = useCallback((value) => {
         const v = !!value
         setGlobalInvertState(v)
-        try { window.dispatchEvent(new CustomEvent('pixxel:mask-invert', { detail: { value: v } })) } catch { /* SSR safe */ }
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-invert', { detail: { value: v } })) } catch { /* SSR safe */ }
     }, [])
 
     return {

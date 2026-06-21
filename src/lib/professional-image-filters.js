@@ -25,7 +25,7 @@ const CONFIGS = [
   { key: "pixelate", defaultValue: 1, filterClass: filters.Pixelate, valueKey: "blocksize", toFilterValue: (v) => v },
 ];
 
-const isAgentFilter = (filter) => filter?._pixxelAgentFilter === true;
+const isAgentFilter = (filter) => filter?._phosmithAgentFilter === true;
 
 const buildProfessionalFilters = (adjustments = {}) =>
   CONFIGS.reduce((acc, config) => {
@@ -36,8 +36,8 @@ const buildProfessionalFilters = (adjustments = {}) =>
       ? config.toFilterOptions(value)
       : { [config.valueKey]: config.toFilterValue(value) };
     const filter = new config.filterClass(options);
-    filter._pixxelAgentFilter = true;
-    filter._pixxelAdjustmentKey = config.key;
+    filter._phosmithAgentFilter = true;
+    filter._phosmithAdjustmentKey = config.key;
     acc.push(filter);
     return acc;
   }, []);

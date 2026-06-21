@@ -12,7 +12,7 @@ import {
     Point,
     config as fabricConfig,
 } from "fabric"
-// Side-effect import: registers PixxelCurves filter in Fabric's classRegistry so
+// Side-effect import: registers PhosmithCurves filter in Fabric's classRegistry so
 // loadFromJSON can rehydrate saved canvas state that contains it.
 import "../../../../../lib/curves-filter"
 // Eagerly register the MegashaderFilter class with Fabric's classRegistry at
@@ -71,7 +71,7 @@ import {
 import { createCanvasSync, loadLocalState, clearLocalState } from "../../../../../lib/canvas-sync"
 import { createPresenceChannel } from "../../../../../lib/canvas-presence"
 import { toast } from "sonner"
-import { isPixxelMaskOverlay } from "../../../../../lib/canvas-mask"
+import { isPhosmithMaskOverlay } from "../../../../../lib/canvas-mask"
 import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
 import AuroraLoader from "./AuroraLoader"
 
@@ -912,7 +912,7 @@ const CanvasEditor = ({ project }) => {
                 try {
                     await canvas.loadFromJSON(canvasState.canvas || canvasState)
                     // Restore the "grade background" intent so it keeps tracking after reload.
-                    canvas.__pixxelGradeBackground = Boolean(canvasState.gradeBackground)
+                    canvas.__phosmithGradeBackground = Boolean(canvasState.gradeBackground)
                     removeExpansionFramesFromCanvas(canvas)
                     if (canvasState.viewport) { setViewportState(canvas, canvasState.viewport, { x: proj.width / 2, y: proj.height / 2 }); hasRestoredViewport = true }
                     const imageUrl = effectiveCurrentImageUrl || proj.originalImageUrl
@@ -1264,7 +1264,7 @@ const CanvasEditor = ({ project }) => {
     // Step 10.2 — `recompileTimerRef` is a component-level `useRef`
     // holding the debounce timer for `handleLayersChanged`. Without
     // this, dragging a slider (e.g. per-layer exposure) fires
-    // `pixxel:mask-layers-changed` on every step; the GLSL compiler
+    // `phosmith:mask-layers-changed` on every step; the GLSL compiler
     // (50-200 ms for a complex chain) re-runs for every step, blocking
     // the main thread. The 150 ms debounce coalesces a rapid burst
     // into one recompile after the user pauses.
@@ -1283,7 +1283,7 @@ const CanvasEditor = ({ project }) => {
             if (!canvas) return null
             const objects = canvas.getObjects?.() || []
             return objects.find(
-                (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPixxelMaskOverlay(obj)
+                (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPhosmithMaskOverlay(obj)
             ) || null
         }
 
@@ -1351,16 +1351,16 @@ const CanvasEditor = ({ project }) => {
             handleLayersChanged(event)
         }
 
-        window.addEventListener('pixxel:mask-layers-changed', wrapped)
-        window.addEventListener('pixxel:mask-global-alpha', handleGlobalAlpha)
-        window.addEventListener('pixxel:mask-overlay', handleOverlay)
-        window.addEventListener('pixxel:mask-invert', handleInvert)
+        window.addEventListener('phosmith:mask-layers-changed', wrapped)
+        window.addEventListener('phosmith:mask-global-alpha', handleGlobalAlpha)
+        window.addEventListener('phosmith:mask-overlay', handleOverlay)
+        window.addEventListener('phosmith:mask-invert', handleInvert)
 
         return () => {
-            window.removeEventListener('pixxel:mask-layers-changed', wrapped)
-            window.removeEventListener('pixxel:mask-global-alpha', handleGlobalAlpha)
-            window.removeEventListener('pixxel:mask-overlay', handleOverlay)
-            window.removeEventListener('pixxel:mask-invert', handleInvert)
+            window.removeEventListener('phosmith:mask-layers-changed', wrapped)
+            window.removeEventListener('phosmith:mask-global-alpha', handleGlobalAlpha)
+            window.removeEventListener('phosmith:mask-overlay', handleOverlay)
+            window.removeEventListener('phosmith:mask-invert', handleInvert)
             // Step 10.2: clear any pending debounced recompile so a
             // canvasEditor change mid-debounce doesn't fire a stale
             // apply against a torn-down renderer.
@@ -1378,26 +1378,30 @@ const CanvasEditor = ({ project }) => {
     useEffect(() => {
         let unregisterMask = () => {}
         let unregisterCrop = () => {}
+        let unregisterCollage = () => {}
         let cancelled = false
         Promise.all([
             import('@/lib/agent/command-registry'),
             import('@/lib/agent/mask-commands'),
             import('@/lib/agent/crop-commands'),
-        ]).then(([reg, mask, crop]) => {
+            import('@/lib/agent/collage-commands'),
+        ]).then(([reg, mask, crop, collage]) => {
             if (cancelled) return
             const getPrimaryImage = () => {
                 const canvas = canvasInstanceRef.current
                 if (!canvas) return null
                 const objects = canvas.getObjects?.() || []
                 return objects.find(
-                    (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPixxelMaskOverlay(obj)
+                    (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPhosmithMaskOverlay(obj)
                 ) || null
             }
             const getCanvas = () => canvasInstanceRef.current
+            const getProject = () => projectRef.current
             unregisterMask = reg.registerDomain('mask', mask.createMaskCommands({ getPrimaryImage }))
             unregisterCrop = reg.registerDomain('crop', crop.createCropCommands({ getPrimaryImage, getCanvas }))
+            unregisterCollage = reg.registerDomain('collage', collage.createCollageCommands({ getCanvas, getProject }))
         }).catch(() => { /* agent layer optional */ })
-        return () => { cancelled = true; unregisterMask(); unregisterCrop() }
+        return () => { cancelled = true; unregisterMask(); unregisterCrop(); unregisterCollage() }
     }, [])
 
     // Track the last-hydrated URL so we skip redundant re-hydrations when
@@ -1622,7 +1626,7 @@ const CanvasEditor = ({ project }) => {
             // otherwise the redo stack is truncated immediately after an undo.
             if (isRestoringRef.current) return
             if (isExpansionFrameLike(event?.target)) return
-            if (isPixxelMaskOverlay(event?.target)) return
+            if (isPhosmithMaskOverlay(event?.target)) return
 
             const change = describeCanvasChange(eventName, event)
             // Zero-delta gesture (click without movement) — nothing happened.
@@ -1634,7 +1638,7 @@ const CanvasEditor = ({ project }) => {
             // canvas background. Gated to image edits (skip text/shape moves) and to
             // when a background actually exists; change-detected inside.
             if (
-                canvasEditor.__pixxelGradeBackground &&
+                canvasEditor.__phosmithGradeBackground &&
                 canvasEditor.backgroundImage &&
                 event?.target?.type?.toLowerCase?.() === 'image'
             ) {
