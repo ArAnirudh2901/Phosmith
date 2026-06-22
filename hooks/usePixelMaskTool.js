@@ -10,6 +10,8 @@ import {
     createMaskClipPath,
     decodeMaskCanvas,
     encodeMaskCanvas,
+    eraseMaskToInpaintMask,
+    fillEnclosedMaskRegions,
     floodFillMask,
     getImageBitmapSize,
     getImageSourceElement,
@@ -168,6 +170,7 @@ export default function usePixelMaskTool({
     showOverlay = true,
     livePreview = true,
     disabled = false,
+    fillEnclosed = false,
 }) {
     const [mode, setMode] = useState(defaultMode)
     const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE)
@@ -196,6 +199,7 @@ export default function usePixelMaskTool({
     const showOverlayRef = useRef(showOverlay)
     const livePreviewRef = useRef(livePreview)
     const disabledRef = useRef(disabled)
+    const fillEnclosedRef = useRef(fillEnclosed)
 
     const modeRef = useRef(mode)
     const brushSizeRef = useRef(brushSize)
@@ -258,6 +262,7 @@ export default function usePixelMaskTool({
     useEffect(() => { showOverlayRef.current = showOverlay }, [showOverlay])
     useEffect(() => { livePreviewRef.current = livePreview }, [livePreview])
     useEffect(() => { disabledRef.current = disabled }, [disabled])
+    useEffect(() => { fillEnclosedRef.current = fillEnclosed }, [fillEnclosed])
     useEffect(() => { toleranceRef.current = tolerance }, [tolerance])
 
     // Mirror the per-stroke stack depth onto the canvas + broadcast it, so the
@@ -1403,6 +1408,144 @@ export default function usePixelMaskTool({
         }
     }, [effectiveMode, pushUndo, snapshot, syncMaskToImage, canvasEditor, commitCleanupUrl])
 
+    /* ─── brush generative fill ───
+     * Paint a region (or draw a bounded shape) with the erase brush, then fill
+     * the enclosed interior and regenerate the whole region with AI — the SAME
+     * inpaint pipeline as the click-to-remove object eraser, but the mask comes
+     * from the brush instead of a SAM 2 click. Lets you erase things SAM 2
+     * can't isolate (a fence, scattered litter, a hand-drawn area) and have the
+     * background convincingly filled rather than cut to transparency. */
+    const generativeFill = useCallback(async () => {
+        const img = targetImageRef.current
+        const maskCanvas = maskCanvasRef.current
+        const sourceEl = img ? getImageSourceElement(img) : null
+        if (!img || !maskCanvas || !sourceEl) return
+        if (isObjectRunningRef.current) {
+            toast('Still working on the previous fill…', { icon: '⏳' })
+            return
+        }
+        if (isMaskCanvasEmpty(maskCanvas, MASK_EMPTY_THRESHOLD)) {
+            toast('Paint over the area to fill first', { icon: '🖌️' })
+            return
+        }
+
+        try { objectAbortRef.current?.abort() } catch { /* ignore */ }
+        const controller = new AbortController()
+        objectAbortRef.current = controller
+        isObjectRunningRef.current = true
+        setIsObjectRunning(true)
+        setObjectPhase?.('filling')
+
+        // Keep the pre-fill mask so the fallback (and a failed run) stay undoable.
+        const beforeFill = snapshot()
+        try {
+            const { width: bw, height: bh } = getImageBitmapSize(img)
+            const cropX = img.cropX || 0
+            const cropY = img.cropY || 0
+            const srcW = sourceEl.naturalWidth || sourceEl.width || 0
+            const srcH = sourceEl.naturalHeight || sourceEl.height || 0
+            if (srcW < 1 || srcH < 1 || bw < 2 || bh < 2) {
+                throw new Error('Image is still loading — try again in a moment')
+            }
+
+            // Turn a drawn outline into a solid region, then show the user exactly
+            // what's about to be regenerated (the cutout previews the selection
+            // while the network call runs; it's replaced on success).
+            fillEnclosedMaskRegions(maskCanvas)
+            syncMaskToImage(img)
+
+            // Source image in cropped-bitmap space (matches the mask canvas).
+            const fullImg = document.createElement('canvas')
+            fullImg.width = bw
+            fullImg.height = bh
+            const fctx = fullImg.getContext('2d')
+            fctx.drawImage(sourceEl, cropX, cropY, bw, bh, 0, 0, bw, bh)
+
+            // White-on-black inpaint mask from the painted (+ filled) region.
+            const { canvas: fullMask, filled } = eraseMaskToInpaintMask(maskCanvas, bw, bh, {
+                threshold: MASK_EMPTY_THRESHOLD,
+            })
+            if (filled / (bw * bh) < 0.0005) {
+                toast('Nothing to fill there — paint over the object', { icon: '🤔' })
+                if (beforeFill) applySnapshot(beforeFill)
+                syncMaskToImage(img)
+                return
+            }
+
+            const [imgBlob, mskBlob] = await Promise.all([
+                new Promise((res, rej) =>
+                    fullImg.toBlob((b) => (b ? res(b) : rej(new Error('image toBlob failed'))), 'image/png')),
+                new Promise((res, rej) =>
+                    fullMask.toBlob((b) => (b ? res(b) : rej(new Error('mask toBlob failed'))), 'image/png')),
+            ])
+            if (controller.signal.aborted) return
+
+            const inpaintForm = new FormData()
+            inpaintForm.append('image', imgBlob, 'image.png')
+            inpaintForm.append('mask', mskBlob, 'mask.png')
+            inpaintForm.append('backend', inpaintBackendFromRouting())
+
+            const inpaintResp = await fetch('/api/ai/inpaint', {
+                method: 'POST',
+                body: inpaintForm,
+                signal: controller.signal,
+            })
+            if (!inpaintResp.ok) {
+                const errData = await inpaintResp.json().catch(() => ({}))
+                throw new Error(errData.error || `Generative fill failed (${inpaintResp.status})`)
+            }
+
+            const resultBlob = await inpaintResp.blob()
+            const resultUrl = await persistResultBlob(resultBlob, {
+                signal: controller.signal,
+                label: 'gen-fill',
+            })
+            if (controller.signal.aborted) return
+
+            // Bail if the target image changed (tool switch / undo) mid-flight.
+            if (targetImageRef.current !== img
+                || !(canvasEditor?.getObjects?.() || []).includes(img)) {
+                return
+            }
+
+            const committed = await commitCleanupUrl(resultUrl)
+            if (committed) {
+                // The painted strokes are now baked into the image. Drop the stale
+                // per-stroke mask history so ⌘Z reverts the FILL (via canvas
+                // history) instead of re-applying an old mask onto the new image.
+                undoStackRef.current = []
+                redoStackRef.current = []
+                setUndoDepth(0)
+                setRedoDepth(0)
+                toast.success('Generative fill applied')
+            } else {
+                throw new Error('Could not apply the fill to this image')
+            }
+        } catch (err) {
+            if (err?.name === 'AbortError') return
+            console.warn('[gen-fill] failed, leaving an alpha erase as fallback:', err?.message)
+            // Inpaint failed: keep the (hole-filled) region erased to transparency
+            // as a graceful fallback, and make it a single undoable step.
+            if (beforeFill) {
+                undoStackRef.current.push(beforeFill)
+                if (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift()
+                redoStackRef.current = []
+                setUndoDepth(undoStackRef.current.length)
+                setRedoDepth(0)
+            }
+            syncMaskToImage(img)
+            commitMaskChange(canvasEditor, img)
+            toast.error(err?.message || 'Generative fill failed — erased the region instead')
+        } finally {
+            if (objectAbortRef.current === controller) {
+                objectAbortRef.current = null
+                isObjectRunningRef.current = false
+                setIsObjectRunning(false)
+                setObjectPhase?.(null)
+            }
+        }
+    }, [snapshot, applySnapshot, syncMaskToImage, canvasEditor, commitCleanupUrl])
+
     /* ─── canvas lock / unlock (disable selection while painting) ─── */
 
     const lockCanvas = useCallback((canvas, targetImage) => {
@@ -1779,6 +1922,12 @@ export default function usePixelMaskTool({
             // The brush paints exactly what the user draws (standard behavior).
             strokePointsRef.current = []
             if (deferApplyRef.current) {
+                // Circle-to-remove: a freehand loop selects its whole interior, so
+                // the highlighted selection is the enclosed region — not just the
+                // ring you drew. Open strokes have no interior → unchanged.
+                if (fillEnclosedRef.current && effectiveMode() === 'erase') {
+                    fillEnclosedMaskRegions(maskCanvasRef.current)
+                }
                 // Preview only — show overlay but don't apply clipPath or commit.
                 syncMaskToImage(targetImageRef.current, { skipClip: true })
                 setHasPending(true)
@@ -2048,6 +2197,7 @@ export default function usePixelMaskTool({
         feather, setFeather,
         magic, setMagic: setMagicExclusive,
         objectSelect, setObjectSelect, isObjectRunning, objectPhase,
+        generativeFill,
         tolerance, setTolerance,
         altActive,
         hasMask, undoDepth, redoDepth,

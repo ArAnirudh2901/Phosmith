@@ -78,35 +78,97 @@ const DrawControls = ({ dominantColor }) => {
         })
     }, [canvasEditor])
 
+    /**
+     * Minimum squared distance from point (px, py) to the line segment (ax,ay)→(bx,by).
+     */
+    const distSqToSegment = (px, py, ax, ay, bx, by) => {
+        const dx = bx - ax
+        const dy = by - ay
+        const lenSq = dx * dx + dy * dy
+        if (lenSq === 0) return (px - ax) ** 2 + (py - ay) ** 2
+        const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq))
+        const projX = ax + t * dx
+        const projY = ay + t * dy
+        return (px - projX) ** 2 + (py - projY) ** 2
+    }
+
+    /**
+     * Extract absolute (scene-space) points from a Fabric path object.
+     * Path.path is an array of SVG commands like ['M', x, y], ['L', x, y],
+     * ['Q', cx, cy, x, y], ['C', ...], etc. We transform them through the
+     * object's full matrix so we work in scene coordinates.
+     */
+    const getAbsolutePathPoints = (pathObj) => {
+        const commands = pathObj?.path
+        if (!Array.isArray(commands) || commands.length === 0) return []
+        const matrix = pathObj.calcTransformMatrix()
+        const points = []
+        for (const cmd of commands) {
+            if (!Array.isArray(cmd) || cmd.length < 3) continue
+            // For every command, the last two numbers are the endpoint
+            const x = cmd[cmd.length - 2]
+            const y = cmd[cmd.length - 1]
+            if (typeof x !== 'number' || typeof y !== 'number') continue
+            // Transform from object-local to scene coordinates
+            const tx = matrix[0] * x + matrix[2] * y + matrix[4]
+            const ty = matrix[1] * x + matrix[3] * y + matrix[5]
+            points.push({ x: tx, y: ty })
+        }
+        return points
+    }
+
     const erasePathsAtPointer = useCallback(
         (opt) => {
             if (!canvasEditor || !opt?.e) return
 
             const pointer = canvasEditor.getScenePoint(opt.e)
-            const eraserRadius = brushType === 'marker' ? brushSize * 3 : brushSize
+            const eraserRadius = brushType === 'marker' ? brushSize * 3 : Math.max(brushSize, 8)
+            const eraserRadiusSq = eraserRadius * eraserRadius
             let removed = false
 
             for (const path of canvasEditor.getObjects().filter(isPathObject)) {
-                try {
-                    if (typeof path.containsPoint === 'function' && path.containsPoint(pointer)) {
-                        canvasEditor.remove(path)
-                        strokeStackRef.current = strokeStackRef.current.filter((p) => p !== path)
-                        removed = true
+                // Quick bounding-box rejection — skip paths that are clearly too far
+                const bounds = path.getBoundingRect?.()
+                if (bounds) {
+                    const pad = eraserRadius
+                    if (
+                        pointer.x < bounds.left - pad ||
+                        pointer.x > bounds.left + bounds.width + pad ||
+                        pointer.y < bounds.top - pad ||
+                        pointer.y > bounds.top + bounds.height + pad
+                    ) {
                         continue
                     }
-                } catch {
-                    /* fall through to bounds check */
                 }
 
-                const bounds = path.getBoundingRect?.()
-                if (!bounds) continue
-                const pad = eraserRadius
-                if (
-                    pointer.x >= bounds.left - pad &&
-                    pointer.x <= bounds.left + bounds.width + pad &&
-                    pointer.y >= bounds.top - pad &&
-                    pointer.y <= bounds.top + bounds.height + pad
-                ) {
+                // Accurate check: distance from pointer to each segment of the path
+                const pts = getAbsolutePathPoints(path)
+                let hit = false
+
+                if (pts.length === 0) {
+                    // Fallback: if we can't extract path points, use containsPoint
+                    try {
+                        hit = typeof path.containsPoint === 'function' && path.containsPoint(pointer)
+                    } catch { /* ignore */ }
+                } else if (pts.length === 1) {
+                    // Single point (dot) — distance check
+                    hit = (pointer.x - pts[0].x) ** 2 + (pointer.y - pts[0].y) ** 2 <= eraserRadiusSq
+                } else {
+                    // Walk segments and check distance
+                    for (let i = 0; i < pts.length - 1; i++) {
+                        if (distSqToSegment(pointer.x, pointer.y, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= eraserRadiusSq) {
+                            hit = true
+                            break
+                        }
+                    }
+                    // Also check distance to the last point (for single-segment paths)
+                    if (!hit) {
+                        const last = pts[pts.length - 1]
+                        hit = (pointer.x - last.x) ** 2 + (pointer.y - last.y) ** 2 <= eraserRadiusSq
+                    }
+                }
+
+                if (hit) {
                     canvasEditor.remove(path)
                     strokeStackRef.current = strokeStackRef.current.filter((p) => p !== path)
                     removed = true

@@ -62,6 +62,129 @@ export const createMaskCanvas = (width, height, fill = '#ffffff') => {
   return canvas
 }
 
+/**
+ * Fill the INTERIOR of any closed shape painted into a mask (white=keep,
+ * dark=painted). Drawing a loop/outline with the brush leaves only a thin ring
+ * of painted pixels; this turns that ring into a solid filled region so a
+ * "bounded shape" selection actually selects everything inside it.
+ *
+ * Algorithm: flood "outside" inward from the four borders, traversing only
+ * NON-painted pixels. Any non-painted pixel the flood can't reach is enclosed
+ * by the stroke → mark it painted. The flood runs on a capped-resolution copy
+ * (one button press, not per-frame) and the discovered interior is composited
+ * back onto the full-res mask as black, leaving the original crisp stroke edges
+ * untouched. Returns the number of interior pixels filled (0 = open stroke or
+ * already-solid scribble → no change).
+ */
+export const fillEnclosedMaskRegions = (maskCanvas, { threshold = 250, maxDim = 1536 } = {}) => {
+  if (!maskCanvas) return 0
+  const W = maskCanvas.width
+  const H = maskCanvas.height
+  if (W < 3 || H < 3) return 0
+
+  // Downscale for the flood so a 12MP mask doesn't allocate a 48MB queue.
+  const s = Math.min(1, maxDim / Math.max(W, H))
+  const w = Math.max(3, Math.round(W * s))
+  const h = Math.max(3, Math.round(H * s))
+  const small = createMaskCanvas(w, h)
+  const sctx = small.getContext('2d', { willReadFrequently: true })
+  sctx.drawImage(maskCanvas, 0, 0, w, h)
+  const data = sctx.getImageData(0, 0, w, h).data
+
+  const n = w * h
+  const painted = new Uint8Array(n)
+  for (let p = 0, i = 0; p < n; p += 1, i += 4) {
+    if (data[i] < threshold) painted[p] = 1
+  }
+
+  // BFS the "outside" region from every border pixel through non-painted cells.
+  const outside = new Uint8Array(n)
+  const queue = new Int32Array(n)
+  let qh = 0
+  let qt = 0
+  const visit = (p) => {
+    if (!painted[p] && !outside[p]) {
+      outside[p] = 1
+      queue[qt++] = p
+    }
+  }
+  for (let x = 0; x < w; x += 1) {
+    visit(x)
+    visit((h - 1) * w + x)
+  }
+  for (let y = 0; y < h; y += 1) {
+    visit(y * w)
+    visit(y * w + (w - 1))
+  }
+  while (qh < qt) {
+    const p = queue[qh++]
+    const x = p % w
+    const y = (p / w) | 0
+    if (x > 0) visit(p - 1)
+    if (x < w - 1) visit(p + 1)
+    if (y > 0) visit(p - w)
+    if (y < h - 1) visit(p + w)
+  }
+
+  // Enclosed = not painted AND the outside flood never reached it.
+  const holes = createMaskCanvas(w, h)
+  const hctx = holes.getContext('2d')
+  const himg = hctx.createImageData(w, h)
+  const hd = himg.data
+  let filled = 0
+  for (let p = 0, o = 0; p < n; p += 1, o += 4) {
+    if (!painted[p] && !outside[p]) {
+      hd[o] = 0
+      hd[o + 1] = 0
+      hd[o + 2] = 0
+      hd[o + 3] = 255
+      filled += 1
+    } else {
+      // Transparent elsewhere so compositing only darkens the interior.
+      hd[o + 3] = 0
+    }
+  }
+  if (!filled) return 0
+  hctx.putImageData(himg, 0, 0)
+
+  const mctx = maskCanvas.getContext('2d')
+  mctx.save()
+  mctx.imageSmoothingEnabled = false
+  mctx.drawImage(holes, 0, 0, w, h, 0, 0, W, H)
+  mctx.restore()
+  return filled
+}
+
+/**
+ * Build a white-on-black inpaint mask (white = region to regenerate) from an
+ * erase mask (white = keep, dark = painted), scaled to outW×outH. This is the
+ * mask convention `/api/ai/inpaint` expects — the inverse of the erase mask.
+ * Returns the number of "on" (to-fill) pixels alongside the canvas so callers
+ * can guard against an empty selection.
+ */
+export const eraseMaskToInpaintMask = (maskCanvas, outW, outH, { threshold = 250 } = {}) => {
+  const out = createMaskCanvas(outW, outH, '#000000')
+  if (!maskCanvas) return { canvas: out, filled: 0 }
+  // Render the erase mask at the inpaint resolution first, then invert per-pixel.
+  const scaled = createMaskCanvas(outW, outH)
+  scaled.getContext('2d').drawImage(maskCanvas, 0, 0, outW, outH)
+  const src = scaled.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, outW, outH).data
+  const ctx = out.getContext('2d')
+  const img = ctx.createImageData(outW, outH)
+  const dst = img.data
+  let filled = 0
+  for (let i = 0; i < src.length; i += 4) {
+    const on = src[i] < threshold ? 255 : 0
+    dst[i] = on
+    dst[i + 1] = on
+    dst[i + 2] = on
+    dst[i + 3] = 255
+    if (on) filled += 1
+  }
+  ctx.putImageData(img, 0, 0)
+  return { canvas: out, filled }
+}
+
 export const getClipElement = (clipPath) =>
   clipPath?._element ||
   clipPath?._originalElement ||

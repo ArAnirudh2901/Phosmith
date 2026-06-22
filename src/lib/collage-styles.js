@@ -101,19 +101,26 @@ export const AI_BG_THEMES = [
  * background theme (decorative, generated to fit the photos). The generator
  * marries each look to a layout that fits the current photo count.
  */
+// Each look bundles a frame style (shape / corner radius / shadow / inner mat),
+// its own spacing (gap + padding — seamless vs airy), and either an instant
+// backdrop or an AI background theme. The spread spans matted galleries,
+// seamless cinematic mosaics, scrapbook journals and bold gradients so even the
+// keyless heuristic gallery is stylish and varied.
 export const TEMPLATE_LOOKS = [
-    { id: 'cream-bloom', label: 'Cream Bloom', style: { shape: 'rect', radiusPct: 24, shadow: true }, theme: 'floral' },
-    { id: 'doodle-pop', label: 'Doodle Pop', style: { shape: 'rect', radiusPct: 18, shadow: true }, theme: 'doodle' },
-    { id: 'botanical', label: 'Botanical', style: { shape: 'rect', radiusPct: 20, shadow: false }, theme: 'botanical' },
-    { id: 'aquarelle', label: 'Aquarelle', style: { shape: 'rect', radiusPct: 22, shadow: true }, theme: 'watercolor' },
-    { id: 'confetti', label: 'Confetti', style: { shape: 'circle', radiusPct: 0, shadow: true }, theme: 'confetti' },
-    { id: 'chalkboard', label: 'Chalkboard', style: { shape: 'rect', radiusPct: 10, shadow: true }, theme: 'chalk' },
-    { id: 'pastel-pop', label: 'Pastel Pop', style: { shape: 'rect', radiusPct: 22, shadow: true }, backdrop: { type: 'gradient', stops: ['#fbcfe8', '#bfdbfe'] } },
-    { id: 'golden-hour', label: 'Golden Hour', style: { shape: 'rect', radiusPct: 20, shadow: true }, backdrop: { type: 'gradient', stops: ['#fde68a', '#fb7185'] } },
-    { id: 'fresh-mint', label: 'Fresh Mint', style: { shape: 'circle', radiusPct: 0, shadow: true }, backdrop: { type: 'gradient', stops: ['#bbf7d0', '#a5f3fc'] } },
-    { id: 'noir', label: 'Noir', style: { shape: 'rect', radiusPct: 12, shadow: true }, backdrop: { type: 'solid', color: '#0b0d12' } },
-    { id: 'polaroid', label: 'Polaroid', style: { shape: 'rect', radiusPct: 6, shadow: true }, backdrop: { type: 'solid', color: '#ffffff' } },
-    { id: 'blush-bubbles', label: 'Blush Bubbles', style: { shape: 'circle', radiusPct: 0, shadow: true }, backdrop: { type: 'solid', color: '#fbcfe8' } },
+    { id: 'gallery-wall', label: 'Gallery Wall', style: { shape: 'rect', radiusPct: 3, shadow: true, framePct: 10 }, gap: 22, padding: 30, backdrop: { type: 'solid', color: '#f4f1ea' } },
+    { id: 'cinematic', label: 'Cinematic', style: { shape: 'rect', radiusPct: 0, shadow: false, framePct: 0 }, gap: 0, padding: 0, backdrop: { type: 'solid', color: '#0b0d12' } },
+    { id: 'polaroid', label: 'Polaroid Stack', style: { shape: 'rect', radiusPct: 4, shadow: true, framePct: 9 }, gap: 18, padding: 22, backdrop: { type: 'solid', color: '#ffffff' } },
+    { id: 'slate-gallery', label: 'Slate Gallery', style: { shape: 'rect', radiusPct: 4, shadow: false, framePct: 11 }, gap: 20, padding: 28, backdrop: { type: 'solid', color: '#2f3437' } },
+    { id: 'cream-bloom', label: 'Pressed Bloom', style: { shape: 'rect', radiusPct: 16, shadow: true, framePct: 6 }, gap: 16, padding: 22, theme: 'floral' },
+    { id: 'botanical', label: 'Botanical Air', style: { shape: 'rect', radiusPct: 12, shadow: false, framePct: 5 }, gap: 18, padding: 26, theme: 'botanical' },
+    { id: 'kraft-journal', label: 'Kraft Journal', style: { shape: 'rect', radiusPct: 6, shadow: true, framePct: 7 }, gap: 14, padding: 18, theme: 'doodle' },
+    { id: 'aquarelle', label: 'Aquarelle', style: { shape: 'rect', radiusPct: 18, shadow: true, framePct: 4 }, gap: 12, padding: 16, theme: 'watercolor' },
+    { id: 'chalk-menu', label: 'Chalk Menu', style: { shape: 'rect', radiusPct: 8, shadow: true, framePct: 6 }, gap: 14, padding: 18, theme: 'chalk' },
+    { id: 'confetti', label: 'Confetti Pop', style: { shape: 'circle', radiusPct: 0, shadow: true, framePct: 0 }, gap: 16, padding: 18, theme: 'confetti' },
+    { id: 'pastel-pop', label: 'Pastel Pop', style: { shape: 'rect', radiusPct: 22, shadow: true, framePct: 0 }, gap: 12, padding: 14, backdrop: { type: 'gradient', stops: ['#fbcfe8', '#bfdbfe'] } },
+    { id: 'golden-hour', label: 'Golden Hour', style: { shape: 'rect', radiusPct: 18, shadow: true, framePct: 0 }, gap: 10, padding: 12, backdrop: { type: 'gradient', stops: ['#fde68a', '#fb7185'] } },
+    { id: 'noir', label: 'Noir Mosaic', style: { shape: 'rect', radiusPct: 6, shadow: false, framePct: 0 }, gap: 3, padding: 6, backdrop: { type: 'solid', color: '#0b0d12' } },
+    { id: 'blush-bubbles', label: 'Blush Bubbles', style: { shape: 'circle', radiusPct: 0, shadow: true, framePct: 0 }, gap: 14, padding: 18, backdrop: { type: 'solid', color: '#fbcfe8' } },
 ]
 
 /** clamp a corner-radius percentage (0..50) to px for a given cell. */

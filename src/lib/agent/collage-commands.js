@@ -18,6 +18,11 @@
  *   collage.setBackground      — set a solid/gradient/named canvas backdrop.
  *   collage.generateBackground — generate a decorative background that "fits the
  *                                photos" (samples their colours) and apply it.
+ *   collage.suggestTemplates   — VISION model looks at the photos and returns
+ *                                content-matched template recipes (read-only).
+ *   collage.aiTemplate         — vision-driven one-shot: design + apply the
+ *                                best content-matched template (layout + style +
+ *                                content-aware background).
  *   collage.fromDescription    — natural-language entry: parse a prompt like
  *                                "make a rounded pastel 4-grid collage with a
  *                                floral background" → createTemplate (+ generate).
@@ -43,6 +48,7 @@ import {
     applyCollageBackground,
     buildAiBackgroundPrompt,
 } from '@/lib/collage-styles'
+import { wrapCollageBgPrompt } from '@/lib/collage-ai'
 import { applyCanvasSizedBackground } from '@/lib/canvas-background'
 
 const fac = new FastAverageColor()
@@ -56,19 +62,21 @@ const NAMED_COLORS = {
 }
 
 const resolveStyle = (style) => {
-    const base = { shape: 'rect', radiusPct: 0, shadow: false, backdrop: null }
+    const base = { shape: 'rect', radiusPct: 0, shadow: false, framePct: 0, backdrop: null }
     if (!style) return base
     if (typeof style === 'object') {
+        const shape = style.shape === 'circle' ? 'circle' : 'rect'
         return {
-            shape: style.shape === 'circle' ? 'circle' : 'rect',
+            shape,
             radiusPct: Math.max(0, Math.min(50, Number(style.radiusPct) || 0)),
             shadow: Boolean(style.shadow),
+            framePct: shape === 'circle' ? 0 : Math.max(0, Math.min(14, Number(style.framePct) || 0)),
             backdrop: style.backdrop || null,
         }
     }
     const preset = COLLAGE_STYLES.find((s) => s.id === String(style).toLowerCase())
     if (preset) {
-        return { shape: preset.shape, radiusPct: preset.radiusPct, shadow: preset.shadow, backdrop: preset.backdrop }
+        return { shape: preset.shape, radiusPct: preset.radiusPct, shadow: preset.shadow, framePct: 0, backdrop: preset.backdrop }
     }
     return base
 }
@@ -102,6 +110,32 @@ const samplePhotoColors = async (images) => {
         }
     }
     return colors
+}
+
+/** Downscale photos to small JPEGs the vision model can SEE (tainted sources
+ *  skipped). Returns `[{ base64, mimeType, aspect }]`. */
+const buildThumbnailsFromImages = async (images, max = 6) => {
+    const out = []
+    for (const img of images.slice(0, max)) {
+        const el = img._originalElement || img._element || img.getElement?.()
+        const w = el?.naturalWidth || el?.width
+        const h = el?.naturalHeight || el?.height
+        if (!el || !w || !h || typeof document === 'undefined') continue
+        const scale = Math.min(1, 384 / Math.max(w, h))
+        const cw = Math.max(1, Math.round(w * scale))
+        const ch = Math.max(1, Math.round(h * scale))
+        const c = document.createElement('canvas')
+        c.width = cw
+        c.height = ch
+        try {
+            c.getContext('2d').drawImage(el, 0, 0, cw, ch)
+            const base64 = c.toDataURL('image/jpeg', 0.72).split(',')[1]
+            if (base64) out.push({ base64, mimeType: 'image/jpeg', aspect: w / h })
+        } catch {
+            /* tainted source — skip it */
+        }
+    }
+    return out
 }
 
 /**
@@ -213,7 +247,7 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
         if (backdrop) applyCollageBackground(canvas, backdrop, sizeOf())
 
         const cells = computeCollageCells(sizeOf(), layoutId, gap, padding)
-        const frameStyle = { shape: st.shape, radiusPct: st.radiusPct, shadow: st.shadow }
+        const frameStyle = { shape: st.shape, radiusPct: st.radiusPct, shadow: st.shadow, framePct: st.framePct || 0 }
 
         canvas.discardActiveObject?.()
         images.slice(0, cells.length).forEach((image, index) => fitImageToCell(image, cells[index], frameStyle))
@@ -253,6 +287,87 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
             generatedBackground = { applied: false, error: String(error?.message || error) }
         }
         return { ...template, randomized: true, theme: theme.id, generatedBackground }
+    }
+
+    // Vision-driven: the model LOOKS at the photos and proposes templates that
+    // match their content. Returns the analysis + validated recipes (read-only).
+    const doSuggestTemplates = async (directionHint = '') => {
+        const images = getImages()
+        if (images.length < 2) {
+            throw new Error(`[agent.collage] need at least 2 photos to suggest templates (found ${images.length})`)
+        }
+        const [thumbs, colors] = await Promise.all([
+            buildThumbnailsFromImages(images),
+            samplePhotoColors(images),
+        ])
+        if (thumbs.length === 0) {
+            throw new Error('[agent.collage] could not read the photos for vision analysis (cross-origin without CORS?)')
+        }
+        const project = getProject?.()
+        const canvasAspect = (Number(project?.width) || 1) / (Number(project?.height) || 1)
+        const resp = await fetch('/api/ai/collage-plan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                photos: thumbs,
+                photoCount: images.length,
+                palette: colors,
+                aspects: thumbs.map((t) => t.aspect),
+                canvasAspect,
+                recipeCount: 6,
+                directionHint: typeof directionHint === 'string' ? directionHint : '',
+            }),
+        })
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}))
+            throw new Error(data.error || `[agent.collage] collage-plan HTTP ${resp.status}`)
+        }
+        const data = await resp.json()
+        return {
+            source: data.source || 'none',
+            analysis: data.analysis || null,
+            recipes: Array.isArray(data.recipes) ? data.recipes : [],
+        }
+    }
+
+    // Vision-driven full build: suggest → apply the best-fit recipe (layout +
+    // style + content-aware background). Falls back to the randomized auto when
+    // the vision model is unavailable.
+    const doAiTemplate = async (directionHint = '') => {
+        let plan
+        try {
+            plan = await doSuggestTemplates(directionHint)
+        } catch (error) {
+            const auto = await doAutoTemplate()
+            return { ...auto, aiFallback: true, reason: String(error?.message || error) }
+        }
+        const best = plan.recipes[0]
+        if (!best) {
+            const auto = await doAutoTemplate()
+            return { ...auto, aiFallback: true, reason: 'no vision recipes returned' }
+        }
+
+        const template = doCreateTemplate({
+            layout: best.layoutId,
+            style: best.style,
+            gap: Number.isFinite(best.gap) ? best.gap : 10,
+            padding: Number.isFinite(best.padding) ? best.padding : 10,
+        })
+        let generatedBackground = null
+        try {
+            if (best.bgPrompt) {
+                const colors = await samplePhotoColors(getImages())
+                generatedBackground = await doGenerateBackground({ prompt: wrapCollageBgPrompt(best.bgPrompt, colors) })
+            } else if (best.backdrop) {
+                applyCollageBackground(getCanvas?.(), best.backdrop, sizeOf())
+                getCanvas?.()?.__pushHistoryState?.({ label: 'Set collage background', domain: 'collage' })
+                getCanvas?.()?.__saveCanvasState?.()
+                generatedBackground = { applied: true, backdrop: best.backdrop }
+            }
+        } catch (error) {
+            generatedBackground = { applied: false, error: String(error?.message || error) }
+        }
+        return { ...template, analysis: plan.analysis, label: best.label, generatedBackground }
     }
 
     const doGenerateBackground = async ({ theme, prompt } = {}) => {
@@ -336,6 +451,22 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
             description: 'Auto-build a randomized collage tuned to the photo count: detect how many photos are on the canvas, pick a layout that uses as many as possible plus a random style, place the photos, and generate a fit-to-photos background.',
             params: {},
             run: () => doAutoTemplate(),
+        },
+
+        suggestTemplates: {
+            description: 'Use a VISION model to look at the canvas photos, infer what they show (portrait/food/nature/product/…) and their mood, and return creative template recipes (named direction + layout + spacing + frame style + content-aware background) that MATCH the content. Read-only — pair with createTemplate/generateBackground or use aiTemplate to apply.',
+            params: {
+                direction: 'optional creative brief steering the look, e.g. "editorial fashion", "90s film album", "cozy cafe menu"',
+            },
+            run: ({ direction } = {}) => doSuggestTemplates(direction),
+        },
+
+        aiTemplate: {
+            description: 'Vision-driven one-shot collage: look at the photos, design a unique content-matched template, place the photos, and apply the best-fit layout, spacing, frame style and content-aware background. Pass a direction to steer the aesthetic. Falls back to the randomized autoTemplate if the vision model is unavailable.',
+            params: {
+                direction: 'optional creative brief, e.g. "vintage scrapbook", "minimal gallery wall", "bold magazine"',
+            },
+            run: ({ direction } = {}) => doAiTemplate(direction),
         },
 
         fromDescription: {

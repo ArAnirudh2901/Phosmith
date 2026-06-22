@@ -1279,7 +1279,10 @@ const AdjustControls = () => {
         const val = isPointsKey ? v : (Array.isArray(v) ? v[0] : v)
         const prev = latestRef.current
         if (!isPointsKey && prev[key] === val) return
-        applyNextValues({ ...prev, [key]: val })
+        const next = { ...prev, [key]: val }
+        // For curve points, update React state immediately so the SVG path
+        // re-renders in real-time while dragging (not just on mouse-up).
+        applyNextValues(next, { updateState: isPointsKey })
     }
 
     const handleCommitChange = (key, v) => {
