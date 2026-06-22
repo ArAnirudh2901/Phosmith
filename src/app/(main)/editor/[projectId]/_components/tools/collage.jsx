@@ -16,6 +16,7 @@ import {
     backdropPreviewCss,
     buildAiBackgroundPrompt,
 } from '@/lib/collage-styles'
+import { wrapCollageBgPrompt } from '@/lib/collage-ai'
 import {
     LAYOUTS,
     buildLayoutCells,
@@ -83,9 +84,15 @@ const LayoutPreview = ({ layoutId, active }) => {
 }
 
 /** A realistic thumbnail of a generated template recipe: the backdrop with the
- *  layout's cells drawn at the recipe's frame shape. */
+ *  layout's cells drawn at the recipe's spacing (gap + padding), frame shape,
+ *  and inner mat (framePct) — so the gallery actually shows the variety. */
 const TemplatePreview = ({ recipe }) => {
-    const cells = buildLayoutCells(recipe.layoutId, { x: 0, y: 0, w: 100, h: 100 }, 6)
+    // Map canvas-px spacing into the 100-unit preview box (rough, for the look).
+    const previewPad = Math.min(20, (Number.isFinite(recipe.padding) ? recipe.padding : 6) / 8)
+    const previewGap = Math.min(12, (Number.isFinite(recipe.gap) ? recipe.gap : 6) / 8)
+    const frame = { x: previewPad, y: previewPad, w: 100 - 2 * previewPad, h: 100 - 2 * previewPad }
+    const cells = buildLayoutCells(recipe.layoutId, frame, previewGap)
+    const matPct = recipe.style.shape === 'circle' ? 0 : Math.min(14, recipe.style.framePct || 0)
     const radius = recipe.style.shape === 'circle' ? '50%' : `${Math.round((recipe.style.radiusPct || 0) / 5) + 1}px`
     return (
         <div
@@ -101,13 +108,22 @@ const TemplatePreview = ({ recipe }) => {
                         top: `${cell.y}%`,
                         width: `${cell.w}%`,
                         height: `${cell.h}%`,
-                        borderRadius: radius,
-                        background: 'rgba(255,255,255,0.92)',
-                        boxShadow: recipe.style.shadow
-                            ? '0 1px 2px rgba(0,0,0,0.35)'
-                            : 'inset 0 0 0 1px rgba(0,0,0,0.08)',
+                        padding: `${matPct}%`,
+                        boxSizing: 'border-box',
                     }}
-                />
+                >
+                    <div
+                        style={{
+                            width: '100%',
+                            height: '100%',
+                            borderRadius: radius,
+                            background: 'rgba(255,255,255,0.94)',
+                            boxShadow: recipe.style.shadow
+                                ? '0 1px 3px rgba(0,0,0,0.4)'
+                                : 'inset 0 0 0 1px rgba(0,0,0,0.10)',
+                        }}
+                    />
+                </div>
             ))}
         </div>
     )
@@ -154,6 +170,21 @@ export default function CollageControls({ project, dominantColor }) {
     const [generatingTheme, setGeneratingTheme] = useState(null)
     // Generated "stylish template" suggestions (gallery).
     const [templateRecipes, setTemplateRecipes] = useState([])
+    // Vision-AI template planning: in-flight flag + the model's content analysis.
+    const [isPlanning, setIsPlanning] = useState(false)
+    const [aiAnalysis, setAiAnalysis] = useState(null)
+    // Optional creative direction the user (or the agent) asks for — steers the
+    // whole plan ("editorial", "vintage film", "scrapbook"…). Mirrored to a ref
+    // so requestAiTemplates stays stable (no re-fire on each keystroke).
+    const [aiDirection, setAiDirection] = useState('')
+    const aiDirectionRef = useRef('')
+    useEffect(() => { aiDirectionRef.current = aiDirection }, [aiDirection])
+    // Latest applyRecipe, so autoTemplate can call it without a definition-order
+    // dependency cycle (applyRecipe is defined below autoTemplate).
+    const applyRecipeRef = useRef(null)
+    // Photo count we've already run a vision plan for — so opening the tool fires
+    // the AI matcher once per photo set, not on every render.
+    const aiPlannedRef = useRef(0)
 
     const syncImageCount = useCallback(() => {
         const images = canvasEditor?.getObjects?.().filter(isVisibleImage) || []
@@ -323,18 +354,17 @@ export default function CollageControls({ project, dominantColor }) {
         return colors
     }, [canvasEditor, dominantColor])
 
-    // Generate a decorative background tuned to the photos and set it on the canvas.
-    const generateThemedBackground = useCallback(async (theme) => {
-        if (!canvasEditor || generatingTheme) return
-        setGeneratingTheme(theme.id)
-        setProcessingMessage?.(`Generating ${theme.label.toLowerCase()} background...`)
+    // Shared core: generate a decorative background from a final prompt and set
+    // it on the canvas (handles busy state, history, and user-facing toasts).
+    const applyGeneratedBackground = useCallback(async (finalPrompt, { busyKey = 'ai', label = 'AI' } = {}) => {
+        if (!canvasEditor) return false
+        setGeneratingTheme(busyKey)
+        setProcessingMessage?.(`Generating ${String(label).toLowerCase()} background...`)
         try {
-            const colors = await samplePhotoColors()
-            const prompt = buildAiBackgroundPrompt(theme, colors)
             const response = await fetch('/api/ai/background', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt, raw: true }),
+                body: JSON.stringify({ prompt: finalPrompt, raw: true }),
             })
             if (!response.ok) {
                 const data = await response.json().catch(() => ({}))
@@ -346,79 +376,180 @@ export default function CollageControls({ project, dominantColor }) {
             setProcessingMessage?.('Applying background...')
             await applyCanvasSizedBackground(canvasEditor, FabricImage, data.imageUrl, project)
             setActiveBackdrop(null)
-            canvasEditor.__pushHistoryState?.({ label: 'Generated collage background', detail: theme.label, domain: 'collage' })
+            canvasEditor.__pushHistoryState?.({ label: 'Generated collage background', detail: label, domain: 'collage' })
             canvasEditor.__saveCanvasState?.()
-            toast.success(`${theme.label} background applied`)
+            toast.success(`${label} background applied`)
+            return true
         } catch (error) {
-            console.warn('[collage] themed background failed:', error)
+            console.warn('[collage] background generation failed:', error)
             const msg = String(error?.message || '')
             toast.error(
                 /rate limit|429/i.test(msg) ? 'AI is busy — try again in a minute.'
                     : /token|configured/i.test(msg) ? 'AI background is not configured.'
                         : 'Could not generate that background. Try another style.'
             )
+            return false
         } finally {
             setGeneratingTheme(null)
             setProcessingMessage?.(null)
         }
-    }, [canvasEditor, generatingTheme, samplePhotoColors, project, setProcessingMessage])
+    }, [canvasEditor, project, setProcessingMessage])
 
-    // One click: detect the photo count, pick a fitting layout + a random style,
-    // place the photos, then generate a background tuned to them. Layout/style
-    // land instantly; the AI background streams in after.
+    // Generate a decorative background tuned to the photos for a named theme.
+    const generateThemedBackground = useCallback(async (theme) => {
+        if (generatingTheme) return false
+        const colors = await samplePhotoColors()
+        return applyGeneratedBackground(buildAiBackgroundPrompt(theme, colors), { busyKey: theme.id, label: theme.label })
+    }, [generatingTheme, samplePhotoColors, applyGeneratedBackground])
+
+    // Generate a CONTENT-AWARE background from a description the vision model
+    // wrote for these specific photos (wrapped with palette + safety rules).
+    const generateBackgroundFromPrompt = useCallback(async (decorative, label = 'AI') => {
+        if (generatingTheme) return false
+        const colors = await samplePhotoColors()
+        return applyGeneratedBackground(wrapCollageBgPrompt(decorative, colors), { busyKey: 'custom', label })
+    }, [generatingTheme, samplePhotoColors, applyGeneratedBackground])
+
+    // Downscale each canvas photo to a small JPEG the vision model can SEE.
+    // Tainted (cross-origin, no CORS) sources are skipped — the plan still runs
+    // on whatever thumbnails succeed, and falls back to heuristics if none do.
+    const buildThumbnails = useCallback(async (images, max = 6) => {
+        const out = []
+        for (const img of images.slice(0, max)) {
+            const el = img._originalElement || img._element || img.getElement?.()
+            const w = el?.naturalWidth || el?.width
+            const h = el?.naturalHeight || el?.height
+            if (!el || !w || !h) continue
+            const scale = Math.min(1, 384 / Math.max(w, h))
+            const cw = Math.max(1, Math.round(w * scale))
+            const ch = Math.max(1, Math.round(h * scale))
+            const c = document.createElement('canvas')
+            c.width = cw
+            c.height = ch
+            try {
+                c.getContext('2d').drawImage(el, 0, 0, cw, ch)
+                const base64 = c.toDataURL('image/jpeg', 0.72).split(',')[1]
+                if (base64) out.push({ base64, mimeType: 'image/jpeg', aspect: w / h })
+            } catch {
+                /* tainted source — skip it */
+            }
+        }
+        return out
+    }, [])
+
+    // Ask the vision model for templates that MATCH the photos. Maps the plan
+    // into the gallery's recipe shape; falls back to the local heuristic set when
+    // the model is unavailable. Returns the recipes it set.
+    const requestAiTemplates = useCallback(async (directionOverride) => {
+        const images = canvasEditor?.getObjects?.().filter(isVisibleImage) || []
+        if (images.length < 2) return []
+        const directionHint = directionOverride != null ? directionOverride : aiDirectionRef.current
+
+        const heuristicFallback = () => {
+            const recipes = generateTemplateRecipes(images.length, 6)
+            setTemplateRecipes(recipes)
+            setAiAnalysis(null)
+            return recipes
+        }
+
+        setIsPlanning(true)
+        try {
+            const [thumbs, colors] = await Promise.all([buildThumbnails(images), samplePhotoColors()])
+            if (thumbs.length === 0) return heuristicFallback()
+
+            const canvasAspect = (Number(project?.width) || 1) / (Number(project?.height) || 1)
+            const resp = await fetch('/api/ai/collage-plan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    photos: thumbs,
+                    photoCount: images.length,
+                    palette: colors,
+                    aspects: thumbs.map((t) => t.aspect),
+                    canvasAspect,
+                    recipeCount: 6,
+                    directionHint,
+                }),
+            })
+            if (!resp.ok) return heuristicFallback()
+            const data = await resp.json()
+            const planRecipes = Array.isArray(data?.recipes) ? data.recipes : []
+            if (data?.source !== 'gemini' || planRecipes.length === 0) return heuristicFallback()
+
+            const analysis = data.analysis || null
+            const palette = (analysis?.palette || colors || []).filter(Boolean)
+            const previewFor = (r) => {
+                if (r.backdrop) return backdropPreviewCss(r.backdrop)
+                if (palette.length >= 2) return `linear-gradient(135deg, ${palette[0]}, ${palette[1]})`
+                if (palette.length === 1) return palette[0]
+                return '#eef1f5'
+            }
+            const mapped = planRecipes.map((r, index) => ({
+                id: `${r.layoutId}-ai-${index}-${Math.random().toString(36).slice(2, 6)}`,
+                label: r.label,
+                direction: r.direction || '',
+                layoutId: r.layoutId,
+                gap: Number.isFinite(r.gap) ? r.gap : null,
+                padding: Number.isFinite(r.padding) ? r.padding : null,
+                style: r.style,
+                backdrop: r.backdrop || null,
+                theme: r.theme || null,
+                bgPrompt: r.bgPrompt || null,
+                rationale: r.rationale || '',
+                isAi: Boolean(r.bgPrompt || r.theme),
+                previewBg: previewFor(r),
+            }))
+            setTemplateRecipes(mapped)
+            setAiAnalysis(analysis)
+            return mapped
+        } catch (error) {
+            console.warn('[collage] AI template plan failed:', error)
+            return heuristicFallback()
+        } finally {
+            setIsPlanning(false)
+        }
+    }, [canvasEditor, project?.width, project?.height, buildThumbnails, samplePhotoColors])
+
+    // One click: a vision model LOOKS at the photos, designs templates that match
+    // their content, fills the gallery, and applies the best-fit one (layout +
+    // style + a content-aware background). Falls back to a heuristic pick when the
+    // model is unavailable.
     const autoTemplate = useCallback(async () => {
-        if (!canvasEditor || generatingTheme) return
+        if (!canvasEditor || generatingTheme || isPlanning) return
         const images = canvasEditor.getObjects().filter(isVisibleImage)
         if (images.length < 2) {
             toast.error('Add at least 2 photos to auto-generate a template')
             return
         }
-        const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)]
+        const recipes = await requestAiTemplates()
+        const best = recipes[0]
+        if (!best) {
+            toast.error('Could not generate a template — try again')
+            return
+        }
+        await applyRecipeRef.current?.(best)
+    }, [canvasEditor, generatingTheme, isPlanning, requestAiTemplates])
 
-        // Prefer layouts that use as many of the photos as possible, then random.
-        const usable = LAYOUTS.filter((l) => l.cellCount <= images.length)
-        const maxCells = Math.max(...usable.map((l) => l.cellCount))
-        const layoutDef = pickRandom(usable.filter((l) => l.cellCount === maxCells))
-        const preset = pickRandom(COLLAGE_STYLES)
-        const theme = pickRandom(AI_BG_THEMES)
-        const nextStyle = { shape: preset.shape, radiusPct: preset.radiusPct, shadow: preset.shadow }
-
-        // Reflect the random pick in the controls.
-        setSelectedLayout(layoutDef.id)
-        setSelectedStyle(preset.id)
-        setShape(preset.shape)
-        setRadiusPct(preset.radiusPct)
-        setShadow(preset.shadow)
-
-        const cells = computeCollageCells(
-            { width: project?.width, height: project?.height },
-            layoutDef.id,
-            gap,
-            padding,
-        )
-        canvasEditor.discardActiveObject()
-        images.slice(0, cells.length).forEach((image, index) => fitImageToCell(image, cells[index], nextStyle))
-        canvasEditor.requestRenderAll()
-        canvasEditor.__pushHistoryState?.({ label: 'Auto template', detail: layoutDef.label, domain: 'collage' })
-        canvasEditor.__saveCanvasState?.()
-        toast.success(`${layoutDef.label} · ${preset.label} — generating background…`)
-
-        // Generate + apply the fit-to-photos background (handles its own toasts).
-        await generateThemedBackground(theme)
-    }, [canvasEditor, generatingTheme, project?.width, project?.height, gap, padding, generateThemedBackground])
-
-    // (Re)generate the stylish-template gallery for the current photo count.
+    // (Re)generate the gallery — re-runs the vision matcher for fresh, content-fit
+    // suggestions (heuristic fallback when the model is unavailable).
     const regenerateTemplates = useCallback(() => {
-        setTemplateRecipes(imageCount >= 2 ? generateTemplateRecipes(imageCount, 6) : [])
-    }, [imageCount])
+        if (imageCount < 2 || isPlanning) return
+        requestAiTemplates()
+    }, [imageCount, isPlanning, requestAiTemplates])
 
-    // Keep at least one set of suggestions ready; refresh when the photo count
-    // changes (a layout for 2 photos shouldn't linger once there are 5).
+    // Keep suggestions ready: show the instant heuristic set immediately, then
+    // upgrade to vision-matched templates ONCE per photo set (not every render).
     useEffect(() => {
-        setTemplateRecipes((current) =>
-            imageCount >= 2 && current.length === 0 ? generateTemplateRecipes(imageCount, 6) : current
-        )
-    }, [imageCount])
+        if (imageCount < 2) {
+            aiPlannedRef.current = 0
+            return
+        }
+        setTemplateRecipes((current) => (current.length ? current : generateTemplateRecipes(imageCount, 6)))
+        if (aiPlannedRef.current !== imageCount) {
+            aiPlannedRef.current = imageCount
+            requestAiTemplates().catch(() => {})
+        }
+    }, [imageCount, requestAiTemplates])
 
     // Apply one generated template: layout + frame style + its backdrop (instant)
     // or AI theme (generated to fit the photos).
@@ -430,16 +561,20 @@ export default function CollageControls({ project, dominantColor }) {
             return
         }
         const nextStyle = recipe.style
+        const nextGap = Number.isFinite(recipe.gap) ? recipe.gap : gap
+        const nextPadding = Number.isFinite(recipe.padding) ? recipe.padding : padding
         setSelectedLayout(recipe.layoutId)
         setShape(nextStyle.shape)
         setRadiusPct(nextStyle.radiusPct)
         setShadow(nextStyle.shadow)
+        setGap(nextGap)
+        setPadding(nextPadding)
 
         const cells = computeCollageCells(
             { width: project?.width, height: project?.height },
             recipe.layoutId,
-            gap,
-            padding,
+            nextGap,
+            nextPadding,
         )
         canvasEditor.discardActiveObject()
         images.slice(0, cells.length).forEach((image, index) => fitImageToCell(image, cells[index], nextStyle))
@@ -447,7 +582,11 @@ export default function CollageControls({ project, dominantColor }) {
         canvasEditor.__pushHistoryState?.({ label: 'Applied stylish template', detail: recipe.label, domain: 'collage' })
         canvasEditor.__saveCanvasState?.()
 
-        if (recipe.theme) {
+        if (recipe.bgPrompt) {
+            // Content-aware background the vision model wrote for THESE photos.
+            toast.success(`${recipe.label} — generating background…`)
+            await generateBackgroundFromPrompt(recipe.bgPrompt, recipe.label)
+        } else if (recipe.theme) {
             const theme = AI_BG_THEMES.find((t) => t.id === recipe.theme)
             if (theme) {
                 toast.success(`${recipe.label} — generating background…`)
@@ -457,7 +596,13 @@ export default function CollageControls({ project, dominantColor }) {
             applyBackdrop(recipe.backdrop)
             toast.success(`${recipe.label} applied`)
         }
-    }, [canvasEditor, generatingTheme, project?.width, project?.height, gap, padding, generateThemedBackground, applyBackdrop])
+    }, [canvasEditor, generatingTheme, project?.width, project?.height, gap, padding, generateThemedBackground, generateBackgroundFromPrompt, applyBackdrop])
+
+    // Keep the ref current so autoTemplate can invoke the latest applyRecipe
+    // without creating a definition-order dependency cycle.
+    useEffect(() => {
+        applyRecipeRef.current = applyRecipe
+    }, [applyRecipe])
 
     // Replace the selected cell's photo with an uploaded one, keeping the SAME
     // cell frame, shape and cover-fit so the collage stays intact.
@@ -506,7 +651,7 @@ export default function CollageControls({ project, dominantColor }) {
 
     const layout = LAYOUTS.find(item => item.id === selectedLayout)
     const missingCount = Math.max(0, (layout?.cellCount || 0) - imageCount)
-    const isGenerating = Boolean(generatingTheme)
+    const isGenerating = Boolean(generatingTheme) || isPlanning
 
 
     return (
@@ -521,7 +666,7 @@ export default function CollageControls({ project, dominantColor }) {
 
             <Section title="Auto Template" icon={Wand2}>
                 <p className="mb-3 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    {`Detects your ${imageCount} photo${imageCount === 1 ? '' : 's'}, picks a matching layout & style, and generates a background to fit them.`}
+                    {`AI looks at your ${imageCount} photo${imageCount === 1 ? '' : 's'}, designs a layout, style & background that match what they show, and applies the best fit.`}
                 </p>
                 <motion.button
                     type="button"
@@ -545,7 +690,11 @@ export default function CollageControls({ project, dominantColor }) {
                 <Section title="Stylish Templates" icon={Sparkles}>
                     <div className="mb-3 flex items-center justify-between gap-2">
                         <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                            {`Ready-made looks for your ${imageCount} photos.`}
+                            {isPlanning
+                                ? 'Matching templates to your photos…'
+                                : aiAnalysis?.contentType
+                                    ? `Matched to your ${aiAnalysis.contentType} photos${aiAnalysis.mood ? ` · ${aiAnalysis.mood}` : ''}.`
+                                    : `Ready-made looks for your ${imageCount} photos.`}
                         </p>
                         <button
                             type="button"
@@ -554,10 +703,51 @@ export default function CollageControls({ project, dominantColor }) {
                             className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium editor-interactive disabled:opacity-50"
                             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                         >
-                            <Shuffle className="w-3 h-3" />
-                            Shuffle
+                            {isPlanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shuffle className="w-3 h-3" />}
+                            {isPlanning ? 'Matching…' : 'Shuffle'}
                         </button>
                     </div>
+
+                    {/* Creative direction — steer the whole plan toward a style.
+                        A chip or free text becomes the model's directionHint. */}
+                    <div className="mb-3 space-y-1.5">
+                        <div className="flex flex-wrap gap-1">
+                            {['Editorial', 'Vintage', 'Scrapbook', 'Minimal', 'Bold', 'Cinematic'].map((d) => {
+                                const active = aiDirection.trim().toLowerCase() === d.toLowerCase()
+                                return (
+                                    <button
+                                        key={d}
+                                        type="button"
+                                        disabled={isGenerating}
+                                        onClick={() => {
+                                            const next = active ? '' : d
+                                            setAiDirection(next)
+                                            requestAiTemplates(next)
+                                        }}
+                                        className="rounded-full px-2 py-0.5 text-[10px] font-medium editor-interactive disabled:opacity-50"
+                                        style={{
+                                            background: active ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
+                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                        }}
+                                    >
+                                        {d}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                        <input
+                            type="text"
+                            value={aiDirection}
+                            onChange={(e) => setAiDirection(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); requestAiTemplates(aiDirection) } }}
+                            disabled={isGenerating}
+                            placeholder="Or describe a direction, then ↵ (e.g. 90s film album)"
+                            className="w-full rounded-md px-2 py-1.5 text-[10px] editor-interactive disabled:opacity-50"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
+                        />
+                    </div>
+
                     <div className="grid grid-cols-2 gap-2">
                         {templateRecipes.map((recipe) => (
                             <motion.button
@@ -568,7 +758,10 @@ export default function CollageControls({ project, dominantColor }) {
                                 whileTap={{ scale: 0.96 }}
                                 className="relative flex flex-col gap-1.5 rounded-lg p-1.5 text-left editor-interactive disabled:opacity-50"
                                 style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
-                                title={`${recipe.label} template`}
+                                title={[
+                                    recipe.direction && recipe.direction !== recipe.label ? `${recipe.label} · ${recipe.direction}` : `${recipe.label}`,
+                                    recipe.rationale,
+                                ].filter(Boolean).join(' — ')}
                             >
                                 <TemplatePreview recipe={recipe} />
                                 <div className="flex items-center justify-between gap-1 px-0.5">

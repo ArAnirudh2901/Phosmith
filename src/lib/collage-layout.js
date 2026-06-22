@@ -213,12 +213,16 @@ export const generateTemplateRecipes = (photoCount, count = 6) => {
         return {
             id: `${look.id}-${index}-${Math.random().toString(36).slice(2, 6)}`,
             label: look.label,
+            direction: look.label,
             layoutId: fitting[index % fitting.length].id,
-            style: { ...look.style },
+            gap: Number.isFinite(look.gap) ? look.gap : 10,
+            padding: Number.isFinite(look.padding) ? look.padding : 10,
+            style: { shape: 'rect', radiusPct: 0, shadow: false, framePct: 0, ...look.style },
             backdrop: look.backdrop || null,
             theme: look.theme || null,
             isAi: Boolean(look.theme),
             previewBg,
+            rationale: '',
         }
     })
 }
@@ -251,18 +255,41 @@ export const getCellCoverScale = (image, cell) => {
 }
 
 /**
+ * Inner mat: shrink the cell the photo occupies by `style.framePct` (% of the
+ * cell's short side) so the canvas backdrop shows through as a border around the
+ * photo — the matted-gallery / polaroid / scrapbook look. Returns the cell
+ * unchanged when no frame is requested.
+ */
+export const insetCellForFrame = (cell, style) => {
+    const pct = Math.max(0, Math.min(14, Number(style?.framePct) || 0))
+    if (!pct) return cell
+    const raw = Math.min(cell.w, cell.h) * (pct / 100)
+    const maxInset = Math.max(0, Math.min(cell.w, cell.h) / 2 - 1)
+    const inset = Math.max(0, Math.min(raw, maxInset))
+    if (!inset) return cell
+    return {
+        x: cell.x + inset,
+        y: cell.y + inset,
+        w: Math.max(1, cell.w - 2 * inset),
+        h: Math.max(1, cell.h - 2 * inset),
+    }
+}
+
+/**
  * Frame an image into a collage cell: scale to COVER the cell, centre it, and
  * clip it to the cell with an absolutely-positioned shape (rounded rect or
- * ellipse, per `style`). Rotation/skew are locked so the cell always stays
- * covered; the optional drop shadow is a native `shadow` so it serializes.
+ * ellipse, per `style`). An optional inner mat (`style.framePct`) insets the
+ * photo so the backdrop frames it. Rotation/skew are locked so the cell always
+ * stays covered; the optional drop shadow is a native `shadow` so it serializes.
  */
 export const fitImageToCell = (image, cell, style) => {
     const source = getCollageSource(image)
-    const coverScale = getCellCoverScale(image, cell)
+    const c = insetCellForFrame(cell, style)
+    const coverScale = getCellCoverScale(image, c)
 
     image.set({
-        left: cell.x + cell.w / 2,
-        top: cell.y + cell.h / 2,
+        left: c.x + c.w / 2,
+        top: c.y + c.h / 2,
         originX: 'center',
         originY: 'center',
         width: source.width,
@@ -278,9 +305,9 @@ export const fitImageToCell = (image, cell, style) => {
         lockSkewingX: true,
         lockSkewingY: true,
         shadow: buildCellShadow(style),
-        clipPath: buildCellClipPath(cell, style),
+        clipPath: buildCellClipPath(c, style),
     })
-    image.phosmithCollageCell = { x: cell.x, y: cell.y, w: cell.w, h: cell.h }
+    image.phosmithCollageCell = { x: c.x, y: c.y, w: c.w, h: c.h }
     image._phosmithCollageCell = image.phosmithCollageCell
     image.phosmithCollageCoverScale = coverScale
     image._phosmithCollageCoverScale = coverScale

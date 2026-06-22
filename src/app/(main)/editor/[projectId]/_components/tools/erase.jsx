@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Eraser, Loader2, MousePointerClick, Sparkles, Wand2 } from 'lucide-react'
+import { Eraser, Lasso, Loader2, MousePointerClick, Sparkles, Wand2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { motion } from 'framer-motion'
 import { useCanvas } from '../../../../../../../context/context'
@@ -108,14 +108,19 @@ const EraseControls = ({ project, dominantColor }) => {
     const { canvasEditor, processingMessage, setProcessingMessage, registerProcessingAbort } = useCanvas()
     const { hasAccess } = usePlanAccess()
 
+    // "Circle to Remove" flips the brush into a deferred lasso: draw a freehand
+    // loop, its interior is highlighted as a pending selection, then you
+    // Generative-Fill / Erase it. Off → the usual instant erase brush.
+    const [circleSelect, setCircleSelect] = useState(false)
     const tool = usePixelMaskTool({
         canvasEditor,
         defaultMode: 'erase',
         supportsMagic: true,
-        deferApply: false,
+        deferApply: circleSelect,
         inferRegion: false,
-        showOverlay: false,
-        livePreview: false,
+        showOverlay: circleSelect,
+        livePreview: circleSelect,
+        fillEnclosed: circleSelect,
     })
     const [isAutoErasing, setIsAutoErasing] = useState(false)
     const [maskServiceStatus, setMaskServiceStatus] = useState(null) // null | 'checking' | 'warm' | 'cold' | 'warming' | 'unavailable'
@@ -127,7 +132,30 @@ const EraseControls = ({ project, dominantColor }) => {
     }, [])
     const abortRef = useRef(null)
     const warmupTriggeredRef = useRef(false)
-    const { setMagic, setMode, setObjectSelect } = tool
+    const { setMagic, setMode, setObjectSelect, discardPending } = tool
+
+    // Circle-to-Remove is mutually exclusive with the click/flood modes.
+    const toggleCircleSelect = useCallback(() => {
+        setCircleSelect((on) => {
+            const next = !on
+            if (next) {
+                setObjectSelect(false)
+                setMagic(false)
+            } else {
+                discardPending?.()
+            }
+            return next
+        })
+    }, [setObjectSelect, setMagic, discardPending])
+
+    // If a click/flood mode is turned on (here or via the radial menu), drop out
+    // of Circle-to-Remove and clear any pending lasso selection.
+    useEffect(() => {
+        if ((tool.objectSelect || tool.magic) && circleSelect) {
+            setCircleSelect(false)
+            discardPending?.()
+        }
+    }, [tool.objectSelect, tool.magic, circleSelect, discardPending])
 
     // Proactively check mask service health and trigger warmup on first mount
     useEffect(() => {
@@ -176,6 +204,7 @@ const EraseControls = ({ project, dominantColor }) => {
         const onSub = (event) => {
             const { toolId, subId } = event.detail || {}
             if (toolId !== 'erase' || !subId) return
+            setCircleSelect(false)
             if (subId === 'magic') setMagic(true)
             else if (subId === 'brush') { setMagic(false); setObjectSelect(false); setMode('erase') }
             else if (subId === 'restore') { setMagic(false); setObjectSelect(false); setMode('restore') }
@@ -377,6 +406,38 @@ const EraseControls = ({ project, dominantColor }) => {
 
 
 
+            {/* Circle to Remove — freehand lasso: draw a loop, its interior is
+                highlighted as a selection, then Generative-Fill / Erase it. */}
+            <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                <motion.button
+                    type="button"
+                    onClick={toggleCircleSelect}
+                    whileTap={{ scale: 0.97 }}
+                    className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left editor-interactive"
+                    style={{
+                        background: circleSelect ? 'rgba(56, 189, 248, 0.1)' : 'transparent',
+                        border: `1px solid ${circleSelect ? 'rgba(56,189,248,0.6)' : 'var(--border-subtle)'}`,
+                        color: circleSelect ? '#7DD3FC' : 'var(--text-secondary)',
+                    }}
+                >
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg shrink-0"
+                        style={{
+                            background: circleSelect ? 'rgba(56,189,248,0.15)' : 'var(--bg-elevated)',
+                            border: `1px solid ${circleSelect ? 'rgba(56,189,248,0.5)' : 'var(--border-default)'}`,
+                        }}>
+                        <Lasso className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                        <div className="text-xs font-semibold">
+                            {circleSelect ? 'Circle to Remove: ON' : 'Circle to Remove: OFF'}
+                        </div>
+                        <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                            Draw a loop around something — its inside highlights, then erase or generative-fill it
+                        </div>
+                    </div>
+                </motion.button>
+            </div>
+
             {/* Mode */}
             <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <ModeToggle mode={tool.mode} setMode={tool.setMode} altActive={tool.altActive} />
@@ -386,8 +447,64 @@ const EraseControls = ({ project, dominantColor }) => {
             {!tool.magic && !tool.objectSelect && (
                 <div className="space-y-3" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                     <BrushSizeControl value={tool.brushSize} setValue={tool.setBrushSize} min={MIN_BRUSH} max={MAX_BRUSH} dominantColor={dominantColor} />
-                    <LabeledSlider label="Hardness" value={tool.hardness} min={1} max={100} suffix="%" onChange={tool.setHardness} dominantColor={dominantColor} />
-                    <LabeledSlider label="Flow" value={tool.flow} min={5} max={100} suffix="%" onChange={tool.setFlow} dominantColor={dominantColor} />
+                    {!circleSelect && (
+                        <>
+                            <LabeledSlider label="Hardness" value={tool.hardness} min={1} max={100} suffix="%" onChange={tool.setHardness} dominantColor={dominantColor} />
+                            <LabeledSlider label="Flow" value={tool.flow} min={5} max={100} suffix="%" onChange={tool.setFlow} dominantColor={dominantColor} />
+                        </>
+                    )}
+
+                    {/* Generative fill — paint/scribble or circle a region, then
+                        regenerate it with AI (same inpaint pipeline as the
+                        click-to-remove object eraser). */}
+                    <motion.button
+                        type="button"
+                        onClick={() => tool.generativeFill()}
+                        disabled={!tool.hasMask || tool.isObjectRunning}
+                        whileTap={{ scale: tool.hasMask && !tool.isObjectRunning ? 0.97 : 1 }}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-50"
+                        style={{ background: 'rgba(124, 58, 237, 0.12)', border: '1px solid rgba(124,58,237,0.6)', color: '#C4B5FD' }}
+                    >
+                        {tool.isObjectRunning && tool.objectPhase === 'filling'
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Wand2 className="h-3.5 w-3.5" />}
+                        {tool.isObjectRunning && tool.objectPhase === 'filling' ? 'Filling…' : 'Generative Fill'}
+                    </motion.button>
+
+                    {circleSelect ? (
+                        tool.hasPending ? (
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => tool.commitErase()}
+                                    disabled={tool.isObjectRunning}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium editor-interactive disabled:opacity-50"
+                                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)' }}
+                                >
+                                    <Eraser className="h-3.5 w-3.5" /> Erase
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => tool.discardPending()}
+                                    disabled={tool.isObjectRunning}
+                                    className="flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium editor-interactive disabled:opacity-50"
+                                    style={{ background: 'transparent', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)' }}
+                                >
+                                    <X className="h-3.5 w-3.5" /> Clear
+                                </button>
+                            </div>
+                        ) : (
+                            <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                Draw a loop around what you want to remove — its inside highlights, then Generative Fill or Erase it
+                            </p>
+                        )
+                    ) : (
+                        <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                            {tool.hasMask
+                                ? 'Erases the painted area and fills it with AI-generated background'
+                                : 'Paint over (or draw a shape around) what to remove, then fill it with AI'}
+                        </p>
+                    )}
                 </div>
             )}
 
@@ -408,6 +525,8 @@ const EraseControls = ({ project, dominantColor }) => {
 
             <TipCard>
                 <p>• <strong>Paint</strong> over what you want to erase — the exact stroke is removed when you release</p>
+                <p>• <strong>Circle to Remove</strong>: draw a freehand loop — the enclosed area is highlighted, then Generative Fill or Erase it</p>
+                <p>• <strong>Generative Fill</strong>: scribble over (or draw a shape around) something, then hit the button — AI erases inside and fills the background</p>
                 <p>• <strong>AI object remover</strong>: click an object and AI removes it + fills the background — click each subject to remove several</p>
                 <p>• Hold <strong>Alt</strong> to temporarily switch Erase ↔ Restore</p>
                 <p>• <strong>[</strong> / <strong>]</strong> resize the brush; raise feather for soft edges</p>

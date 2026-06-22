@@ -1,5 +1,13 @@
 "use client"
 
+let _uidCounter = 0
+const ensureUid = (img) => {
+    if (!img.__phosmithUid) {
+        img.__phosmithUid = img.__uid || `pho_${++_uidCounter}_${Date.now()}`
+    }
+    return img.__phosmithUid
+}
+
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useCanvas } from '../../../../../../../context/context'
 import {
@@ -60,6 +68,7 @@ const ImageManager = ({ project, dominantColor }) => {
     const syncImages = useCallback(() => {
         if (!canvasEditor) return
         const all = canvasEditor.getObjects().filter(isImageObject)
+        all.forEach(ensureUid)
         setImages(all)
 
         const active = canvasEditor.getActiveObject()
@@ -277,7 +286,7 @@ const ImageManager = ({ project, dominantColor }) => {
 
     const beginRename = (img) => {
         const idx = images.length - images.indexOf(img)
-        setRenamingId(img.__uid || `img-${images.indexOf(img)}`)
+        setRenamingId(ensureUid(img))
         setRenameDraft(getLayerName(img, idx))
         requestAnimationFrame(() => {
             renameInputRef.current?.focus()
@@ -456,7 +465,7 @@ const ImageManager = ({ project, dominantColor }) => {
                         const canMoveDown = imageLayerIndex > 0
                         const thumb = getImageThumbSrc(img)
 
-                        const rowKey = img.__uid || `img-${idx}`
+                        const rowKey = ensureUid(img)
                         const isRenaming = renamingId === rowKey
                         const displayName = getLayerName(img, images.length - idx)
                         return (
