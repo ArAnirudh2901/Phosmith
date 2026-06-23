@@ -10,7 +10,7 @@ import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
 import { addImageFilesToCanvas } from '@/lib/canvas-images'
 import ProBadge from '@/components/pro-badge'
-import PhosmithWordmark from '@/components/phosmith-wordmark'
+import PixxelWordmark from '@/components/phosmith-wordmark'
 import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
 import { motion, AnimatePresence } from 'framer-motion'
 import { snapshotCanvasToBlobSafe, isTaintError } from '@/lib/canvas-snapshot'
@@ -406,7 +406,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
-                        <PhosmithWordmark showText={false} height={24} markScale={2.1} />
+                        <PixxelWordmark showText={false} height={24} markScale={2.1} />
                     </Link>
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).

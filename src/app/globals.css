@@ -208,7 +208,7 @@
   }
 }
 
-.phosmith-agent-theme {
+.pixxel-agent-theme {
   position: relative;
   min-height: 100vh;
   background:
@@ -217,7 +217,7 @@
     #070707;
 }
 
-.phosmith-agent-theme::before {
+.pixxel-agent-theme::before {
   content: "";
   position: fixed;
   inset: 0;
@@ -1335,7 +1335,7 @@ a:focus-visible,
 
 /* ── Wordmark variant ──
    The standard `.editor-logo-button` is a 2rem × 2rem square sized for the
-   icon-only mark. The wordmark variant (icon + "PHOSMITH" text) widens to
+   icon-only mark. The wordmark variant (icon + "PIXXEL" text) widens to
    hug its content, with internal padding for the gap. The cyan offset
    shadow, white border, and dark background all carry over from the base
    class — the wordmark shares its visual frame with the icon-only mark so

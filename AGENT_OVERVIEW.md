@@ -1,6 +1,6 @@
-# Phosmith — Project Overview for Agents
+# Pixxel — Project Overview for Agents
 
-Welcome! This document provides an architectural overview of the **Phosmith** codebase to help AI agents understand the stack, folder structure, key paradigms, and layout constraints.
+Welcome! This document provides an architectural overview of the **Pixxel** codebase to help AI agents understand the stack, folder structure, key paradigms, and layout constraints.
 
 ## Tech Stack
 
@@ -28,14 +28,14 @@ Welcome! This document provides an architectural overview of the **Phosmith** co
   - `/api/canvas/*`: Canvas presence and snapshot routes.
   - `/api/neon/*`: Database query/mutation routes.
 - `/src/components`: React components.
-  - `phosmith-wordmark.jsx`: Pure inline SVG brand mark (cyan 4-point spark + "Phosmith" text). Import `PHOSMITH_SPARK` for the path data.
+  - `phosmith-wordmark.jsx`: Pure inline SVG brand mark (cyan 4-point spark + "Pixxel" text). Import `PIXXEL_SPARK` for the path data.
   - `header.jsx`: App header — hidden in the editor, shows wordmark + auth controls on marketing/dashboard pages.
   - `/ui`: Shadcn UI primitives.
   - `/neo`: Neo-brutalist design system components (NeoButton, ShortcutsGuide, Marquee, etc.).
 - `/src/lib`: Core library modules.
   - `megashader/`: GLSL megashader engine — compiler, renderer, Fabric filter, mask-kind registry, GLSL fragment templates.
   - `agent/`: Agent command system.
-    - `command-registry.js`: `registerDomain(domain, defs)` → `runCommand(id, args)`. Exposes `window.__phosmith.agent`.
+    - `command-registry.js`: `registerDomain(domain, defs)` → `runCommand(id, args)`. Exposes `window.__pixxel.agent`.
     - `collage-commands.js`: `createCollageCommands({ getCanvas, getProject })` factory — `collage.*` domain (createTemplate, fromDescription, autoTemplate, generateBackground, setBackground, listLayouts, listStyles).
     - `mask-commands.js`: `mask.*` domain (selectSubject, clickSelect, addSubjectBox, detectSubjects, selectSubjects, fromDescription, expandLayer).
     - `crop-commands.js`: `crop.*` domain (auto, subjectAware, fitAspect, contentFill, applyBox).
@@ -65,7 +65,7 @@ Welcome! This document provides an architectural overview of the **Phosmith** co
 1. **Agent Command Registry**:
    - All editor capabilities are registered as named commands via `registerDomain(domain, defs)` in `command-registry.js`.
    - Commands are invoked by the agent chat, verify scripts, and keyboard shortcuts through a unified `runCommand(id, args)` interface.
-   - The registry is exposed on `window.__phosmith.agent` — call `listCommands()` to enumerate all registered commands at runtime.
+   - The registry is exposed on `window.__pixxel.agent` — call `listCommands()` to enumerate all registered commands at runtime.
    - Every `runCommand` call is wrapped in refcounted `beginAgentAction/endAgentAction` and logged to the change journal with `source: 'agent'`.
 
 2. **Collage Engine**:

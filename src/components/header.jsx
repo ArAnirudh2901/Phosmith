@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation'
 import React, { useEffect, useState } from 'react'
 import { LayoutDashboard, Menu, X } from 'lucide-react'
 import ProBadge from '@/components/pro-badge'
-import PhosmithWordmark from '@/components/phosmith-wordmark'
+import PixxelWordmark from '@/components/phosmith-wordmark'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useDashboardNavigation } from '@/hooks/useDashboardNavigation'
 import { duration, easeOut } from '@/lib/motion'
@@ -143,7 +143,7 @@ const Header = () => {
       >
         <nav className="flex items-center gap-3 sm:gap-6 pl-4 pr-4 sm:pr-6 h-16 w-full max-w-7xl mx-auto">
           <Link href="/" className="flex items-center shrink-0 group transition-opacity group-hover:opacity-90">
-            <PhosmithWordmark height={24} markScale={1.2} showText={false} />
+            <PixxelWordmark height={24} markScale={1.2} showText={false} />
           </Link>
 
           <div className="hidden md:flex items-center gap-1 ml-4">

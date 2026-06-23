@@ -64,7 +64,7 @@ export async function POST(request) {
         cache: "no-store",
         headers: {
           Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-          "User-Agent": "Phosmith ImageKit resolver",
+          "User-Agent": "Pixxel ImageKit resolver",
         },
       });
       const headers = getHeaderSnapshot(response);
