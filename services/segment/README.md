@@ -1,5 +1,5 @@
 ---
-title: Pixxel Mask Service
+title: Phosmith
 emoji: 🎨
 colorFrom: blue
 colorTo: indigo
@@ -40,10 +40,11 @@ This repository contains a [Dockerfile](file:///Users/anirudharavalli/Web_Dev/Ne
    - `yolo26n-seg.pt` (optional, YOLO weights will download automatically if not present)
 
 3. **Get your Endpoint**:
-   Once built and showing **Running**, your public API base URL will be:
+   Once built and showing **Running**, your public API base URL is:
    ```text
-   https://<your-username>-<your-space-name>.hf.space
+   https://aranirudh-phosmith.hf.space
    ```
+
    Provide this URL as the `MASK_SERVICE_URL` environment variable in Vercel.
 
 ---
