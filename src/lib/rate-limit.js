@@ -26,6 +26,7 @@ const LIMITERS = {
     "ai-ground":         { count: 10,  windowSec: 60 },  // 10 / minute — CLIPSeg + SAM2 text grounding
     "ai-mask-plan":      { count: 30,  windowSec: 60 },  // 30 / minute — NL mask planning (Gemini text-only)
     "ai-collage-plan":   { count: 12,  windowSec: 60 },  // 12 / minute — vision collage planner (up to ~6 thumbnails per call)
+    "ai-stretch-plan":   { count: 10,  windowSec: 60 },  // 10 / minute — AI pixel stretch planner (one-shot per image)
     "shape-mask":        { count: 120, windowSec: 60 },  // 120/minute — deterministic local shape rasterization
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute

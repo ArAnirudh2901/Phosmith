@@ -1,5 +1,6 @@
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
+import { stripImageMetadata } from '@/lib/strip-metadata'
 
 const CASCADE_OFFSET = 32
 
@@ -15,12 +16,69 @@ const readFileAsDataURL = (file) =>
     reader.readAsDataURL(file)
   })
 
+// ImageKit rejects images above 25 MP on serving ("ELIMIT"). We downscale
+// anything above 24 MP (safety margin) through an offscreen canvas so the
+// uploaded image is always servable.
+const IMAGEKIT_MAX_MP = 24_000_000
+const MAX_EDGE = 8192
+
+const downscaleIfNeeded = (file) =>
+  new Promise((resolve) => {
+    // Only standard rasters need the check — blobs from canvas are already sized
+    if (!file?.type?.startsWith('image/')) return resolve(file)
+
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      const w = img.naturalWidth || img.width || 0
+      const h = img.naturalHeight || img.height || 0
+      URL.revokeObjectURL(url)
+
+      if (w * h <= IMAGEKIT_MAX_MP && w <= MAX_EDGE && h <= MAX_EDGE) {
+        return resolve(file)            // within limits — use original
+      }
+
+      // Downscale proportionally
+      let nw = w, nh = h
+      if (nw > MAX_EDGE || nh > MAX_EDGE) {
+        const s = MAX_EDGE / Math.max(nw, nh)
+        nw = Math.round(nw * s)
+        nh = Math.round(nh * s)
+      }
+      if (nw * nh > IMAGEKIT_MAX_MP) {
+        const s = Math.sqrt(IMAGEKIT_MAX_MP / (nw * nh))
+        nw = Math.round(nw * s)
+        nh = Math.round(nh * s)
+      }
+
+      const canvas = document.createElement('canvas')
+      canvas.width = nw
+      canvas.height = nh
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0, nw, nh)
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) return resolve(file)  // fallback to original
+          resolve(new File([blob], file.name, { type: blob.type, lastModified: Date.now() }))
+        },
+        'image/jpeg',
+        0.92,
+      )
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file) }
+    img.src = url
+  })
+
 // Uploads to our /api/imagekit/upload endpoint (auth-gated) and returns the CDN URL.
 // This is the path that keeps saved canvas state small enough for Neon's per-doc
 // size limit when users add several photos to one project.
 const uploadFileToImageKit = async (file) => {
+  // Strip EXIF, GPS, XMP, IPTC — binary-level, no re-encoding
+  const cleanFile = await stripImageMetadata(file)
+  // Downscale if the image exceeds ImageKit's 25 MP serving limit
+  const readyFile = await downscaleIfNeeded(cleanFile)
   const formData = new FormData()
-  formData.append('file', file)
+  formData.append('file', readyFile)
   formData.append('fileName', file.name || 'upload')
   const response = await fetch('/api/imagekit/upload', {
     method: 'POST',
@@ -40,8 +98,11 @@ const uploadFileToImageKit = async (file) => {
 // CDN URL. Throws on failure so callers can fall back to a data URL.
 export const uploadImageBlobToImageKit = async (blob, fileName = 'image.png') => {
   if (!blob) throw new Error('No blob to upload')
+  // Strip any metadata the browser may have embedded
+  const blobFile = blob instanceof File ? blob : new File([blob], fileName, { type: blob.type })
+  const cleanBlob = await stripImageMetadata(blobFile)
   const formData = new FormData()
-  formData.append('file', blob, fileName)
+  formData.append('file', cleanBlob, fileName)
   formData.append('fileName', fileName)
   const response = await fetch('/api/imagekit/upload', { method: 'POST', body: formData })
   if (!response.ok) throw new Error(`ImageKit upload failed: ${response.status}`)

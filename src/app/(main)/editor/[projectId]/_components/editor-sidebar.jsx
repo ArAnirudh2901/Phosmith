@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react"
 import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
-import { Bot, Beaker, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid } from "lucide-react"
+import { Bot, Beaker, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid, AudioLines } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
 // Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
 // they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
@@ -40,6 +40,7 @@ const ImageKitAgent = lazyTool(() => import("./tools/imagekit-agent"))
 const ImageManager = lazyTool(() => import("./tools/images"))
 const DrawControls = lazyTool(() => import("./tools/draw"))
 const CollageControls = lazyTool(() => import("./tools/collage"))
+const PixelStretchControls = lazyTool(() => import("./tools/pixel-stretch"))
 
 // Dev-only: Megashader test panel. The dynamic import is gated by
 // NODE_ENV at the call site too, so production builds never request the
@@ -58,6 +59,7 @@ const TOOL_CONFIGS = {
     erase: { title: "Erase", icon: Eraser },
     mask: { title: "Mask", icon: Scissors },
     text: { title: "Text", icon: Text },
+    pixel_stretch: { title: "Pixel Stretch", icon: AudioLines },
     ai_background: { title: "AI Background", icon: Palette },
     ai_extender: { title: "AI Extender", icon: Maximize2 },
     ai_edit: { title: "AI Edit", icon: Eye },
@@ -124,6 +126,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "erase": return <EraseControls project={project} {...colorProps} />
             case "mask": return <MaskControls {...colorProps} />
             case "text": return <TextControls {...colorProps} />
+            case "pixel_stretch": return <PixelStretchControls {...colorProps} />
             case "ai_background": return project ? <BackgroundControls project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_extender": return project ? <AIExtender project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_edit": return project ? <AIEdits project={project} {...colorProps} /> : <div>Loading...</div>

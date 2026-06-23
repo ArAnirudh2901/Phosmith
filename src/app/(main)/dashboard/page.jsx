@@ -215,7 +215,8 @@ const Dashboard = () => {
     const { mutate: deleteProjectMutate } = useDatabaseMutation(api.projects.deleteProject)
     const { mutate: bulkDeleteProjectsMutate } = useDatabaseMutation(api.projects.bulkDeleteProjects)
     const isLoading = isAuthLoading || isProjectsLoading
-    const projectCount = projects.length
+    const visibleProjects = projects.filter((p) => !optimisticallyRemovedIds.includes(p._id))
+    const projectCount = visibleProjects.length
     const hasProjects = projectCount > 0
     const projectCountLabel = isLoading
         ? "Loading projects"
@@ -390,47 +391,54 @@ const Dashboard = () => {
         }
         setDeleteConfirm(emptyDeleteConfirm)
         const label = type === "single" ? `"${projectTitle}"` : projectTitle
+
+        // Stage the disintegration animation — captures each card's pixels and
+        // starts the particle scatter.  This also sets `pendingDeleteIds` so the
+        // cards become non-interactive + visually faded while dissolving.
+        const { finished, stagedIds } = await stageProjectDisintegration(ids)
+
+        // Wait for the particle animation to finish before hiding the source
+        // cards from the grid.  If the effect couldn't be staged (e.g. reduced
+        // motion, off-screen cards, or canvas capture failures), fall through
+        // immediately so the delete still proceeds.
+        await finished
+
+        // Hide cards from the grid (optimistic removal).
+        setOptimisticallyRemovedIds((current) => [...new Set([...current, ...ids])])
+        if (type === "bulk") {
+            setSelectedProjectIds([])
+            setIsSelectionMode(false)
+        }
+
+        // Clean up the pixel canvases now that the cards are hidden.
+        cleanupProjectPixels(stagedIds)
+
         let undone = false
         let finalized = false
-        const stagedEffectPromise = stageProjectDisintegration(ids)
         const toastId = toast(`Deleting ${label}`, {
             duration: 5000,
-            description: "Undo now to rebuild the card from pixels.",
+            description: "Undo to restore the project.",
             action: {
                 label: "Undo",
-                onClick: async () => {
+                onClick: () => {
                     undone = true
                     toast.dismiss(toastId)
-                    await stagedEffectPromise
-                    await restoreProjectIntegration(ids)
+                    setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
                 },
             },
-            onAutoClose: async () => {
+            onAutoClose: () => {
                 if (undone || finalized) return
                 finalized = true
-                const stagedEffect = await stagedEffectPromise
-                await stagedEffect.finished
-                // Animation done — collapse the card slots in the grid immediately
-                // so surrounding cards rearrange now, rather than after the DB round-trip.
-                setOptimisticallyRemovedIds((current) => [...new Set([...current, ...ids])])
-                cleanupProjectPixels(ids)
-                // DB delete runs in the background; restore on failure.
-                performDelete(type, projectId, ids).catch(async (error) => {
+                performDelete(type, projectId, ids).catch((error) => {
                     setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
-                    await restoreProjectIntegration(ids)
                     toast.error(error?.message || "Failed to delete project")
                 })
             },
-            onDismiss: async () => {
+            onDismiss: () => {
                 if (undone || finalized) return
                 finalized = true
-                const stagedEffect = await stagedEffectPromise
-                await stagedEffect.finished
-                setOptimisticallyRemovedIds((current) => [...new Set([...current, ...ids])])
-                cleanupProjectPixels(ids)
-                performDelete(type, projectId, ids).catch(async (error) => {
+                performDelete(type, projectId, ids).catch((error) => {
                     setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
-                    await restoreProjectIntegration(ids)
                     toast.error(error?.message || "Failed to delete project")
                 })
             },
@@ -439,7 +447,6 @@ const Dashboard = () => {
         cleanupProjectPixels,
         deleteConfirm,
         performDelete,
-        restoreProjectIntegration,
         stageProjectDisintegration,
     ])
 
@@ -490,7 +497,7 @@ const Dashboard = () => {
                                 {hasProjects && (
                                     <span className="inline-flex items-center gap-1.5">
                                         <Calendar className="h-3.5 w-3.5" />
-                                        Last created {formatRelativeTime(Math.max(...projects.map((p) => p._creationTime || p.updatedAt)))}
+                                        Last created {formatRelativeTime(Math.max(...visibleProjects.map((p) => p._creationTime || p.updatedAt)))}
                                     </span>
                                 )}
                             </div>
@@ -587,7 +594,7 @@ const Dashboard = () => {
                         </section>
                     ) : hasProjects ? (
                         <section className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                            {projects.filter((p) => !optimisticallyRemovedIds.includes(p._id)).map((project, index) => {
+                            {visibleProjects.map((project, index) => {
                                 const isSelected = selectedProjectIds.includes(project._id)
                                 const isPendingDelete = pendingDeleteIds.includes(project._id)
                                 const isDeletingThisProject = deletingProjectId === project._id

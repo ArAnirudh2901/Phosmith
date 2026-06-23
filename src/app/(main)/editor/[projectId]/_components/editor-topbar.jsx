@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Beaker, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid } from 'lucide-react'
+import { Bot, Beaker, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -41,6 +41,7 @@ const TOOLS = [
     { id: "erase", label: "Erase", icon: Eraser },
     { id: "mask", label: "Mask", icon: Scissors },
     { id: "text", label: "Text", icon: Text },
+    { id: "pixel_stretch", label: "Stretch", icon: AudioLines },
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
     { id: "ai_edit", label: "AI Edit", icon: Eye, proOnly: true },
@@ -353,16 +354,16 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
         <>
             {/* ── Top Navigation Bar ──
                 Layout contract (the core fix for tablet/laptop overlap):
-                  • LEFT (flex-none, max-w 42%): logo, optional back, title, badges. Title
+                  • LEFT (auto, overflow-hidden): logo, optional back, title, badges. Title
                     truncates with a fluid clamp() so it never pushes the middle off-screen.
-                  • MIDDLE (flex-1, min-w-0, overflow-x-auto): tool buttons. Takes ALL
+                    Content-sized so it takes exactly what it needs.
+                  • MIDDLE (minmax(0,1fr), overflow-x-auto): tool buttons. Takes ALL
                     remaining space and scrolls horizontally when its content can't fit.
-                    This is what stops the right section from being clipped at <1700px.
-                  • RIGHT (flex-none): utility icons + Export. Never shrinks below its
+                    This is what stops the left/right sections from overlapping with tools.
+                  • RIGHT (auto, flex-none): utility icons + Export. Never shrinks below its
                     content width — Export is the primary action, must always be reachable.
-                Old layout had left+right as flex-1 and middle as flex-none, which caused
-                the right section to be pushed past the viewport at <1700px with tool
-                labels on, and again at <1280px because of accumulated content width. */}
+                Left and right are content-sized (auto) so they never get squeezed to zero,
+                and the center absorbs all remaining space and scrolls when needed. */}
             {/* Spacing scale (uniform across every section so the row reads as one
                 rhythm instead of three different ones):
                   768–1023:  gap-1.5  (6px)
@@ -376,10 +377,10 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                 sits the same distance apart. Dividers contribute only their 1px
                 width; per-element mx-* margins were removed to keep spacing
                 gap-only and predictable. */}
-            <div className="editor-topbar grid items-center gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 px-2 lg:px-3 min-w-0 w-full" style={{ gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr)' }}>
+            <div className="editor-topbar grid items-center gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 px-2 lg:px-3 min-w-0 w-full" style={{ gridTemplateColumns: 'auto minmax(0, 1fr) auto' }}>
 
                 {/* Left section: navigation chrome + project identity */}
-                <div className="flex items-center justify-start gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 min-w-0">
+                <div className="flex items-center justify-start gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 min-w-0 overflow-hidden">
                     {/* Sidebar toggle — visible only when the parent is in overlay-mode
                         (<lg viewport), where the sidebar is hidden by default. Icon flips
                         to PanelRight when the agent sidebar (right side) is active so the
@@ -480,7 +481,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     by the topbar bounds. Non-essential icons (zoom reset, keyboard
                     shortcuts) collapse out at narrow widths since they have
                     keyboard shortcuts (⌘0, ?). */}
-                <div className="flex items-center justify-end gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3" style={{ overflow: 'visible' }}>
+                <div className="flex items-center justify-end gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 flex-none" style={{ overflow: 'visible' }}>
                     {/* Undo / Redo — always visible (core workflow) */}
                     <motion.button
                         onClick={handleUndo}
