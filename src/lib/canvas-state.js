@@ -107,6 +107,14 @@ export const serializeCanvasState = (canvas) => {
                         matchingObj.phosmithCollageSource || matchingObj._phosmithCollageSource
                 }
 
+                // Pixel-stretch re-edit metadata (params + placement + source ref) —
+                // toJSON() drops custom props, so carry `data.pixelStretch` through
+                // explicitly. Fabric re-assigns `data` onto the object on load, so the
+                // stretch layer stays re-editable across reloads.
+                if (matchingObj?.data?.pixelStretch) {
+                    cleaned.data = { ...(cleaned.data || {}), pixelStretch: matchingObj.data.pixelStretch }
+                }
+
                 const maskCanvas =
                     matchingObj?._phosmithMaskCanvas ||
                     (matchingObj?.clipPath

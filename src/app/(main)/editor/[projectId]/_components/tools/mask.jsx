@@ -188,6 +188,11 @@ const MaskControls = ({ dominantColor }) => {
     const [subjectInstances, setSubjectInstances] = useState(/** @type {Array<any> | null} */ (null))
     const [activeInstanceIndex, setActiveInstanceIndex] = useState(/** @type {number | null} */ (null))
     const lastInstancesImageRef = useRef(/** @type {any} */ (null))
+    // Id of the non-destructive megashader layer that currently holds the AI
+    // subject selection. The "Select Subject" / "Detect All Subjects" / chip
+    // picker all SELECT a region (they no longer erase the background); picking
+    // a different subject SWAPS this single layer instead of stacking duplicates.
+    const subjectLayerIdRef = useRef(/** @type {string | null} */ (null))
     // Ref-mirrors of the "running" flags. The `useCallback` closures for
     // `handleSelectSubject` / `handleSemanticRun` / `handleDepthRun` capture
     // the React state at render time, so a fast double-click (or two clicks
@@ -227,6 +232,13 @@ const MaskControls = ({ dominantColor }) => {
         selectedLayerId, selectLayer,
         undo: undoChain, redo: redoChain, canUndo, canRedo, setChain,
     } = chain
+
+    // Always-current mirror of the chain so async callbacks (which capture the
+    // `stack` from the render where they were created) can check the LIVE layer
+    // list — used by the subject-selection swap to see whether its tracked
+    // layer still exists without re-binding on every chain edit.
+    const chainStackRef = useRef(stack)
+    useEffect(() => { chainStackRef.current = stack }, [stack])
 
     // Persistence rehydrate: if the primary image already carries a persisted
     // MegashaderFilter (restored from project state by loadFromJSON, with its
@@ -2386,6 +2398,36 @@ const MaskControls = ({ dominantColor }) => {
     }, [activeDraft, stack, canvasEditor, imageToDisplay, tool.mainImage])
 
     /* ─── AI Subject Selection ─── */
+
+    // Turn a decoded AI subject mask (white = subject, black = background) into
+    // a NON-DESTRUCTIVE selection: it's stored in the megashader texture cache
+    // and added as a `semantic` chain layer (fillMode 'fill' → the subject is
+    // tinted/visible while the background is left fully intact). This is the
+    // same path SAM 2 / Lasso / Brush use, so the selection shows up in the
+    // MASK LAYERS panel and stays editable (boundary, blend op, feather, and
+    // add/subtract brush or lasso layers) "even after subject detection".
+    //
+    // Picking a different subject swaps the single tracked layer rather than
+    // piling up duplicates — matching the radio-style chip picker.
+    const applySubjectSelection = useCallback((imageData, label) => {
+        if (!imageData) return null
+        const key = `subject-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+        setMaskTexture(key, imageData)
+        // If our tracked selection layer still exists, swap its texture in
+        // place — this keeps the layer's slot / blend op and sidesteps the
+        // MAX_LAYERS cap, while resetting the boundary (growPx / baseTextureKey)
+        // so the "Boundary" slider tracks the NEW subject's edge from 0.
+        const existingId = subjectLayerIdRef.current
+        const present = existingId && (chainStackRef.current?.chain || []).some((e) => e.layer.id === existingId)
+        if (present) {
+            updateLayer(existingId, { maskTextureKey: key, baseTextureKey: key, growPx: 0, label: label || 'Subject' })
+            return existingId
+        }
+        const id = addChainLayer('semantic', { maskTextureKey: key, feather: 0.1, label: label || 'Subject' })
+        subjectLayerIdRef.current = id
+        return id
+    }, [addChainLayer, updateLayer])
+
     const handleSelectSubject = useCallback(async () => {
         if (!tool.mainImage) return
         if (isSegmentingRef.current) return
@@ -2431,11 +2473,15 @@ const MaskControls = ({ dominantColor }) => {
 
             const maskBlob = await resp.blob()
             if (segmentAbortRef.current !== abortController) return
-            const applied = await tool.applyExternalMaskBlob(maskBlob)
-            if (applied) {
-                toast.success('Subject selected! Use brush to refine.')
+            const decoded = await decodeMaskBlob(maskBlob)
+            // A newer request may have superseded us while decoding.
+            if (segmentAbortRef.current !== abortController) return
+            const id = applySubjectSelection(decoded.imageData, 'Subject')
+            if (id) {
+                setActiveInstanceIndex(null)
+                toast.success('Subject selected — adjust it in Mask Layers, or add a brush/lasso to refine.')
             } else {
-                toast.error('Could not apply subject mask')
+                toast.error('Could not create subject selection')
             }
         } catch (err) {
             if (err?.name === 'AbortError') return
@@ -2447,7 +2493,7 @@ const MaskControls = ({ dominantColor }) => {
                 setIsSegmenting(false)
             }
         }
-    }, [tool])
+    }, [tool, decodeMaskBlob, applySubjectSelection])
 
     /* ─── Multi-Subject Detection (Detect All Subjects) ──────────────────────
      * Calls /api/ai/segment-instances to enumerate every subject in the image
@@ -2502,7 +2548,7 @@ const MaskControls = ({ dominantColor }) => {
             if (instancesAbortRef.current !== abortController) return
 
             if (!data.instances?.length) {
-                toast.info('No distinct subjects detected — try Select Subject for the unified matte.')
+                toast.info('No distinct subjects detected — try Select Subject for the unified selection.')
                 setSubjectInstances([])
                 return
             }
@@ -2513,10 +2559,14 @@ const MaskControls = ({ dominantColor }) => {
             // mask-commands cache) can reuse the same payload.
             try { fabricObj.__phosmithSubjectInstances = { ...data, instances: data.instances } } catch { /* ignore */ }
 
-            // Auto-apply the union so the panel shows immediate masking feedback.
+            // Auto-select the union (non-destructively) so the panel shows
+            // immediate feedback — the user can then click a chip to swap to a
+            // single subject. The background is never removed.
             if (data.unionPng) {
-                const unionBlob = base64PngToBlob(data.unionPng)
-                await tool.applyExternalMaskBlob(unionBlob)
+                const decoded = await decodeMaskBlob(base64PngToBlob(data.unionPng))
+                if (instancesAbortRef.current !== abortController) return
+                applySubjectSelection(decoded.imageData, `All subjects (${data.instances.length})`)
+                setActiveInstanceIndex(-1)
             }
             toast.success(
                 `Detected ${data.instances.length} subject${data.instances.length === 1 ? '' : 's'}` +
@@ -2532,24 +2582,26 @@ const MaskControls = ({ dominantColor }) => {
                 setIsDetectingInstances(false)
             }
         }
-    }, [tool, base64PngToBlob])
+    }, [tool, base64PngToBlob, decodeMaskBlob, applySubjectSelection])
 
     const handleApplyInstance = useCallback(async (instance) => {
         if (!tool.mainImage || !instance?.maskPng) return
         try {
             const blob = base64PngToBlob(instance.maskPng)
-            const ok = await tool.applyExternalMaskBlob(blob)
-            if (ok) {
+            const decoded = await decodeMaskBlob(blob)
+            const label = `${instance.label || 'Subject'} #${(instance.index ?? 0) + 1}`
+            const id = applySubjectSelection(decoded.imageData, label)
+            if (id) {
                 setActiveInstanceIndex(instance.index ?? null)
-                toast.success(`Masked ${instance.label || `subject ${instance.index ?? ''}`}`)
+                toast.success(`Selected ${instance.label || `subject ${instance.index ?? ''}`}`)
             } else {
-                toast.error('Could not apply subject mask')
+                toast.error('Could not create subject selection')
             }
         } catch (err) {
             console.error('[mask] apply-instance failed:', err)
-            toast.error('Could not apply subject mask')
+            toast.error('Could not create subject selection')
         }
-    }, [tool, base64PngToBlob])
+    }, [tool, base64PngToBlob, decodeMaskBlob, applySubjectSelection])
 
     const handleApplyAllSubjectsUnion = useCallback(async () => {
         if (!tool.mainImage) return
@@ -2557,17 +2609,21 @@ const MaskControls = ({ dominantColor }) => {
         if (cached?.unionPng) {
             try {
                 const blob = base64PngToBlob(cached.unionPng)
-                const ok = await tool.applyExternalMaskBlob(blob)
-                if (ok) {
+                const decoded = await decodeMaskBlob(blob)
+                const count = cached.instances?.length || subjectInstances?.length || ''
+                const id = applySubjectSelection(decoded.imageData, `All subjects (${count})`)
+                if (id) {
                     setActiveInstanceIndex(-1)
-                    toast.success(`Masked all ${cached.instances?.length || subjectInstances?.length || ''} subjects`)
+                    toast.success(`Selected all ${count} subjects`)
+                } else {
+                    toast.error('Could not create union selection')
                 }
             } catch (err) {
                 console.error('[mask] apply-union failed:', err)
-                toast.error('Could not apply union mask')
+                toast.error('Could not create union selection')
             }
         }
-    }, [tool, subjectInstances, base64PngToBlob])
+    }, [tool, subjectInstances, base64PngToBlob, decodeMaskBlob, applySubjectSelection])
 
     // Invalidate the multi-subject cache when the user switches to a
     // different image so the chips don't show stale data.
@@ -2575,6 +2631,9 @@ const MaskControls = ({ dominantColor }) => {
         if (lastInstancesImageRef.current && tool.mainImage !== lastInstancesImageRef.current) {
             setSubjectInstances(null)
             setActiveInstanceIndex(null)
+            // The subject selection layer belonged to the previous image's chain;
+            // drop the handle so the next selection adds a fresh layer.
+            subjectLayerIdRef.current = null
             lastInstancesImageRef.current = tool.mainImage
         }
     }, [tool.mainImage])
@@ -2988,7 +3047,7 @@ const MaskControls = ({ dominantColor }) => {
                     )}
                 </motion.button>
                 <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
-                    AI detects and masks the main subject
+                    AI selects the main subject as a layer — background stays intact
                 </p>
 
                 {/* ── Multi-subject: per-instance picker ────────────────── */}

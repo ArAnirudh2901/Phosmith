@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
 import UpgradeModel from '@/components/upgradeModel'
+import { stripImageMetadata } from '@/lib/strip-metadata'
 
 const loadImageFromObjectUrl = (url) =>
     new Promise((resolve, reject) => {
@@ -38,22 +39,66 @@ const getSafeBaseName = (fileName) => {
         .slice(0, 96) || "upload"
 }
 
+/**
+ * Safe limits for rasterised uploads.
+ *
+ * TWO independent constraints must be satisfied:
+ *   1. Browser canvas limits — toBlob() silently returns null beyond these.
+ *        • Edge length ≤ 8 192 px  (Safari hard limit)
+ *        • Total area  ≤ 67 M px   (Chrome/Firefox memory guard)
+ *   2. ImageKit serving limit — images above 25 MP get a 400 ("ELIMIT").
+ *
+ * We cap at 24 MP (safety margin below ImageKit's 25 MP hard cut-off) with an
+ * 8 192 px edge cap. An 8K image (7680×4320 = 33 MP) is above 24 MP and will
+ * be proportionally downscaled to ≈6400×3600, which is still very high quality.
+ */
+const MAX_CANVAS_EDGE = 8192
+const IMAGEKIT_MAX_MP = 24_000_000              // 24 MP — stay safely below ImageKit's 25 MP cap
+const MAX_CANVAS_AREA = IMAGEKIT_MAX_MP         // use the tighter constraint
+const IMAGEKIT_MAX_BYTES = 25 * 1024 * 1024     // 25 MB — ImageKit upload hard limit
+
+const fitToCanvasLimits = (srcW, srcH) => {
+    let w = srcW
+    let h = srcH
+
+    // Clamp longest edge first
+    if (w > MAX_CANVAS_EDGE || h > MAX_CANVAS_EDGE) {
+        const edgeScale = MAX_CANVAS_EDGE / Math.max(w, h)
+        w = Math.round(w * edgeScale)
+        h = Math.round(h * edgeScale)
+    }
+
+    // Then clamp total area (can still be too large if both sides are close to the limit)
+    if (w * h > MAX_CANVAS_AREA) {
+        const areaScale = Math.sqrt(MAX_CANVAS_AREA / (w * h))
+        w = Math.round(w * areaScale)
+        h = Math.round(h * areaScale)
+    }
+
+    // Ensure at least 1×1
+    return { w: Math.max(1, w), h: Math.max(1, h) }
+}
+
 const rasterizeSelectedImage = async (file, objectUrl) => {
     if (!file || !objectUrl) {
         throw new Error("No image selected")
     }
 
     const image = await loadImageFromObjectUrl(objectUrl)
-    const width = Math.round(image.naturalWidth || image.width || 0)
-    const height = Math.round(image.naturalHeight || image.height || 0)
+    const origW = Math.round(image.naturalWidth || image.width || 0)
+    const origH = Math.round(image.naturalHeight || image.height || 0)
 
-    if (!width || !height) {
+    if (!origW || !origH) {
         throw new Error("Could not read the selected image dimensions")
     }
 
+    // Use native size when safe, otherwise scale down to stay within canvas limits.
+    // `let` so the stage-3 dimension-reduction step can update them if needed.
+    let { w: canvasW, h: canvasH } = fitToCanvasLimits(origW, origH)
+
     const canvas = document.createElement("canvas")
-    canvas.width = width
-    canvas.height = height
+    canvas.width = canvasW
+    canvas.height = canvasH
 
     const context = canvas.getContext("2d", {
         alpha: true,
@@ -64,19 +109,80 @@ const rasterizeSelectedImage = async (file, objectUrl) => {
         throw new Error("Could not prepare the selected image")
     }
 
-    context.clearRect(0, 0, width, height)
-    context.drawImage(image, 0, 0, width, height)
+    context.clearRect(0, 0, canvasW, canvasH)
+    context.drawImage(image, 0, 0, canvasW, canvasH)
 
-    let blob = await canvasToBlob(canvas, "image/webp", 0.98)
-    if (!blob?.size || blob.type !== "image/webp") {
-        blob = await canvasToBlob(canvas, "image/png", 1)
+    // ── Stage 1: WebP with progressive quality reduction ─────────────────────
+    // Floor is 0.60 — WebP at this quality is still visually excellent for
+    // photography (roughly equivalent to JPEG q82) while being 3-4× smaller
+    // than the same image as lossless PNG. An 8K photo at 24 MP fits comfortably
+    // under 25 MB at q0.65–0.70 for most subjects.
+    const QUALITY_START = 0.92
+    const QUALITY_FLOOR = 0.60
+    const QUALITY_STEP  = 0.04
+
+    let blob = null
+    for (let q = QUALITY_START; q >= QUALITY_FLOOR; q -= QUALITY_STEP) {
+        const candidate = await canvasToBlob(canvas, "image/webp", q)
+        if (candidate?.size && candidate.type === "image/webp" && candidate.size <= IMAGEKIT_MAX_BYTES) {
+            blob = candidate
+            break
+        }
+    }
+
+    // ── Stage 2: JPEG fallback (lossy — never PNG for photos) ────────────────
+    // PNG is lossless and produces files 3-5× larger than JPEG/WebP for photos,
+    // so it is the wrong fallback. JPEG with its own quality ladder handles
+    // browsers that don't support WebP encoding and extreme worst-case images.
+    if (!blob) {
+        for (let q = 0.88; q >= 0.55; q -= 0.05) {
+            const candidate = await canvasToBlob(canvas, "image/jpeg", q)
+            if (candidate?.size && candidate.size <= IMAGEKIT_MAX_BYTES) {
+                blob = candidate
+                break
+            }
+        }
+    }
+
+    // ── Stage 3: dimension reduction to 16 MP then WebP ──────────────────────
+    // Only reached if the image is both extremely large AND extremely detailed
+    // (e.g. synthetic noise patterns, dense HDR panoramas). Scales down to
+    // 16 MP — still higher than any standard display — and retries WebP.
+    if (!blob) {
+        const FALLBACK_MP = 16_000_000
+        const fbScale = Math.sqrt(FALLBACK_MP / (canvasW * canvasH))
+        if (fbScale < 1) {
+            const fbW = Math.max(1, Math.round(canvasW * fbScale))
+            const fbH = Math.max(1, Math.round(canvasH * fbScale))
+            const fbCanvas = document.createElement("canvas")
+            fbCanvas.width = fbW
+            fbCanvas.height = fbH
+            const fbCtx = fbCanvas.getContext("2d") || fbCanvas.getContext("2d", { alpha: true })
+            if (fbCtx) {
+                fbCtx.drawImage(canvas, 0, 0, fbW, fbH)
+                const candidate = await canvasToBlob(fbCanvas, "image/webp", 0.85)
+                if (candidate?.size && candidate.size <= IMAGEKIT_MAX_BYTES) {
+                    blob = candidate
+                    canvasW = fbW
+                    canvasH = fbH
+                }
+            }
+        }
     }
 
     if (!blob?.size) {
-        throw new Error("Could not lock in the visible image edits")
+        throw new Error("Could not encode the selected image")
     }
 
-    const extension = blob.type === "image/webp" ? "webp" : "png"
+    if (blob.size > IMAGEKIT_MAX_BYTES) {
+        throw new Error(
+            `Image is still too large (${(blob.size / 1024 / 1024).toFixed(1)} MB) after compression. ` +
+            `Try a smaller image or lower resolution.`
+        )
+    }
+
+    const mimeToExt = { "image/webp": "webp", "image/jpeg": "jpg", "image/png": "png" }
+    const extension = mimeToExt[blob.type] ?? "webp"
     const rasterFileName = `${getSafeBaseName(file.name)}-visible.${extension}`
 
     return {
@@ -84,8 +190,8 @@ const rasterizeSelectedImage = async (file, objectUrl) => {
             type: blob.type || `image/${extension}`,
             lastModified: Date.now(),
         }),
-        width,
-        height,
+        width: canvasW,
+        height: canvasH,
         rasterFileName,
     }
 }
@@ -127,8 +233,23 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
         }
     }
 
+    const onDropRejected = (fileRejections) => {
+        const rejection = fileRejections[0]
+        if (!rejection) return
+
+        const code = rejection.errors?.[0]?.code
+        if (code === "file-too-large") {
+            toast.error("Image is too large — please use an image under 20 MB")
+        } else if (code === "file-invalid-type") {
+            toast.error("Unsupported image format — try PNG, JPEG, or WebP")
+        } else {
+            toast.error(rejection.errors?.[0]?.message || "Could not accept this file")
+        }
+    }
+
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
+        onDropRejected,
         accept: {
             "image/*": [".png", ".jpg", ".webp", ".jpeg", ".gif", ".svg", ".avif", ".apng"]
         },
@@ -136,6 +257,11 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
         maxSize: 20 * 1024 * 1024,   // 20mb file size limit
         disabled: !canCreate || isUploading,
     })
+
+    /** Standard raster formats that can go to ImageKit untouched */
+    const DIRECT_UPLOAD_TYPES = new Set([
+        "image/jpeg", "image/png", "image/webp", "image/avif",
+    ])
 
     const handleCreateProject = async () => {
         if (!canCreate) {
@@ -151,21 +277,52 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
         setIsUploading(true)
 
         try {
-            const rasterizedImage = await rasterizeSelectedImage(selectedFile, previewUrl)
             const formData = new FormData()
             formData.append("fileName", selectedFile.name)
-            formData.append("rasterFile", rasterizedImage.file)
-            formData.append("rasterFileName", rasterizedImage.rasterFileName)
-            formData.append("rasterWidth", String(rasterizedImage.width))
-            formData.append("rasterHeight", String(rasterizedImage.height))
-            formData.append("sourceMetadata", JSON.stringify({
-                originalName: selectedFile.name,
-                originalType: selectedFile.type,
-                originalSize: selectedFile.size,
-                originalLastModified: selectedFile.lastModified,
-                rasterizedType: rasterizedImage.file.type,
-                rasterizedSize: rasterizedImage.file.size,
-            }))
+
+            // Standard raster formats (JPEG, PNG, WebP, AVIF) can skip the
+            // canvas rasterisation step — UNLESS the resolution exceeds
+            // ImageKit's 25 MP serving limit. In that case we must downscale
+            // through the canvas (fitToCanvasLimits caps at 24 MP).
+            //
+            // Non-raster / animated formats (SVG, GIF, APNG) always go through
+            // the canvas so we get a clean static raster.
+
+            // Read dimensions to decide the path
+            const image = await loadImageFromObjectUrl(previewUrl)
+            const origW = Math.round(image.naturalWidth  || image.width  || 0)
+            const origH = Math.round(image.naturalHeight || image.height || 0)
+            const megapixels = origW * origH
+            const isStandardRaster = DIRECT_UPLOAD_TYPES.has(selectedFile.type)
+            const canSkipRaster = isStandardRaster && megapixels <= IMAGEKIT_MAX_MP
+
+            if (canSkipRaster) {
+                // Strip EXIF, GPS, XMP, IPTC, comments — binary-level, no re-encoding
+                const cleanFile = await stripImageMetadata(selectedFile)
+                formData.append("file", cleanFile)
+                formData.append("rasterWidth",  String(origW || 0))
+                formData.append("rasterHeight", String(origH || 0))
+                formData.append("sourceMetadata", JSON.stringify({
+                    originalName: selectedFile.name,
+                    originalType: selectedFile.type,
+                    originalSize: selectedFile.size,
+                    originalLastModified: selectedFile.lastModified,
+                }))
+            } else {
+                const rasterizedImage = await rasterizeSelectedImage(selectedFile, previewUrl)
+                formData.append("rasterFile", rasterizedImage.file)
+                formData.append("rasterFileName", rasterizedImage.rasterFileName)
+                formData.append("rasterWidth", String(rasterizedImage.width))
+                formData.append("rasterHeight", String(rasterizedImage.height))
+                formData.append("sourceMetadata", JSON.stringify({
+                    originalName: selectedFile.name,
+                    originalType: selectedFile.type,
+                    originalSize: selectedFile.size,
+                    originalLastModified: selectedFile.lastModified,
+                    rasterizedType: rasterizedImage.file.type,
+                    rasterizedSize: rasterizedImage.file.size,
+                }))
+            }
 
             const uploadResponse = await fetch("/api/imagekit/upload", {
                 method: "POST",

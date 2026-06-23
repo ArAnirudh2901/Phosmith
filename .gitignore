@@ -62,3 +62,13 @@ skills-lock.json
 *.onnx
 
 .cache/
+
+# Videos
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v

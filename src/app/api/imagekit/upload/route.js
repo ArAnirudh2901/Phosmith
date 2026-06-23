@@ -3,6 +3,9 @@ import ImageKit from "imagekit";
 import { NextResponse } from "next/server";
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit";
 
+// Large rasterised 8K images need extra processing time
+export const maxDuration = 30;      // seconds
+
 let imagekit = null
 
 const getImageKit = () => {
@@ -101,10 +104,11 @@ export async function POST(request) {
     } catch (error) {
         console.error("ImageKit upload error", error)
 
+        const detail = error?.message || String(error)
         return NextResponse.json({
             success: false,
-            error: "Failed to upload image",
-            details: error.message,
+            error: `Upload failed: ${detail}`,
+            details: detail,
         },
             { status: 500 }
         )
