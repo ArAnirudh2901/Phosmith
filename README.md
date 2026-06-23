@@ -5,7 +5,7 @@
   </svg>
 </p>
 
-<h1 align="center">Phosmith — AI Image Studio</h1>
+<h1 align="center">Pixxel — AI Image Studio</h1>
 
 <p align="center">
   <strong>A professional-grade, AI-powered image editor built for the browser.</strong><br />
@@ -25,7 +25,7 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Phosmith — Shape Light, Forge Photos" width="100%" />
+  <img src="docs/screenshots/hero.png" alt="Pixxel — Shape Light, Forge Photos" width="100%" />
 </p>
 
 ---
@@ -54,7 +54,7 @@
 
 ## Overview
 
-Phosmith (*phos* = light, *smith* = maker) is a state-of-the-art web-based image editor that seamlessly blends professional-grade adjustment tools with advanced AI capabilities. It features a custom WebGL2 compositing engine (the **Megashader**), non-destructive mask layers, an AI agentic editing assistant with a collage command registry, and support for local large language models and computer vision models.
+Pixxel is a state-of-the-art web-based image editor that seamlessly blends professional-grade adjustment tools with advanced AI capabilities. It features a custom WebGL2 compositing engine (the **Megashader**), non-destructive mask layers, an AI agentic editing assistant with a collage command registry, and support for local large language models and computer vision models.
 
 The editor runs entirely in the browser — image processing is handled by the GPU via WebGL2 shaders, and AI inference is offloaded to a local Python FastAPI service. No cloud GPU required.
 
@@ -306,7 +306,7 @@ Each mask layer stores its parameters (not pixels) so they remain fully editable
 
 ## 🧩 Agent Command System
 
-All editor capabilities are exposed through a **command registry** at `src/lib/agent/command-registry.js`. Domains are registered by `canvas.jsx` on editor mount and are accessible as `window.__phosmith.agent`.
+All editor capabilities are exposed through a **command registry** at `src/lib/agent/command-registry.js`. Domains are registered by `canvas.jsx` on editor mount and are accessible as `window.__pixxel.agent`.
 
 | Domain | Commands |
 |---|---|
@@ -367,8 +367,8 @@ The dashboard provides a grid view of all projects with:
 
 ```bash
 # Clone the repo
-git clone https://github.com/ArAnirudh2901/phosmith.git
-cd phosmith
+git clone https://github.com/ArAnirudh2901/pixxel.git
+cd pixxel
 
 # Install dependencies
 bun install
@@ -520,17 +520,47 @@ The agent has a persistent chat interface with conversation history stored per-p
 
 ---
 
-## ☁️ Deployment
+## ☁️ Production Deployment
 
-### Vercel (Recommended)
+To run Pixxel in production with all AI features active, you need to deploy the Next.js frontend to **Vercel** and the Python FastAPI Mask Service to a **Hugging Face Space (Docker SDK)**.
 
-1. Connect your repo to [Vercel](https://vercel.com)
-2. Set the **Install Command** to `bun install`
-3. Set the **Build Command** to `bun run build`
-4. Add all environment variables from `.env.local` to the Vercel dashboard
-5. Deploy
+### 1. Backend: Deploy Mask Service to Hugging Face Spaces
 
-> **Note:** The local AI mask service must be hosted separately (e.g., on a GPU instance or Hugging Face Spaces) for production use. Update `MASK_SERVICE_URL` accordingly. See `services/segment/README.md` for free-tier deployment options.
+Hugging Face Spaces provides a free 16 GB CPU container tier, which is comfortable for running this FastAPI service.
+
+1. **Create a Space**:
+   - Log into [Hugging Face](https://huggingface.co/) and click **New Space**.
+   - Set the SDK option to **Docker** (Blank template).
+   - Set Space visibility to **Public** (so Vercel's backend can query it without OAuth credentials).
+2. **Push the Code**:
+   - Initialize a Git repo or upload files directly. Push the contents of the `/services/segment` directory directly to the root of your Hugging Face Space repository.
+   - Ensure the following files are present at the root of the Space repository:
+     - `Dockerfile` (already configured to expose port `7860`)
+     - `requirements.txt`
+     - `main.py`
+     - `yolo26n-seg.pt` (optional, will download on start if missing)
+3. **Build & Direct URL**:
+   - Hugging Face will automatically read the `Dockerfile`, install OpenCV/PyTorch dependencies, expose port `7860`, and run the uvicorn server.
+   - Once the build finishes and shows **Running**, note your public Space URL:
+     `https://<your-username>-<your-space-name>.hf.space`
+
+### 2. Frontend: Deploy Next.js to Vercel
+
+1. Connect your repository to **Vercel**.
+2. Configure the build settings:
+   - **Framework Preset**: Next.js
+   - **Install Command**: `bun install`
+   - **Build Command**: `bun run build`
+3. Add your production environment variables in the Vercel dashboard:
+   - Auth variables (`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, etc.)
+   - Database and cache variables (`DATABASE_URL`, `UPSTASH_REDIS_REST_URL`, etc.)
+   - Image CDN variables (`NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY`, `IMAGEKIT_PRIVATE_KEY`, etc.)
+   - LLM variables (`GEMINI_API_KEY`)
+   - **Mask Service variable**: Set `MASK_SERVICE_URL` to your Hugging Face Space URL (e.g. `https://<your-username>-<your-space-name>.hf.space`). *Ensure there is no trailing slash.*
+4. Deploy the project.
+
+> 💡 **Pro-Tip (Preventing Cold Starts):** Free-tier Hugging Face Spaces automatically sleep after 48 hours of inactivity. The first API request after a sleep period will wake the space up, which takes about 30–60 seconds. To prevent timeouts, you can set up a simple uptime monitor/cron to regularly ping the `/health` endpoint of your Space to keep it active.
+
 
 ---
 

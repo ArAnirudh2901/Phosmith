@@ -135,8 +135,8 @@ const recordDiag = (capability, startedAt, ok, error) => {
     if (state.diagnostics.length > DIAG_MAX) state.diagnostics.shift()
     // Mirror for devtools debugging (read-only convention).
     if (hasWindow()) {
-        window.__phosmith = window.__phosmith || {}
-        window.__phosmith.clientAI = getClientAIState()
+        window.__pixxel = window.__pixxel || {}
+        window.__pixxel.clientAI = getClientAIState()
     }
 }
 

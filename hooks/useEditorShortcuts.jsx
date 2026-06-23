@@ -4,7 +4,7 @@ import { useEffect, useCallback } from "react"
 import { ActiveSelection } from "fabric"
 
 /**
- * Global keyboard shortcut hook for the Phosmith editor.
+ * Global keyboard shortcut hook for the Pixxel editor.
  *
  * Immediately bypasses shortcut logic when the user is typing inside
  * an <input>, <textarea>, or contentEditable element.

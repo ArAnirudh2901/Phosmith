@@ -19,7 +19,7 @@
  * the last completed step instead of replanning from scratch.
  *
  * Pure JS, framework-agnostic, browser-side. NOT wired to any UI — drive it
- * from the agent bridge or the dev console via `window.__phosmith.agent`.
+ * from the agent bridge or the dev console via `window.__pixxel.agent`.
  *
  * @module agent/grade-loop
  */

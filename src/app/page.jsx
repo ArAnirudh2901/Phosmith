@@ -71,7 +71,7 @@ export default function Home() {
                                 lineHeight: 1.5,
                             }}
                         >
-                            Phosmith is a free canvas with optional AI superpowers. No download,
+                            Pixxel is a free canvas with optional AI superpowers. No download,
                             no plugins, no fragile workflows.
                         </p>
                         <NeoButton variant="secondary" size="xl" href="/dashboard">
@@ -101,7 +101,7 @@ export default function Home() {
                     gap: 16,
                 }}
             >
-                <span style={{ color: "#F4F4F5" }}>Phosmith · AI Photo Studio</span>
+                <span style={{ color: "#F4F4F5" }}>Pixxel · AI Photo Studio</span>
                 <span>© {new Date().getFullYear()} · Built for pixels</span>
             </footer>
         </div>
