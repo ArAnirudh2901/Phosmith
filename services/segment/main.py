@@ -1,13 +1,11 @@
 """Pixxel mask service.
 
-Wraps `rembg` (BiRefNet default) and Hugging Face `transformers` SAM 2
-(Hiera-Small) in a tiny FastAPI HTTP API so the Next.js AI routes can
-call SOTA background-removal and click-to-select models locally without
-Docker.
+Wraps `rembg` and Hugging Face `transformers` SAM 2 (Hiera-Small) in a
+tiny FastAPI HTTP API so the Next.js AI routes can call background-removal
+and click-to-select models locally without Docker.
 
 Free-tier friendly: no GPU required, but auto-uses CUDA (NVIDIA) or
-MPS (Apple Silicon) when available. BiRefNet and SAM 2 Hiera-Small are
-both MIT / Apache 2.0 and free for any use.
+MPS (Apple Silicon) when available.
 """
 
 from __future__ import annotations
@@ -66,7 +64,26 @@ except Exception:  # pragma: no cover - optional
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-MODEL_NAME = os.getenv("SEGMENT_MODEL", "birefnet-general").strip()
+# Persistent model cache directory.
+# Set MODEL_CACHE_DIR to a directory that survives process restarts, e.g.:
+#   - HuggingFace Spaces with persistent storage: /data/models
+#   - Docker volume: /models
+# When set, both HF_HOME (transformers/diffusers) and U2NET_HOME (rembg ONNX)
+# are redirected here so models are downloaded once and reused across restarts.
+# Leave unset to use the platform defaults (~/.cache/huggingface, ~/.u2net).
+MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "").strip() or None
+
+if MODEL_CACHE_DIR:
+    os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+    # HF_HOME covers transformers, huggingface_hub, diffusers, tokenizers
+    os.environ.setdefault("HF_HOME", MODEL_CACHE_DIR)
+    # U2NET_HOME covers all rembg ONNX checkpoints
+    _u2net_dir = os.path.join(MODEL_CACHE_DIR, "u2net")
+    os.makedirs(_u2net_dir, exist_ok=True)
+    os.environ.setdefault("U2NET_HOME", _u2net_dir)
+    log.info("model cache pinned to %r (HF_HOME + U2NET_HOME)", MODEL_CACHE_DIR)
+
+MODEL_NAME = os.getenv("SEGMENT_MODEL", "isnet-general-use").strip()
 SAM2_MODEL_ID = os.getenv("SAM2_MODEL_ID", "facebook/sam2-hiera-small").strip()
 SAM2_CACHE_MAX = int(os.getenv("SAM2_CACHE_MAX", "20").strip())
 SAM2_MAX_CLICKS = int(os.getenv("SAM2_MAX_CLICKS", "50").strip())
@@ -89,9 +106,8 @@ DEPTH_MAX_SIDE = int(os.getenv("DEPTH_MAX_SIDE", "2048").strip())
 PORT = int(os.getenv("PORT", "8001").strip())
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "24").strip())
 # Reject /segment inputs whose longest side exceeds this (defense-in-depth vs
-# direct curls that bypass the Node route's MAX_MODEL_SIDE cap). BiRefNet runs
-# at a fixed 1024² internally, so a 12K image only wastes resize/YOLO work.
-# Mirrors the /depth handler's DEPTH_MAX_SIDE.
+# direct curls that bypass the Node route's MAX_MODEL_SIDE cap). Mirrors the
+# /depth handler's DEPTH_MAX_SIDE.
 SEGMENT_MAX_SIDE = int(os.getenv("SEGMENT_MAX_SIDE", "2048").strip())
 SHAPE_MASK_MAX_SIDE = int(os.getenv("SHAPE_MASK_MAX_SIDE", "2048").strip())
 SHAPE_MASK_MAX_POINTS = int(os.getenv("SHAPE_MASK_MAX_POINTS", "10000").strip())
@@ -99,72 +115,23 @@ SHAPE_MASK_MAX_POINTS = int(os.getenv("SHAPE_MASK_MAX_POINTS", "10000").strip())
 # By default, SAM 2 and Depth Anything (the heavy torch models behind the
 # /sam2 and /depth endpoints) are loaded LAZILY — on first use of their
 # endpoint — instead of at startup. This keeps the resident footprint small
-# (~500-800 MB: just rembg + YOLO + onnxruntime) so the service fits a small
-# free-tier host; the core "Select Subject" (/segment) path never needs them.
+# so the service fits a small free-tier host; the core "Select Subject"
+# (/segment) path never needs them.
 # Set SEGMENT_EAGER_MODELS=1 to preload everything at startup (lowest
 # first-request latency, ~1.5-2.5 GB resident).
 SEGMENT_EAGER_MODELS = os.getenv("SEGMENT_EAGER_MODELS", "0").strip() not in ("0", "false", "False", "")
 
-# ─── Semantic subject detection (/segment "Select Subject") ──────────────────
-# YOLO11n-seg (ultralytics) gives tiny (~6 MB) person/animal INSTANCE masks so
-# "Select Subject" can semantically isolate the photo's subject(s) —
-# differentiating people/animals from background objects, and covering every
-# subject in a group photo — then the BiRefNet saliency matte refines the
-# union for clean hair/fur edges. Falls back to pure saliency when YOLO is
-# unavailable or finds no subject (e.g. a product/object photo).
-#
-# NOTE: ultralytics is AGPL-3.0. Acceptable here because the project is being
-# open-sourced; swap SUBJECT_MODEL / set SUBJECT_DETECT=0 to disable.
-# YOLO26n-seg (Jan 2026) is the default: ~6 MB / 2.7M params, NMS-free
-# (native end-to-end head), and up to ~43% faster CPU ONNX inference than
-# YOLO11n — ideal for free-tier CPU hosts. Because it's NMS-free, the IOU /
-# AGNOSTIC_NMS / MAX_DET knobs below are no-ops for it (they still apply if you
-# switch SUBJECT_MODEL back to a yolo11*-seg model). Needs ultralytics >= 8.4.
-SUBJECT_MODEL = os.getenv("SUBJECT_MODEL", "yolo26n-seg.pt").strip()
-SUBJECT_DETECT = os.getenv("SUBJECT_DETECT", "1").strip() not in ("0", "false", "False", "")
-# conf=0.20 admits faint/occluded subjects in group photos. We UNION every
-# instance and then gate it against the BiRefNet saliency matte, so a low conf
-# floods nothing — spurious low-conf boxes that aren't salient are dropped.
-SUBJECT_CONF = float(os.getenv("SUBJECT_CONF", "0.20").strip())
-# imgsz is the single biggest recall lever for small/distant people in group
-# photos (ultralytics letterboxes the input to this size before inference, so
-# more pixels land on each far-away face). 1280 costs ~120ms extra on CPU.
-SUBJECT_IMGSZ = int(os.getenv("SUBJECT_IMGSZ", "1280").strip())
-# NMS IoU. Keep HIGH (0.7) so legitimately-overlapping people in a crowd are
-# NOT merged/suppressed into one box. Lowering this loses subjects.
-SUBJECT_IOU = float(os.getenv("SUBJECT_IOU", "0.7").strip())
-# Cap on detected instances (large group photos can have many people).
-SUBJECT_MAX_DET = int(os.getenv("SUBJECT_MAX_DET", "300").strip())
-# Class-aware NMS (False) so a person overlapping a dog/horse isn't suppressed.
-SUBJECT_AGNOSTIC_NMS = os.getenv("SUBJECT_AGNOSTIC_NMS", "0").strip() not in ("0", "false", "False", "")
-# Refine the YOLO union with the BiRefNet matte for soft edges (2 inferences).
-SUBJECT_REFINE = os.getenv("SUBJECT_REFINE", "1").strip() not in ("0", "false", "False", "")
-# Extend "subject" beyond person/animal to generic multi-subject photos: include
-# ANY detected instance whose own mask is mostly salient (per the BiRefNet matte)
-# and large enough. Zero extra inference — pure numpy AND/area math per instance.
-SUBJECT_SALIENT_INCLUDE = os.getenv("SUBJECT_SALIENT_INCLUDE", "1").strip() not in ("0", "false", "False", "")
-# An instance counts as a subject if >= this fraction of ITS OWN pixels are
-# salient (matte>127). The denominator is the instance area (not the image), so
-# a big background object that merely clips the foreground fails the test.
-SUBJECT_SALIENT_OVERLAP = float(os.getenv("SUBJECT_SALIENT_OVERLAP", "0.60").strip())
-# ... and its mask must cover at least this fraction of the frame (drops noise).
-SUBJECT_SALIENT_AREA_FRAC = float(os.getenv("SUBJECT_SALIENT_AREA_FRAC", "0.005").strip())
-# An instance whose mask covers MORE than this fraction of the frame is treated
-# as scene/background (a couch/wall the subject sits in front of), not a
-# subject, so the salient-include rule won't union it in.
-SUBJECT_SALIENT_AREA_MAX_FRAC = float(os.getenv("SUBJECT_SALIENT_AREA_MAX_FRAC", "0.55").strip())
-# Cap on instances returned by /segment/instances (sorted by area, largest
-# first). Each instance carries a full-res base64 PNG mask, so an uncapped
-# crowd photo could produce a multi-hundred-MB JSON response.
-SUBJECT_INSTANCES_MAX = int(os.getenv("SUBJECT_INSTANCES_MAX", "24").strip())
-# Salient-pass duplicate suppression: with `classes=` unset (salient mode) YOLO
-# can report the SAME physical object under two labels (e.g. "vase" AND "potted
-# plant"). A salient candidate whose mask is at least this contained inside an
-# already-accepted instance's mask is treated as a duplicate and dropped.
-# Containment (intersection / candidate area), NOT IoU — a small prop fully
-# inside a person's mask region still scores low because instance masks rarely
-# share pixels, while a relabelled duplicate shares nearly all of them.
-SUBJECT_DEDUP_CONTAINMENT = float(os.getenv("SUBJECT_DEDUP_CONTAINMENT", "0.85").strip())
+# ─── SAM 3 concept segmentation ──────────────────────────────────────────────
+# SAM 3 is preferred anywhere this service needs open-vocabulary subject or
+# concept masks. It is optional because Meta's official package/checkpoints are
+# gated and have newer runtime requirements than the lightweight local service.
+SAM3_ENABLE = os.getenv("SAM3_ENABLE", "1").strip() not in ("0", "false", "False", "")
+SAM3_MODEL_ID = os.getenv("SAM3_MODEL_ID", "facebook/sam3.1").strip()
+SAM3_CHECKPOINT_PATH = os.getenv("SAM3_CHECKPOINT_PATH", "").strip() or None
+SAM3_CONFIDENCE = float(os.getenv("SAM3_CONFIDENCE", "0.5").strip())
+SAM3_SUBJECT_PROMPT = os.getenv("SAM3_SUBJECT_PROMPT", "main subject").strip() or "main subject"
+SAM3_INSTANCES_MAX = int(os.getenv("SAM3_INSTANCES_MAX", "24").strip())
+SAM3_EAGER = os.getenv("SAM3_EAGER", "0").strip() not in ("0", "false", "False", "")
 
 # ─── Matte-cleanup tuning ────────────────────────────────────────────────────
 # Only fill interior holes SMALLER than this fraction of the subject's area —
@@ -180,14 +147,6 @@ MATTE_FAINT_RECOVER_MAX = int(os.getenv("MATTE_FAINT_RECOVER_MAX", "96").strip()
 # fraction of its area. A subject that is mostly faint IS translucent — recover
 # nothing, keep its alpha as-is.
 MATTE_FAINT_MIN_SOLID_FRAC = float(os.getenv("MATTE_FAINT_MIN_SOLID_FRAC", "0.50").strip())
-# COCO subject class ids: person(0) + animals(14..23: bird,cat,dog,horse,
-# sheep,cow,elephant,bear,zebra,giraffe). Always included regardless of the
-# salient-instance gates above. Override with a CSV to broaden.
-_DEFAULT_SUBJECT_CLASSES = "0,14,15,16,17,18,19,20,21,22,23"
-SUBJECT_CLASSES = {
-    int(x) for x in os.getenv("SUBJECT_CLASSES", _DEFAULT_SUBJECT_CLASSES).split(",")
-    if x.strip().lstrip("-").isdigit()
-}
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
@@ -204,11 +163,10 @@ CROP_SUBJECT_PADDING = float(os.getenv("CROP_SUBJECT_PADDING", "0.08").strip())
 # deliberate breathing room / context around it. 0.62 ≈ subject fills ~⅔ of the
 # frame with ~⅓ context — a natural hero composition. Lower = more context.
 CROP_SUBJECT_TARGET_FRAC = float(os.getenv("CROP_SUBJECT_TARGET_FRAC", "0.62").strip())
-# When there is NO distinct subject (YOLO found nothing → diffuse BiRefNet
-# saliency) and the salient bbox sprawls across at least this fraction of the
-# frame, the image is a scene, not a subject. Subject-aware then composes the
-# WHOLE scene (max-area aspect fit, gently biased toward the salient region)
-# instead of zooming into a saliency blob.
+# When there is no distinct compact saliency region and the salient bbox
+# sprawls across at least this fraction of the frame, the image is a scene, not
+# a subject. Subject-aware then composes the whole scene (max-area aspect fit,
+# gently biased toward the salient region) instead of zooming into a blob.
 CROP_SCENE_SPREAD = float(os.getenv("CROP_SCENE_SPREAD", "0.45").strip())
 # How far a scene crop is biased toward the salient centroid (0 = image centre,
 # 1 = fully on the salient region). A gentle pull keeps the composition balanced.
@@ -255,13 +213,10 @@ GROUND_MAX_COMPONENTS = int(os.getenv("GROUND_MAX_COMPONENTS", "4").strip())
 GROUND_REFINE_TOP = int(os.getenv("GROUND_REFINE_TOP", "2").strip())
 
 # rembg >=2.0.59 model registry.
-# Licenses:  birefnet-*, isnet-*, u2net*, silueta = MIT;
-#            bria-rmbg = CC BY-NC (non-commercial).
+# Licenses: isnet-*, u2net*, silueta = MIT; bria-rmbg = CC BY-NC
+# (non-commercial).
 # Sizes and recommended use-cases are documented in README.md.
 ALLOWED_MODELS = {
-    "birefnet-general",
-    "birefnet-general-lite",
-    "birefnet-portrait",
     "isnet-general-use",
     "u2net",
     "u2netp",
@@ -272,28 +227,16 @@ ALLOWED_MODELS = {
 }
 
 if MODEL_NAME not in ALLOWED_MODELS:
-    log.warning("unknown SEGMENT_MODEL=%r; falling back to birefnet-general-lite", MODEL_NAME)
-    MODEL_NAME = "birefnet-general-lite"
+    log.warning("unknown SEGMENT_MODEL=%r; falling back to isnet-general-use", MODEL_NAME)
+    MODEL_NAME = "isnet-general-use"
 
 
 # ─── Execution-provider auto-detect (ONNX / rembg) ──────────────────────────
 
-# CoreML reliably JITs the small/lite BiRefNet graphs, but compiling the heavy
-# Swin-Large exports (birefnet-general / -massive) can take many minutes on
-# first run and has been observed to deadlock the Apple ANE service at session
-# init. For those models we skip CoreML and run on CPU (~30 s/inference,
-# rock-solid) unless the user opts back in. CUDA is unaffected — it's preferred
-# over CoreML and is the fast path for the heavy models in production.
-_COREML_UNSTABLE_MODELS = {"birefnet-general", "birefnet-massive"}
-SEGMENT_ALLOW_COREML_HEAVY = os.getenv("SEGMENT_ALLOW_COREML_HEAVY", "0").strip() not in ("0", "false", "False", "")
-
-
 def detect_providers() -> List[str]:
     """Pick the best ONNX Runtime execution providers for this machine.
 
-    Order of preference: CUDA (NVIDIA) > CoreML (Apple Silicon) > CPU. CoreML is
-    skipped for the heavy Swin-Large models (see `_COREML_UNSTABLE_MODELS`)
-    unless `SEGMENT_ALLOW_COREML_HEAVY=1`.
+    Order of preference: CUDA (NVIDIA) > CoreML (Apple Silicon) > CPU.
     """
     override = os.getenv("SEGMENT_PROVIDERS", "").strip()
     if override:
@@ -307,16 +250,8 @@ def detect_providers() -> List[str]:
             providers.insert(0, "CUDAExecutionProvider")
             log.info("ONNX CUDA execution provider detected (NVIDIA GPU)")
         elif "CoreMLExecutionProvider" in available:
-            if MODEL_NAME in _COREML_UNSTABLE_MODELS and not SEGMENT_ALLOW_COREML_HEAVY:
-                log.info(
-                    "CoreML available but skipped for heavy model %r (slow/unstable "
-                    "Swin-Large compile); using CPU. Set SEGMENT_ALLOW_COREML_HEAVY=1 "
-                    "to force CoreML, or SEGMENT_PROVIDERS to override.",
-                    MODEL_NAME,
-                )
-            else:
-                providers.insert(0, "CoreMLExecutionProvider")
-                log.info("ONNX CoreML execution provider detected (Apple Silicon GPU)")
+            providers.insert(0, "CoreMLExecutionProvider")
+            log.info("ONNX CoreML execution provider detected (Apple Silicon GPU)")
     except Exception as e:  # pragma: no cover - best effort
         log.debug("onnxruntime provider probe failed: %s", e)
     return providers
@@ -551,180 +486,236 @@ def clean_matte(matte_u8: np.ndarray, rgb: "np.ndarray | None" = None) -> np.nda
     return out
 
 
-# ─── App lifecycle ───────────────────────────────────────────────────────────
+# ─── SAM 3 helpers ───────────────────────────────────────────────────────────
 
-def _detect_subject_instances(app, pil_img: "Image.Image", matte: "np.ndarray | None" = None):
-    """Detect subject INSTANCES with YOLO-seg and return a list of per-instance
-    dicts, or `[]` if YOLO is unavailable or nothing qualifies as a subject.
+_SAM3_LOCK = threading.Lock()
+_SAM3_INFER_LOCK = threading.Lock()
 
-    Each dict: `{class_id, label, confidence, mask (HxW bool), area,
-    source ('class'|'salient')}`. The same gating that previously lived inside
-    `_subject_union_mask` decides what counts as a subject:
 
-      - Person/animal classes (`SUBJECT_CLASSES`) are ALWAYS subjects.
-      - When `matte` (the BiRefNet saliency map) is supplied and
-        `SUBJECT_SALIENT_INCLUDE` is on, ANY other detected instance whose own
-        mask is mostly salient and large enough is ALSO a subject — so
-        multi-subject photos that aren't people (products, multiple objects)
-        keep every subject — while prominent background objects
-        (sky/walls/furniture) score ~0 saliency and are excluded.
-
-    Detection recall on small/distant/occluded subjects is driven by
-    `SUBJECT_IMGSZ` (letterbox size), `SUBJECT_CONF`, and `SUBJECT_IOU` (kept
-    high so overlapping people in a crowd aren't merged). `classes=` filters
-    inside NMS rather than post-hoc, so the `max_det` budget isn't spent on
-    background classes when only person/animal subjects are wanted.
-
-    Takes the PIL (RGB) image — NOT a raw numpy array — because ultralytics
-    treats bare ndarrays as BGR (cv2 convention) and would swap R/B channels,
-    degrading detection. PIL input goes through ultralytics' correct RGB path.
-    """
-    model = getattr(app.state, "yolo", None)
-    if model is None:
-        return []
-    w, h = pil_img.size  # PIL size is (width, height)
-
-    # When salient-instance inclusion is on we must SEE every class (so a
-    # non-person subject can be tested against the matte), so we don't pass
-    # `classes=` to NMS; the per-instance gate below does the filtering. When
-    # it's off, filter inside NMS to save the max_det budget.
-    use_salient = SUBJECT_SALIENT_INCLUDE and matte is not None
-    predict_kwargs = dict(
-        verbose=False,
-        imgsz=SUBJECT_IMGSZ,
-        conf=SUBJECT_CONF,
-        iou=SUBJECT_IOU,
-        max_det=SUBJECT_MAX_DET,
-        agnostic_nms=SUBJECT_AGNOSTIC_NMS,
-        retina_masks=True,  # full-resolution instance masks
-    )
-    if not use_salient:
-        predict_kwargs["classes"] = sorted(SUBJECT_CLASSES) or None
+def _sam3_loadable() -> bool:
+    """Cheap probe: is the official SAM 3 package importable?"""
     try:
-        results = model.predict(pil_img, **predict_kwargs)
+        return bool(importlib.util.find_spec("sam3") and importlib.util.find_spec("torch"))
     except Exception:
-        log.exception("YOLO predict failed")
-        return []
-    if not results:
-        return []
-    r = results[0]
-    if getattr(r, "masks", None) is None or getattr(r, "boxes", None) is None:
-        return []
+        return False
+
+
+def _sam3_device_label() -> str:
+    """SAM 3's builder reliably handles CUDA and CPU. Avoid MPS model/tensor
+    mismatches in the upstream helper by using CPU on Apple Silicon."""
     try:
-        cls = r.boxes.cls.cpu().numpy().astype(int)
-        confs = r.boxes.conf.cpu().numpy().astype(float)
-        masks = r.masks.data.cpu().numpy()  # (N, mh, mw) in 0..1
+        import torch  # type: ignore
     except Exception:
-        log.exception("YOLO mask extraction failed")
-        return []
-    names = getattr(model, "names", None) or {}
+        return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Resolve every instance mask to a full-res boolean once.
-    instances = []  # (class_id, conf, bool_mask, area)
-    for i, c in enumerate(cls):
-        m = masks[i]
-        if m.shape != (h, w):
-            # Resize via PIL (avoids a hard cv2 dependency).
-            m_img = Image.fromarray((np.clip(m, 0.0, 1.0) * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)
-            m = np.asarray(m_img, dtype=np.float32) / 255.0
-        mb = m > 0.5
-        instances.append((int(c), float(confs[i]), mb, int(mb.sum())))
 
-    out = []
+def _sam3_checkpoint_kwargs():
+    if SAM3_CHECKPOINT_PATH:
+        return {"checkpoint_path": SAM3_CHECKPOINT_PATH, "load_from_HF": False}
+    # The current preferred checkpoint is SAM 3.1. Older upstream builders only
+    # download SAM 3 by default, so resolve 3.1 explicitly when requested.
+    if SAM3_MODEL_ID.lower().replace("_", ".") in {"sam3.1", "facebook/sam3.1"}:
+        from sam3.model_builder import download_ckpt_from_hf  # type: ignore
 
-    # Pass 1: person/animal subjects are ALWAYS included. Track the largest so
-    # the salient pass can tell props from scenery.
-    max_subj_area = 0
-    for c, conf, mb, area in instances:
-        if c in SUBJECT_CLASSES and area > 0:
-            out.append({
-                "class_id": c,
-                "label": str(names.get(c, c)),
-                "confidence": conf,
-                "mask": mb,
-                "area": area,
-                "source": "class",
-            })
-            max_subj_area = max(max_subj_area, area)
+        return {
+            "checkpoint_path": download_ckpt_from_hf(version="sam3.1"),
+            "load_from_HF": False,
+        }
+    return {"checkpoint_path": None, "load_from_HF": True}
 
-    # Pass 2: generic salient instances (multi-object photos). A salient object
-    # whose OWN pixels are mostly salient counts as a subject — UNLESS the scene
-    # is person-centric and the object is bigger than the largest person, in
-    # which case it's scene/background (a bus, couch, or wall behind the people)
-    # and is excluded. With no person/animal present, allow up to the frame cap.
-    salient = (matte > 127) if (use_salient and matte is not None) else None
-    if salient is not None:
-        frame_area = float(w * h)
-        min_inst_area = SUBJECT_SALIENT_AREA_FRAC * frame_area
-        max_inst_area = SUBJECT_SALIENT_AREA_MAX_FRAC * frame_area
-        salient_cap = max_inst_area if max_subj_area == 0 else min(max_inst_area, 1.5 * max_subj_area)
 
-        def _is_duplicate(mb: np.ndarray, area: int) -> bool:
-            # Same object relabelled under a second class shares nearly all of
-            # its pixels with an already-accepted instance; genuinely distinct
-            # subjects (even touching ones) share very few.
-            for prev in out:
-                inter = float((mb & prev["mask"]).sum())
-                if inter / float(area or 1) >= SUBJECT_DEDUP_CONTAINMENT:
-                    return True
+def _load_sam3(app: FastAPI) -> bool:
+    """Load SAM 3 into app.state (blocking). Caller holds _SAM3_LOCK."""
+    if not SAM3_ENABLE:
+        app.state.sam3_load_failed = True
+        return False
+    try:
+        from sam3.model.sam3_image_processor import Sam3Processor  # type: ignore
+        from sam3.model_builder import build_sam3_image_model  # type: ignore
+
+        device = _sam3_device_label()
+        log.info("loading SAM 3 model %r onto %s ...", SAM3_MODEL_ID, device)
+        t0 = time.perf_counter()
+        kwargs = _sam3_checkpoint_kwargs()
+        model = build_sam3_image_model(
+            device=device,
+            enable_segmentation=True,
+            enable_inst_interactivity=False,
+            **kwargs,
+        )
+        processor = Sam3Processor(
+            model,
+            device=device,
+            confidence_threshold=SAM3_CONFIDENCE,
+        )
+        app.state.sam3_model = model
+        app.state.sam3_processor = processor
+        app.state.sam3_device = device
+        app.state.sam3_model_id = SAM3_MODEL_ID
+        app.state.sam3_available = True
+        log.info("SAM 3 ready in %.1fs on %s", time.perf_counter() - t0, device)
+        return True
+    except ImportError:
+        log.warning(
+            "SAM 3 package not installed; SAM 3-backed routes will fall back. "
+            "Install facebookresearch/sam3 and authenticate with Hugging Face "
+            "for the gated checkpoints."
+        )
+        app.state.sam3_load_failed = True
+        return False
+    except Exception as e:  # pragma: no cover - defensive
+        log.exception("failed to load SAM 3: %s", e)
+        app.state.sam3_load_failed = True
+        return False
+
+
+def _ensure_sam3(app: FastAPI):
+    """Lazily load SAM 3; return True/'cold' if ready, False if unavailable."""
+    if getattr(app.state, "sam3_available", False):
+        return True
+    if getattr(app.state, "sam3_load_failed", False):
+        return False
+    with _SAM3_LOCK:
+        if getattr(app.state, "sam3_available", False):
+            return True
+        if getattr(app.state, "sam3_load_failed", False):
             return False
+        ok = _load_sam3(app)
+        return "cold" if ok else False
 
-        # Highest-confidence candidates first, so when two salient detections
-        # cover the same object the better label is the one that survives.
-        candidates = [
-            (c, conf, mb, area) for c, conf, mb, area in instances
-            if c not in SUBJECT_CLASSES and min_inst_area <= area <= salient_cap
-        ]
-        candidates.sort(key=lambda t: -t[1])
-        for c, conf, mb, area in candidates:
-            overlap = float((mb & salient).sum()) / float(area or 1)
-            if overlap < SUBJECT_SALIENT_OVERLAP:
+
+def _bbox_of(mask: np.ndarray) -> "list[int]":
+    """Tight [x, y, w, h] bounding box of a boolean mask (mask is non-empty)."""
+    ys, xs = np.nonzero(mask)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
+
+
+def _mask_png_b64(alpha: np.ndarray) -> str:
+    buf = io.BytesIO()
+    Image.fromarray(alpha, "L").save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _soft_alpha_from_mask(mask: np.ndarray) -> np.ndarray:
+    alpha = (mask.astype(np.uint8)) * 255
+    return np.asarray(
+        Image.fromarray(alpha, "L").filter(ImageFilter.GaussianBlur(1.0)),
+        dtype=np.uint8,
+    )
+
+
+def _instances_from_sam3_output(output: dict, label: str) -> "list[dict]":
+    masks_t = output.get("masks")
+    if masks_t is None:
+        return []
+    masks = masks_t.detach().cpu().numpy() if hasattr(masks_t, "detach") else np.asarray(masks_t)
+    if masks.ndim == 4:
+        masks = masks[:, 0]
+    if masks.ndim == 2:
+        masks = masks[None, :, :]
+
+    scores_t = output.get("scores")
+    scores = (
+        scores_t.detach().cpu().numpy().reshape(-1)
+        if hasattr(scores_t, "detach")
+        else np.asarray(scores_t if scores_t is not None else [], dtype=np.float32).reshape(-1)
+    )
+
+    out: "list[dict]" = []
+    for i, raw in enumerate(masks):
+        mb = raw > 0
+        area = int(mb.sum())
+        if area <= 0:
+            continue
+        out.append({
+            "class_id": -1,
+            "label": label,
+            "confidence": float(scores[i]) if i < len(scores) else 1.0,
+            "mask": mb,
+            "area": area,
+            "source": "sam3",
+        })
+    out.sort(key=lambda inst: -inst["area"])
+    return out[:SAM3_INSTANCES_MAX]
+
+
+def _sam3_instances_for_prompt(app, img: Image.Image, prompt: str) -> "list[dict]":
+    processor = app.state.sam3_processor
+    with _SAM3_INFER_LOCK:
+        state = processor.set_image(img)
+        output = processor.set_text_prompt(state=state, prompt=prompt)
+    return _instances_from_sam3_output(output, prompt)
+
+
+def _sam3_ground_results(app, img: Image.Image, phrases: "list[str]", rgb: np.ndarray) -> "list[dict]":
+    processor = app.state.sam3_processor
+    frame_area = float(img.width * img.height) or 1.0
+    results = []
+
+    with _SAM3_INFER_LOCK:
+        state = processor.set_image(img)
+        for phrase in phrases:
+            output = processor.set_text_prompt(state=state, prompt=phrase)
+            instances = _instances_from_sam3_output(output, phrase)
+            if not instances:
+                results.append({
+                    "phrase": phrase,
+                    "found": False,
+                    "score": 0.0,
+                    "coverage": 0.0,
+                    "bbox": None,
+                    "components": 0,
+                    "refined": True,
+                    "source": "sam3",
+                    "maskPng": None,
+                })
                 continue
-            if _is_duplicate(mb, area):
-                continue
-            out.append({
-                "class_id": c,
-                "label": str(names.get(c, c)),
-                "confidence": conf,
-                "mask": mb,
-                "area": area,
-                "source": "salient",
+
+            union = _union_from_instances(instances, img.width, img.height) > 0
+            alpha = _soft_alpha_from_mask(union)
+            if _MATTE_CLEANUP:
+                try:
+                    alpha = clean_matte(alpha, rgb)
+                except Exception:
+                    log.exception("clean_matte failed after SAM 3 grounding; using raw SAM 3 mask")
+            bbox = _bbox_from_mask(alpha > 127)
+            results.append({
+                "phrase": phrase,
+                "found": True,
+                "score": round(max(float(i["confidence"]) for i in instances), 4),
+                "coverage": round(float((alpha > 127).sum()) / frame_area, 4),
+                "bbox": list(bbox) if bbox else None,
+                "components": len(instances),
+                "refined": True,
+                "source": "sam3",
+                "maskPng": _mask_png_b64(alpha),
             })
 
-    return out
+    return results
 
 
-def _subject_union_mask(app, pil_img: "Image.Image", matte: "np.ndarray | None" = None):
-    """Union of every subject instance (group photos → one mask). Thin wrapper
-    over `_detect_subject_instances`; returns `(union uint8 0/255, count)` or
-    `(None, 0)` — the exact contract /segment has always used."""
-    instances = _detect_subject_instances(app, pil_img, matte)
-    if not instances:
-        return None, 0
-    h, w = instances[0]["mask"].shape
-    union = np.zeros((h, w), dtype=np.uint8)
+def _union_from_instances(instances: "list[dict]", width: int, height: int) -> np.ndarray:
+    union = np.zeros((height, width), dtype=np.uint8)
     for inst in instances:
         union[inst["mask"]] = 255
-    return union, len(instances)
+    return union
 
 
-def _compose_subject_alpha(matte: np.ndarray, subject: np.ndarray) -> np.ndarray:
-    """Combine the semantic subject union with the saliency matte into a final
-    alpha: clean matte edges where the subject is salient, full coverage for
-    non-salient subjects, and nothing outside the subject region (so prominent
-    non-subject objects are excluded).
-    """
-    subj_img = Image.fromarray(subject, "L")
-    # Dilate the subject a little so the matte can supply soft edges just
-    # outside the YOLO boundary (hair/fur). MaxFilter kernel must be odd.
-    dil = np.asarray(subj_img.filter(ImageFilter.MaxFilter(15)))
-    if SUBJECT_REFINE and matte is not None:
-        combined = np.where(dil > 0, np.maximum(matte, subject), 0).astype(np.uint8)
-    else:
-        combined = subject
-    # Feather the result for anti-aliased edges.
-    combined = np.asarray(Image.fromarray(combined, "L").filter(ImageFilter.GaussianBlur(1.2)), dtype=np.uint8)
-    return combined
+def _saliency_instance(label: str, matte: np.ndarray) -> "dict | None":
+    mb = matte > 127
+    if not mb.any():
+        return None
+    return {
+        "class_id": -1,
+        "label": label,
+        "confidence": 1.0,
+        "mask": mb,
+        "area": int(mb.sum()),
+        "source": "saliency",
+    }
 
 
 # ─── Lazy model loaders (SAM 2 / Depth) ──────────────────────────────────────
@@ -1053,30 +1044,12 @@ async def lifespan(app: FastAPI):
         app.state.model_name = "u2net"
         app.state.providers = ["CPUExecutionProvider"]
 
-    # Optional: YOLO-seg semantic subject detection for /segment. When
-    # available, "Select Subject" returns the union of person/animal instances
-    # (refined by the matte); otherwise it falls back to pure saliency.
-    app.state.yolo = None
-    app.state.yolo_available = False
-    if SUBJECT_DETECT:
-        try:
-            from ultralytics import YOLO  # type: ignore
-
-            ty = time.perf_counter()
-            app.state.yolo = YOLO(SUBJECT_MODEL)
-            app.state.yolo_available = True
-            log.info("YOLO subject model %r ready in %.1fs", SUBJECT_MODEL, time.perf_counter() - ty)
-        except Exception as e:  # pragma: no cover - defensive
-            log.warning(
-                "YOLO subject detection unavailable (%s); /segment uses saliency only. "
-                "Install with: pip install ultralytics",
-                e,
-            )
-
-    # SAM 2 (Step 5 click-to-select) + Depth Anything V2 (Step 6) are the heavy
-    # torch models. By default they load LAZILY on first use (small footprint);
-    # set SEGMENT_EAGER_MODELS=1 to preload them now. The configured model ids
-    # are recorded up front so /health and response headers can report them.
+    # SAM 3, SAM 2 (click-to-select), and Depth Anything V2 are loaded lazily
+    # unless explicitly warmed. Their configured model ids are recorded up
+    # front so /health and response headers can report them.
+    app.state.sam3_available = False
+    app.state.sam3_load_failed = not SAM3_ENABLE
+    app.state.sam3_model_id = SAM3_MODEL_ID
     app.state.sam2_available = False
     app.state.sam2_load_failed = False
     app.state.sam2_model_id = SAM2_MODEL_ID
@@ -1089,13 +1062,16 @@ async def lifespan(app: FastAPI):
     app.state.lama_available = False
     app.state.lama_load_failed = False
 
+    if SAM3_EAGER:
+        await run_in_threadpool(_ensure_sam3, app)
+
     if SEGMENT_EAGER_MODELS:
         await run_in_threadpool(_ensure_sam2, app)
         await run_in_threadpool(_ensure_depth, app)
     else:
         log.info(
-            "SAM 2 + Depth will load lazily on first /sam2 or /depth call "
-            "(set SEGMENT_EAGER_MODELS=1 to preload at startup)."
+            "SAM 3, SAM 2, and Depth will load lazily on first use "
+            "(set SAM3_EAGER=1 or SEGMENT_EAGER_MODELS=1 to preload)."
         )
 
     yield
@@ -1241,15 +1217,17 @@ async def health() -> dict:
         "model": app.state.model_name,
         "providers": app.state.providers,
         "max_upload_mb": MAX_UPLOAD_MB,
-        "subject_detect": getattr(app.state, "yolo_available", False),
-        "subject_model": SUBJECT_MODEL if getattr(app.state, "yolo_available", False) else None,
-        "subject_imgsz": SUBJECT_IMGSZ,
-        "subject_conf": SUBJECT_CONF,
-        "subject_salient_include": SUBJECT_SALIENT_INCLUDE,
+        "subject_engine": "sam3" if getattr(app.state, "sam3_available", False) else "saliency",
+        "subject_prompt": SAM3_SUBJECT_PROMPT,
         "matte_cleanup": _MATTE_CLEANUP,
         "lazy_models": not SEGMENT_EAGER_MODELS,
         # `*_available` = CAPABLE of serving the endpoint (already loaded, or
         # loadable on first use). `*_loaded` = the heavy model is resident now.
+        "sam3_available": getattr(app.state, "sam3_available", False)
+        or (SAM3_ENABLE and _sam3_loadable() and not getattr(app.state, "sam3_load_failed", False)),
+        "sam3_loaded": getattr(app.state, "sam3_available", False),
+        "sam3_model": app.state.sam3_model_id,
+        "sam3_confidence": SAM3_CONFIDENCE,
         "sam2_available": app.state.sam2_available
         or (_torch_stack_loadable() and not app.state.sam2_load_failed),
         "sam2_loaded": app.state.sam2_available,
@@ -1277,6 +1255,14 @@ async def warmup() -> dict:
     first user interaction. Returns which models were loaded (vs already warm).
     """
     results = {}
+
+    # SAM 3
+    sam3_was_loaded = getattr(app.state, "sam3_available", False)
+    sam3_status = await run_in_threadpool(_ensure_sam3, app)
+    results["sam3"] = (
+        "already_loaded" if sam3_was_loaded
+        else "loaded" if sam3_status else "failed"
+    )
 
     # SAM 2
     sam2_was_loaded = app.state.sam2_available
@@ -1451,8 +1437,7 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
         img = img.convert("RGB")
 
     # Reject pathologically large inputs (defense-in-depth vs direct curls that
-    # bypass the Node route's MAX_MODEL_SIDE). BiRefNet runs at a fixed 1024²,
-    # so anything past SEGMENT_MAX_SIDE only wastes resize/YOLO work.
+    # bypass the Node route's MAX_MODEL_SIDE).
     if max(img.width, img.height) > SEGMENT_MAX_SIDE:
         raise HTTPException(
             413,
@@ -1463,38 +1448,38 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
     img_rgb = img.convert("RGB")
     np_rgb = np.asarray(img_rgb)
 
-    # 1) Saliency matte (soft 0..255 alpha) from rembg, then clean it: fill
-    #    interior holes, drop stray specks, recover faint/translucent regions —
-    #    while preserving the model's anti-aliased edges. This is what makes a
-    #    backlit leaf (or any under-segmented subject) come back solid and
-    #    complete instead of Swiss-cheesed.
-    try:
-        matte_img = await run_in_threadpool(
-            remove, img, session=app.state.session, only_mask=True
-        )
-    except Exception as e:
-        log.exception("rembg.remove failed")
-        raise HTTPException(500, f"segmentation failed: {e}")
-    raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
-    matte = await run_in_threadpool(clean_matte, raw_matte)
-
-    # 2) Semantic subject union (person/animal + salient instances) from
-    #    YOLO-seg. The cleaned matte is threaded in so YOLO's salient-instance
-    #    gate (and edge refinement) work off the completed subject region.
-    subject_mode = "saliency"
+    subject_mode = "sam3"
     subjects = 0
-    final_alpha = matte
-    if getattr(app.state, "yolo_available", False):
-        try:
-            subject, subjects = await run_in_threadpool(_subject_union_mask, app, img_rgb, matte)
-        except Exception:
-            log.exception("subject detection failed; using saliency")
-            subject, subjects = None, 0
-        if subject is not None and subject.any():
-            final_alpha = _compose_subject_alpha(matte, subject)
-            subject_mode = "yolo+matte" if SUBJECT_REFINE else "yolo"
+    final_alpha = None
 
-    # 3) Compose RGBA: original colours with the computed subject alpha.
+    if await run_in_threadpool(_ensure_sam3, app):
+        try:
+            instances = await run_in_threadpool(
+                _sam3_instances_for_prompt, app, img_rgb, SAM3_SUBJECT_PROMPT
+            )
+        except Exception:
+            log.exception("SAM 3 subject segmentation failed; using saliency fallback")
+            instances = []
+        if instances:
+            subjects = len(instances)
+            final_alpha = _soft_alpha_from_mask(
+                _union_from_instances(instances, img.width, img.height) > 0
+            )
+
+    if final_alpha is None:
+        subject_mode = "saliency"
+        try:
+            matte_img = await run_in_threadpool(
+                remove, img, session=app.state.session, only_mask=True
+            )
+        except Exception as e:
+            log.exception("rembg.remove failed")
+            raise HTTPException(500, f"segmentation failed: {e}")
+        raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
+        final_alpha = await run_in_threadpool(clean_matte, raw_matte)
+        subjects = 1 if final_alpha.any() else 0
+
+    # Compose RGBA: original colours with the computed subject alpha.
     rgba = np.dstack([np_rgb, final_alpha]).astype(np.uint8)
     out = Image.fromarray(rgba, "RGBA")
 
@@ -1518,7 +1503,7 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
         media_type="image/png",
         headers={
             "Cache-Control": "no-store",
-            "X-Model": app.state.model_name,
+            "X-Model": app.state.sam3_model_id if subject_mode == "sam3" else app.state.model_name,
             "X-Subject-Mode": subject_mode,
             "X-Subjects": str(subjects),
             "X-Elapsed-Ms": str(int(elapsed * 1000)),
@@ -1526,68 +1511,33 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
     )
 
 
-def _instance_alpha(matte: "np.ndarray | None", inst_mask: np.ndarray) -> np.ndarray:
-    """Per-instance refined soft alpha: same recipe as `_compose_subject_alpha`
-    but scoped to ONE instance. The BiRefNet matte supplies anti-aliased
-    hair/fur edges inside a small dilation of the instance boundary; everything
-    outside stays 0, so a neighbouring subject's matte never leaks in beyond
-    the 15px dilation ring."""
-    subject = (inst_mask.astype(np.uint8)) * 255
-    subj_img = Image.fromarray(subject, "L")
-    dil = np.asarray(subj_img.filter(ImageFilter.MaxFilter(15)))
-    if SUBJECT_REFINE and matte is not None:
-        combined = np.where(dil > 0, np.maximum(matte, subject), 0).astype(np.uint8)
-    else:
-        combined = subject
-    return np.asarray(
-        Image.fromarray(combined, "L").filter(ImageFilter.GaussianBlur(1.2)),
-        dtype=np.uint8,
-    )
-
-
-def _bbox_of(mask: np.ndarray) -> "list[int]":
-    """Tight [x, y, w, h] bounding box of a boolean mask (mask is non-empty)."""
-    ys, xs = np.nonzero(mask)
-    x0, x1 = int(xs.min()), int(xs.max())
-    y0, y1 = int(ys.min()), int(ys.max())
-    return [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
-
-
-def _mask_png_b64(alpha: np.ndarray) -> str:
-    buf = io.BytesIO()
-    Image.fromarray(alpha, "L").save(buf, format="PNG", optimize=True)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
 @app.post("/segment/instances")
-async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSONResponse:
-    """Multi-subject detection: every subject in the photo as its OWN mask.
+async def segment_instances(
+    image: UploadFile = File(..., alias="image"),
+    prompt: str = Form(SAM3_SUBJECT_PROMPT),
+) -> JSONResponse:
+    """SAM 3-first concept instance detection.
 
-    Where /segment unions all subjects into one alpha, this returns one
-    refined, soft-edged greyscale mask PER subject instance, with class label,
-    confidence, bounding box and area — so a caller (or the agent) can target
-    "person 2" or "the dog" individually, or recombine any subset.
+    Where /segment unions matching instances into one alpha, this returns one
+    greyscale mask PER SAM 3 concept instance, with label, confidence, bounding
+    box and area. The default prompt is `SAM3_SUBJECT_PROMPT`, and callers can
+    supply a narrower noun phrase such as "person", "red jacket", or "dog".
 
     Response JSON:
         {
           "width": int, "height": int,
-          "model": str, "subject_model": str,
+          "model": str, "prompt": str,
           "count": int,
           "instances": [
-            { "index": 0, "label": "person", "class_id": 0,
-              "confidence": 0.94, "source": "class" | "salient",
+            { "index": 0, "label": "person",
+              "confidence": 0.94, "source": "sam3" | "saliency",
               "bbox": [x, y, w, h], "area": int, "area_frac": float,
               "centroid": [cx, cy],
-              "mask_png": "<base64 greyscale PNG, white=subject>" },
+              "mask_png": "<base64 greyscale PNG, white=match>" },
             ...
           ],
-          "union_png": "<base64 greyscale PNG of all subjects>"
+          "union_png": "<base64 greyscale PNG of all matches>"
         }
-
-    Instances are sorted by area (largest first) and capped at
-    `SUBJECT_INSTANCES_MAX`. Falls back to a single saliency instance when
-    YOLO is unavailable or finds nothing (count=1, source="saliency"), and
-    count=0 with an empty list when the image has no salient subject at all.
     """
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(415, f"unsupported content-type: {image.content_type}")
@@ -1615,48 +1565,38 @@ async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSO
 
     img_rgb = img.convert("RGB")
     w, h = img_rgb.size
+    concept = str(prompt or SAM3_SUBJECT_PROMPT).strip() or SAM3_SUBJECT_PROMPT
 
-    # 1) Saliency matte (same path as /segment) — edge refinement + the
-    #    salient-instance gate both need it.
-    try:
-        matte_img = await run_in_threadpool(
-            remove, img, session=app.state.session, only_mask=True
-        )
-    except Exception as e:
-        log.exception("rembg.remove failed")
-        raise HTTPException(500, f"segmentation failed: {e}")
-    raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
-    matte = await run_in_threadpool(clean_matte, raw_matte)
-
-    # 2) Per-instance detection.
+    mode = "sam3"
+    source_model = app.state.sam3_model_id
     instances = []
-    if getattr(app.state, "yolo_available", False):
+    if await run_in_threadpool(_ensure_sam3, app):
         try:
-            instances = await run_in_threadpool(_detect_subject_instances, app, img_rgb, matte)
+            instances = await run_in_threadpool(
+                _sam3_instances_for_prompt, app, img_rgb, concept
+            )
         except Exception:
-            log.exception("instance detection failed; falling back to saliency")
+            log.exception("SAM 3 instance detection failed; falling back to saliency")
             instances = []
 
-    mode = "yolo+matte" if instances else "saliency"
-    if not instances and matte.any():
-        # No YOLO (or nothing detected) but the image HAS a salient subject:
-        # return the whole cleaned matte as a single instance so callers get a
-        # uniform shape regardless of which models are resident.
-        mb = matte > 127
-        if mb.any():
-            instances = [{
-                "class_id": -1,
-                "label": "subject",
-                "confidence": 1.0,
-                "mask": mb,
-                "area": int(mb.sum()),
-                "source": "saliency",
-            }]
+    if not instances:
+        mode = "saliency"
+        source_model = app.state.model_name
+        try:
+            matte_img = await run_in_threadpool(
+                remove, img, session=app.state.session, only_mask=True
+            )
+        except Exception as e:
+            log.exception("rembg.remove failed")
+            raise HTTPException(500, f"segmentation failed: {e}")
+        raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
+        matte = await run_in_threadpool(clean_matte, raw_matte)
+        inst = _saliency_instance(concept, matte)
+        instances = [inst] if inst else []
 
-    # Largest first; cap the payload.
     instances.sort(key=lambda i: -i["area"])
-    truncated = len(instances) > SUBJECT_INSTANCES_MAX
-    instances = instances[:SUBJECT_INSTANCES_MAX]
+    truncated = len(instances) > SAM3_INSTANCES_MAX
+    instances = instances[:SAM3_INSTANCES_MAX]
 
     def _build_payload():
         frame_area = float(w * h) or 1.0
@@ -1664,7 +1604,7 @@ async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSO
         items = []
         for idx, inst in enumerate(instances):
             mb = inst["mask"]
-            alpha = _instance_alpha(matte, mb)
+            alpha = _soft_alpha_from_mask(mb)
             union = np.maximum(union, alpha)
             ys, xs = np.nonzero(mb)
             items.append({
@@ -1685,8 +1625,8 @@ async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSO
 
     elapsed = time.perf_counter() - t0
     log.info(
-        "segment/instances %s (%dx%d) mode=%s count=%d%s in %.2fs",
-        image.filename or "<unnamed>", w, h, mode, len(items),
+        "segment/instances %s (%dx%d) mode=%s prompt=%r count=%d%s in %.2fs",
+        image.filename or "<unnamed>", w, h, mode, concept, len(items),
         " (truncated)" if truncated else "", elapsed,
     )
 
@@ -1694,8 +1634,8 @@ async def segment_instances(image: UploadFile = File(..., alias="image")) -> JSO
         {
             "width": w,
             "height": h,
-            "model": app.state.model_name,
-            "subject_model": SUBJECT_MODEL if getattr(app.state, "yolo_available", False) else None,
+            "model": source_model,
+            "prompt": concept,
             "mode": mode,
             "count": len(items),
             "truncated": truncated,
@@ -1993,10 +1933,9 @@ async def ground_text(
 ) -> JSONResponse:
     """Text-grounded masking: free-text phrase(s) → soft mask(s).
 
-    Pipeline per phrase: CLIPSeg relevance heatmap → adaptive threshold →
-    connected components (small/noise dropped) → SAM 2 box+peak-point
-    refinement of the top components (crisp instance edges; falls back to the
-    coarse component when SAM 2 is unavailable) → matte cleanup.
+    Pipeline per phrase: SAM 3 concept segmentation when available; otherwise
+    CLIPSeg relevance heatmap → adaptive threshold → connected components →
+    SAM 2 box+peak-point refinement of the top components → matte cleanup.
 
     Form fields:
         image:     JPEG/PNG/WebP, max MAX_UPLOAD_MB, longest side GROUND_MAX_SIDE.
@@ -2015,7 +1954,7 @@ async def ground_text(
               "coverage": float,     # mask area / frame area
               "bbox": [x,y,w,h] | null,
               "components": int,
-              "refined": bool,       # SAM 2 actually used
+              "refined": bool,       # SAM 3 used, or SAM 2 fallback refined
               "maskPng": str | null  # base64 greyscale PNG, white = selected
           }]
         }
@@ -2041,14 +1980,6 @@ async def ground_text(
     thr = GROUND_THRESHOLD if threshold is None else max(0.05, min(0.95, float(threshold)))
     do_refine = str(refine).strip() not in ("0", "false", "False")
 
-    if not await run_in_threadpool(_ensure_ground, app):
-        raise HTTPException(
-            501,
-            "Text grounding not available on this server. "
-            "Install torch + transformers and restart, or set GROUND_MODEL_ID "
-            "to a CLIPSeg model in your HF cache.",
-        )
-
     contents = await _read_limited(image)
     if not contents:
         raise HTTPException(400, "empty upload")
@@ -2065,13 +1996,44 @@ async def ground_text(
             f"image too large ({img.width}x{img.height}); max longest side {GROUND_MAX_SIDE}px",
         )
 
-    from scipy import ndimage  # transitively available via ultralytics
+    from scipy import ndimage
 
     W, H = img.size
     frame_area = float(W * H)
     rgb = np.asarray(img, dtype=np.uint8)
 
     t0 = time.perf_counter()
+
+    if await run_in_threadpool(_ensure_sam3, app):
+        try:
+            results = await run_in_threadpool(
+                _sam3_ground_results, app, img, phrase_list, rgb
+            )
+            elapsed = time.perf_counter() - t0
+            log.info(
+                "ground/text %s (%dx%d) engine=sam3 phrases=%s in %.2fs",
+                image.filename or "<unnamed>", W, H, phrase_list, elapsed,
+            )
+            return JSONResponse({
+                "width": W,
+                "height": H,
+                "model": app.state.sam3_model_id,
+                "engine": "sam3",
+                "refine": True,
+                "elapsed_ms": int(elapsed * 1000),
+                "results": results,
+            }, headers={"Cache-Control": "no-store"})
+        except Exception:
+            log.exception("SAM 3 text grounding failed; using CLIPSeg fallback")
+
+    if not await run_in_threadpool(_ensure_ground, app):
+        raise HTTPException(
+            501,
+            "Text grounding not available on this server. Install SAM 3, or "
+            "install torch + transformers and set GROUND_MODEL_ID to a CLIPSeg "
+            "model in your HF cache.",
+        )
+
     heatmaps = await run_in_threadpool(_ground_heatmaps, app, img, phrase_list)
 
     results = []
@@ -2166,6 +2128,7 @@ async def ground_text(
         "width": W,
         "height": H,
         "model": app.state.ground_model_id,
+        "engine": "clipseg",
         "refine": any_refined,
         "elapsed_ms": int(elapsed * 1000),
         "results": results,
@@ -2367,7 +2330,7 @@ def _compute_subject_crop(
 
     Two regimes:
 
-    1. A distinct subject (YOLO instance, or a saliency blob that doesn't sprawl
+    1. A distinct subject (SAM 3 instance, or a saliency blob that doesn't sprawl
        across the frame): size the crop so the subject's longer side spans
        ~`target_frac` of it — leaving deliberate breathing room/context — then
        nudge to rule-of-thirds and fit `aspect`. This is the fix for "subject-
@@ -2627,12 +2590,11 @@ def _compute_aspect_crop(
 def _subjects_from_instances(
     instances: "list[dict]", W: int, H: int
 ) -> "tuple[list[dict], np.ndarray, tuple[float, float] | None]":
-    """Reduce YOLO instance dicts to the three things /crop/auto's subject
+    """Reduce concept instance dicts to the three things /crop/auto's subject
     strategy needs: the JSON `subjects` payload, a uint8 union mask over the
     top-N instances, and an area-weighted centroid (more stable than a global
-    matte centroid for multi-subject photos). Shared by the fast (matte-free)
-    path and the BiRefNet fallback so both build identical metadata."""
-    top = sorted(instances, key=lambda i: -i["area"])[:SUBJECT_INSTANCES_MAX]
+    matte centroid for multi-subject photos)."""
+    top = sorted(instances, key=lambda i: -i["area"])[:SAM3_INSTANCES_MAX]
     payload: "list[dict]" = []
     union = np.zeros((H, W), dtype=np.uint8)
     total = sx = sy = 0.0
@@ -2674,7 +2636,7 @@ async def crop_auto(
                  strategy's box is fitted to this ratio.
         mode:    one of `"subject" | "aspect" | "content" | "depth" | "all"`.
                  Default `"all"` runs every strategy that's available
-                 (depth-aware needs Depth Anything; subject needs BiRefNet).
+                 (depth-aware needs Depth Anything; subject prefers SAM 3).
         padding: optional float (0..1) overriding `CROP_SUBJECT_PADDING`.
 
     Response shape:
@@ -2760,41 +2722,30 @@ async def crop_auto(
             log.exception("content-fill crop failed")
             crops["content"] = None
 
-    # Subject-aware: YOLO-first. The crop box only needs a subject REGION, not
-    # a pixel-perfect alpha — so for the common case (people/pets/objects YOLO
-    # recognises) we detect instances WITHOUT the ~25-60s BiRefNet matte and
-    # build the region straight from the instance masks. The matte is only
-    # computed as a fallback when YOLO finds nothing (a non-COCO subject, or
-    # YOLO disabled), which keeps the slow path available without paying for it
-    # on every subject crop — and stops one subject-aware request from pinning
-    # the worker for a minute while every other mode waits.
+    # Subject-aware: SAM 3 first. The crop box only needs a subject region, not
+    # a pixel-perfect alpha, so SAM 3 concept instances provide the strongest
+    # signal. If SAM 3 is unavailable or finds nothing, fall back to the generic
+    # saliency matte so the tool remains usable in lightweight local setups.
     if mode in ("subject", "all"):
         try:
             union_mask: "np.ndarray | None" = None
             subject_centroid: "tuple[float, float] | None" = None
 
-            # Fast path — matte-free YOLO instances.
-            if getattr(app.state, "yolo_available", False):
+            if await run_in_threadpool(_ensure_sam3, app):
                 try:
                     instances = await run_in_threadpool(
-                        _detect_subject_instances, app, rgb_img, None
+                        _sam3_instances_for_prompt, app, rgb_img, SAM3_SUBJECT_PROMPT
                     )
                 except Exception:
-                    log.exception("instance detection failed in /crop/auto")
+                    log.exception("SAM 3 subject detection failed in /crop/auto")
                     instances = []
                 if instances:
                     payload, union, subject_centroid = _subjects_from_instances(
                         instances, W, H
                     )
                     subjects_payload.extend(payload)
-                    # The YOLO instance union already isolates the subject(s)
-                    # from the background, so no matte gating is needed.
                     union_mask = union
 
-            # Fallback — only when the fast path found no subject. Run the
-            # BiRefNet saliency matte and gate it to any salient instances
-            # (same recipe as /segment's _compose_subject_alpha) so non-COCO
-            # subjects still get a sensible crop.
             if union_mask is None:
                 matte_img = await run_in_threadpool(
                     remove, img, session=app.state.session, only_mask=True
@@ -2802,24 +2753,10 @@ async def crop_auto(
                 raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
                 matte = await run_in_threadpool(clean_matte, raw_matte, rgb)
                 union_mask = matte.copy()
-                if getattr(app.state, "yolo_available", False):
-                    try:
-                        instances = await run_in_threadpool(
-                            _detect_subject_instances, app, rgb_img, matte
-                        )
-                    except Exception:
-                        log.exception("instance detection failed in /crop/auto")
-                        instances = []
-                    if instances:
-                        payload, union, subject_centroid = _subjects_from_instances(
-                            instances, W, H
-                        )
-                        subjects_payload.extend(payload)
-                        union_mask = _compose_subject_alpha(matte, union)
 
-            # `has_subject` is True only when YOLO actually found instances —
-            # the fallback BiRefNet matte alone (no instances) means "diffuse
-            # saliency", which the subject crop treats as a scene, not a target.
+            # `has_subject` is True only when SAM 3 found instances. A fallback
+            # saliency matte alone can be diffuse, so the crop treats it as a
+            # scene when it sprawls across the frame.
             crops["subject"] = _compute_subject_crop(
                 union_mask, W, H,
                 aspect=aspect_value, centroid=subject_centroid,

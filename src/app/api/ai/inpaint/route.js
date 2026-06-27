@@ -17,6 +17,7 @@ export const maxDuration = 120
 export const runtime = 'nodejs'
 
 const MAX_INPUT_BYTES = 24 * 1024 * 1024
+const MAX_DEPLOY_BODY_BYTES = 4 * 1024 * 1024
 const MAX_MODEL_SIDE = 1024
 const DEFAULT_MODEL = 'stable-diffusion-v1-5/stable-diffusion-inpainting'
 
@@ -329,6 +330,19 @@ export async function POST(request) {
 
     const limited = rateLimitResponse(await enforceRateLimit('ai-inpaint', userId))
     if (limited) return limited
+
+    const contentLength = request.headers.get('content-length')
+    if (contentLength) {
+      const cl = Number.parseInt(contentLength, 10)
+      if (Number.isFinite(cl) && cl > MAX_DEPLOY_BODY_BYTES) {
+        return NextResponse.json(
+          {
+            error: `Inpaint selection is too large for deployment upload (${(cl / 1024 / 1024).toFixed(1)}MB). Select a smaller area or let the client crop the request first.`,
+          },
+          { status: 413 },
+        )
+      }
+    }
 
     const formData = await request.formData()
     const imageBuffer = await fileToBuffer(formData.get('image'), 'image')
