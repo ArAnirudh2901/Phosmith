@@ -36,6 +36,9 @@ export const MASK_EMPTY_THRESHOLD = 250
 const MAX_HISTORY = 40
 const BRACKET_STEP = 4
 const DEFERRED_REGION_PREVIEW_MS = 90
+const INPAINT_UPLOAD_MAX_SIDE = 1536
+const INPAINT_MASK_THRESHOLD = 16
+const INPAINT_IMAGE_QUALITY = 0.88
 
 const isMaskOverlay = (obj) => isPhosmithMaskOverlay(obj)
 
@@ -132,6 +135,140 @@ const sampleMaskCoverage = (imageEl) => {
     } catch {
         return 1
     }
+}
+
+const canvasToBlob = (canvas, type = 'image/png', quality) =>
+    new Promise((resolve, reject) => {
+        canvas.toBlob(
+            (blob) => (blob ? resolve(blob) : reject(new Error('canvas toBlob failed'))),
+            type,
+            quality,
+        )
+    })
+
+const decodeBlobImage = (blob) =>
+    new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(blob)
+        const image = new Image()
+        image.onload = () => {
+            URL.revokeObjectURL(url)
+            resolve(image)
+        }
+        image.onerror = () => {
+            URL.revokeObjectURL(url)
+            reject(new Error('image decode failed'))
+        }
+        image.src = url
+    })
+
+const findInpaintMaskBounds = (maskCanvas) => {
+    if (!maskCanvas?.width || !maskCanvas?.height) return null
+    const w = maskCanvas.width
+    const h = maskCanvas.height
+    const ctx = maskCanvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return null
+
+    let data
+    try {
+        data = ctx.getImageData(0, 0, w, h).data
+    } catch {
+        return null
+    }
+
+    let minX = w
+    let minY = h
+    let maxX = -1
+    let maxY = -1
+    for (let y = 0; y < h; y += 1) {
+        const row = y * w * 4
+        for (let x = 0; x < w; x += 1) {
+            if (data[row + x * 4] <= INPAINT_MASK_THRESHOLD) continue
+            minX = Math.min(minX, x)
+            minY = Math.min(minY, y)
+            maxX = Math.max(maxX, x)
+            maxY = Math.max(maxY, y)
+        }
+    }
+    if (maxX < minX || maxY < minY) return null
+
+    const boxW = maxX - minX + 1
+    const boxH = maxY - minY + 1
+    const pad = Math.max(32, Math.min(220, Math.round(Math.max(boxW, boxH) * 0.35)))
+    const left = Math.max(0, minX - pad)
+    const top = Math.max(0, minY - pad)
+    const right = Math.min(w - 1, maxX + pad)
+    const bottom = Math.min(h - 1, maxY + pad)
+    return {
+        left,
+        top,
+        width: right - left + 1,
+        height: bottom - top + 1,
+    }
+}
+
+const buildCompactInpaintPayload = async (imageCanvas, maskCanvas) => {
+    const bounds = findInpaintMaskBounds(maskCanvas)
+    if (!bounds) return null
+
+    const scale = Math.min(1, INPAINT_UPLOAD_MAX_SIDE / Math.max(bounds.width, bounds.height))
+    const outW = Math.max(1, Math.round(bounds.width * scale))
+    const outH = Math.max(1, Math.round(bounds.height * scale))
+
+    const imageCrop = document.createElement('canvas')
+    imageCrop.width = outW
+    imageCrop.height = outH
+    const imageCtx = imageCrop.getContext('2d')
+    if (!imageCtx) throw new Error('Could not allocate inpaint image crop')
+    imageCtx.imageSmoothingEnabled = true
+    imageCtx.imageSmoothingQuality = 'high'
+    imageCtx.drawImage(
+        imageCanvas,
+        bounds.left,
+        bounds.top,
+        bounds.width,
+        bounds.height,
+        0,
+        0,
+        outW,
+        outH,
+    )
+
+    const maskCrop = document.createElement('canvas')
+    maskCrop.width = outW
+    maskCrop.height = outH
+    const maskCtx = maskCrop.getContext('2d')
+    if (!maskCtx) throw new Error('Could not allocate inpaint mask crop')
+    maskCtx.imageSmoothingEnabled = false
+    maskCtx.drawImage(
+        maskCanvas,
+        bounds.left,
+        bounds.top,
+        bounds.width,
+        bounds.height,
+        0,
+        0,
+        outW,
+        outH,
+    )
+
+    const [imageBlob, maskBlob] = await Promise.all([
+        canvasToBlob(imageCrop, 'image/jpeg', INPAINT_IMAGE_QUALITY),
+        canvasToBlob(maskCrop, 'image/png'),
+    ])
+
+    return { imageBlob, maskBlob, bounds, scale }
+}
+
+const compositeInpaintPatch = async (baseCanvas, patchBlob, bounds) => {
+    const patch = await decodeBlobImage(patchBlob)
+    const out = document.createElement('canvas')
+    out.width = baseCanvas.width
+    out.height = baseCanvas.height
+    const ctx = out.getContext('2d')
+    if (!ctx) throw new Error('Could not allocate inpaint composite canvas')
+    ctx.drawImage(baseCanvas, 0, 0)
+    ctx.drawImage(patch, bounds.left, bounds.top, bounds.width, bounds.height)
+    return canvasToBlob(out, 'image/png')
 }
 
 /**
@@ -1275,13 +1412,8 @@ export default function usePixelMaskTool({
                     mctx.fillRect(0, 0, bw, bh)
                     mctx.drawImage(decoded, 0, 0, bw, bh)
 
-                    // Convert both to blobs for the inpaint API
-                    const [imgBlob, mskBlob] = await Promise.all([
-                        new Promise((res, rej) =>
-                            fullImg.toBlob((b) => (b ? res(b) : rej(new Error('image toBlob failed'))), 'image/png')),
-                        new Promise((res, rej) =>
-                            fullMask.toBlob((b) => (b ? res(b) : rej(new Error('mask toBlob failed'))), 'image/png')),
-                    ])
+                    const compactPayload = await buildCompactInpaintPayload(fullImg, fullMask)
+                    if (!compactPayload) throw new Error('No selected pixels found')
 
                     if (controller.signal.aborted) return
 
@@ -1289,8 +1421,8 @@ export default function usePixelMaskTool({
                     // routing preference: Device → LaMa on the local mask
                     // service, Server → HF Stable Diffusion, Auto → LaMa first.
                     const inpaintForm = new FormData()
-                    inpaintForm.append('image', imgBlob, 'image.png')
-                    inpaintForm.append('mask', mskBlob, 'mask.png')
+                    inpaintForm.append('image', compactPayload.imageBlob, 'image.jpg')
+                    inpaintForm.append('mask', compactPayload.maskBlob, 'mask.png')
                     inpaintForm.append('backend', inpaintBackendFromRouting())
 
                     const inpaintResp = await fetch('/api/ai/inpaint', {
@@ -1305,13 +1437,14 @@ export default function usePixelMaskTool({
                     }
 
                     const resultBlob = await inpaintResp.blob()
+                    const compositedBlob = await compositeInpaintPatch(fullImg, resultBlob, compactPayload.bounds)
 
                     // The committed src must outlive this page: undo/redo
                     // recreates the image from its serialized src and the
                     // canvas state is persisted, so a blob: URL (revoked,
                     // page-scoped) would break both. Upload to ImageKit,
                     // falling back to an inline data: URL.
-                    const resultUrl = await persistResultBlob(resultBlob, {
+                    const resultUrl = await persistResultBlob(compositedBlob, {
                         signal: controller.signal,
                         label: 'object-remove',
                     })
@@ -1472,17 +1605,13 @@ export default function usePixelMaskTool({
                 return
             }
 
-            const [imgBlob, mskBlob] = await Promise.all([
-                new Promise((res, rej) =>
-                    fullImg.toBlob((b) => (b ? res(b) : rej(new Error('image toBlob failed'))), 'image/png')),
-                new Promise((res, rej) =>
-                    fullMask.toBlob((b) => (b ? res(b) : rej(new Error('mask toBlob failed'))), 'image/png')),
-            ])
+            const compactPayload = await buildCompactInpaintPayload(fullImg, fullMask)
+            if (!compactPayload) throw new Error('No selected pixels found')
             if (controller.signal.aborted) return
 
             const inpaintForm = new FormData()
-            inpaintForm.append('image', imgBlob, 'image.png')
-            inpaintForm.append('mask', mskBlob, 'mask.png')
+            inpaintForm.append('image', compactPayload.imageBlob, 'image.jpg')
+            inpaintForm.append('mask', compactPayload.maskBlob, 'mask.png')
             inpaintForm.append('backend', inpaintBackendFromRouting())
 
             const inpaintResp = await fetch('/api/ai/inpaint', {
@@ -1496,7 +1625,8 @@ export default function usePixelMaskTool({
             }
 
             const resultBlob = await inpaintResp.blob()
-            const resultUrl = await persistResultBlob(resultBlob, {
+            const compositedBlob = await compositeInpaintPatch(fullImg, resultBlob, compactPayload.bounds)
+            const resultUrl = await persistResultBlob(compositedBlob, {
                 signal: controller.signal,
                 label: 'gen-fill',
             })

@@ -295,6 +295,8 @@ const EraseControls = ({ project, dominantColor }) => {
     }
 
     const autoBusy = isAutoErasing || Boolean(processingMessage)
+    const hasFillSelection = tool.hasMask || tool.hasPending
+    const fillBusy = tool.isObjectRunning && tool.objectPhase === 'filling'
 
     return (
         <div className="space-y-4 overflow-y-auto pr-1 panel-scroll">
@@ -438,6 +440,28 @@ const EraseControls = ({ project, dominantColor }) => {
                 </motion.button>
             </div>
 
+            <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                <label className="panel-label">Generative Fill</label>
+                <motion.button
+                    type="button"
+                    onClick={() => tool.generativeFill()}
+                    disabled={!hasFillSelection || tool.isObjectRunning}
+                    whileTap={{ scale: hasFillSelection && !tool.isObjectRunning ? 0.97 : 1 }}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-50"
+                    style={{ background: 'rgba(124, 58, 237, 0.12)', border: '1px solid rgba(124,58,237,0.6)', color: '#C4B5FD' }}
+                >
+                    {fillBusy
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : <Wand2 className="h-3.5 w-3.5" />}
+                    {fillBusy ? 'Filling…' : 'Generative Fill'}
+                </motion.button>
+                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                    {hasFillSelection
+                        ? 'Fills the selected area with generated background'
+                        : 'Paint or circle the area to replace, then fill it'}
+                </p>
+            </div>
+
             {/* Mode */}
             <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <ModeToggle mode={tool.mode} setMode={tool.setMode} altActive={tool.altActive} />
@@ -453,23 +477,6 @@ const EraseControls = ({ project, dominantColor }) => {
                             <LabeledSlider label="Flow" value={tool.flow} min={5} max={100} suffix="%" onChange={tool.setFlow} dominantColor={dominantColor} />
                         </>
                     )}
-
-                    {/* Generative fill — paint/scribble or circle a region, then
-                        regenerate it with AI (same inpaint pipeline as the
-                        click-to-remove object eraser). */}
-                    <motion.button
-                        type="button"
-                        onClick={() => tool.generativeFill()}
-                        disabled={!tool.hasMask || tool.isObjectRunning}
-                        whileTap={{ scale: tool.hasMask && !tool.isObjectRunning ? 0.97 : 1 }}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-xs font-semibold editor-interactive disabled:opacity-50"
-                        style={{ background: 'rgba(124, 58, 237, 0.12)', border: '1px solid rgba(124,58,237,0.6)', color: '#C4B5FD' }}
-                    >
-                        {tool.isObjectRunning && tool.objectPhase === 'filling'
-                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            : <Wand2 className="h-3.5 w-3.5" />}
-                        {tool.isObjectRunning && tool.objectPhase === 'filling' ? 'Filling…' : 'Generative Fill'}
-                    </motion.button>
 
                     {circleSelect ? (
                         tool.hasPending ? (

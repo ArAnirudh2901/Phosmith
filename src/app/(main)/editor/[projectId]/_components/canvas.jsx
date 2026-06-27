@@ -184,6 +184,18 @@ const CanvasEditor = ({ project }) => {
             } catch {
                 /* already disposed */
             }
+            // After dispose(), Fabric's internal canvas context is null.
+            // Stale references held by in-flight RAF callbacks, debounced saves,
+            // or React state that hasn't caught up yet will still call
+            // requestRenderAll / renderAll and crash inside Fabric with
+            // "t.clearRect" (t = null context). Replace them with no-ops so any
+            // caller that fires after dispose silently does nothing.
+            try {
+                const noop = () => {}
+                existing.requestRenderAll = noop
+                existing.renderAll = noop
+                existing.renderAndReset = noop
+            } catch { /* ignore — already dead */ }
             canvasInstanceRef.current = null
         }
         setCanvasEditor(null)
