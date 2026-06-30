@@ -77,6 +77,14 @@ export const AI_CAPABILITIES = {
         clientImpl: 'RMBG-1.4 in browser',
         serverImpl: 'BiRefNet (service)',
     },
+    sam: {
+        label: 'Click / box select',
+        hint: 'Point or drag to select an object',
+        client: true,
+        server: true,
+        clientImpl: 'SlimSAM in browser',
+        serverImpl: 'SAM 3.1 (service)',
+    },
     inpaint: {
         label: 'Object fill',
         hint: 'Fills removed objects with background texture',

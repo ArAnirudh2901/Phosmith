@@ -9,7 +9,7 @@ pinned: false
 license: mit
 ---
 
-# Pixxel Mask Service
+# Phosmith Mask Service
 
 A lightweight, production-ready FastAPI service designed to run SOTA computer vision models on CPU/GPU. This service is optimized for deployment as a **Hugging Face Space (Docker SDK)** and connects with your frontend (e.g. Next.js on Vercel).
 

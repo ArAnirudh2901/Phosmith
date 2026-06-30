@@ -15,7 +15,7 @@
  * Design goals:
  *   - Pure JS, no React. Commands operate on whatever runtime context they
  *     need (usually the live Fabric canvas), passed in at registration time.
- *   - Discoverable: the registry mirrors itself onto `window.__pixxel.agent`
+ *   - Discoverable: the registry mirrors itself onto `window.__phosmith.agent`
  *     so a dev console (or a future agent bridge) can list + call commands.
  *   - Self-describing: every command carries a `description` + `params`
  *     schema so an LLM agent can choose + fill arguments.
@@ -50,8 +50,8 @@ const summarizeArgs = (args) => {
 
 const syncWindow = () => {
     if (typeof window === 'undefined') return
-    window.__pixxel = window.__pixxel || {}
-    window.__pixxel.agent = { listCommands, getCommand, runCommand, runPlan, registerCommand, registerDomain }
+    window.__phosmith = window.__phosmith || {}
+    window.__phosmith.agent = { listCommands, getCommand, runCommand, runPlan, registerCommand, registerDomain }
 }
 
 /**

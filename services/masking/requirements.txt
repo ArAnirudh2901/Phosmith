@@ -1,0 +1,23 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pillow>=10.0.0
+
+# numpy is a hard import in main.py; cv2 (opencv-python-headless) + scipy power
+# clean_matte() and arrive transitively via rembg, but are imported defensively.
+numpy>=1.24.0
+
+# Subject saliency (BiRefNet/ISNet/u2net). rembg[cpu] -> onnxruntime (CoreML EP
+# on Apple Silicon); use rembg[gpu] on Linux+NVIDIA. Brings numpy/opencv/scipy.
+rembg[cpu]>=2.0.59
+
+# Depth Anything V2 (/depth) + the transformers stack SAM 3 also uses.
+torch>=2.1.0
+torchvision>=0.16.0
+transformers>=4.45.0
+
+# SAM 3.1 (/segment, /segment/instances, /segment/box, /sam2/click, /ground/text)
+# is gated and installed separately — Meta's package is not on PyPI:
+#   pip install "git+https://github.com/facebookresearch/sam3.git"
+#   huggingface-cli login            # accept facebook/sam3.1 terms first
+# Without it, every SAM-3 route degrades to the saliency/None fallback.

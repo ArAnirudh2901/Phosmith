@@ -5,7 +5,7 @@
   </svg>
 </p>
 
-<h1 align="center">Pixxel — AI Image Studio</h1>
+<h1 align="center">Phosmith — AI Image Studio</h1>
 
 <p align="center">
   <strong>A professional-grade, AI-powered image editor built for the browser.</strong><br />
@@ -25,7 +25,7 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="Pixxel — Shape Light, Forge Photos" width="100%" />
+  <img src="docs/screenshots/hero.png" alt="Phosmith — Shape Light, Forge Photos" width="100%" />
 </p>
 
 ---
@@ -54,7 +54,7 @@
 
 ## Overview
 
-Pixxel is a state-of-the-art web-based image editor that seamlessly blends professional-grade adjustment tools with advanced AI capabilities. It features a custom WebGL2 compositing engine (the **Megashader**), non-destructive mask layers, an AI agentic editing assistant with a collage command registry, and support for local large language models and computer vision models.
+Phosmith is a state-of-the-art web-based image editor that seamlessly blends professional-grade adjustment tools with advanced AI capabilities. It features a custom WebGL2 compositing engine (the **Megashader**), non-destructive mask layers, an AI agentic editing assistant with a collage command registry, and support for local large language models and computer vision models.
 
 The editor runs entirely in the browser — image processing is handled by the GPU via WebGL2 shaders, and AI inference is offloaded to a local Python FastAPI service. No cloud GPU required.
 
@@ -306,7 +306,7 @@ Each mask layer stores its parameters (not pixels) so they remain fully editable
 
 ## 🧩 Agent Command System
 
-All editor capabilities are exposed through a **command registry** at `src/lib/agent/command-registry.js`. Domains are registered by `canvas.jsx` on editor mount and are accessible as `window.__pixxel.agent`.
+All editor capabilities are exposed through a **command registry** at `src/lib/agent/command-registry.js`. Domains are registered by `canvas.jsx` on editor mount and are accessible as `window.__phosmith.agent`.
 
 | Domain | Commands |
 |---|---|
@@ -367,8 +367,8 @@ The dashboard provides a grid view of all projects with:
 
 ```bash
 # Clone the repo
-git clone https://github.com/ArAnirudh2901/pixxel.git
-cd pixxel
+git clone https://github.com/ArAnirudh2901/phosmith.git
+cd phosmith
 
 # Install dependencies
 bun install
@@ -522,7 +522,7 @@ The agent has a persistent chat interface with conversation history stored per-p
 
 ## ☁️ Production Deployment
 
-To run Pixxel in production with all AI features active, you need to deploy the Next.js frontend to **Vercel** and the Python FastAPI Mask Service to a **Hugging Face Space (Docker SDK)**.
+To run Phosmith in production with all AI features active, you need to deploy the Next.js frontend to **Vercel** and the Python FastAPI Mask Service to a **Hugging Face Space (Docker SDK)**.
 
 ### 1. Backend: Deploy Mask Service to Hugging Face Spaces
 
