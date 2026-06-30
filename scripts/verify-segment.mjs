@@ -3,7 +3,7 @@
  * End-to-end test for the local mask service.
  *
  * Synthesises a coloured circle on a contrasting background, POSTs it to
- * `MASK_SERVICE_URL/segment` (default http://127.0.0.1:8001/segment), and
+ * `MASK_SERVICE_URL/segment` (default http://127.0.0.1:8002/segment), and
  * asserts the returned PNG has a non-degenerate alpha channel that covers
  * the subject region.
  *
@@ -13,7 +13,7 @@
 
 import sharp from 'sharp'
 
-const MASK_SERVICE_URL = (process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8001')
+const MASK_SERVICE_URL = (process.env.MASKING_SERVICE_URL || process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8002')
   .trim()
   .replace(/\/+$/, '')
 

@@ -1,8 +1,7 @@
-"""Pixxel mask service.
+"""Phosmith mask service.
 
-Wraps `rembg` and Hugging Face `transformers` SAM 2 (Hiera-Small) in a
-tiny FastAPI HTTP API so the Next.js AI routes can call background-removal
-and click-to-select models locally without Docker.
+Wraps `rembg` and Meta SAM 3.1 in a tiny FastAPI HTTP API so the Next.js AI
+routes can call background-removal and segmentation models locally.
 
 Free-tier friendly: no GPU required, but auto-uses CUDA (NVIDIA) or
 MPS (Apple Silicon) when available.
@@ -84,9 +83,6 @@ if MODEL_CACHE_DIR:
     log.info("model cache pinned to %r (HF_HOME + U2NET_HOME)", MODEL_CACHE_DIR)
 
 MODEL_NAME = os.getenv("SEGMENT_MODEL", "isnet-general-use").strip()
-SAM2_MODEL_ID = os.getenv("SAM2_MODEL_ID", "facebook/sam2-hiera-small").strip()
-SAM2_CACHE_MAX = int(os.getenv("SAM2_CACHE_MAX", "20").strip())
-SAM2_MAX_CLICKS = int(os.getenv("SAM2_MAX_CLICKS", "50").strip())
 DEPTH_MODEL_ID = os.getenv(
     "DEPTH_MODEL_ID", "depth-anything/Depth-Anything-V2-Small-hf"
 ).strip()
@@ -112,13 +108,8 @@ SEGMENT_MAX_SIDE = int(os.getenv("SEGMENT_MAX_SIDE", "2048").strip())
 SHAPE_MASK_MAX_SIDE = int(os.getenv("SHAPE_MASK_MAX_SIDE", "2048").strip())
 SHAPE_MASK_MAX_POINTS = int(os.getenv("SHAPE_MASK_MAX_POINTS", "10000").strip())
 
-# By default, SAM 2 and Depth Anything (the heavy torch models behind the
-# /sam2 and /depth endpoints) are loaded LAZILY — on first use of their
-# endpoint — instead of at startup. This keeps the resident footprint small
-# so the service fits a small free-tier host; the core "Select Subject"
-# (/segment) path never needs them.
-# Set SEGMENT_EAGER_MODELS=1 to preload everything at startup (lowest
-# first-request latency, ~1.5-2.5 GB resident).
+# Heavy torch models load LAZILY on first use to keep resident footprint small.
+# Set SEGMENT_EAGER_MODELS=1 to preload at startup (lowest first-request latency).
 SEGMENT_EAGER_MODELS = os.getenv("SEGMENT_EAGER_MODELS", "0").strip() not in ("0", "false", "False", "")
 
 # ─── SAM 3 concept segmentation ──────────────────────────────────────────────
@@ -128,7 +119,11 @@ SEGMENT_EAGER_MODELS = os.getenv("SEGMENT_EAGER_MODELS", "0").strip() not in ("0
 SAM3_ENABLE = os.getenv("SAM3_ENABLE", "1").strip() not in ("0", "false", "False", "")
 SAM3_MODEL_ID = os.getenv("SAM3_MODEL_ID", "facebook/sam3.1").strip()
 SAM3_CHECKPOINT_PATH = os.getenv("SAM3_CHECKPOINT_PATH", "").strip() or None
-SAM3_CONFIDENCE = float(os.getenv("SAM3_CONFIDENCE", "0.5").strip())
+# 0.25 (not 0.5): at 0.5 SAM 3.1 only commits the highest-confidence core of a
+# concept — e.g. "sky" bound just the bright centre (~30%). 0.25 lets it segment
+# the full concept (whole sky ~80%, complete subject) while box prompts, which
+# are high-confidence, are unaffected.
+SAM3_CONFIDENCE = float(os.getenv("SAM3_CONFIDENCE", "0.25").strip())
 SAM3_SUBJECT_PROMPT = os.getenv("SAM3_SUBJECT_PROMPT", "main subject").strip() or "main subject"
 SAM3_INSTANCES_MAX = int(os.getenv("SAM3_INSTANCES_MAX", "24").strip())
 SAM3_EAGER = os.getenv("SAM3_EAGER", "0").strip() not in ("0", "false", "False", "")
@@ -188,29 +183,10 @@ CROP_THIRDS_SNAP = float(os.getenv("CROP_THIRDS_SNAP", "0.65").strip())
 CROP_MAX_SIDE = int(os.getenv("CROP_MAX_SIDE", "2048").strip())
 
 # ─── Text-grounded masking (/ground/text — Step 9: NL mask pipeline) ────────
-# CLIPSeg turns a free-text phrase ("the red jacket", "the waterfall") into a
-# coarse relevance heatmap; connected components above threshold are then
-# refined with SAM 2 box+point prompts for crisp instance-quality edges.
-# rd64-refined is ~600 MB and lazy-loads exactly like SAM 2 / Depth.
-GROUND_MODEL_ID = os.getenv("GROUND_MODEL_ID", "CIDAS/clipseg-rd64-refined").strip()
+# Free-text phrase ("the red jacket", "the waterfall") → mask, via SAM 3's
+# open-vocabulary concept grounding.
 GROUND_MAX_SIDE = int(os.getenv("GROUND_MAX_SIDE", "2048").strip())
-# CLIPSeg's sigmoid map lives in a compressed range (true positives often
-# peak at only 0.35..0.6), so the binarisation threshold is RELATIVE to the
-# map's own peak: pixel >= max(GROUND_FLOOR, GROUND_THRESHOLD * peak). An
-# absolute cut (the naive 0.4) silently drops weak-but-real targets.
-GROUND_THRESHOLD = float(os.getenv("GROUND_THRESHOLD", "0.55").strip())
-# Absolute floor under the relative cut — keeps near-zero noise out of the
-# mask even when the peak itself is tiny.
-GROUND_FLOOR = float(os.getenv("GROUND_FLOOR", "0.10").strip())
-# Below this peak probability the phrase is reported as not found at all.
-GROUND_MIN_PEAK = float(os.getenv("GROUND_MIN_PEAK", "0.25").strip())
-# Ignore components smaller than this fraction of the frame (heatmap noise).
-GROUND_MIN_AREA_FRAC = float(os.getenv("GROUND_MIN_AREA_FRAC", "0.001").strip())
 GROUND_MAX_PHRASES = int(os.getenv("GROUND_MAX_PHRASES", "4").strip())
-GROUND_MAX_COMPONENTS = int(os.getenv("GROUND_MAX_COMPONENTS", "4").strip())
-# SAM 2 refinement is the latency hot spot on CPU — cap how many components
-# get the treatment; the rest fall back to the (cleaned) CLIPSeg mask.
-GROUND_REFINE_TOP = int(os.getenv("GROUND_REFINE_TOP", "2").strip())
 
 # rembg >=2.0.59 model registry.
 # Licenses: isnet-*, u2net*, silueta = MIT; bria-rmbg = CC BY-NC
@@ -257,7 +233,7 @@ def detect_providers() -> List[str]:
     return providers
 
 
-# ─── Optional torch / SAM 2 loader ──────────────────────────────────────────
+# ─── Torch device ────────────────────────────────────────────────────────────
 
 def detect_torch_device():
     """Pick the best torch device on this machine.
@@ -276,51 +252,14 @@ def detect_torch_device():
     return torch.device("cpu"), "cpu"
 
 
-SAM2_EMBEDDING_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
 DEPTH_CACHE: "OrderedDict[str, np.ndarray]" = OrderedDict()
 
 
 def _image_hash(img: Image.Image) -> str:
-    """Stable hash of a PIL image's pixel data for cache keys (SAM 2
-    embeddings, depth maps). Collisions on 16 hex chars (64 bits) are
-    astronomically unlikely for any image a user will upload."""
+    """Stable hash of a PIL image's pixel data for cache keys (depth maps).
+    Collisions on 16 hex chars (64 bits) are astronomically unlikely for any
+    image a user will upload."""
     return hashlib.sha256(img.tobytes()).hexdigest()[:16]
-
-
-def _sam2_encode(app, img: Image.Image):
-    """Run the SAM 2 image encoder, caching by image-content hash.
-
-    Returns (image_embeddings, original_sizes) on the model's device.
-    """
-    key = _image_hash(img)
-    cached = SAM2_EMBEDDING_CACHE.get(key)
-    if cached is not None:
-        SAM2_EMBEDDING_CACHE.move_to_end(key)
-        log.info("SAM 2 embedding cache hit (%d entries)", len(SAM2_EMBEDDING_CACHE))
-        return cached
-
-    import torch  # type: ignore
-    processor = app.state.sam2_processor
-    model = app.state.sam2_model
-    device = app.state.sam2_device
-
-    t0 = time.perf_counter()
-    inputs = processor(images=img, return_tensors="pt").to(device)
-    with torch.inference_mode():
-        embeddings = model.get_image_embeddings(pixel_values=inputs.pixel_values)
-
-    value = (embeddings, inputs["original_sizes"])
-    SAM2_EMBEDDING_CACHE[key] = value
-    while len(SAM2_EMBEDDING_CACHE) > SAM2_CACHE_MAX:
-        SAM2_EMBEDDING_CACHE.popitem(last=False)
-
-    log.info(
-        "SAM 2 embedded %dx%d in %.2fs (cache: %d entries)",
-        img.width, img.height,
-        time.perf_counter() - t0,
-        len(SAM2_EMBEDDING_CACHE),
-    )
-    return value
 
 
 def _depth_predict(app, img: Image.Image) -> np.ndarray:
@@ -529,15 +468,29 @@ _SAM3_CPU_PATCHED = False
 
 
 def _patch_sam3_fused_mlp_for_cpu() -> None:
-    """sam3.model.vitdet's MLP block always routes fc1+activation through
-    sam3.perflib.fused.addmm_act, which unconditionally casts to bfloat16 for
-    GPU tensor-core throughput. On CPU this leaves fc1's output in bf16 while
-    fc2's float32 weights are untouched, so every forward pass crashes with
-    "mat1 and mat2 must have the same dtype". Replace the symbol vitdet.py
-    actually calls with a plain float32 fc1->activation, only on CPU."""
+    """Two upstream sam3/torch issues only reproduce on CPU on Apple Silicon;
+    patch both once before the first CPU load.
+
+    1. sam3.model.vitdet's MLP block always routes fc1+activation through
+       sam3.perflib.fused.addmm_act, which unconditionally casts to bfloat16
+       for GPU tensor-core throughput. On CPU this leaves fc1's output in
+       bf16 while fc2's float32 weights are untouched, crashing every
+       forward pass with "mat1 and mat2 must have the same dtype". Replace
+       the symbol vitdet.py actually calls with a plain float32 path.
+
+    2. sam3.model.geometry_encoders calls tensor.pin_memory() before moving
+       box-scale tensors onto the inference device. On this machine (torch
+       2.12.0 + Apple Silicon, MPS backend available), pin_memory() alone -
+       with no MPS tensor involved anywhere - crashes with "Attempted to set
+       the storage of a tensor on device cpu to a storage on a different
+       device mps:0" (reproduces from a bare `torch.tensor([1.]).pin_memory()`
+       call). Pinning only speeds up host->CUDA transfers and is a no-op
+       benefit-wise on CPU, so disable it process-wide while running SAM 3
+       on CPU."""
     global _SAM3_CPU_PATCHED
     if _SAM3_CPU_PATCHED:
         return
+    import torch  # type: ignore
     import torch.nn as nn  # type: ignore
     import torch.nn.functional as F  # type: ignore
     import sam3.model.vitdet as vitdet_mod  # type: ignore
@@ -551,6 +504,7 @@ def _patch_sam3_fused_mlp_for_cpu() -> None:
         raise ValueError(f"Unexpected activation {activation}")
 
     vitdet_mod.addmm_act = _addmm_act_cpu
+    torch.Tensor.pin_memory = lambda self, *a, **kw: self
     _SAM3_CPU_PATCHED = True
 
 
@@ -681,6 +635,45 @@ def _sam3_instances_for_prompt(app, img: Image.Image, prompt: str) -> "list[dict
     return _instances_from_sam3_output(output, prompt)
 
 
+def _sam3_box_mask(app, img: Image.Image, box_xyxy: "tuple[float, float, float, float]"):
+    """SAM 3.1 box-prompted selection of the single object inside a rectangle.
+
+    `box_xyxy` is (x0, y0, x1, y1) in image pixels. Returns
+    (mask uint8 HxW white=selected, score float). The mask is all-zero when
+    SAM finds no confident object in the box. Uses the detector's geometric
+    prompt (Sam3Processor.add_geometric_prompt), which expects the box as
+    [cx, cy, w, h] normalised to 0..1 — the strongest single-object prompt
+    SAM 3 supports on a still image.
+    """
+    import torch  # type: ignore
+
+    W, H = img.width, img.height
+    x0, y0, x1, y1 = box_xyxy
+    box_norm = [
+        ((x0 + x1) / 2.0) / W,
+        ((y0 + y1) / 2.0) / H,
+        (x1 - x0) / W,
+        (y1 - y0) / H,
+    ]
+    processor = app.state.sam3_processor
+    with _SAM3_INFER_LOCK:
+        state = processor.set_image(img)
+        out = processor.add_geometric_prompt(box=box_norm, label=True, state=state)
+
+    masks = out.get("masks")
+    scores = out.get("scores")
+    if masks is None or len(masks) == 0:
+        return np.zeros((H, W), dtype=np.uint8), 0.0
+
+    s = scores.detach().cpu().numpy().reshape(-1) if scores is not None else np.array([0.0])
+    best = int(s.argmax())
+    m = masks[best].detach().cpu().numpy()
+    m = np.squeeze(m)
+    # `masks` may be probabilities (0..1) or raw logits; threshold accordingly.
+    binary = m > (0.0 if float(m.min()) < 0.0 else 0.5)
+    return (binary.astype(np.uint8) * 255), float(s[best])
+
+
 def _sam3_ground_results(app, img: Image.Image, phrases: "list[str]", rgb: np.ndarray) -> "list[dict]":
     processor = app.state.sam3_processor
     frame_area = float(img.width * img.height) or 1.0
@@ -749,13 +742,12 @@ def _saliency_instance(label: str, matte: np.ndarray) -> "dict | None":
     }
 
 
-# ─── Lazy model loaders (SAM 2 / Depth) ──────────────────────────────────────
+# ─── Lazy model loaders (Depth) ──────────────────────────────────────────────
 # These hold the heavy torch models. By default they load on first use so the
 # resident footprint stays small. Loads are serialised per-model with a lock so
 # two concurrent first-requests don't both load. A permanent failure (e.g. torch
 # not installed) is remembered so we don't retry the heavy load on every request.
 
-_SAM2_LOCK = threading.Lock()
 _DEPTH_LOCK = threading.Lock()
 
 
@@ -768,52 +760,6 @@ def _torch_stack_loadable() -> bool:
         )
     except Exception:  # pragma: no cover - find_spec on a broken install
         return False
-
-
-def _load_sam2(app: FastAPI) -> bool:
-    """Load SAM 2 into app.state (blocking). Caller holds _SAM2_LOCK."""
-    try:
-        import torch  # type: ignore  # noqa: F401
-        from transformers import Sam2Model, Sam2Processor  # type: ignore
-
-        device, device_label = detect_torch_device()
-        if device is None:
-            raise ImportError("torch not available")
-
-        log.info("loading SAM 2 model %r onto %s ...", SAM2_MODEL_ID, device_label)
-        t1 = time.perf_counter()
-        app.state.sam2_processor = Sam2Processor.from_pretrained(SAM2_MODEL_ID)
-        app.state.sam2_model = Sam2Model.from_pretrained(SAM2_MODEL_ID).to(device)
-        app.state.sam2_model.eval()
-        app.state.sam2_device = device
-        app.state.sam2_model_id = SAM2_MODEL_ID
-        app.state.sam2_available = True
-        log.info("SAM 2 ready in %.1fs on %s", time.perf_counter() - t1, device_label)
-        return True
-    except ImportError:
-        log.warning("torch / transformers not installed; /sam2/click disabled.")
-        app.state.sam2_load_failed = True
-        return False
-    except Exception as e:  # pragma: no cover - defensive
-        log.exception("failed to load SAM 2: %s", e)
-        app.state.sam2_load_failed = True
-        return False
-
-
-def _ensure_sam2(app: FastAPI):
-    """Lazily load SAM 2; return True/'cold' if ready, False if failed.
-    Returns 'cold' on first load (model just downloaded/loaded)."""
-    if app.state.sam2_available:
-        return True
-    if getattr(app.state, "sam2_load_failed", False):
-        return False
-    with _SAM2_LOCK:
-        if app.state.sam2_available:
-            return True
-        if getattr(app.state, "sam2_load_failed", False):
-            return False
-        ok = _load_sam2(app)
-        return "cold" if ok else False
 
 
 def _load_depth(app: FastAPI) -> bool:
@@ -859,55 +805,6 @@ def _ensure_depth(app: FastAPI):
         if getattr(app.state, "depth_load_failed", False):
             return False
         ok = _load_depth(app)
-        return "cold" if ok else False
-
-
-_GROUND_LOCK = threading.Lock()
-
-
-def _load_ground(app: FastAPI) -> bool:
-    """Load CLIPSeg into app.state (blocking). Caller holds _GROUND_LOCK."""
-    try:
-        import torch  # type: ignore  # noqa: F401
-        from transformers import CLIPSegForImageSegmentation, CLIPSegProcessor  # type: ignore
-
-        device, device_label = detect_torch_device()
-        if device is None:
-            raise ImportError("torch not available")
-
-        log.info("loading CLIPSeg model %r onto %s ...", GROUND_MODEL_ID, device_label)
-        t = time.perf_counter()
-        app.state.ground_processor = CLIPSegProcessor.from_pretrained(GROUND_MODEL_ID)
-        app.state.ground_model = CLIPSegForImageSegmentation.from_pretrained(GROUND_MODEL_ID).to(device)
-        app.state.ground_model.eval()
-        app.state.ground_device = device
-        app.state.ground_model_id = GROUND_MODEL_ID
-        app.state.ground_available = True
-        log.info("CLIPSeg ready in %.1fs on %s", time.perf_counter() - t, device_label)
-        return True
-    except ImportError:
-        log.warning("torch / transformers not installed; /ground/text disabled.")
-        app.state.ground_load_failed = True
-        return False
-    except Exception as e:  # pragma: no cover - defensive
-        log.exception("failed to load CLIPSeg: %s", e)
-        app.state.ground_load_failed = True
-        return False
-
-
-def _ensure_ground(app: FastAPI):
-    """Lazily load CLIPSeg; return True/'cold' if ready, False if failed.
-    Returns 'cold' on first load (model just downloaded/loaded)."""
-    if getattr(app.state, "ground_available", False):
-        return True
-    if getattr(app.state, "ground_load_failed", False):
-        return False
-    with _GROUND_LOCK:
-        if getattr(app.state, "ground_available", False):
-            return True
-        if getattr(app.state, "ground_load_failed", False):
-            return False
-        ok = _load_ground(app)
         return "cold" if ok else False
 
 
@@ -979,83 +876,6 @@ def _ensure_lama(app: FastAPI):
         return "cold" if ok else False
 
 
-def _ground_heatmaps(app, img: Image.Image, phrases: "list[str]") -> np.ndarray:
-    """CLIPSeg relevance maps for `phrases` against `img`.
-
-    Returns float32 array of shape (len(phrases), H, W) in 0..1 at the
-    IMAGE's resolution (the model's 352² logits are bilinearly upsampled).
-    """
-    import torch  # type: ignore
-
-    processor = app.state.ground_processor
-    model = app.state.ground_model
-    device = app.state.ground_device
-
-    inputs = processor(
-        text=phrases,
-        images=[img] * len(phrases),
-        padding=True,
-        return_tensors="pt",
-    ).to(device)
-    with torch.inference_mode():
-        outputs = model(**inputs)
-    logits = outputs.logits  # (N, 352, 352) — or (352, 352) when N == 1
-    if logits.dim() == 2:
-        logits = logits.unsqueeze(0)
-    probs = torch.sigmoid(logits).cpu().numpy().astype(np.float32)
-
-    out = np.empty((len(phrases), img.height, img.width), dtype=np.float32)
-    for i in range(probs.shape[0]):
-        m = Image.fromarray((probs[i] * 255.0).astype(np.uint8), mode="L")
-        m = m.resize((img.width, img.height), Image.BILINEAR)
-        out[i] = np.asarray(m, dtype=np.float32) / 255.0
-    return out
-
-
-def _sam2_refine_box(app, img: Image.Image, box: "tuple[int, int, int, int]",
-                     point: "tuple[float, float] | None" = None) -> "np.ndarray | None":
-    """Refine a coarse region into a crisp SAM 2 mask using a box prompt
-    (plus an optional positive point at the region's confidence peak).
-
-    `box` is (x, y, w, h) in image pixels. Returns a bool (H, W) mask or
-    None when SAM 2 is unavailable or inference fails — callers fall back
-    to the coarse mask.
-    """
-    if not _ensure_sam2(app):
-        return None
-    try:
-        import torch  # type: ignore
-
-        x, y, w, h = box
-        # SAM 2 input_boxes: [image, object, [x0, y0, x1, y1]] = 3 levels.
-        boxes = [[[float(x), float(y), float(x + w), float(y + h)]]]
-        kwargs = dict(images=img, input_boxes=boxes, return_tensors="pt")
-        if point is not None:
-            # input_points: [image, object, point, [x, y]] = 4 levels.
-            kwargs["input_points"] = [[[[float(point[0]), float(point[1])]]]]
-            kwargs["input_labels"] = [[[1]]]
-
-        embeddings, original_sizes = _sam2_encode(app, img)
-        processor = app.state.sam2_processor
-        model = app.state.sam2_model
-        device = app.state.sam2_device
-
-        inputs = processor(**kwargs).to(device)
-        inputs["image_embeddings"] = embeddings
-        inputs.pop("pixel_values", None)
-        with torch.inference_mode():
-            outputs = model(**inputs)
-        masks = processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(), original_sizes.cpu(),
-        )
-        scores = outputs.iou_scores.cpu().numpy()[0].reshape(-1)
-        best = int(scores.argmax())
-        return masks[0][0][best].cpu().numpy().astype(bool)
-    except Exception:
-        log.exception("SAM 2 box refinement failed; using coarse mask")
-        return None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("loading rembg model %r ...", MODEL_NAME)
@@ -1075,21 +895,14 @@ async def lifespan(app: FastAPI):
         app.state.model_name = "u2net"
         app.state.providers = ["CPUExecutionProvider"]
 
-    # SAM 3, SAM 2 (click-to-select), and Depth Anything V2 are loaded lazily
-    # unless explicitly warmed. Their configured model ids are recorded up
-    # front so /health and response headers can report them.
+    # SAM 3.1 (subject / text-grounding / box-select) and Depth load lazily
+    # unless warmed; record model ids up front for /health and headers.
     app.state.sam3_available = False
     app.state.sam3_load_failed = not SAM3_ENABLE
     app.state.sam3_model_id = SAM3_MODEL_ID
-    app.state.sam2_available = False
-    app.state.sam2_load_failed = False
-    app.state.sam2_model_id = SAM2_MODEL_ID
     app.state.depth_available = False
     app.state.depth_load_failed = False
     app.state.depth_model_id = DEPTH_MODEL_ID
-    app.state.ground_available = False
-    app.state.ground_load_failed = False
-    app.state.ground_model_id = GROUND_MODEL_ID
     app.state.lama_available = False
     app.state.lama_load_failed = False
 
@@ -1097,23 +910,21 @@ async def lifespan(app: FastAPI):
         await run_in_threadpool(_ensure_sam3, app)
 
     if SEGMENT_EAGER_MODELS:
-        await run_in_threadpool(_ensure_sam2, app)
         await run_in_threadpool(_ensure_depth, app)
     else:
         log.info(
-            "SAM 3, SAM 2, and Depth will load lazily on first use "
+            "SAM 3 and Depth will load lazily on first use "
             "(set SAM3_EAGER=1 or SEGMENT_EAGER_MODELS=1 to preload)."
         )
 
     yield
 
-    SAM2_EMBEDDING_CACHE.clear()
     DEPTH_CACHE.clear()
     log.info("shutting down mask service")
 
 
 app = FastAPI(
-    title="Pixxel Mask Service",
+    title="Phosmith Mask Service",
     version="1.1.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -1238,7 +1049,7 @@ def _rasterize_shape_mask(width: int, height: int, points: list[tuple[float, flo
 async def root() -> dict:
     return {
         "status": "ok",
-        "message": "Pixxel Mask Service is running"
+        "message": "Phosmith Mask Service is running"
     }
 
 @app.get("/health")
@@ -1259,18 +1070,10 @@ async def health() -> dict:
         "sam3_loaded": getattr(app.state, "sam3_available", False),
         "sam3_model": app.state.sam3_model_id,
         "sam3_confidence": SAM3_CONFIDENCE,
-        "sam2_available": app.state.sam2_available
-        or (_torch_stack_loadable() and not app.state.sam2_load_failed),
-        "sam2_loaded": app.state.sam2_available,
-        "sam2_model": app.state.sam2_model_id,
         "depth_available": app.state.depth_available
         or (_torch_stack_loadable() and not app.state.depth_load_failed),
         "depth_loaded": app.state.depth_available,
         "depth_model": app.state.depth_model_id,
-        "ground_available": app.state.ground_available
-        or (_torch_stack_loadable() and not app.state.ground_load_failed),
-        "ground_loaded": app.state.ground_available,
-        "ground_model": app.state.ground_model_id,
         "shape_mask_engine": "opencv-fillpoly" if cv2 is not None else "pillow-polygon",
         "lama_available": getattr(app.state, "lama_available", False)
         or _lama_loadable(),
@@ -1295,28 +1098,12 @@ async def warmup() -> dict:
         else "loaded" if sam3_status else "failed"
     )
 
-    # SAM 2
-    sam2_was_loaded = app.state.sam2_available
-    sam2_status = await run_in_threadpool(_ensure_sam2, app)
-    results["sam2"] = (
-        "already_loaded" if sam2_was_loaded
-        else "loaded" if sam2_status else "failed"
-    )
-
     # Depth Anything V2
     depth_was_loaded = app.state.depth_available
     depth_status = await run_in_threadpool(_ensure_depth, app)
     results["depth"] = (
         "already_loaded" if depth_was_loaded
         else "loaded" if depth_status else "failed"
-    )
-
-    # CLIPSeg grounding
-    ground_was_loaded = getattr(app.state, "ground_available", False)
-    ground_status = await run_in_threadpool(_ensure_ground, app)
-    results["ground"] = (
-        "already_loaded" if ground_was_loaded
-        else "loaded" if ground_status else "failed"
     )
 
     # LaMa inpainting
@@ -1443,727 +1230,9 @@ async def shape_fill(
     )
 
 
-@app.post("/segment")
-async def segment(image: UploadFile = File(..., alias="image")) -> Response:
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
-
-    contents = await _read_limited(image)
-    if not contents:
-        raise HTTPException(400, "empty upload")
-
-    t0 = time.perf_counter()
-    try:
-        img = Image.open(io.BytesIO(contents))
-        img.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
-        # PIL throws UnidentifiedImageError for "not an image at all" and
-        # OSError (Truncated File Read, decode error) for "image header
-        # was valid but body is corrupt". SyntaxError covers malformed
-        # PNG chunks. All four are user-input problems, not server
-        # bugs — return 400, not 500.
-        raise HTTPException(400, f"could not decode image: {e}")
-
-    if img.mode not in ("RGB", "RGBA", "L"):
-        img = img.convert("RGB")
-
-    # Reject pathologically large inputs (defense-in-depth vs direct curls that
-    # bypass the Node route's MAX_MODEL_SIDE).
-    if max(img.width, img.height) > SEGMENT_MAX_SIDE:
-        raise HTTPException(
-            413,
-            f"image too large ({img.width}x{img.height}); "
-            f"max longest side is {SEGMENT_MAX_SIDE}px",
-        )
-
-    img_rgb = img.convert("RGB")
-    np_rgb = np.asarray(img_rgb)
-
-    subject_mode = "sam3"
-    subjects = 0
-    final_alpha = None
-
-    if await run_in_threadpool(_ensure_sam3, app):
-        try:
-            instances = await run_in_threadpool(
-                _sam3_instances_for_prompt, app, img_rgb, SAM3_SUBJECT_PROMPT
-            )
-        except Exception:
-            log.exception("SAM 3 subject segmentation failed; using saliency fallback")
-            instances = []
-        if instances:
-            subjects = len(instances)
-            final_alpha = _soft_alpha_from_mask(
-                _union_from_instances(instances, img.width, img.height) > 0
-            )
-
-    if final_alpha is None:
-        subject_mode = "saliency"
-        try:
-            matte_img = await run_in_threadpool(
-                remove, img, session=app.state.session, only_mask=True
-            )
-        except Exception as e:
-            log.exception("rembg.remove failed")
-            raise HTTPException(500, f"segmentation failed: {e}")
-        raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
-        final_alpha = await run_in_threadpool(clean_matte, raw_matte)
-        subjects = 1 if final_alpha.any() else 0
-
-    # Compose RGBA: original colours with the computed subject alpha.
-    rgba = np.dstack([np_rgb, final_alpha]).astype(np.uint8)
-    out = Image.fromarray(rgba, "RGBA")
-
-    buf = io.BytesIO()
-    out.save(buf, format="PNG", optimize=True)
-    elapsed = time.perf_counter() - t0
-    log.info(
-        "segmented %s (%dx%d, %dKB) mode=%s subjects=%d in %.2fs -> %dKB",
-        image.filename or "<unnamed>",
-        img.width,
-        img.height,
-        len(contents) // 1024,
-        subject_mode,
-        subjects,
-        elapsed,
-        buf.tell() // 1024,
-    )
-
-    return Response(
-        content=buf.getvalue(),
-        media_type="image/png",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Model": app.state.sam3_model_id if subject_mode == "sam3" else app.state.model_name,
-            "X-Subject-Mode": subject_mode,
-            "X-Subjects": str(subjects),
-            "X-Elapsed-Ms": str(int(elapsed * 1000)),
-        },
-    )
-
-
-@app.post("/segment/instances")
-async def segment_instances(
-    image: UploadFile = File(..., alias="image"),
-    prompt: str = Form(SAM3_SUBJECT_PROMPT),
-) -> JSONResponse:
-    """SAM 3-first concept instance detection.
-
-    Where /segment unions matching instances into one alpha, this returns one
-    greyscale mask PER SAM 3 concept instance, with label, confidence, bounding
-    box and area. The default prompt is `SAM3_SUBJECT_PROMPT`, and callers can
-    supply a narrower noun phrase such as "person", "red jacket", or "dog".
-
-    Response JSON:
-        {
-          "width": int, "height": int,
-          "model": str, "prompt": str,
-          "count": int,
-          "instances": [
-            { "index": 0, "label": "person",
-              "confidence": 0.94, "source": "sam3" | "saliency",
-              "bbox": [x, y, w, h], "area": int, "area_frac": float,
-              "centroid": [cx, cy],
-              "mask_png": "<base64 greyscale PNG, white=match>" },
-            ...
-          ],
-          "union_png": "<base64 greyscale PNG of all matches>"
-        }
-    """
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
-
-    contents = await _read_limited(image)
-    if not contents:
-        raise HTTPException(400, "empty upload")
-
-    t0 = time.perf_counter()
-    try:
-        img = Image.open(io.BytesIO(contents))
-        img.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-
-    if img.mode not in ("RGB", "RGBA", "L"):
-        img = img.convert("RGB")
-
-    if max(img.width, img.height) > SEGMENT_MAX_SIDE:
-        raise HTTPException(
-            413,
-            f"image too large ({img.width}x{img.height}); "
-            f"max longest side is {SEGMENT_MAX_SIDE}px",
-        )
-
-    img_rgb = img.convert("RGB")
-    w, h = img_rgb.size
-    concept = str(prompt or SAM3_SUBJECT_PROMPT).strip() or SAM3_SUBJECT_PROMPT
-
-    mode = "sam3"
-    source_model = app.state.sam3_model_id
-    instances = []
-    if await run_in_threadpool(_ensure_sam3, app):
-        try:
-            instances = await run_in_threadpool(
-                _sam3_instances_for_prompt, app, img_rgb, concept
-            )
-        except Exception:
-            log.exception("SAM 3 instance detection failed; falling back to saliency")
-            instances = []
-
-    if not instances:
-        mode = "saliency"
-        source_model = app.state.model_name
-        try:
-            matte_img = await run_in_threadpool(
-                remove, img, session=app.state.session, only_mask=True
-            )
-        except Exception as e:
-            log.exception("rembg.remove failed")
-            raise HTTPException(500, f"segmentation failed: {e}")
-        raw_matte = np.asarray(matte_img.convert("L"), dtype=np.uint8)
-        matte = await run_in_threadpool(clean_matte, raw_matte)
-        inst = _saliency_instance(concept, matte)
-        instances = [inst] if inst else []
-
-    instances.sort(key=lambda i: -i["area"])
-    truncated = len(instances) > SAM3_INSTANCES_MAX
-    instances = instances[:SAM3_INSTANCES_MAX]
-
-    def _build_payload():
-        frame_area = float(w * h) or 1.0
-        union = np.zeros((h, w), dtype=np.uint8)
-        items = []
-        for idx, inst in enumerate(instances):
-            mb = inst["mask"]
-            alpha = _soft_alpha_from_mask(mb)
-            union = np.maximum(union, alpha)
-            ys, xs = np.nonzero(mb)
-            items.append({
-                "index": idx,
-                "label": inst["label"],
-                "class_id": inst["class_id"],
-                "confidence": round(float(inst["confidence"]), 4),
-                "source": inst["source"],
-                "bbox": _bbox_of(mb),
-                "area": int(inst["area"]),
-                "area_frac": round(inst["area"] / frame_area, 5),
-                "centroid": [round(float(xs.mean()), 1), round(float(ys.mean()), 1)],
-                "mask_png": _mask_png_b64(alpha),
-            })
-        return items, (_mask_png_b64(union) if items else None)
-
-    items, union_b64 = await run_in_threadpool(_build_payload)
-
-    elapsed = time.perf_counter() - t0
-    log.info(
-        "segment/instances %s (%dx%d) mode=%s prompt=%r count=%d%s in %.2fs",
-        image.filename or "<unnamed>", w, h, mode, concept, len(items),
-        " (truncated)" if truncated else "", elapsed,
-    )
-
-    return JSONResponse(
-        {
-            "width": w,
-            "height": h,
-            "model": source_model,
-            "prompt": concept,
-            "mode": mode,
-            "count": len(items),
-            "truncated": truncated,
-            "instances": items,
-            "union_png": union_b64,
-            "elapsed_ms": int(elapsed * 1000),
-        },
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-@app.post("/sam2/click")
-async def sam2_click(
-    image: UploadFile = File(..., alias="image"),
-    clicks: "str | None" = Form(None),
-    box: "str | None" = Form(None),
-) -> Response:
-    """Click- and/or box-prompted semantic masking with SAM 2.
-
-    Form fields:
-        image:  image file
-        clicks: optional JSON array of `[x, y, label]` tuples, where `label`
-                is 1 (positive / include this point) or 0 (negative / exclude).
-        box:    optional JSON `[x0, y0, x1, y1]` box prompt — "select the
-                object inside this rectangle". Boxes are SAM 2's strongest
-                single prompt for whole-object selection; clicks can be
-                combined with a box to refine it.
-
-    At least one of `clicks` / `box` is required.
-    Returns a greyscale PNG mask: white = include, black = exclude.
-    """
-    # Lazily load SAM 2 on first use (no-op once loaded).
-    _sam2_status = await run_in_threadpool(_ensure_sam2, app)
-    if not _sam2_status:
-        raise HTTPException(
-            501,
-            "SAM 2 not available on this server. "
-            "Install torch + transformers and restart, "
-            "or set SAM2_MODEL_ID to a model in your HF cache.",
-        )
-    _sam2_cold = _sam2_status == "cold"
-
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
-
-    contents = await _read_limited(image)
-    if not contents:
-        raise HTTPException(400, "empty upload")
-
-    try:
-        img = Image.open(io.BytesIO(contents))
-        img.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    clicks_data = []
-    if clicks is not None and str(clicks).strip():
-        try:
-            clicks_data = json.loads(clicks)
-        except json.JSONDecodeError as e:
-            raise HTTPException(400, f"invalid clicks JSON: {e}")
-        if not isinstance(clicks_data, list):
-            raise HTTPException(400, "clicks must be an array of [x, y, label] tuples")
-
-    box_data = None
-    if box is not None and str(box).strip():
-        try:
-            box_data = json.loads(box)
-        except json.JSONDecodeError as e:
-            raise HTTPException(400, f"invalid box JSON: {e}")
-        if not (isinstance(box_data, list) and len(box_data) == 4):
-            raise HTTPException(400, f"box must be [x0, y0, x1, y1]; got {box_data!r}")
-        for i, v in enumerate(box_data):
-            if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
-                raise HTTPException(400, f"box[{i}] must be a finite number; got {v!r}")
-        x0, y0, x1, y1 = box_data
-        if not (0 <= x0 < x1 <= img.width and 0 <= y0 < y1 <= img.height):
-            raise HTTPException(
-                400,
-                f"box {box_data} is degenerate or outside image bounds ({img.width}x{img.height})",
-            )
-
-    if not clicks_data and box_data is None:
-        raise HTTPException(400, "provide clicks and/or a box prompt")
-
-    if len(clicks_data) > SAM2_MAX_CLICKS:
-        raise HTTPException(
-            400,
-            f"too many clicks: {len(clicks_data)} > {SAM2_MAX_CLICKS}",
-        )
-
-    for i, c in enumerate(clicks_data):
-        if not (isinstance(c, list) and len(c) == 3):
-            raise HTTPException(400, f"click #{i} must be [x, y, label]; got {c!r}")
-        x, y, label = c
-        # `bool` is a subclass of `int` in Python, so it must be excluded
-        # explicitly (otherwise `True in (0, 1)` is `True`).
-        if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x):
-            raise HTTPException(400, f"click #{i} x must be a finite number; got {x!r}")
-        if not isinstance(y, (int, float)) or isinstance(y, bool) or not math.isfinite(y):
-            raise HTTPException(400, f"click #{i} y must be a finite number; got {y!r}")
-        if not (isinstance(label, int) and not isinstance(label, bool) and label in (0, 1)):
-            raise HTTPException(400, f"click #{i} label must be 0 or 1; got {label!r}")
-        if not (0 <= x < img.width and 0 <= y < img.height):
-            raise HTTPException(
-                400,
-                f"click #{i} ({x}, {y}) is outside image bounds ({img.width}x{img.height})",
-            )
-
-    import torch  # type: ignore
-    # SAM 2 input_points format: [image, object, point, [x, y]] = 4 levels.
-    points = [[[[c[0], c[1]] for c in clicks_data]]] if clicks_data else None
-    # SAM 2 input_labels format: [image, object, point_label] = 3 levels.
-    labels = [[[c[2] for c in clicks_data]]] if clicks_data else None
-    # SAM 2 input_boxes format: [image, object, [x0, y0, x1, y1]] = 3 levels.
-    boxes = [[list(map(float, box_data))]] if box_data is not None else None
-
-    t0 = time.perf_counter()
-    try:
-        embeddings, original_sizes = _sam2_encode(app, img)
-        processor = app.state.sam2_processor
-        model = app.state.sam2_model
-        device = app.state.sam2_device
-
-        prompt_kwargs = {}
-        if points is not None:
-            prompt_kwargs["input_points"] = points
-            prompt_kwargs["input_labels"] = labels
-        if boxes is not None:
-            prompt_kwargs["input_boxes"] = boxes
-        inputs = processor(
-            images=img,
-            return_tensors="pt",
-            **prompt_kwargs,
-        ).to(device)
-        inputs["image_embeddings"] = embeddings
-        inputs.pop("pixel_values", None)
-
-        with torch.inference_mode():
-            outputs = model(**inputs)
-
-        masks = processor.image_processor.post_process_masks(
-            outputs.pred_masks.cpu(),
-            original_sizes.cpu(),
-        )
-        scores = outputs.iou_scores.cpu().numpy()[0].reshape(-1)
-        best_idx = int(scores.argmax())
-        best_mask = masks[0][0][best_idx].cpu().numpy().astype(np.uint8) * 255
-    except Exception as e:
-        log.exception("sam2.click failed")
-        raise HTTPException(500, f"sam2 inference failed: {e}")
-
-    elapsed = time.perf_counter() - t0
-    log.info(
-        "SAM 2 click (%d points) on %dx%d in %.2fs (score=%.3f)",
-        len(clicks_data), img.width, img.height, elapsed, float(scores[best_idx]),
-    )
-
-    mask_img = Image.fromarray(best_mask, mode="L")
-    buf = io.BytesIO()
-    mask_img.save(buf, format="PNG", optimize=True)
-
-    resp_headers = {
-            "Cache-Control": "no-store",
-            "X-Model": app.state.sam2_model_id or "sam2",
-            "X-Score": f"{float(scores[best_idx]):.4f}",
-            "X-Elapsed-Ms": str(int(elapsed * 1000)),
-        }
-    if _sam2_cold:
-        resp_headers["X-Cold-Load"] = "true"
-        log.info("SAM 2 cold load — first request after model download")
-
-    return Response(
-        content=buf.getvalue(),
-        media_type="image/png",
-        headers=resp_headers,
-    )
-
-
-@app.post("/depth")
-async def depth(image: UploadFile = File(..., alias="image")) -> Response:
-    """Monocular depth estimation with Depth Anything V2.
-
-    Form fields:
-        image:  image file (JPEG/PNG/WebP)
-
-    Returns a greyscale PNG depth map at the input image's resolution.
-    White (255) = nearest to the camera, black (0) = farthest. Per-image
-    min-max normalisation is applied so the user can pick a meaningful
-    near/far range on the resulting 0..1 slider.
-
-    The map is cached by image-content hash (LRU, max `DEPTH_CACHE_MAX`
-    entries); repeats against the same image return the cached result
-    in milliseconds.
-    """
-    # Lazily load Depth Anything V2 on first use (no-op once loaded).
-    _depth_status = await run_in_threadpool(_ensure_depth, app)
-    if not _depth_status:
-        raise HTTPException(
-            501,
-            "Depth Anything V2 not available on this server. "
-            "Install torch + transformers and restart, "
-            "or set DEPTH_MODEL_ID to a model in your HF cache.",
-        )
-    _depth_cold = _depth_status == "cold"
-
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
-
-    contents = await _read_limited(image)
-    if not contents:
-        raise HTTPException(400, "empty upload")
-
-    try:
-        img = Image.open(io.BytesIO(contents))
-        img.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    # Reject inputs whose longest side exceeds DEPTH_MAX_SIDE. The model
-    # runs internally at ~518×518, and the route (or this handler)
-    # resizes the depth map back to the input's dimensions — a 12K
-    # image would trigger a 144M-op Lanczos resize and a 144 MB array.
-    # The Node route applies the same cap; this is defense-in-depth.
-    if max(img.width, img.height) > DEPTH_MAX_SIDE:
-        raise HTTPException(
-            413,
-            f"image too large ({img.width}x{img.height}); "
-            f"max longest side is {DEPTH_MAX_SIDE}px",
-        )
-
-    t0 = time.perf_counter()
-    try:
-        depth_arr = _depth_predict(app, img)
-    except Exception as e:
-        log.exception("depth predict failed")
-        raise HTTPException(500, f"depth inference failed: {e}")
-    elapsed = time.perf_counter() - t0
-
-    # Depth Anything V2 runs at a fixed internal resolution (~518×518) and
-    # returns the depth map at that size. We resize to the input image's
-    # resolution so the user can drop it straight onto the original
-    # canvas at 1:1. Lanczos is the right kernel for greyscale maps:
-    # smooth in flat areas, preserves sharp depth edges better than
-    # nearest-neighbour and avoids the blocky artefacts from bilinear.
-    if depth_arr.shape != (img.height, img.width):
-        depth_native = Image.fromarray(depth_arr, mode="L")
-        depth_resized = depth_native.resize(
-            (img.width, img.height), resample=Image.LANCZOS
-        )
-        depth_arr = np.array(depth_resized, dtype=np.uint8)
-
-    log.info(
-        "Depth %s on %dx%d in %.2fs",
-        app.state.depth_model_id, img.width, img.height, elapsed,
-    )
-
-    depth_img = Image.fromarray(depth_arr, mode="L")
-    buf = io.BytesIO()
-    depth_img.save(buf, format="PNG", optimize=True)
-
-    resp_headers = {
-            "Cache-Control": "no-store",
-            "X-Model": app.state.depth_model_id or "depth",
-            "X-Width": str(img.width),
-            "X-Height": str(img.height),
-            "X-Elapsed-Ms": str(int(elapsed * 1000)),
-        }
-    if _depth_cold:
-        resp_headers["X-Cold-Load"] = "true"
-        log.info("Depth cold load — first request after model download")
-
-    return Response(
-        content=buf.getvalue(),
-        media_type="image/png",
-        headers=resp_headers,
-    )
-
 
 # ─── Auto-crop helpers ──────────────────────────────────────────────────────
 
-
-@app.post("/ground/text")
-async def ground_text(
-    image: UploadFile = File(..., alias="image"),
-    phrases: str = Form(...),
-    threshold: "float | None" = Form(None),
-    refine: str = Form("1"),
-) -> JSONResponse:
-    """Text-grounded masking: free-text phrase(s) → soft mask(s).
-
-    Pipeline per phrase: SAM 3 concept segmentation when available; otherwise
-    CLIPSeg relevance heatmap → adaptive threshold → connected components →
-    SAM 2 box+peak-point refinement of the top components → matte cleanup.
-
-    Form fields:
-        image:     JPEG/PNG/WebP, max MAX_UPLOAD_MB, longest side GROUND_MAX_SIDE.
-        phrases:   JSON array of 1..GROUND_MAX_PHRASES strings.
-        threshold: optional float 0..1 overriding GROUND_THRESHOLD — the
-                   RELATIVE fraction of the heatmap peak a pixel must reach.
-        refine:    "0" to skip SAM 2 refinement (faster, coarser).
-
-    Response:
-        {
-          "width": int, "height": int, "model": str, "refine": bool,
-          "results": [{
-              "phrase": str,
-              "found": bool,
-              "score": float,        # heatmap peak 0..1
-              "coverage": float,     # mask area / frame area
-              "bbox": [x,y,w,h] | null,
-              "components": int,
-              "refined": bool,       # SAM 3 used, or SAM 2 fallback refined
-              "maskPng": str | null  # base64 greyscale PNG, white = selected
-          }]
-        }
-
-    A phrase that doesn't bind (peak < GROUND_MIN_PEAK) returns found=false
-    with score — callers decide whether to fall back or surface it.
-    """
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(415, f"unsupported content-type: {image.content_type}")
-
-    try:
-        phrase_list = json.loads(phrases)
-    except json.JSONDecodeError as e:
-        raise HTTPException(400, f"invalid phrases JSON: {e}")
-    if not isinstance(phrase_list, list) or not phrase_list:
-        raise HTTPException(400, "phrases must be a non-empty JSON array of strings")
-    phrase_list = [str(p).strip() for p in phrase_list if str(p).strip()]
-    if not phrase_list:
-        raise HTTPException(400, "phrases contained no usable text")
-    if len(phrase_list) > GROUND_MAX_PHRASES:
-        raise HTTPException(400, f"too many phrases: {len(phrase_list)} > {GROUND_MAX_PHRASES}")
-
-    thr = GROUND_THRESHOLD if threshold is None else max(0.05, min(0.95, float(threshold)))
-    do_refine = str(refine).strip() not in ("0", "false", "False")
-
-    contents = await _read_limited(image)
-    if not contents:
-        raise HTTPException(400, "empty upload")
-    try:
-        img = Image.open(io.BytesIO(contents))
-        img.load()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as e:
-        raise HTTPException(400, f"could not decode image: {e}")
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    if max(img.width, img.height) > GROUND_MAX_SIDE:
-        raise HTTPException(
-            413,
-            f"image too large ({img.width}x{img.height}); max longest side {GROUND_MAX_SIDE}px",
-        )
-
-    from scipy import ndimage
-
-    W, H = img.size
-    frame_area = float(W * H)
-    rgb = np.asarray(img, dtype=np.uint8)
-
-    t0 = time.perf_counter()
-
-    if await run_in_threadpool(_ensure_sam3, app):
-        try:
-            results = await run_in_threadpool(
-                _sam3_ground_results, app, img, phrase_list, rgb
-            )
-            elapsed = time.perf_counter() - t0
-            log.info(
-                "ground/text %s (%dx%d) engine=sam3 phrases=%s in %.2fs",
-                image.filename or "<unnamed>", W, H, phrase_list, elapsed,
-            )
-            return JSONResponse({
-                "width": W,
-                "height": H,
-                "model": app.state.sam3_model_id,
-                "engine": "sam3",
-                "refine": True,
-                "elapsed_ms": int(elapsed * 1000),
-                "results": results,
-            }, headers={"Cache-Control": "no-store"})
-        except Exception:
-            log.exception("SAM 3 text grounding failed; using CLIPSeg fallback")
-
-    if not await run_in_threadpool(_ensure_ground, app):
-        raise HTTPException(
-            501,
-            "Text grounding not available on this server. Install SAM 3, or "
-            "install torch + transformers and set GROUND_MODEL_ID to a CLIPSeg "
-            "model in your HF cache.",
-        )
-
-    heatmaps = await run_in_threadpool(_ground_heatmaps, app, img, phrase_list)
-
-    results = []
-    any_refined = False
-    for pi, phrase in enumerate(phrase_list):
-        heat = heatmaps[pi]
-        peak = float(heat.max())
-        if peak < GROUND_MIN_PEAK:
-            results.append({
-                "phrase": phrase, "found": False, "score": round(peak, 4),
-                "coverage": 0.0, "bbox": None, "components": 0,
-                "refined": False, "maskPng": None,
-            })
-            continue
-
-        # Peak-relative threshold (CLIPSeg sigmoids are range-compressed —
-        # see GROUND_THRESHOLD comment), clamped to an absolute noise floor.
-        eff_thr = max(GROUND_FLOOR, thr * peak)
-        binary = heat >= eff_thr
-        labeled, n = ndimage.label(binary)
-        comps = []
-        for ci in range(1, n + 1):
-            comp = labeled == ci
-            area = int(comp.sum())
-            if area < GROUND_MIN_AREA_FRAC * frame_area:
-                continue
-            mean_heat = float(heat[comp].mean())
-            comps.append((mean_heat * math.sqrt(area), comp, area))
-        comps.sort(key=lambda t: -t[0])
-        comps = comps[:GROUND_MAX_COMPONENTS]
-
-        if not comps:
-            results.append({
-                "phrase": phrase, "found": False, "score": round(peak, 4),
-                "coverage": 0.0, "bbox": None, "components": 0,
-                "refined": False, "maskPng": None,
-            })
-            continue
-
-        union = np.zeros((H, W), dtype=bool)
-        used_refine = False
-        for rank, (_, comp, area) in enumerate(comps):
-            refined_mask = None
-            if do_refine and rank < GROUND_REFINE_TOP:
-                bbox = _bbox_from_mask(comp)
-                # Positive point at the component's confidence peak.
-                comp_heat = np.where(comp, heat, 0.0)
-                py_, px_ = np.unravel_index(int(comp_heat.argmax()), comp_heat.shape)
-                refined_mask = await run_in_threadpool(
-                    _sam2_refine_box, app, img, bbox, (float(px_), float(py_))
-                )
-                if refined_mask is not None:
-                    # Sanity-gate the refinement: a mask that exploded far
-                    # beyond the prompt region (>4x area with little overlap)
-                    # means SAM grabbed the wrong object — keep the coarse one.
-                    r_area = float(refined_mask.sum())
-                    inter = float((refined_mask & comp).sum())
-                    if r_area > 4.0 * area and inter / float(area or 1) < 0.3:
-                        refined_mask = None
-            if refined_mask is not None:
-                union |= refined_mask
-                used_refine = True
-            else:
-                union |= comp
-
-        alpha = (union.astype(np.uint8)) * 255
-        if _MATTE_CLEANUP:
-            try:
-                alpha = await run_in_threadpool(clean_matte, alpha, rgb)
-            except Exception:
-                log.exception("clean_matte failed in /ground/text; using raw mask")
-        any_refined = any_refined or used_refine
-
-        results.append({
-            "phrase": phrase,
-            "found": True,
-            "score": round(peak, 4),
-            "coverage": round(float((alpha > 127).sum()) / frame_area, 4),
-            "bbox": list(_bbox_from_mask(alpha > 127) or ()) or None,
-            "components": len(comps),
-            "refined": used_refine,
-            "maskPng": _mask_png_b64(alpha),
-        })
-
-    elapsed = time.perf_counter() - t0
-    log.info(
-        "ground/text %s (%dx%d) phrases=%s refine=%s in %.2fs",
-        image.filename or "<unnamed>", W, H,
-        [r["phrase"] for r in results], any_refined, elapsed,
-    )
-    return JSONResponse({
-        "width": W,
-        "height": H,
-        "model": app.state.ground_model_id,
-        "engine": "clipseg",
-        "refine": any_refined,
-        "elapsed_ms": int(elapsed * 1000),
-        "results": results,
-    }, headers={"Cache-Control": "no-store"})
 
 
 def _parse_aspect(raw: "str | None") -> "float | None":

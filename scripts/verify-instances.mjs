@@ -20,7 +20,7 @@
 
 import sharp from 'sharp'
 
-const MASK_SERVICE_URL = (process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8001')
+const MASK_SERVICE_URL = (process.env.MASKING_SERVICE_URL || process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8002')
   .trim()
   .replace(/\/+$/, '')
 
