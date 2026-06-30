@@ -7,6 +7,7 @@ import {
     Eraser, Paintbrush, RotateCcw, Redo2, Trash2, Undo2,
 } from 'lucide-react'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
+import { LayerGradeEditor } from './_layer-grade-editor.jsx'
 import { hexToRgba } from '@/lib/color-utils'
 
 /**
@@ -211,6 +212,7 @@ const KIND_META = {
     depth:      { label: 'Depth Map', color: '#60a5fa', step: 6 },
     lasso:      { label: 'Lasso',     color: '#06b8d4', step: null },
     brush:      { label: 'Brush',     color: '#c084fc', step: null },
+    path:       { label: 'Pen Path',  color: '#53d8ff', step: null },
 }
 
 export const getKindMeta = (kind) => KIND_META[kind] || { label: kind, color: '#94a3b8', step: null }
@@ -314,6 +316,13 @@ function LayerAdjustEditor({ layer, onUpdate, dominantColor }) {
                 dominantColor={dominantColor}
             />
             <LabeledSlider
+                label="Vibrance"
+                value={Math.round(layer.vibrance ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ vibrance: v })}
+                dominantColor={dominantColor}
+            />
+            <LabeledSlider
                 label="Brightness"
                 value={Math.round(layer.brightness ?? 0)}
                 min={-100} max={100} step={1} suffix="%"
@@ -366,6 +375,22 @@ function LayerAdjustEditor({ layer, onUpdate, dominantColor }) {
                 onChange={(v) => onUpdate({ tint: v })}
                 dominantColor={dominantColor}
             />
+
+            <div className="text-[8px] font-bold uppercase tracking-wider pt-1" style={{ color: 'var(--text-muted)' }}>Detail</div>
+            <LabeledSlider
+                label="Texture"
+                value={Math.round(layer.texture ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ texture: v })}
+                dominantColor={dominantColor}
+            />
+            <LabeledSlider
+                label="Dehaze"
+                value={Math.round(layer.dehaze ?? 0)}
+                min={-100} max={100} step={1} suffix="%"
+                onChange={(v) => onUpdate({ dehaze: v })}
+                dominantColor={dominantColor}
+            />
         </div>
     )
 }
@@ -379,7 +404,7 @@ function LayerAdjustEditor({ layer, onUpdate, dominantColor }) {
  * Step 8: every kind editor now ALSO renders `LayerAdjustEditor`
  * underneath the kind-specific controls, so adjustments are universal.
  */
-export function KindParamEditor({ layer, onUpdate, dominantColor, imageSize }) {
+export function KindParamEditor({ layer, onUpdate, onApplyCurve, histogram, dominantColor, imageSize }) {
     const meta = getKindMeta(layer.kind)
     let kindSpecific = null
     if (layer.kind === 'luminance') {
@@ -640,6 +665,18 @@ export function KindParamEditor({ layer, onUpdate, dominantColor, imageSize }) {
                 change it.
             </p>
         )
+    } else if (layer.kind === 'path') {
+        // Pen/Bézier path — live per-region feather, same as the lasso (the
+        // rasterised path alpha is softened in the shader by this value).
+        kindSpecific = (
+            <LabeledSlider
+                label="Feather"
+                value={Math.round((layer.feather ?? 0.04) * 100)}
+                min={0} max={40} step={1} suffix="%"
+                onChange={(v) => onUpdate({ feather: v / 100 })}
+                dominantColor={dominantColor}
+            />
+        )
     }
 
     if (kindSpecific) {
@@ -647,6 +684,13 @@ export function KindParamEditor({ layer, onUpdate, dominantColor, imageSize }) {
             <div className="space-y-2 pt-2" style={{ borderTop: '1px dashed var(--border-subtle)' }}>
                 <div className="space-y-2">{kindSpecific}</div>
                 <LayerAdjustEditor layer={layer} onUpdate={onUpdate} dominantColor={dominantColor} />
+                <LayerGradeEditor
+                    layer={layer}
+                    onUpdate={onUpdate}
+                    onApplyCurve={onApplyCurve}
+                    histogram={histogram}
+                    dominantColor={dominantColor}
+                />
             </div>
         )
     }
@@ -729,6 +773,7 @@ export function MaskChainCard({
     onUpdate, onRemove, onMove, onSetOp, onSetFillMode,
     selected, onSelect,
     dominantColor, imageSize, onExpandBoundary,
+    onApplyCurve, histogram,
 }) {
     const layer = entry.layer
     const meta = getKindMeta(layer.kind)
@@ -932,7 +977,7 @@ export function MaskChainCard({
                         className="overflow-hidden"
                         style={{ pointerEvents: locked ? 'none' : 'auto', opacity: locked ? 0.5 : 1 }}
                     >
-                        <KindParamEditor layer={layer} onUpdate={onUpdate} dominantColor={dominantColor} imageSize={imageSize} />
+                        <KindParamEditor layer={layer} onUpdate={onUpdate} onApplyCurve={onApplyCurve} histogram={histogram} dominantColor={dominantColor} imageSize={imageSize} />
                     </motion.div>
                 )}
             </AnimatePresence>

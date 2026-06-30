@@ -525,6 +525,35 @@ def _sam3_checkpoint_kwargs():
     return {"checkpoint_path": None, "load_from_HF": True}
 
 
+_SAM3_CPU_PATCHED = False
+
+
+def _patch_sam3_fused_mlp_for_cpu() -> None:
+    """sam3.model.vitdet's MLP block always routes fc1+activation through
+    sam3.perflib.fused.addmm_act, which unconditionally casts to bfloat16 for
+    GPU tensor-core throughput. On CPU this leaves fc1's output in bf16 while
+    fc2's float32 weights are untouched, so every forward pass crashes with
+    "mat1 and mat2 must have the same dtype". Replace the symbol vitdet.py
+    actually calls with a plain float32 fc1->activation, only on CPU."""
+    global _SAM3_CPU_PATCHED
+    if _SAM3_CPU_PATCHED:
+        return
+    import torch.nn as nn  # type: ignore
+    import torch.nn.functional as F  # type: ignore
+    import sam3.model.vitdet as vitdet_mod  # type: ignore
+
+    def _addmm_act_cpu(activation, linear, mat1):
+        x = linear(mat1)
+        if activation in (F.relu, nn.ReLU):
+            return F.relu(x)
+        if activation in (F.gelu, nn.GELU):
+            return F.gelu(x)
+        raise ValueError(f"Unexpected activation {activation}")
+
+    vitdet_mod.addmm_act = _addmm_act_cpu
+    _SAM3_CPU_PATCHED = True
+
+
 def _load_sam3(app: FastAPI) -> bool:
     """Load SAM 3 into app.state (blocking). Caller holds _SAM3_LOCK."""
     if not SAM3_ENABLE:
@@ -535,6 +564,8 @@ def _load_sam3(app: FastAPI) -> bool:
         from sam3.model_builder import build_sam3_image_model  # type: ignore
 
         device = _sam3_device_label()
+        if device == "cpu":
+            _patch_sam3_fused_mlp_for_cpu()
         log.info("loading SAM 3 model %r onto %s ...", SAM3_MODEL_ID, device)
         t0 = time.perf_counter()
         kwargs = _sam3_checkpoint_kwargs()

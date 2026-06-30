@@ -312,6 +312,29 @@ const writeKindSamplers = (gl, program, layer, slotIndex, textureBindings) => {
 }
 
 /**
+ * Bind the per-layer tone-curve LUT sampler to its texture unit and flip
+ * `curveOn` on. When the layer has no curve LUT bound (the common case), force
+ * `curveOn` to 0 so the GLSL skips the four LUT lookups and the early-out fires.
+ *
+ * @param {WebGL2RenderingContext} gl
+ * @param {WebGLProgram} program
+ * @param {object} layer
+ * @param {number} slotIndex
+ * @param {{ curveUnits?: Map<number, number> }} textureBindings
+ */
+const writeCurveUniforms = (gl, program, layer, slotIndex, textureBindings) => {
+    const onLoc = gl.getUniformLocation(program, `uLayer_${slotIndex}_curveOn`)
+    const unit = textureBindings?.curveUnits?.get(slotIndex)
+    if (unit === undefined) {
+        if (onLoc) gl.uniform1f(onLoc, 0.0)
+        return
+    }
+    const sLoc = gl.getUniformLocation(program, `uLayer_${slotIndex}_curveLut`)
+    if (sLoc) gl.uniform1i(sLoc, unit)
+    if (onLoc) gl.uniform1f(onLoc, 1.0)
+}
+
+/**
  * Write the per-kind UNIFORM fields (floats / vec2s) for one layer. Reads
  * the layer object's field name (matched against the schema's `name`),
  * normalises into the canonical shape the GLSL uniform writer expects
@@ -428,6 +451,7 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
     set('exposure',    layer.exposure,    -3,   3)
     set('contrast',    layer.contrast,    -100, 100)
     set('saturation',  layer.saturation,  -100, 100)
+    set('vibrance',    layer.vibrance,    -100, 100)
     set('brightness',  layer.brightness,  -100, 100)
     // Pro-parity tonal + white-balance adjustments (all default to 0).
     set('highlights',  layer.highlights,  -100, 100)
@@ -436,6 +460,28 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
     set('blacks',      layer.blacks,      -100, 100)
     set('temperature', layer.temperature, -100, 100)
     set('tint',        layer.tint,        -100, 100)
+    // Detail — local-contrast ops (sample the source neighbourhood in GLSL).
+    set('texture',     layer.texture,     -100, 100)
+    set('dehaze',      layer.dehaze,      -100, 100)
+
+    // Gamma — per-channel power (identity 1.0); different default from the 0.0
+    // fields above, so written directly rather than via `set`.
+    const gammaLoc = gl.getUniformLocation(program, `${prefix}gamma`)
+    if (gammaLoc) {
+        const g = Number.isFinite(layer.gamma) ? Math.max(0.2, Math.min(2.2, layer.gamma)) : 1.0
+        gl.uniform1f(gammaLoc, g)
+    }
+    // 3-way colour wheels — vec3 offsets (-1..1) on the non-adjust prefix.
+    const setWheel = (name, raw) => {
+        const loc = gl.getUniformLocation(program, `uLayer_${slotIndex}_${name}`)
+        if (!loc) return
+        const a = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw.x, raw.y, raw.z] : [])
+        const cl = (v) => (Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) : 0)
+        gl.uniform3f(loc, cl(a[0]), cl(a[1]), cl(a[2]))
+    }
+    setWheel('wheel_shadows', layer.wheelShadows)
+    setWheel('wheel_midtones', layer.wheelMidtones)
+    setWheel('wheel_highlights', layer.wheelHighlights)
 }
 
 /**
@@ -531,6 +577,7 @@ const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBinding
         writeLayerAdjustUniforms(gl, program, layer, i)
         writeLayerFillUniforms(gl, program, layer, i)
         writeKindSamplers(gl, program, layer, i, textureBindings)
+        writeCurveUniforms(gl, program, layer, i, textureBindings)
     }
 }
 
@@ -566,6 +613,9 @@ const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBinding
 const bindKindTextures = (gl, stack) => {
     const ownedTextures = []
     const kindUnits = new Map()
+    // Per-layer tone-curve LUT units (orthogonal to the kind mask — ANY kind can
+    // carry a curve). Keyed slot → texture unit, filled after the kind loop.
+    const curveUnits = new Map()
     let nextUnit = 1  // 0 is the source image
     let nullUnit = -1 // lazily-allocated 1×1 transparent texture unit
 
@@ -598,7 +648,7 @@ const bindKindTextures = (gl, stack) => {
     }
 
     if (!stack || !Array.isArray(stack.chain)) {
-        return { kindUnits, ownedTextures }
+        return { kindUnits, curveUnits, ownedTextures }
     }
     for (let i = 0; i < stack.chain.length; i += 1) {
         const layer = stack.chain[i].layer
@@ -618,6 +668,8 @@ const bindKindTextures = (gl, stack) => {
         } else if (layer.kind === 'lasso') {
             cacheKey = layer.maskTextureKey
         } else if (layer.kind === 'brush') {
+            cacheKey = layer.maskTextureKey
+        } else if (layer.kind === 'path') {
             cacheKey = layer.maskTextureKey
         } else {
             continue
@@ -684,7 +736,43 @@ const bindKindTextures = (gl, stack) => {
             break
         }
     }
-    return { kindUnits, ownedTextures }
+
+    // ── Per-layer tone-curve LUTs ──────────────────────────────────────────
+    // A layer with a non-identity curve carries `curveLutKey`; the UI builds a
+    // 256×1 RGBA LUT (R/G/B + master in alpha — packLutsRgba) and registers it
+    // via setMaskTexture. Upload one texture per such layer to its own unit and
+    // record it so writeCurveUniforms can bind the sampler + flip curveOn on.
+    for (let i = 0; i < stack.chain.length; i += 1) {
+        if (nextUnit >= 16) break
+        const layer = stack.chain[i].layer
+        const key = layer && typeof layer.curveLutKey === 'string' ? layer.curveLutKey : null
+        if (!key) continue
+        const lut = getMaskTexture(key)
+        if (!lut) continue
+        const tex = gl.createTexture()
+        if (!tex) continue
+        gl.activeTexture(gl.TEXTURE0 + nextUnit)
+        gl.bindTexture(gl.TEXTURE_2D, tex)
+        // No Y-flip (1px tall) and no premultiply — the LUT is data, not an image.
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+        try {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, /** @type {any} */ (lut))
+        } catch {
+            gl.deleteTexture(tex)
+            continue
+        }
+        // LINEAR so values between the 256 entries interpolate; CLAMP at the ends.
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        curveUnits.set(i, nextUnit)
+        ownedTextures.push(tex)
+        nextUnit += 1
+    }
+
+    return { kindUnits, curveUnits, ownedTextures }
 }
 
 /**
@@ -844,7 +932,7 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
     // Upload kind-specific textures (semantic masks, depth maps etc.) and
     // capture the slot → texture-unit mapping. The textures live until the
     // gl.deleteTexture calls below.
-    const { kindUnits, ownedTextures } = bindKindTextures(gl, stack || { chain: [] })
+    const { kindUnits, curveUnits, ownedTextures } = bindKindTextures(gl, stack || { chain: [] })
 
     writeUniforms(
         gl,
@@ -857,7 +945,7 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             overlayColor: options.overlayColor,
         },
         imageSize,
-        { kindUnits },
+        { kindUnits, curveUnits },
     )
 
     // Bind quad + draw.

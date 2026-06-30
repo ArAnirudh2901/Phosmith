@@ -18,6 +18,7 @@ import {
     getFrameBoundsFromFabricRect,
     getSourcePixelDimensions,
     isCanvasLive,
+    MAX_OUTPUT_DIMENSION,
     removeExpansionFramesFromCanvas,
     showEdgeControlsOnly,
     silenceImageForExpansion,
@@ -320,6 +321,9 @@ const AIExtender = ({ project }) => {
                 originY: 'top',
             })
             frame.setCoords()
+            showEdgeControlsOnly(frame)
+            canvasEditor.setActiveObject(frame)
+            canvasEditor.requestRenderAll()
             schedulePreviewSync()
         }
 
@@ -704,6 +708,15 @@ const AIExtender = ({ project }) => {
                             {targetDims.width} × {targetDims.height} px
                         </span>
                     </div>
+                    {(sourceDims.width >= MAX_OUTPUT_DIMENSION || sourceDims.height >= MAX_OUTPUT_DIMENSION) && (
+                        <p className="pt-1 text-[10px] leading-snug" style={{ color: 'var(--text-muted)' }}>
+                            {sourceDims.width >= MAX_OUTPUT_DIMENSION && sourceDims.height >= MAX_OUTPUT_DIMENSION
+                                ? 'Image is already at the maximum size on both axes — extension is not available.'
+                                : sourceDims.width >= MAX_OUTPUT_DIMENSION
+                                ? `Width is already at the ${MAX_OUTPUT_DIMENSION}px limit. Drag the top or bottom handle to extend vertically.`
+                                : `Height is already at the ${MAX_OUTPUT_DIMENSION}px limit. Drag the left or right handle to extend horizontally.`}
+                        </p>
+                    )}
                 </div>
             )}
 

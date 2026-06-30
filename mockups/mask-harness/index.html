@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Megashader Mask Harness</title>
+<style>
+  body{margin:0;background:#0a0a09;color:#f4f2e8;font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px}
+  h1{font-size:14px;padding:12px 16px;margin:0;border-bottom:1px solid #ffffff14}
+  h1 b{color:#53d8ff}
+  #grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;padding:16px}
+  .tile{background:#11110f;border:1px solid #ffffff14;border-radius:10px;overflow:hidden}
+  .tile .out{display:block;width:100%;height:auto;background:#000}
+  .tile .cap{padding:7px 10px;font-size:11px;color:#c7c3b5;border-top:1px solid #ffffff14}
+  #log{white-space:pre-wrap;padding:12px 16px;margin:0 16px 24px;background:#070707;border:1px solid #ffffff14;border-radius:10px;color:#9a988c;line-height:1.6}
+</style>
+</head>
+<body>
+  <h1>Megashader <b>Mask Harness</b> — radial / linear / pen-path masks · vibrance · texture · dehaze (no auth, real WebGL2)</h1>
+  <div id="grid"></div>
+  <pre id="log"></pre>
+  <script src="bundle.js"></script>
+</body>
+</html>

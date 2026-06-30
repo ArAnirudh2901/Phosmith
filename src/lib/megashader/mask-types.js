@@ -83,6 +83,10 @@
  * @property {number} saturation    -100..+100. Lerp toward (-100) or away
  *                                  from (+100) luminance. Applied only in the
  *                                  region the layer selects. Step 8.
+ * @property {number} vibrance      -100..+100. Like saturation, but the boost
+ *                                  is scaled by (1 - currentSaturation) so
+ *                                  already-vivid pixels (and skin tones) are
+ *                                  protected. Applied only in the masked region.
  * @property {number} brightness    -100..+100. Additive shift in 0..1 RGB
  *                                  space (× 0.01). Applied only in the region
  *                                  the layer selects. Step 8.
@@ -291,6 +295,7 @@ export const MASK_KINDS = /** @type {const} */ ([
     'depth',
     'lasso',
     'brush',
+    'path',
 ])
 
 /**
@@ -376,12 +381,25 @@ export const sanitiseFill = (layer = {}) => {
  * predicates and the sanitiser so adding a field is a one-line change.
  */
 export const ADJUST_FIELDS = /** @type {const} */ ([
-    'exposure', 'contrast', 'saturation', 'brightness',
+    'exposure', 'contrast', 'saturation', 'vibrance', 'brightness',
     'highlights', 'shadows', 'whites', 'blacks', 'temperature', 'tint',
+    'texture', 'dehaze',
 ])
 
-/** True if any adjustment field on the layer is non-zero. */
-const layerHasAdjustment = (l) => ADJUST_FIELDS.some((f) => l && l[f])
+/** True if a 3-way colour-wheel offset is non-neutral. */
+const wheelActive = (w) => Array.isArray(w) && w.some((n) => Number.isFinite(n) && n !== 0)
+
+/** True if any adjustment field on the layer is non-zero. Includes the
+ *  colour-grading extensions — gamma (identity is 1, not 0), the 3-way colour
+ *  wheels, and a tone-curve LUT — so a grade-only layer is NOT mistaken for a
+ *  no-op and skipped by the renderer's short-circuit. */
+const layerHasAdjustment = (l) => {
+    if (!l) return false
+    if (ADJUST_FIELDS.some((f) => l[f])) return true
+    if (typeof l.gamma === 'number' && l.gamma !== 1) return true
+    if (l.curveLutKey) return true
+    return wheelActive(l.wheelShadows) || wheelActive(l.wheelMidtones) || wheelActive(l.wheelHighlights)
+}
 
 export const isAdjustmentsIdentity = (stack) => {
     if (!stack || !Array.isArray(stack.chain)) return true
@@ -461,6 +479,13 @@ const clampFinite = (v, lo, hi, fallback = lo) => (
     typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : fallback
 )
 
+/** Normalise a 3-way colour-wheel offset to a clamped [r,g,b] in -1..1.
+ *  Accepts an array or {x,y,z}; anything else → neutral [0,0,0]. */
+const sanitiseWheel = (w) => {
+    const a = Array.isArray(w) ? w : (w && typeof w === 'object' ? [w.x, w.y, w.z] : [])
+    return [0, 1, 2].map((i) => clampFinite(a[i], -1, 1, 0))
+}
+
 /**
  * Sanitise a MaskLayer into the canonical shape: ensures all `MaskLayerBase`
  * fields are present with safe defaults. Unknown `kind` values throw so the
@@ -492,6 +517,7 @@ export const sanitiseLayer = (layer) => {
         exposure: 0,
         contrast: 0,
         saturation: 0,
+        vibrance: 0,
         brightness: 0,
         opacity: 1,
         // Spread AFTER the defaults so a layer-supplied opacity wins; we
@@ -515,6 +541,7 @@ export const sanitiseLayer = (layer) => {
         exposure: clampFinite(layer.exposure, -3, 3, 0),
         contrast: clampFinite(layer.contrast, -100, 100, 0),
         saturation: clampFinite(layer.saturation, -100, 100, 0),
+        vibrance: clampFinite(layer.vibrance, -100, 100, 0),
         brightness: clampFinite(layer.brightness, -100, 100, 0),
         // Pro-parity tonal + white-balance adjustments (default identity).
         highlights: clampFinite(layer.highlights, -100, 100, 0),
@@ -523,6 +550,19 @@ export const sanitiseLayer = (layer) => {
         blacks: clampFinite(layer.blacks, -100, 100, 0),
         temperature: clampFinite(layer.temperature, -100, 100, 0),
         tint: clampFinite(layer.tint, -100, 100, 0),
+        // Detail — local-contrast ops (sample the source neighbourhood).
+        texture: clampFinite(layer.texture, -100, 100, 0),
+        dehaze: clampFinite(layer.dehaze, -100, 100, 0),
+        // Colour-grading extensions (per mask): gamma (1 = identity), 3-way
+        // colour wheels (vec3 offsets -1..1 for shadows/midtones/highlights),
+        // and a tone-curve LUT key (renderer uploads the packed 256×1 RGBA LUT
+        // stored under it). curves = the raw points, kept for the UI/rebuild.
+        gamma: clampFinite(layer.gamma, 0.2, 2.2, 1),
+        wheelShadows: sanitiseWheel(layer.wheelShadows),
+        wheelMidtones: sanitiseWheel(layer.wheelMidtones),
+        wheelHighlights: sanitiseWheel(layer.wheelHighlights),
+        ...(typeof layer.curveLutKey === 'string' && layer.curveLutKey ? { curveLutKey: layer.curveLutKey } : {}),
+        ...(layer.curves && typeof layer.curves === 'object' ? { curves: layer.curves } : {}),
         lock: layer.lock === true,
         // Per-layer output mode (fill/adjust/erase) + fill colour/strength.
         ...sanitiseFill(layer),
@@ -817,6 +857,41 @@ export const lassoLayer = ({ maskTextureKey, feather = 0.05, label, fillMode = '
         kind: 'lasso',
         id: `las-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         label: label || 'Lasso selection',
+        opacity: 1,
+        visible: true,
+        lock: false,
+        inverted: false,
+        maskTextureKey,
+        feather: clampFinite(feather, 0, 1),
+        ...sanitiseFill({ fillMode, fillColor, fillStrength }),
+    }
+}
+
+/**
+ * Build a fully-formed Pen / Bézier path selection layer. Engine-identical to
+ * the lasso (a thin handle into the module texture cache via `maskTextureKey`)
+ * — the caller rasterises the closed Bézier path to an alpha canvas with
+ * `rasterisePath`, registers it via `setMaskTexture`, then pushes this layer.
+ * Defaults to `fill` mode so the path selection is visible the instant it's
+ * added; switch to `adjust` to drive per-layer local adjustments inside it.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.maskTextureKey]   Required — opaque cache handle.
+ * @param {number} [opts.feather=0.04]
+ * @param {string} [opts.label]
+ * @param {string} [opts.fillMode='fill']  'fill' | 'adjust' | 'erase'.
+ * @param {{r:number,g:number,b:number}} [opts.fillColor]
+ * @param {number} [opts.fillStrength=0.5]
+ * @returns {object}
+ */
+export const pathLayer = ({ maskTextureKey, feather = 0.04, label, fillMode = 'fill', fillColor, fillStrength = 0.5 } = {}) => {
+    if (typeof maskTextureKey !== 'string' || !maskTextureKey) {
+        throw new Error('[megashader] pathLayer: `maskTextureKey` is required')
+    }
+    return {
+        kind: 'path',
+        id: `pth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        label: label || 'Pen path',
         opacity: 1,
         visible: true,
         lock: false,

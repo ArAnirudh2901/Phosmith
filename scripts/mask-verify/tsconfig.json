@@ -1,0 +1,10 @@
+{
+  "//": "Scoped to this dir ONLY so bun can resolve the @/ alias when running verify-subject-cleanup.mjs headlessly. The Next app resolves @/ via next.config.mjs's webpack alias and has no root tsconfig; this file lives in a subdir so it never affects `next build` or the editor's view of src/. baseUrl is this dir's ../.. (the repo root). The exact @/lib/megashader key wins over @/* and points at the no-op stub.",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "paths": {
+      "@/lib/megashader": ["scripts/mask-verify/_stub-megashader.mjs"],
+      "@/*": ["src/*"]
+    }
+  }
+}

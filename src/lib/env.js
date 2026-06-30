@@ -44,7 +44,7 @@ const collect = (names) => {
 }
 
 // Next.js dev mode evaluates this module in multiple runtimes (server bootstrap
-// + route handlers + proxy.ts), each with its own module instance. A plain
+// + route handlers + middleware.js), each with its own module instance. A plain
 // module-level `let validated = false` would log the warning once per instance.
 // Hoist the dedupe flag to `globalThis` so all instances share it.
 const VALIDATED_KEY = Symbol.for("phosmith.env.validated")

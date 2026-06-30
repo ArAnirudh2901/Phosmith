@@ -65,10 +65,13 @@ export {
     depthLayer,
     lassoLayer,
     brushLayer,
+    pathLayer,
     setMaskTexture,
     getMaskTexture,
     clearMaskTexture,
 } from './mask-types'
+
+export { rasterisePath, smoothToBezier } from './path-raster'
 
 export { KIND_SCHEMAS, KIND_BUILDERS, getKindBuilder, getKindSchema } from './glsl-mask-kinds'
 

@@ -3632,6 +3632,19 @@ a:focus-visible,
   gap: 0.65rem;
 }
 
+/* ── LayerGradeEditor (per-mask + base grade: gamma · curves · 3-way wheels) ── */
+.grade-editor { display: flex; flex-direction: column; gap: 0.55rem; padding-top: 0.5rem; }
+.grade-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.grade-cap { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted, rgba(148, 163, 184, 0.7)); }
+.grade-gamma-row { display: flex; align-items: center; gap: 0.5rem; }
+.grade-gamma-row .pro-ruler-slider { flex: 1 1 auto; min-width: 0; }
+.grade-num { width: 3.4rem; flex: 0 0 auto; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(244, 244, 245, 0.12); border-radius: 5px; color: var(--text-secondary, #cbd5e1); font: inherit; font-size: 0.72rem; padding: 0.28rem 0.4rem; text-align: right; -moz-appearance: textfield; }
+.grade-num::-webkit-inner-spin-button, .grade-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.grade-wheels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.45rem; }
+.grade-wheel { padding: 0.5rem; gap: 0.4rem; }
+.grade-wheel .adjust-wheel-picker { width: 86%; }
+.grade-wheel .adjust-color-wheel-top div { font-size: 0.64rem; font-weight: 700; }
+
 .adjust-look-strip,
 .adjust-toggle-grid,
 .adjust-mini-color-grid {

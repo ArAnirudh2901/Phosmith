@@ -70,4 +70,86 @@ export const hexToRgba = (hex, alpha = 1) => {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
+/**
+ * Convert a hex colour to an `{ r, g, b }` triple (0..255). Tolerates a
+ * missing `#` and short/long input by trimming/padding to 6 digits, so a
+ * partially-typed value never throws. Mirrors the helper in `adjust.jsx`
+ * so the colour-wheel maths matches the production Adjust tool.
+ *
+ * @param {string} hex   e.g. '#facc15' or 'facc15'
+ * @returns {{ r: number, g: number, b: number }}
+ */
+export const hexToRgb = (hex) => {
+    const clean = String(hex || '000000').replace('#', '').slice(0, 6).padEnd(6, '0')
+    return {
+        r: parseInt(clean.slice(0, 2), 16),
+        g: parseInt(clean.slice(2, 4), 16),
+        b: parseInt(clean.slice(4, 6), 16),
+    }
+}
+
+/**
+ * Convert an `{ r, g, b }` triple (0..255, may be fractional) to a 6-digit
+ * hex string. Components are rounded and clamped to 0..255.
+ *
+ * @param {number} r 0..255
+ * @param {number} g 0..255
+ * @param {number} b 0..255
+ * @returns {string} e.g. '#facc15'
+ */
+export const rgbToHex = (r, g, b) =>
+    `#${[r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')}`
+
+/**
+ * Convert an sRGB triple (0..255) to HSV. Hue is in degrees 0..360;
+ * saturation and value are 0..1. Distinct from {@link rgbToHsb} only in
+ * naming convention (HSV ≡ HSB); kept separate to match the colour-wheel
+ * code ported from `adjust.jsx`.
+ *
+ * @param {{ r: number, g: number, b: number }} rgb 0..255 components
+ * @returns {{ h: number, s: number, v: number }}
+ */
+export const rgbToHsv = ({ r, g, b }) => {
+    const rn = r / 255
+    const gn = g / 255
+    const bn = b / 255
+    const max = Math.max(rn, gn, bn)
+    const min = Math.min(rn, gn, bn)
+    const delta = max - min
+    let h = 0
+    if (delta) {
+        if (max === rn) h = ((gn - bn) / delta) % 6
+        else if (max === gn) h = (bn - rn) / delta + 2
+        else h = (rn - gn) / delta + 4
+        h *= 60
+    }
+    if (h < 0) h += 360
+    return { h, s: max === 0 ? 0 : delta / max, v: max }
+}
+
+/**
+ * Convert HSV (hue 0..360, saturation/value 0..1) to an sRGB `{ r, g, b }`
+ * triple (0..255, fractional). Inverse of {@link rgbToHsv}.
+ *
+ * @param {number} h 0..360
+ * @param {number} s 0..1
+ * @param {number} v 0..1
+ * @returns {{ r: number, g: number, b: number }}
+ */
+export const hsvToRgb = (h, s, v) => {
+    const c = v * s
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+    const m = v - c
+    let rp = 0
+    let gp = 0
+    let bp = 0
+    if (h < 60) [rp, gp, bp] = [c, x, 0]
+    else if (h < 120) [rp, gp, bp] = [x, c, 0]
+    else if (h < 180) [rp, gp, bp] = [0, c, x]
+    else if (h < 240) [rp, gp, bp] = [0, x, c]
+    else if (h < 300) [rp, gp, bp] = [x, 0, c]
+    else [rp, gp, bp] = [c, 0, x]
+    return { r: (rp + m) * 255, g: (gp + m) * 255, b: (bp + m) * 255 }
+}
+
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v)

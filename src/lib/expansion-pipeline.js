@@ -490,23 +490,32 @@ export function canvasBoundsToScreen(canvas, bounds) {
 
 export function getFrameBoundsFromFabricRect(frame) {
   if (!frame) return null
-  const rect = frame.getBoundingRect?.()
-  if (rect?.width && rect?.height) {
+  // Use inner dimensions anchored at (frame.left, frame.top) — the origin-point
+  // position for originX:'left', originY:'top' — rather than getBoundingRect().
+  // getBoundingRect() includes strokeWidth/2 on every side; at display-to-source
+  // ratios of 5–7× that inflates bounds by ~8–10 source pixels per edge, causing
+  // a false inset even before the user drags anything. The fix gives zero insets
+  // on initialization and eliminates strokeWidth accumulation on each
+  // commitFrameSize normalization (getBoundingRect was being set back as
+  // frame.width, growing the logical rect by 1.5 px per gesture).
+  const scaleX = frame.scaleX || 1
+  const scaleY = frame.scaleY || 1
+  const w = frame.width * scaleX
+  const h = frame.height * scaleY
+  if (w > 0 && h > 0) {
     return {
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height,
+      left: frame.left,
+      top: frame.top,
+      width: w,
+      height: h,
     }
   }
-  const w = frame.getScaledWidth?.() || frame.width * (frame.scaleX || 1)
-  const h = frame.getScaledHeight?.() || frame.height * (frame.scaleY || 1)
-  return {
-    left: frame.left,
-    top: frame.top,
-    width: w,
-    height: h,
+  // Degenerate: fall back to bounding rect
+  const rect = frame.getBoundingRect?.()
+  if (rect?.width && rect?.height) {
+    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
   }
+  return null
 }
 
 /** Pick ImageKit pad_resize focus from expansion insets (single-axis fallback). */
