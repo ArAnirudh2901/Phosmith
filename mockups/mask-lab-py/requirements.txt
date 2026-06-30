@@ -1,0 +1,14 @@
+# Phosmith Mask Lab (Python) — deps
+# NOTE: the segment service venv (../../services/segment/.venv) already has
+# everything except gradio. Easiest is to run with that interpreter:
+#   ../../services/segment/.venv/bin/python mask_lab.py photo.jpg --out out/
+#
+# To run anywhere else:
+numpy>=1.24
+opencv-python>=4.8
+Pillow>=9
+scipy>=1.10
+scikit-image>=0.21
+pymatting>=1.1.12      # closed-form / KNN matting + ML foreground estimation (the doc's matting step)
+rembg>=2.0.50          # coarse subject mask (same family the FastAPI service uses)
+gradio>=4.0            # OPTIONAL — only needed for `python mask_lab.py --ui`

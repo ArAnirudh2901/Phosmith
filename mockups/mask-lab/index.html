@@ -1,0 +1,1112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Phosmith · Mask Lab — Select &amp; Mask pipeline mockup</title>
+<style>
+/* ══════════════════════════════════════════════════════════════════
+   Phosmith "Ink Depths" palette (mirrors src/app/globals.css)
+   This is a STANDALONE mockup — no build step, open index.html directly.
+   ══════════════════════════════════════════════════════════════════ */
+:root{
+  --bg-void-darkest:#050505; --bg-void-dark:#070707; --bg-void:#0A0A09; --bg-void-light:#11110F;
+  --bg-panel:#100F0E; --bg-elevated:#181816; --bg-surface:#201F1C; --bg-hover:rgba(255,255,255,.07);
+  --accent:#53D8FF; --accent-glow:rgba(83,216,255,.30); --accent-dim:rgba(83,216,255,.08); --accent-deep:#22B7E6;
+  --text-primary:#F4F2E8; --text-secondary:#C7C3B5; --text-muted:#9A988C; --text-faint:#6c6a60;
+  --stroke:rgba(255,255,255,.08); --stroke-2:rgba(255,255,255,.13);
+  --good:#7BE0A6; --warn:#E8C16B; --bad:#F2766B;
+  --radius:11px;
+  --rail:60px; --props:330px; --top:50px; --pipe:138px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg-void-dark); color:var(--text-primary);
+  font-family:"JetBrains Mono","SFMono-Regular","Cascadia Code",ui-monospace,monospace;
+  font-size:12px; letter-spacing:.01em; overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+.app{
+  height:100vh; display:grid;
+  grid-template-rows:var(--top) 1fr var(--pipe);
+  grid-template-columns:var(--rail) 1fr var(--props);
+  grid-template-areas:"top top top" "rail stage props" "rail pipe pipe";
+}
+button{font-family:inherit;color:inherit;cursor:pointer;border:0;background:none}
+button:disabled{opacity:.4;cursor:not-allowed}
+select,input{font-family:inherit}
+
+/* ── Top bar ── */
+.topbar{
+  grid-area:top; display:flex; align-items:center; gap:14px; padding:0 14px;
+  background:linear-gradient(180deg,var(--bg-panel),var(--bg-void)); border-bottom:1px solid var(--stroke);
+  z-index:30;
+}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600}
+.brand .dot{width:13px;height:13px;border-radius:4px;background:linear-gradient(135deg,var(--accent),var(--accent-deep));box-shadow:0 0 14px var(--accent-glow)}
+.brand small{color:var(--text-muted);font-weight:400}
+.brand b{color:var(--accent)}
+.seg{display:flex;background:var(--bg-void);border:1px solid var(--stroke);border-radius:9px;padding:3px;gap:2px}
+.seg button{padding:5px 11px;border-radius:6px;color:var(--text-muted);font-size:11px;transition:.12s}
+.seg button:hover{color:var(--text-secondary)}
+.seg button.on{background:var(--bg-surface);color:var(--text-primary);box-shadow:inset 0 0 0 1px var(--stroke-2)}
+.spacer{flex:1}
+.tbtn{padding:6px 12px;border-radius:8px;border:1px solid var(--stroke);background:var(--bg-elevated);color:var(--text-secondary);font-size:11px;transition:.12s;display:inline-flex;gap:7px;align-items:center}
+.tbtn:hover{border-color:var(--stroke-2);color:var(--text-primary)}
+.tbtn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-deep));color:#04222b;border-color:transparent;font-weight:600;box-shadow:0 2px 18px var(--accent-glow)}
+.tbtn.primary:hover{filter:brightness(1.08)}
+
+/* ── Left tool rail ── */
+.rail{
+  grid-area:rail; display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 0;
+  background:var(--bg-panel); border-right:1px solid var(--stroke); z-index:20;
+}
+.tool{
+  width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  color:var(--text-muted);position:relative;transition:.12s; border:1px solid transparent;
+}
+.tool:hover{background:var(--bg-hover);color:var(--text-secondary)}
+.tool.on{background:var(--accent-dim);color:var(--accent);border-color:rgba(83,216,255,.25);box-shadow:inset 0 0 0 1px rgba(83,216,255,.18)}
+.tool svg{width:20px;height:20px}
+.tool .tip{
+  position:absolute;left:50px;top:50%;transform:translateY(-50%) scale(.96);transform-origin:left center;
+  background:var(--bg-elevated);border:1px solid var(--stroke-2);color:var(--text-primary);
+  padding:5px 9px;border-radius:7px;white-space:nowrap;font-size:10.5px;opacity:0;pointer-events:none;transition:.12s;z-index:40;
+  box-shadow:0 8px 24px rgba(0,0,0,.5)
+}
+.tool .tip b{color:var(--text-faint);font-weight:400;margin-left:6px}
+.tool:hover .tip{opacity:1;transform:translateY(-50%) scale(1)}
+.rail .div{width:26px;height:1px;background:var(--stroke);margin:6px 0}
+
+/* ── Center stage ── */
+.stage{grid-area:stage;position:relative;overflow:hidden;background:
+  radial-gradient(120% 90% at 50% 0%,#0d0d0c 0%,var(--bg-void-darkest) 70%)}
+.stage-inner{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:26px}
+.canvas-wrap{position:relative;border-radius:8px;box-shadow:0 18px 60px rgba(0,0,0,.6),0 0 0 1px var(--stroke);
+  /* checkerboard shows through transparent canvas pixels */
+  background-color:#13130f;
+  background-image:
+    linear-gradient(45deg,#1c1c18 25%,transparent 25%),linear-gradient(-45deg,#1c1c18 25%,transparent 25%),
+    linear-gradient(45deg,transparent 75%,#1c1c18 75%),linear-gradient(-45deg,transparent 75%,#1c1c18 75%);
+  background-size:18px 18px;background-position:0 0,0 9px,9px -9px,-9px 0;
+}
+#view{display:block;border-radius:8px;cursor:crosshair;touch-action:none;max-width:78vw}
+.brush-ring{position:absolute;border-radius:50%;border:1.5px solid #fff;mix-blend-mode:difference;pointer-events:none;display:none;z-index:5;box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+.stage-hud{position:absolute;left:16px;bottom:14px;display:flex;gap:8px;align-items:center;color:var(--text-faint);font-size:10.5px;z-index:6}
+.stage-hud .k{background:var(--bg-void);border:1px solid var(--stroke);border-radius:5px;padding:2px 6px;color:var(--text-muted)}
+.busy{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:var(--bg-elevated);border:1px solid var(--stroke-2);
+  padding:6px 13px;border-radius:20px;font-size:11px;color:var(--accent);display:none;align-items:center;gap:9px;z-index:8;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.busy.show{display:flex}
+.spin{width:11px;height:11px;border:2px solid rgba(83,216,255,.25);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.drop-hint{position:absolute;inset:18px;border:1.5px dashed rgba(83,216,255,.5);border-radius:14px;display:none;align-items:center;justify-content:center;
+  background:rgba(83,216,255,.06);color:var(--accent);font-size:14px;z-index:9;pointer-events:none}
+.stage.drag .drop-hint{display:flex}
+
+/* ── Right properties ── */
+.props{grid-area:props;background:var(--bg-panel);border-left:1px solid var(--stroke);overflow-y:auto;z-index:20}
+.props::-webkit-scrollbar{width:9px}
+.props::-webkit-scrollbar-thumb{background:#26261f;border-radius:8px;border:2px solid var(--bg-panel)}
+.sect{border-bottom:1px solid var(--stroke)}
+.sect>h3{display:flex;align-items:center;gap:8px;margin:0;padding:13px 15px;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text-secondary);cursor:pointer;user-select:none}
+.sect>h3 .ic{width:15px;height:15px;color:var(--accent);opacity:.85}
+.sect>h3 .chev{margin-left:auto;color:var(--text-faint);transition:.18s}
+.sect.collapsed .chev{transform:rotate(-90deg)}
+.sect.collapsed .body{display:none}
+.sect .body{padding:4px 15px 16px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:11px 0}
+.row label{color:var(--text-muted);font-size:11px;display:flex;align-items:center;gap:6px}
+.row .val{color:var(--text-primary);font-size:11px;min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
+.slider{width:100%;margin:7px 0 2px}
+input[type=range]{-webkit-appearance:none;width:100%;height:4px;border-radius:4px;background:var(--bg-surface);outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--accent);cursor:pointer;box-shadow:0 0 0 3px rgba(83,216,255,.15),0 0 10px var(--accent-glow);transition:.1s}
+input[type=range]::-webkit-slider-thumb:hover{box-shadow:0 0 0 4px rgba(83,216,255,.22),0 0 14px var(--accent-glow)}
+.fld{display:block;width:100%;padding:8px 10px;border-radius:8px;background:var(--bg-void);border:1px solid var(--stroke);
+  color:var(--text-primary);font-size:11px;margin-top:5px}
+.fld:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.hint{color:var(--text-faint);font-size:10px;line-height:1.5;margin:8px 0 2px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{padding:5px 9px;border-radius:7px;background:var(--bg-void);border:1px solid var(--stroke);color:var(--text-muted);font-size:10.5px;transition:.12s}
+.chip:hover{border-color:var(--stroke-2);color:var(--text-secondary)}
+.chip.on{background:var(--accent-dim);border-color:rgba(83,216,255,.3);color:var(--accent)}
+.toggle{position:relative;width:34px;height:19px;border-radius:20px;background:var(--bg-surface);border:1px solid var(--stroke);transition:.15s;flex:none}
+.toggle::after{content:"";position:absolute;top:1.5px;left:1.5px;width:14px;height:14px;border-radius:50%;background:var(--text-muted);transition:.15s}
+.toggle.on{background:var(--accent-dim);border-color:rgba(83,216,255,.4)}
+.toggle.on::after{left:16px;background:var(--accent)}
+.modelpill{display:flex;gap:6px;margin-top:6px}
+.modelpill button{flex:1;padding:8px 4px;border-radius:8px;border:1px solid var(--stroke);background:var(--bg-void);color:var(--text-muted);font-size:10.5px;transition:.12s}
+.modelpill button.on{background:var(--accent-dim);border-color:rgba(83,216,255,.3);color:var(--accent)}
+.modelpill button:hover{color:var(--text-secondary)}
+.tag{font-size:9px;padding:1px 6px;border-radius:5px;background:var(--accent-dim);color:var(--accent);border:1px solid rgba(83,216,255,.2);letter-spacing:.03em}
+.tag.sim{background:rgba(232,193,107,.1);color:var(--warn);border-color:rgba(232,193,107,.25)}
+.tag.real{background:rgba(123,224,166,.1);color:var(--good);border-color:rgba(123,224,166,.25)}
+
+/* ── Bottom pipeline strip ── */
+.pipe{grid-area:pipe;background:linear-gradient(180deg,var(--bg-void),var(--bg-void-darkest));border-top:1px solid var(--stroke);
+  display:flex;align-items:center;gap:0;padding:0 14px;overflow-x:auto;z-index:15}
+.pipe-title{position:absolute;margin-top:-104px;font-size:9.5px;color:var(--text-faint);letter-spacing:.08em;text-transform:uppercase}
+.stagecard{display:flex;flex-direction:column;gap:5px;min-width:122px;padding:6px 8px;border-radius:10px;transition:.12s;cursor:pointer;border:1px solid transparent}
+.stagecard:hover{background:var(--bg-hover)}
+.stagecard.off{opacity:.38}
+.stagecard .thumb{width:118px;height:66px;border-radius:7px;background:#0d0d0b url('data:image/svg+xml;utf8,') center/12px;border:1px solid var(--stroke);object-fit:cover;
+  background-image:linear-gradient(45deg,#161613 25%,transparent 25%),linear-gradient(-45deg,#161613 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#161613 75%),linear-gradient(-45deg,transparent 75%,#161613 75%);background-size:10px 10px;background-position:0 0,0 5px,5px -5px,-5px 0}
+.stagecard .lab{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-secondary)}
+.stagecard .lab .n{width:14px;height:14px;border-radius:5px;background:var(--bg-surface);color:var(--text-muted);display:flex;align-items:center;justify-content:center;font-size:9px;flex:none}
+.stagecard .meta{font-size:9px;color:var(--text-faint);display:flex;justify-content:space-between}
+.stagecard .meta b{color:var(--accent);font-weight:400}
+.arrow{color:var(--text-faint);padding:0 3px;flex:none}
+.pipe .info{margin-left:auto;align-self:flex-start;margin-top:10px}
+
+/* ── Modal ── */
+.modal{position:fixed;inset:0;background:rgba(3,3,3,.72);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:100;padding:30px}
+.modal.show{display:flex}
+.sheet{background:var(--bg-panel);border:1px solid var(--stroke-2);border-radius:16px;max-width:860px;width:100%;max-height:84vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 30px 90px rgba(0,0,0,.7)}
+.sheet header{display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--stroke)}
+.sheet header h2{margin:0;font-size:14px}
+.sheet header .x{margin-left:auto;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-muted)}
+.sheet header .x:hover{background:var(--bg-hover);color:var(--text-primary)}
+.sheet .scroll{overflow-y:auto;padding:20px}
+.sheet h4{color:var(--accent);font-size:12px;margin:18px 0 8px;letter-spacing:.02em}
+.sheet h4:first-child{margin-top:0}
+.sheet p{color:var(--text-secondary);line-height:1.65;margin:8px 0;font-size:11.5px}
+.sheet code{background:var(--bg-void);padding:1px 5px;border-radius:4px;color:var(--accent);font-size:11px}
+.sheet pre{background:var(--bg-void-darkest);border:1px solid var(--stroke);border-radius:9px;padding:13px 15px;overflow-x:auto;margin:8px 0;
+  color:var(--text-secondary);font-size:11px;line-height:1.6}
+.sheet pre .c{color:var(--text-faint)} .sheet pre .k{color:#c792ea} .sheet pre .s{color:var(--good)} .sheet pre .f{color:var(--accent)}
+.flow{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:10px 0 16px}
+.flow .node{background:var(--bg-elevated);border:1px solid var(--stroke-2);border-radius:8px;padding:7px 11px;font-size:10.5px;color:var(--text-primary)}
+.flow .node small{display:block;color:var(--text-faint);font-size:9px;margin-top:1px}
+.flow .ar{color:var(--accent)}
+.lnk{color:var(--accent);text-decoration:none;border-bottom:1px dotted rgba(83,216,255,.4)}
+.lnk:hover{border-bottom-style:solid}
+table.map{width:100%;border-collapse:collapse;margin:10px 0;font-size:10.5px}
+table.map th,table.map td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--stroke);vertical-align:top}
+table.map th{color:var(--text-muted);font-weight:500}
+table.map td b{color:var(--text-primary);font-weight:500} table.map td .tag{margin-left:0}
+.toast{position:fixed;bottom:154px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--bg-elevated);border:1px solid var(--stroke-2);
+  color:var(--text-primary);padding:9px 16px;border-radius:10px;font-size:11px;opacity:0;transition:.25s;z-index:90;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span>Phosmith&nbsp;<b>Mask&nbsp;Lab</b><small>· Select &amp; Mask pipeline</small></div>
+    <div class="seg" id="scenes">
+      <button data-scene="portrait" class="on">Hair</button>
+      <button data-scene="fur">Fur</button>
+      <button data-scene="product">Product</button>
+      <button data-scene="upload">Upload ↥</button>
+    </div>
+    <div class="spacer"></div>
+    <button class="tbtn" id="btnMapping">◈ Production mapping</button>
+    <button class="tbtn" id="btnUndo">↶ Undo</button>
+    <button class="tbtn" id="btnReset">⟲ Reset</button>
+    <button class="tbtn primary" id="btnExport">⤓ Export cut-out</button>
+  </div>
+
+  <!-- LEFT TOOL RAIL -->
+  <div class="rail" id="rail">
+    <button class="tool on" data-tool="auto" title="Auto-Select Subject">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/><circle cx="12" cy="12" r="5"/><path d="M12 9.5a2.5 2.5 0 0 1 0 5"/></svg>
+      <span class="tip">Auto-Select Subject <b>SAM</b></span>
+    </button>
+    <button class="tool" data-tool="add" title="Brush — add to selection">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 21l3-1 11-11-2-2L4 18l-1 3z"/><path d="M18 4l2 2"/><path d="M19 13h4M21 11v4"/></svg>
+      <span class="tip">Add Brush <b>B</b></span>
+    </button>
+    <button class="tool" data-tool="sub" title="Brush — subtract from selection">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 21l3-1 11-11-2-2L4 18l-1 3z"/><path d="M19 13h4"/></svg>
+      <span class="tip">Subtract Brush <b>E</b></span>
+    </button>
+    <button class="tool" data-tool="refine" title="Refine Edge brush">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 14c4 0 4-8 8-8s4 8 8 8"/><path d="M4 18c4 0 4-5 8-5s4 5 8 5" opacity=".5"/></svg>
+      <span class="tip">Refine Edge brush <b>R</b></span>
+    </button>
+    <div class="div"></div>
+    <button class="tool" data-tool="pan" title="Pan / inspect">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11m0-1.5a1.5 1.5 0 0 1 3 0V12m0-1a1.5 1.5 0 0 1 3 0v4a5 5 0 0 1-5 5h-2a5 5 0 0 1-4-2l-3-4a1.6 1.6 0 0 1 2.6-1.8L9 14"/></svg>
+      <span class="tip">Pan <b>Space</b></span>
+    </button>
+  </div>
+
+  <!-- CENTER STAGE -->
+  <div class="stage" id="stage">
+    <div class="stage-inner">
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="view"></canvas>
+      </div>
+    </div>
+    <div class="brush-ring" id="brushRing"></div>
+    <div class="busy" id="busy"><span class="spin"></span><span id="busyText">Segmenting…</span></div>
+    <div class="drop-hint">Drop an image to mask it</div>
+    <div class="stage-hud">
+      <span class="k" id="hudTool">Auto-Select</span>
+      <span id="hudDims">—</span>
+      <span class="k">[ ] brush size</span>
+    </div>
+  </div>
+
+  <!-- RIGHT PROPERTIES -->
+  <div class="props" id="props">
+
+    <div class="sect" data-sect>
+      <h3><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>View Mode<span class="chev">▾</span></h3>
+      <div class="body">
+        <select id="viewMode" class="fld">
+          <option value="onlayers">On Layers (checker)</option>
+          <option value="overlay">Overlay (rubylith)</option>
+          <option value="onblack">On Black</option>
+          <option value="onwhite">On White</option>
+          <option value="bw">Black &amp; White (matte)</option>
+          <option value="ants">Marching Ants</option>
+        </select>
+        <div class="row"><label>Overlay opacity</label><span class="val" id="vOpac">70%</span></div>
+        <input type="range" class="slider" id="opac" min="10" max="100" value="70">
+        <div class="hint">Press <b style="color:var(--text-muted)">X</b> to flash the original. The composite reflects every stage below.</div>
+      </div>
+    </div>
+
+    <div class="sect" data-sect>
+      <h3><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12h4l2-7 4 14 2-7h4"/></svg>Edge Detection<span class="chev">▾</span></h3>
+      <div class="body">
+        <div class="row"><label>Radius <span class="tag real">trimap</span></label><span class="val" id="vRadius">8 px</span></div>
+        <input type="range" class="slider" id="radius" min="1" max="40" value="8">
+        <div class="row"><label>Smart Radius</label><span class="toggle on" id="smart"></span></div>
+        <div class="hint">Builds the <b style="color:var(--text-muted)">trimap</b> — erode→sure-FG, dilate→sure-BG, the band between is solved by matting. Smart Radius widens the band along high-detail edges (hair/fur).</div>
+      </div>
+    </div>
+
+    <div class="sect" data-sect>
+      <h3><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg>Matting Model<span class="chev">▾</span></h3>
+      <div class="body">
+        <div class="modelpill" id="matModel">
+          <button data-mat="guided" class="on">Guided<br><span style="color:var(--text-faint);font-size:9px">edge-aware</span></button>
+          <button data-mat="vitmatte">ViTMatte<br><span style="color:var(--text-faint);font-size:9px">Matte-Anything</span></button>
+          <button data-mat="zim">ZIM<br><span style="color:var(--text-faint);font-size:9px">naver-ai</span></button>
+        </div>
+        <div class="hint" id="matHint">Local closed-form / guided-filter matte runs <span class="tag real">in-browser</span>. ViTMatte &amp; ZIM presets tune detail strength to emulate the deep models — wire the real weights via the service (see Production mapping).</div>
+        <div class="row" style="margin-top:12px"><label>PyMatting refine <span class="tag real">on</span></label><span class="toggle on" id="pymat"></span></div>
+        <div class="hint">Closed-form edge clean-up: hole-fill + despeckle on the alpha (PyMatting <code>cutout</code> stand-in).</div>
+      </div>
+    </div>
+
+    <div class="sect" data-sect>
+      <h3><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 18c3-6 13-6 16 0"/><path d="M4 12c3-5 13-5 16 0" opacity=".55"/><path d="M4 6c3-3 13-3 16 0" opacity=".3"/></svg>Global Refinements<span class="chev">▾</span></h3>
+      <div class="body">
+        <div class="row"><label>Smooth</label><span class="val" id="vSmooth">0</span></div>
+        <input type="range" class="slider" id="smooth" min="0" max="30" value="0">
+        <div class="row"><label>Feather</label><span class="val" id="vFeather">0.0 px</span></div>
+        <input type="range" class="slider" id="feather" min="0" max="40" value="0" step="0.5">
+        <div class="row"><label>Contrast</label><span class="val" id="vContrast">0%</span></div>
+        <input type="range" class="slider" id="contrast" min="0" max="100" value="0">
+        <div class="row"><label>Shift Edge</label><span class="val" id="vShift">0</span></div>
+        <input type="range" class="slider" id="shift" min="-100" max="100" value="0">
+      </div>
+    </div>
+
+    <div class="sect" data-sect>
+      <h3><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z"/></svg>Output<span class="chev">▾</span></h3>
+      <div class="body">
+        <div class="row"><label>Decontaminate Colors</label><span class="toggle" id="decon"></span></div>
+        <div class="row"><label>Amount</label><span class="val" id="vDecon">60%</span></div>
+        <input type="range" class="slider" id="deconAmt" min="0" max="100" value="60">
+        <select id="outTo" class="fld" style="margin-top:12px">
+          <option value="cutout">Output: Cut-out (transparent PNG)</option>
+          <option value="mask">Output: Layer Mask (grayscale PNG)</option>
+          <option value="white">Output: On White (PNG)</option>
+        </select>
+        <div class="hint">In production this maps to the Mask tool's chain layer — the matte becomes a non-destructive <code>maskTextureKey</code> on a megashader layer.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- BOTTOM PIPELINE STRIP -->
+  <div class="pipe" id="pipe">
+    <span class="pipe-title">Masking pipeline · live</span>
+    <div class="stagecard" data-stage="src"><div class="lab"><span class="n">0</span>Source</div><canvas class="thumb" data-th="src"></canvas><div class="meta"><span>input</span><b id="mSrc">—</b></div></div>
+    <span class="arrow">→</span>
+    <div class="stagecard" data-stage="coarse"><div class="lab"><span class="n">1</span>SAM 3.1 <span class="tag sim">sim</span></div><canvas class="thumb" data-th="coarse"></canvas><div class="meta"><span>coarse mask</span><b id="mCoarse">—</b></div></div>
+    <span class="arrow">→</span>
+    <div class="stagecard" data-stage="trimap"><div class="lab"><span class="n">2</span>Trimap <span class="tag real">real</span></div><canvas class="thumb" data-th="trimap"></canvas><div class="meta"><span>erode/dilate</span><b id="mTri">—</b></div></div>
+    <span class="arrow">→</span>
+    <div class="stagecard" data-stage="matte"><div class="lab"><span class="n">3</span>ZIM/ViTMatte <span class="tag sim">sim</span></div><canvas class="thumb" data-th="matte"></canvas><div class="meta"><span>alpha matte</span><b id="mMatte">—</b></div></div>
+    <span class="arrow">→</span>
+    <div class="stagecard" data-stage="refine"><div class="lab"><span class="n">4</span>PyMatting <span class="tag real">real</span></div><canvas class="thumb" data-th="refine"></canvas><div class="meta"><span>refine</span><b id="mRef">—</b></div></div>
+    <span class="arrow">→</span>
+    <div class="stagecard" data-stage="final"><div class="lab"><span class="n">5</span>Composite</div><canvas class="thumb" data-th="final"></canvas><div class="meta"><span>layer</span><b id="mFin">—</b></div></div>
+    <button class="tbtn info" id="btnMapping2">ⓘ</button>
+  </div>
+
+</div>
+
+<!-- PRODUCTION MAPPING MODAL -->
+<div class="modal" id="modal">
+  <div class="sheet">
+    <header>
+      <span class="dot" style="width:13px;height:13px;border-radius:4px;background:linear-gradient(135deg,var(--accent),var(--accent-deep))"></span>
+      <h2>Production mapping — mockup stage → real model</h2>
+      <button class="x" id="modalClose">✕</button>
+    </header>
+    <div class="scroll" id="mapScroll"><!-- filled by JS --></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════
+   Phosmith Mask Lab — production-grade Select & Mask pipeline mockup.
+
+   Pipeline (mirrors the Executive Summary doc + Matte-Anything/ZIM repos):
+     Image + prompt → [SAM 3.1] coarse mask  (SIMULATED: baked silhouette / saliency / brush)
+                    → [Trimap]  erode/dilate band   (REAL, in-browser morphology)
+                    → [ZIM/ViTMatte] alpha matte    (SIMULATED via edge-aware guided filter)
+                    → [PyMatting] closed-form refine (REAL: hole-fill + despeckle)
+                    → global refinements + decontaminate → composite layer
+
+   Everything below the "AI" stages is the genuine refine math you'd ship —
+   the deep models are swapped for fast classical equivalents so the whole
+   thing runs offline with zero downloads. See #modal for the real wiring.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ───────────────────────── image-processing kernels ───────────────────────── */
+
+// Separable box filter (O(N)), edge-normalised by valid-window count.
+function boxFilter(src, w, h, r){
+  if(r<=0) return src.slice();
+  const tmp=new Float32Array(w*h), out=new Float32Array(w*h);
+  for(let y=0;y<h;y++){
+    const row=y*w; let sum=0, count=Math.min(r,w-1)+1;
+    for(let x=0;x<=r && x<w;x++) sum+=src[row+x];
+    for(let x=0;x<w;x++){
+      tmp[row+x]=sum/count;
+      const add=x+r+1, rem=x-r;
+      if(add<w){ sum+=src[row+add]; count++; }
+      if(rem>=0){ sum-=src[row+rem]; count--; }
+    }
+  }
+  for(let x=0;x<w;x++){
+    let sum=0, count=Math.min(r,h-1)+1;
+    for(let y=0;y<=r && y<h;y++) sum+=tmp[y*w+x];
+    for(let y=0;y<h;y++){
+      out[y*w+x]=sum/count;
+      const add=y+r+1, rem=y-r;
+      if(add<h){ sum+=tmp[add*w+x]; count++; }
+      if(rem>=0){ sum-=tmp[rem*w+x]; count--; }
+    }
+  }
+  return out;
+}
+
+// He et al. guided filter (gray guide). This is our edge-aware matting core —
+// it pulls the soft alpha onto real luminance edges (hair, fur, fringe).
+function guidedFilter(I, p, w, h, r, eps){
+  const N=w*h;
+  const meanI=boxFilter(I,w,h,r), meanp=boxFilter(p,w,h,r);
+  const Ip=new Float32Array(N), II=new Float32Array(N);
+  for(let i=0;i<N;i++){ Ip[i]=I[i]*p[i]; II[i]=I[i]*I[i]; }
+  const meanIp=boxFilter(Ip,w,h,r), meanII=boxFilter(II,w,h,r);
+  const a=new Float32Array(N), b=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    const varI=meanII[i]-meanI[i]*meanI[i];
+    const covIp=meanIp[i]-meanI[i]*meanp[i];
+    const ai=covIp/(varI+eps);
+    a[i]=ai; b[i]=meanp[i]-ai*meanI[i];
+  }
+  const meana=boxFilter(a,w,h,r), meanb=boxFilter(b,w,h,r);
+  const q=new Float32Array(N);
+  for(let i=0;i<N;i++) q[i]=meana[i]*I[i]+meanb[i];
+  return q;
+}
+
+// Separable min/max morphology (erode / dilate) with a square structuring elt.
+function morph(src, w, h, r, isMax){
+  if(r<=0) return src.slice();
+  const tmp=new Float32Array(w*h), out=new Float32Array(w*h);
+  for(let y=0;y<h;y++){ const row=y*w;
+    for(let x=0;x<w;x++){
+      let v=isMax?-1e9:1e9; const x0=Math.max(0,x-r), x1=Math.min(w-1,x+r);
+      for(let k=x0;k<=x1;k++){ const s=src[row+k]; if(isMax){ if(s>v)v=s; } else if(s<v)v=s; }
+      tmp[row+x]=v;
+    }
+  }
+  for(let x=0;x<w;x++){
+    for(let y=0;y<h;y++){
+      let v=isMax?-1e9:1e9; const y0=Math.max(0,y-r), y1=Math.min(h-1,y+r);
+      for(let k=y0;k<=y1;k++){ const s=tmp[k*w+x]; if(isMax){ if(s>v)v=s; } else if(s<v)v=s; }
+      out[y*w+x]=v;
+    }
+  }
+  return out;
+}
+
+function gaussBlur(src, w, h, px){
+  if(px<=0) return src.slice();
+  const r=Math.max(1,Math.round(px*0.6));
+  let a=src;
+  for(let i=0;i<3;i++) a=boxFilter(a,w,h,r);   // 3× box ≈ gaussian
+  return a;
+}
+const clamp01=v=> v<0?0:v>1?1:v;
+
+// luminance guide from RGBA
+function luminance(rgba, w, h){
+  const N=w*h, L=new Float32Array(N);
+  for(let i=0;i<N;i++){ const j=i*4; L[i]=(0.299*rgba[j]+0.587*rgba[j+1]+0.114*rgba[j+2])/255; }
+  return L;
+}
+
+// ─── connected components / hole fill (for saliency auto-select) ───
+function keepLargestCC(bin, w, h){
+  const N=w*h, lab=new Int32Array(N).fill(0); let cur=0, best=0, bestSize=0;
+  const stack=new Int32Array(N);
+  for(let i=0;i<N;i++){
+    if(bin[i]<0.5 || lab[i]) continue;
+    cur++; let sp=0, size=0; stack[sp++]=i; lab[i]=cur;
+    while(sp>0){ const p=stack[--sp]; size++; const x=p%w, y=(p/w)|0;
+      if(x>0   && bin[p-1]>=0.5 && !lab[p-1]){ lab[p-1]=cur; stack[sp++]=p-1; }
+      if(x<w-1 && bin[p+1]>=0.5 && !lab[p+1]){ lab[p+1]=cur; stack[sp++]=p+1; }
+      if(y>0   && bin[p-w]>=0.5 && !lab[p-w]){ lab[p-w]=cur; stack[sp++]=p-w; }
+      if(y<h-1 && bin[p+w]>=0.5 && !lab[p+w]){ lab[p+w]=cur; stack[sp++]=p+w; }
+    }
+    if(size>bestSize){ bestSize=size; best=cur; }
+  }
+  const out=new Float32Array(N);
+  for(let i=0;i<N;i++) out[i]= lab[i]===best ? 1 : 0;
+  return out;
+}
+function fillHoles(bin, w, h){
+  const N=w*h, outside=new Uint8Array(N), stack=[];
+  for(let x=0;x<w;x++){ stack.push(x); stack.push((h-1)*w+x); }
+  for(let y=0;y<h;y++){ stack.push(y*w); stack.push(y*w+w-1); }
+  while(stack.length){ const p=stack.pop(); if(outside[p]||bin[p]>=0.5) continue; outside[p]=1;
+    const x=p%w, y=(p/w)|0;
+    if(x>0)stack.push(p-1); if(x<w-1)stack.push(p+1); if(y>0)stack.push(p-w); if(y<h-1)stack.push(p+w);
+  }
+  const out=new Float32Array(N);
+  for(let i=0;i<N;i++) out[i]= (bin[i]>=0.5 || !outside[i]) ? 1 : 0;
+  return out;
+}
+
+/* ───────────────────────── application state ───────────────────────── */
+
+const S = {
+  W:0, H:0,
+  src:null,           // Uint8ClampedArray RGBA (working res)
+  lum:null,           // Float32 luminance
+  coarse:null,        // Float32 0..1  — SAM stand-in + brush edits
+  refinePaint:null,   // Float32 0..1  — refine-edge brush band
+  trimap:null,        // Float32 0/0.5/1
+  matte:null,         // Float32 after guided filter
+  alpha:null,         // Float32 final (after global refinements)
+  fgColor:null,       // Uint8 decontaminated rgb or null
+  boundary:null,      // Int32Array of edge pixel indices (marching ants)
+  tool:'auto', brush:34,
+  params:{ radius:8, smart:true, mat:'guided', pymat:true, smooth:0, feather:0, contrast:0, shift:0,
+           view:'onlayers', opac:0.7, decon:false, deconAmt:0.6, outTo:'cutout' },
+  undo:[], times:{},
+};
+const WORK_MAX = 760;
+
+const view = document.getElementById('view');
+const vctx = view.getContext('2d');
+
+/* ───────────────────────── procedural demo scenes ─────────────────────────
+   Each returns { img:canvas, coarse:canvas } at native res. coarse is the
+   "what a coarse SAM mask would catch" silhouette (excludes wispy hair/fur),
+   so the refine pipeline has something real to recover.                       */
+
+function sceneCanvas(wn,hn){ const c=document.createElement('canvas'); c.width=wn; c.height=hn; return c; }
+
+function scenePortrait(){
+  const W=520,H=560, img=sceneCanvas(W,H), m=sceneCanvas(W,H);
+  const g=img.getContext('2d'), mg=m.getContext('2d');
+  // background
+  const bg=g.createLinearGradient(0,0,W,H); bg.addColorStop(0,'#3a4a57'); bg.addColorStop(.5,'#566773'); bg.addColorStop(1,'#37444e');
+  g.fillStyle=bg; g.fillRect(0,0,W,H);
+  for(let i=0;i<60;i++){ g.fillStyle=`rgba(255,255,255,${Math.random()*0.04})`; const r=Math.random()*120+20; g.beginPath(); g.arc(Math.random()*W,Math.random()*H,r,0,7); g.fill(); }
+  const cx=W/2, cyHead=H*0.40;
+  // body / shoulders
+  function body(ctx,fill){ ctx.fillStyle=fill; ctx.beginPath(); ctx.moveTo(cx-150,H); ctx.quadraticCurveTo(cx-130,H*0.66,cx-78,H*0.60);
+    ctx.quadraticCurveTo(cx,H*0.56,cx+78,H*0.60); ctx.quadraticCurveTo(cx+130,H*0.66,cx+150,H); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx,cyHead,86,104,0,0,7); ctx.fill(); }
+  // hair mass + face
+  g.save();
+  // back hair mass (rounder, dark) — this is part of coarse
+  g.fillStyle='#241a16'; g.beginPath(); g.ellipse(cx,cyHead-14,108,120,0,0,7); g.fill();
+  body(g,'#caa288'); // skin
+  // shading
+  const sh=g.createRadialGradient(cx-30,cyHead-30,10,cx,cyHead,130); sh.addColorStop(0,'rgba(255,235,210,.25)'); sh.addColorStop(1,'rgba(60,30,20,.35)');
+  g.fillStyle=sh; g.beginPath(); g.ellipse(cx,cyHead,86,104,0,0,7); g.fill();
+  // front hair framing
+  g.fillStyle='#2a1d17'; g.beginPath(); g.moveTo(cx-86,cyHead-20); g.quadraticCurveTo(cx-110,cyHead+70,cx-70,cyHead+120);
+  g.lineTo(cx-86,cyHead-90); g.quadraticCurveTo(cx,cyHead-150,cx+86,cyHead-90); g.lineTo(cx+70,cyHead+120);
+  g.quadraticCurveTo(cx+110,cyHead+70,cx+86,cyHead-20); g.quadraticCurveTo(cx,cyHead-70,cx-86,cyHead-20); g.fill();
+  g.restore();
+  // WISPY flyaway hair strands (NOT in coarse — the thing refine must recover)
+  g.strokeStyle='rgba(38,26,20,0.85)'; g.lineCap='round';
+  for(let i=0;i<240;i++){
+    const a=Math.PI + Math.random()*Math.PI; // upper hemisphere mostly
+    const sr=92+Math.random()*8; const sx=cx+Math.cos(a)*sr*0.95, sy=cyHead-14+Math.sin(a)*sr;
+    const len=20+Math.random()*70; const dx=Math.cos(a)*len*(0.6+Math.random()*0.8), dy=Math.sin(a)*len;
+    g.globalAlpha=0.25+Math.random()*0.5; g.lineWidth=0.5+Math.random()*1.3;
+    g.beginPath(); g.moveTo(sx,sy); g.quadraticCurveTo(sx+dx*0.4+ (Math.random()-0.5)*30, sy+dy*0.5, sx+dx, sy+dy); g.stroke();
+  }
+  g.globalAlpha=1;
+  // coarse silhouette: body + head + main hair mass (no wisps)
+  mg.fillStyle='#000'; mg.fillRect(0,0,W,H);
+  mg.fillStyle='#fff'; mg.beginPath(); mg.ellipse(cx,cyHead-14,104,118,0,0,7); mg.fill();
+  body(mg,'#fff');
+  return {img,coarse:m};
+}
+
+function sceneFur(){
+  const W=540,H=480, img=sceneCanvas(W,H), m=sceneCanvas(W,H);
+  const g=img.getContext('2d'), mg=m.getContext('2d');
+  const bg=g.createLinearGradient(0,0,0,H); bg.addColorStop(0,'#516b4a'); bg.addColorStop(1,'#2f3f2b');
+  g.fillStyle=bg; g.fillRect(0,0,W,H);
+  for(let i=0;i<40;i++){ g.fillStyle=`rgba(255,255,255,${Math.random()*0.05})`; g.beginPath(); g.arc(Math.random()*W,Math.random()*H,Math.random()*90+30,0,7); g.fill(); }
+  const cx=W/2, cy=H/2, rx=150, ry=120;
+  // body
+  const body=g.createRadialGradient(cx-30,cy-30,20,cx,cy,170); body.addColorStop(0,'#caa15f'); body.addColorStop(1,'#7c5a2e');
+  g.fillStyle=body; g.beginPath(); g.ellipse(cx,cy,rx,ry,0,0,7); g.fill();
+  // ears
+  g.beginPath(); g.ellipse(cx-90,cy-ry+18,34,46,-0.3,0,7); g.ellipse(cx+90,cy-ry+18,34,46,0.3,0,7); g.fill();
+  // eyes
+  g.fillStyle='#241c12'; g.beginPath(); g.arc(cx-46,cy-10,12,0,7); g.arc(cx+46,cy-10,12,0,7); g.fill();
+  g.fillStyle='#33271a'; g.beginPath(); g.ellipse(cx,cy+34,22,16,0,0,7); g.fill();
+  // FUR fringe — dense strands all around the silhouette
+  g.lineCap='round';
+  for(let i=0;i<1400;i++){
+    const t=Math.random()*Math.PI*2;
+    const ex=cx+Math.cos(t)*rx, ey=cy+Math.sin(t)*ry;
+    const len=6+Math.random()*26; const nx=Math.cos(t), ny=Math.sin(t);
+    const col=120+Math.random()*90;
+    g.strokeStyle=`rgba(${col|0},${(col*0.74)|0},${(col*0.4)|0},${0.4+Math.random()*0.5})`;
+    g.lineWidth=0.6+Math.random()*1.2;
+    g.beginPath(); g.moveTo(ex-nx*8,ey-ny*8); g.lineTo(ex+nx*len+(Math.random()-0.5)*8, ey+ny*len+(Math.random()-0.5)*8); g.stroke();
+  }
+  // coarse: solid body ellipse + ears (no fur fringe)
+  mg.fillStyle='#000'; mg.fillRect(0,0,W,H);
+  mg.fillStyle='#fff'; mg.beginPath(); mg.ellipse(cx,cy,rx-6,ry-6,0,0,7);
+  mg.ellipse(cx-90,cy-ry+18,30,42,-0.3,0,7); mg.ellipse(cx+90,cy-ry+18,30,42,0.3,0,7); mg.fill();
+  return {img,coarse:m};
+}
+
+function sceneProduct(){
+  const W=520,H=540, img=sceneCanvas(W,H), m=sceneCanvas(W,H);
+  const g=img.getContext('2d'), mg=m.getContext('2d');
+  const bg=g.createLinearGradient(0,0,0,H); bg.addColorStop(0,'#e9e6df'); bg.addColorStop(1,'#cdc8bd');
+  g.fillStyle=bg; g.fillRect(0,0,W,H);
+  // soft drop shadow (a halo the decontaminate/refine should not swallow)
+  g.fillStyle='rgba(0,0,0,0.18)'; g.beginPath(); g.ellipse(W/2,H*0.82,120,28,0,0,7); g.fill();
+  const cx=W/2;
+  // bottle body
+  const grd=g.createLinearGradient(cx-70,0,cx+70,0);
+  grd.addColorStop(0,'#1d6f8c'); grd.addColorStop(.5,'#53b9d8'); grd.addColorStop(.55,'#bdeaf6'); grd.addColorStop(1,'#1c5e78');
+  g.fillStyle=grd;
+  roundRect(g,cx-70,H*0.30,140,H*0.50,26); g.fill();
+  // neck + cap
+  g.fillStyle='#16485c'; roundRect(g,cx-26,H*0.20,52,H*0.12,8); g.fill();
+  g.fillStyle='#0e3142'; roundRect(g,cx-30,H*0.16,60,28,7); g.fill();
+  // label
+  g.fillStyle='rgba(255,255,255,.9)'; roundRect(g,cx-58,H*0.46,116,H*0.20,10); g.fill();
+  g.fillStyle='#1d6f8c'; g.font='bold 22px JetBrains Mono,monospace'; g.textAlign='center'; g.fillText('PHOS',cx,H*0.55);
+  g.fillStyle='#7a8a92'; g.font='10px JetBrains Mono,monospace'; g.fillText('hydra serum · 50ml',cx,H*0.60);
+  // specular
+  g.fillStyle='rgba(255,255,255,.45)'; roundRect(g,cx-54,H*0.32,16,H*0.44,8); g.fill();
+  // coarse mask = the whole bottle silhouette
+  mg.fillStyle='#000'; mg.fillRect(0,0,W,H);
+  mg.fillStyle='#fff';
+  roundRect(mg,cx-70,H*0.30,140,H*0.50,26); mg.fill();
+  roundRect(mg,cx-26,H*0.20,52,H*0.12,8); mg.fill();
+  roundRect(mg,cx-30,H*0.16,60,28,7); mg.fill();
+  return {img,coarse:m};
+}
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+const SCENES = { portrait:scenePortrait, fur:sceneFur, product:sceneProduct };
+
+/* ───────────────────────── scene / image loading ───────────────────────── */
+
+function fitWork(wn,hn){ const s=Math.min(1, WORK_MAX/Math.max(wn,hn)); return [Math.max(1,Math.round(wn*s)), Math.max(1,Math.round(hn*s))]; }
+
+function loadScene(name){
+  const {img,coarse}=SCENES[name]();
+  const [W,H]=fitWork(img.width,img.height);
+  S.W=W; S.H=H; view.width=W; view.height=H;
+  // downscale src
+  const t=sceneCanvas(W,H), tc=t.getContext('2d'); tc.drawImage(img,0,0,W,H);
+  S.src=tc.getImageData(0,0,W,H).data;
+  S.lum=luminance(S.src,W,H);
+  // downscale coarse → Float32 0..1
+  const cc=sceneCanvas(W,H).getContext('2d'); cc.drawImage(coarse,0,0,W,H);
+  const cd=cc.getImageData(0,0,W,H).data; S.coarse=new Float32Array(W*H);
+  for(let i=0;i<W*H;i++) S.coarse[i]= cd[i*4]/255 > 0.5 ? 1:0;
+  S.refinePaint=new Float32Array(W*H);
+  S.undo=[];
+  document.getElementById('hudDims').textContent=`${img.width}×${img.height}`;
+  document.getElementById('mSrc').textContent=`${W}×${H}`;
+  busy(false); recompute(true);
+}
+
+function loadImageFromURL(url){
+  const im=new Image(); im.crossOrigin='anonymous';
+  im.onload=()=>{
+    const [W,H]=fitWork(im.naturalWidth,im.naturalHeight);
+    S.W=W; S.H=H; view.width=W; view.height=H;
+    const t=sceneCanvas(W,H), tc=t.getContext('2d'); tc.drawImage(im,0,0,W,H);
+    S.src=tc.getImageData(0,0,W,H).data; S.lum=luminance(S.src,W,H);
+    S.refinePaint=new Float32Array(W*H); S.undo=[];
+    document.getElementById('hudDims').textContent=`${im.naturalWidth}×${im.naturalHeight}`;
+    document.getElementById('mSrc').textContent=`${W}×${H}`;
+    busy(true,'Auto-selecting subject…');
+    setTimeout(()=>{ S.coarse=autoSelect(); busy(false); recompute(true); toast('Subject auto-selected — refine with the brushes'); }, 60);
+  };
+  im.onerror=()=>{ busy(false); toast('Could not load that image'); };
+  im.src=url;
+}
+
+// saliency coarse mask for uploaded photos (SAM stand-in)
+function autoSelect(){
+  const {W,H,src}=S, N=W*H;
+  const t=Math.max(3,Math.round(Math.min(W,H)*0.045));
+  let br=0,bg=0,bb=0,bc=0;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ if(x<t||x>=W-t||y<t||y>=H-t){ const j=(y*W+x)*4; br+=src[j];bg+=src[j+1];bb+=src[j+2];bc++; } }
+  br/=bc;bg/=bc;bb/=bc;
+  const score=new Float32Array(N); const cx=W/2,cy=H*0.46,sx=W*0.44,sy=H*0.48; let mean=0;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x, j=i*4;
+    const dr=src[j]-br,dg=src[j+1]-bg,db=src[j+2]-bb; const d=Math.sqrt(dr*dr+dg*dg+db*db)/441;
+    const gx=(x-cx)/sx, gy=(y-cy)/sy; const center=Math.exp(-(gx*gx+gy*gy)/2);
+    const s=d*0.78+center*0.34; score[i]=s; mean+=s;
+  }
+  mean/=N;
+  let m=new Float32Array(N); const thr=mean*1.05;
+  for(let i=0;i<N;i++) m[i]= score[i]>thr?1:0;
+  m=keepLargestCC(m,W,H); m=fillHoles(m,W,H);
+  m=morph(m,W,H,1,true); // tiny close
+  return m;
+}
+
+/* ───────────────────────── the pipeline ─────────────────────────
+   stage 1 SAM (coarse)  → already in S.coarse
+   stage 2 trimap        → erode/dilate band (+ smart radius + refine paint)
+   stage 3 matte         → guided filter on the unknown band
+   stage 4 pymatting     → hole-fill + despeckle
+   stage 5 global refine → smooth / shift / contrast / feather → S.alpha       */
+
+function buildTrimap(){
+  const {W,H}=S, N=W*H, p=S.params;
+  const cb=new Float32Array(N);
+  for(let i=0;i<N;i++) cb[i]= S.coarse[i]>0.5?1:0;
+  const rIn=Math.max(1,p.radius);
+  const er=morph(cb,W,H,rIn,false);        // sure FG
+  const di=morph(cb,W,H,rIn,true);         // not-sure-BG
+  let erW=er, diW=di;
+  let grad=null;
+  if(p.smart){
+    const rW=Math.min(34,Math.round(rIn*2.2));   // cap keeps morphology snappy
+    erW=morph(cb,W,H,rW,false); diW=morph(cb,W,H,rW,true);
+    // edge strength from luminance gradient (smoothed)
+    grad=new Float32Array(N);
+    for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){ const i=y*W+x;
+      const gx=S.lum[i+1]-S.lum[i-1], gy=S.lum[i+W]-S.lum[i-W]; grad[i]=Math.sqrt(gx*gx+gy*gy);
+    }
+    grad=boxFilter(grad,W,H,2);
+  }
+  const tri=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    let fg=er[i], notbg=di[i];
+    if(p.smart && grad[i]>0.10){ fg=erW[i]; notbg=diW[i]; } // widen band on detailed edges
+    let v = fg>0.5 ? 1 : (notbg>0.5 ? 0.5 : 0);
+    if(S.refinePaint[i]>0.4 && v>0) v=0.5;   // refine brush forces unknown (recover detail)
+    if(S.refinePaint[i]>0.4 && v===0) v=0.5;
+    tri[i]=v;
+  }
+  return tri;
+}
+
+const MAT_PRESET = {
+  guided:{ rf:0.55, eps:1.1e-2 },
+  vitmatte:{ rf:0.7, eps:4.5e-3 },
+  zim:{ rf:0.85, eps:1.6e-3 },
+};
+function buildMatte(tri){
+  const {W,H}=S, N=W*H, p=S.params;
+  const init=new Float32Array(N);
+  for(let i=0;i<N;i++) init[i]= tri[i]===1?1 : tri[i]===0?0 : clamp01(S.coarse[i]*0.5+0.5*0.6);
+  const pre=MAT_PRESET[p.mat]||MAT_PRESET.guided;
+  const r=Math.max(2,Math.round(p.radius*pre.rf*1.4));
+  let q=guidedFilter(S.lum,init,W,H,r,pre.eps);
+  // re-impose hard constraints; solve only the unknown band
+  const out=new Float32Array(N);
+  for(let i=0;i<N;i++) out[i]= tri[i]===1?1 : tri[i]===0?0 : clamp01(q[i]);
+  return out;
+}
+
+// PyMatting "cutout" stand-in: small-hole fill + speckle removal on the alpha.
+function pymattingRefine(a){
+  const {W,H}=S, N=W*H;
+  // fill: dilate then erode the *solid* core to bridge pinholes, gate by original
+  const solid=new Float32Array(N); for(let i=0;i<N;i++) solid[i]= a[i]>0.6?1:0;
+  let closed=morph(solid,W,H,2,true); closed=morph(closed,W,H,2,false);
+  // despeckle: remove tiny FG blobs (open)
+  let opened=morph(closed,W,H,1,false); opened=morph(opened,W,H,1,true);
+  const out=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    let v=a[i];
+    if(opened[i]>0.5 && v<0.6) v=Math.max(v,0.85);   // fill pinhole
+    if(opened[i]<0.5 && v>0.6 && a[i]<0.95) v=Math.min(v,a[i]); // keep edges soft
+    out[i]=v;
+  }
+  return out;
+}
+
+function globalRefine(a){
+  const {W,H}=S, p=S.params;
+  let out=a;
+  if(p.smooth>0){ const b=gaussBlur(out,W,H,p.smooth*0.5); out=new Float32Array(b.length); for(let i=0;i<b.length;i++) out[i]=clamp01((b[i]-0.5)*1.45+0.5); }
+  if(p.shift!==0){ const r=Math.round(Math.abs(p.shift)/100*22); out=morph(out,W,H,r,p.shift>0); }
+  if(p.contrast>0){ const gain=1+p.contrast/100*8; const o=new Float32Array(out.length); for(let i=0;i<out.length;i++) o[i]=clamp01((out[i]-0.5)*gain+0.5); out=o; }
+  if(p.feather>0){ out=gaussBlur(out,W,H,p.feather); }
+  return out;
+}
+
+function decontaminate(){
+  const {W,H,src,alpha}=S, N=W*H;
+  const fg=new Uint8ClampedArray(N*3), known=new Uint8Array(N);
+  for(let i=0;i<N;i++){ const j=i*4; fg[i*3]=src[j]; fg[i*3+1]=src[j+1]; fg[i*3+2]=src[j+2]; if(alpha[i]>0.9) known[i]=1; }
+  const amt=S.params.deconAmt;
+  for(let iter=0;iter<22;iter++){
+    const newly=[];
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x;
+      if(known[i]||alpha[i]<=0.02) continue;
+      let r=0,g=0,b=0,c=0;
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; const xx=x+dx,yy=y+dy; if(xx<0||yy<0||xx>=W||yy>=H)continue; const k=yy*W+xx; if(known[k]){ r+=fg[k*3];g+=fg[k*3+1];b+=fg[k*3+2];c++; } }
+      if(c>0){ const j=i*4; fg[i*3]=src[j]*(1-amt)+r/c*amt; fg[i*3+1]=src[j+1]*(1-amt)+g/c*amt; fg[i*3+2]=src[j+2]*(1-amt)+b/c*amt; newly.push(i); }
+    }
+    for(const i of newly) known[i]=1;
+    if(!newly.length) break;
+  }
+  return fg;
+}
+
+function computeBoundary(){
+  const {W,H,alpha}=S, b=[];
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){ const i=y*W+x; if(alpha[i]<=0.5)continue;
+    if((x>0&&alpha[i-1]<=0.5)||(x<W-1&&alpha[i+1]<=0.5)||(y>0&&alpha[i-W]<=0.5)||(y<H-1&&alpha[i+W]<=0.5)) b.push(i);
+  }
+  S.boundary=new Int32Array(b);
+}
+
+let recomputePending=false;
+function recompute(immediate){
+  if(!S.src) return;
+  if(!immediate){ if(recomputePending) return; recomputePending=true; requestAnimationFrame(()=>{ recomputePending=false; runPipeline(); }); return; }
+  runPipeline();
+}
+function runPipeline(){
+  const t0=performance.now();
+  S.trimap=buildTrimap();        const t1=performance.now();
+  S.matte=buildMatte(S.trimap);  const t2=performance.now();
+  S.alpha= S.params.pymat ? pymattingRefine(S.matte) : S.matte.slice();
+  S.alpha=globalRefine(S.alpha); const t3=performance.now();
+  S.fgColor= S.params.decon ? decontaminate() : null;
+  computeBoundary();
+  S.times={ tri:(t1-t0), matte:(t2-t1), ref:(t3-t2) };
+  render(); updateThumbs(); updateMeta();
+}
+
+/* ───────────────────────── rendering ───────────────────────── */
+
+function render(){
+  const {W,H,src,alpha}=S; if(!src) return;
+  const fg = S.fgColor;
+  const out=vctx.createImageData(W,H), d=out.data;
+  const mode=S.params.view, opac=S.params.opac;
+  const N=W*H;
+  if(mode==='ants'){
+    for(let i=0;i<N;i++){ const j=i*4; d[j]=src[j]; d[j+1]=src[j+1]; d[j+2]=src[j+2]; d[j+3]=255; }
+    const ph=(performance.now()/60|0);
+    for(let n=0;n<S.boundary.length;n++){ const i=S.boundary[n], j=i*4; const on=((i%W)+((i/W)|0)+ph)%10<5; const c=on?255:0; d[j]=c;d[j+1]=c;d[j+2]=c;d[j+3]=255; }
+  } else {
+    for(let i=0;i<N;i++){
+      const j=i*4, a=alpha[i];
+      let r=fg?fg[i*3]:src[j], g=fg?fg[i*3+1]:src[j+1], b=fg?fg[i*3+2]:src[j+2];
+      if(mode==='onlayers'){ d[j]=r; d[j+1]=g; d[j+2]=b; d[j+3]=a*255; }
+      else if(mode==='onblack'){ d[j]=r*a; d[j+1]=g*a; d[j+2]=b*a; d[j+3]=255; }
+      else if(mode==='onwhite'){ d[j]=r*a+255*(1-a); d[j+1]=g*a+255*(1-a); d[j+2]=b*a+255*(1-a); d[j+3]=255; }
+      else if(mode==='bw'){ const v=a*255; d[j]=v;d[j+1]=v;d[j+2]=v;d[j+3]=255; }
+      else if(mode==='overlay'){ const t=(1-a)*opac; d[j]=src[j]*(1-t)+233*t; d[j+1]=src[j+1]*(1-t)+58*t; d[j+2]=src[j+2]*(1-t)+72*t; d[j+3]=255; }
+    }
+  }
+  vctx.putImageData(out,0,0);
+}
+// keep marching ants animating
+function tick(){ if(S.params.view==='ants' && S.boundary && S.boundary.length) render(); requestAnimationFrame(tick); }
+requestAnimationFrame(tick);
+
+/* ───── pipeline thumbnails ───── */
+function drawThumb(key, painter){
+  const c=document.querySelector(`[data-th="${key}"]`); if(!c) return;
+  const {W,H}=S; c.width=118; c.height=66;
+  const tmp=sceneCanvas(W,H), tc=tmp.getContext('2d'); const id=tc.createImageData(W,H);
+  painter(id.data); tc.putImageData(id,0,0);
+  const ctx=c.getContext('2d'); ctx.clearRect(0,0,118,66);
+  const s=Math.min(118/W,66/H), dw=W*s, dh=H*s; ctx.drawImage(tmp,(118-dw)/2,(66-dh)/2,dw,dh);
+}
+function updateThumbs(){
+  const {W,H,src}=S, N=W*H;
+  drawThumb('src',d=>{ for(let i=0;i<N;i++){const j=i*4; d[j]=src[j];d[j+1]=src[j+1];d[j+2]=src[j+2];d[j+3]=255;} });
+  drawThumb('coarse',d=>{ for(let i=0;i<N;i++){const j=i*4,a=S.coarse[i]; d[j]=83*a+20;d[j+1]=216*a+20;d[j+2]=255*a+18;d[j+3]=255;} });
+  drawThumb('trimap',d=>{ for(let i=0;i<N;i++){const j=i*4,t=S.trimap[i]; const v=t===1?235:t===0?22:128; d[j]=v;d[j+1]=t===0.5?168:v;d[j+2]=t===0.5?60:v;d[j+3]=255;} });
+  drawThumb('matte',d=>{ for(let i=0;i<N;i++){const j=i*4,v=S.matte[i]*255; d[j]=v;d[j+1]=v;d[j+2]=v;d[j+3]=255;} });
+  drawThumb('refine',d=>{ for(let i=0;i<N;i++){const j=i*4,v=S.alpha[i]*255; d[j]=v;d[j+1]=v;d[j+2]=v;d[j+3]=255;} });
+  drawThumb('final',d=>{ const fg=S.fgColor; for(let i=0;i<N;i++){const j=i*4,a=S.alpha[i]; d[j]=fg?fg[i*3]:src[j];d[j+1]=fg?fg[i*3+1]:src[j+1];d[j+2]=fg?fg[i*3+2]:src[j+2];d[j+3]=a*255;} });
+}
+function updateMeta(){
+  let fgPx=0,unk=0; const N=S.W*S.H;
+  for(let i=0;i<N;i++){ if(S.alpha[i]>0.5)fgPx++; if(S.trimap[i]===0.5)unk++; }
+  document.getElementById('mCoarse').textContent=`${(100*fgCount()/N).toFixed(0)}%`;
+  document.getElementById('mTri').textContent=`${(100*unk/N).toFixed(0)}% unk`;
+  document.getElementById('mMatte').textContent=`${S.times.matte.toFixed(0)}ms`;
+  document.getElementById('mRef').textContent=`${S.times.ref.toFixed(0)}ms`;
+  document.getElementById('mFin').textContent=`${(100*fgPx/N).toFixed(0)}%`;
+}
+function fgCount(){ let c=0; for(let i=0;i<S.coarse.length;i++) if(S.coarse[i]>0.5)c++; return c; }
+
+/* ───────────────────────── brush interaction ───────────────────────── */
+
+const ring=document.getElementById('brushRing');
+let painting=false, lastPt=null;
+
+function evtToWork(e){
+  const r=view.getBoundingClientRect();
+  const x=(e.clientX-r.left)/r.width*S.W, y=(e.clientY-r.top)/r.height*S.H;
+  return {x,y, scale:r.width/S.W};
+}
+function stamp(buf,x,y,radius,val,subtract){
+  const {W,H}=S, r2=radius*radius;
+  const x0=Math.max(0,Math.floor(x-radius)),x1=Math.min(W-1,Math.ceil(x+radius));
+  const y0=Math.max(0,Math.floor(y-radius)),y1=Math.min(H-1,Math.ceil(y+radius));
+  for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){ const dx=xx-x,dy=yy-y,dd=dx*dx+dy*dy; if(dd>r2)continue;
+    const fall=1-Math.sqrt(dd)/radius; const s=Math.min(1,fall*2.2); const i=yy*W+xx;
+    if(subtract) buf[i]=Math.min(buf[i],1-s*val); else buf[i]=Math.max(buf[i],s*val);
+  }
+}
+function paintLine(buf,a,b,radius,val,subtract){
+  const dist=Math.hypot(b.x-a.x,b.y-a.y); const steps=Math.max(1,Math.ceil(dist/(radius*0.34)));
+  for(let s=0;s<=steps;s++){ const t=s/steps; stamp(buf,a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,radius,val,subtract); }
+}
+function pushUndo(){ S.undo.push({c:S.coarse.slice(),r:S.refinePaint.slice()}); if(S.undo.length>24)S.undo.shift(); }
+
+view.addEventListener('pointerdown',e=>{
+  if(!S.src) return;
+  const tool=S.tool; if(tool==='auto'||tool==='pan') return;
+  view.setPointerCapture(e.pointerId); painting=true; pushUndo();
+  const p=evtToWork(e); lastPt=p; applyBrush(p);
+});
+view.addEventListener('pointermove',e=>{
+  const p=evtToWork(e); moveRing(e);
+  if(!painting) return;
+  if(e.getCoalescedEvents){ for(const ce of e.getCoalescedEvents()){ const cp=evtToWork(ce); applyBrush(cp,true); } }
+  else applyBrush(p,true);
+  lastPt=p; recompute(false);
+});
+window.addEventListener('pointerup',()=>{ if(painting){ painting=false; lastPt=null; recompute(true); } });
+view.addEventListener('pointerenter',()=>{ if(['add','sub','refine'].includes(S.tool)) ring.style.display='block'; });
+view.addEventListener('pointerleave',()=>{ ring.style.display='none'; });
+
+function applyBrush(p,line){
+  const radius=S.brush/2 * (S.W/view.getBoundingClientRect().width);
+  const buf = S.tool==='refine'? S.refinePaint : S.coarse;
+  const val=1, subtract=S.tool==='sub';
+  if(line&&lastPt) paintLine(buf,lastPt,p,radius,val,subtract); else stamp(buf,p.x,p.y,radius,val,subtract);
+}
+function moveRing(e){
+  if(!['add','sub','refine'].includes(S.tool)){ ring.style.display='none'; return; }
+  ring.style.display='block'; ring.style.width=ring.style.height=S.brush+'px';
+  ring.style.left=(e.clientX-S.brush/2)+'px'; ring.style.top=(e.clientY-S.brush/2)+'px';
+  ring.style.borderColor = S.tool==='sub'?'#F2766B':S.tool==='refine'?'#7BE0A6':'#53D8FF';
+}
+
+/* ───────────────────────── UI wiring ───────────────────────── */
+
+function busy(on,txt){ const b=document.getElementById('busy'); if(txt)document.getElementById('busyText').textContent=txt; b.classList.toggle('show',on); }
+function toast(t){ const el=document.getElementById('toast'); el.textContent=t; el.classList.add('show'); clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove('show'),2200); }
+
+// tools
+document.getElementById('rail').addEventListener('click',e=>{ const b=e.target.closest('.tool'); if(!b)return;
+  document.querySelectorAll('.tool').forEach(t=>t.classList.remove('on')); b.classList.add('on');
+  S.tool=b.dataset.tool; document.getElementById('hudTool').textContent=b.querySelector('.tip').childNodes[0].textContent.trim();
+  view.style.cursor = S.tool==='pan'?'grab':'crosshair';
+  if(S.tool==='auto'){ // re-run auto-select
+    pushUndo(); busy(true,'Segmenting subject…');
+    setTimeout(()=>{ const sc=document.querySelector('#scenes .on').dataset.scene;
+      if(sc==='upload'){ S.coarse=autoSelect(); } else { const {coarse}=SCENES[sc](); regenCoarse(coarse); }
+      busy(false); recompute(true); }, 80);
+  }
+});
+function regenCoarse(coarseCanvas){ const {W,H}=S; const cc=sceneCanvas(W,H).getContext('2d'); cc.drawImage(coarseCanvas,0,0,W,H);
+  const cd=cc.getImageData(0,0,W,H).data; for(let i=0;i<W*H;i++) S.coarse[i]=cd[i*4]/255>0.5?1:0; }
+
+// scenes
+document.getElementById('scenes').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  document.querySelectorAll('#scenes button').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  const sc=b.dataset.scene;
+  if(sc==='upload'){ pickFile(); return; }
+  busy(true,'Loading scene…'); setTimeout(()=>loadScene(sc),30);
+});
+function pickFile(){ const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
+  inp.onchange=()=>{ if(inp.files[0]){ const u=URL.createObjectURL(inp.files[0]); loadImageFromURL(u);} }; inp.click(); }
+
+// drag & drop
+const stage=document.getElementById('stage');
+['dragover','dragenter'].forEach(ev=>stage.addEventListener(ev,e=>{e.preventDefault();stage.classList.add('drag');}));
+['dragleave','drop'].forEach(ev=>stage.addEventListener(ev,e=>{e.preventDefault();if(ev==='dragleave'&&e.target!==stage)return;stage.classList.remove('drag');}));
+stage.addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f&&f.type.startsWith('image')){ document.querySelectorAll('#scenes button').forEach(x=>x.classList.remove('on')); document.querySelector('[data-scene="upload"]').classList.add('on'); loadImageFromURL(URL.createObjectURL(f)); } });
+
+// sliders / params
+function bindRange(id,key,fmt,scale){ const el=document.getElementById(id); const out=document.getElementById('v'+id.charAt(0).toUpperCase()+id.slice(1));
+  el.addEventListener('input',()=>{ const v=parseFloat(el.value); S.params[key]=scale?scale(v):v; if(out)out.textContent=fmt(v); recompute(false); }); }
+bindRange('radius','radius',v=>v+' px');
+bindRange('smooth','smooth',v=>String(v));
+bindRange('feather','feather',v=>v.toFixed(1)+' px');
+bindRange('contrast','contrast',v=>v+'%');
+bindRange('shift','shift',v=>String(v));
+document.getElementById('opac').addEventListener('input',e=>{ S.params.opac=e.target.value/100; document.getElementById('vOpac').textContent=e.target.value+'%'; render(); });
+document.getElementById('deconAmt').addEventListener('input',e=>{ S.params.deconAmt=e.target.value/100; document.getElementById('vDecon').textContent=e.target.value+'%'; if(S.params.decon)recompute(false); });
+document.getElementById('viewMode').addEventListener('change',e=>{ S.params.view=e.target.value; render(); });
+document.getElementById('outTo').addEventListener('change',e=>{ S.params.outTo=e.target.value; });
+
+// toggles
+function bindToggle(id,key,after){ const el=document.getElementById(id); el.addEventListener('click',()=>{ el.classList.toggle('on'); S.params[key]=el.classList.contains('on'); if(after)after(); recompute(true); }); }
+bindToggle('smart','smart');
+bindToggle('pymat','pymat');
+bindToggle('decon','decon');
+
+// matting model
+document.getElementById('matModel').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  document.querySelectorAll('#matModel button').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  S.params.mat=b.dataset.mat;
+  const hints={ guided:'Local closed-form / guided-filter matte runs <span class="tag real">in-browser</span> — fast, edge-aware, zero downloads.',
+    vitmatte:'ViTMatte preset (Matte-Anything): smaller eps + wider radius = crisper detail. Real weights: <code>hustvl/ViTMatte_vit_b</code> on the service.',
+    zim:'ZIM preset (naver-ai, ICCV’25): tightest detail recovery for hair/fur. Real weights: <code>zim_vit_l</code> via ZimPredictor.' };
+  document.getElementById('matHint').innerHTML=hints[b.dataset.mat]; recompute(true);
+});
+
+// section collapse
+document.querySelectorAll('[data-sect] h3').forEach(h=>h.addEventListener('click',()=>h.parentElement.classList.toggle('collapsed')));
+
+// undo / reset
+document.getElementById('btnUndo').addEventListener('click',()=>{ const s=S.undo.pop(); if(!s){toast('Nothing to undo');return;} S.coarse=s.c; S.refinePaint=s.r; recompute(true); });
+document.getElementById('btnReset').addEventListener('click',()=>{ const sc=document.querySelector('#scenes .on').dataset.scene; if(sc==='upload'){ S.refinePaint.fill(0); S.coarse=autoSelect(); } else loadScene(sc); recompute(true); toast('Reset'); });
+
+// keyboard
+window.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT') return;
+  const k=e.key.toLowerCase();
+  if(k==='b'){ selTool('add'); } else if(k==='e'){ selTool('sub'); } else if(k==='r'){ selTool('refine'); }
+  else if(k==='[' ){ S.brush=Math.max(4,S.brush-6); } else if(k===']'){ S.brush=Math.min(160,S.brush+6); }
+  else if(k==='x'){ flashOriginal(true); }
+  else if((e.metaKey||e.ctrlKey)&&k==='z'){ e.preventDefault(); document.getElementById('btnUndo').click(); }
+});
+window.addEventListener('keyup',e=>{ if(e.key.toLowerCase()==='x') flashOriginal(false); });
+function selTool(t){ const b=document.querySelector(`.tool[data-tool="${t}"]`); if(b)b.click(); }
+let _savedView=null;
+function flashOriginal(on){ if(on){ if(_savedView)return; _savedView=S.params.view; const {W,H,src}=S; const id=vctx.createImageData(W,H); for(let i=0;i<W*H;i++){const j=i*4;id.data[j]=src[j];id.data[j+1]=src[j+1];id.data[j+2]=src[j+2];id.data[j+3]=255;} vctx.putImageData(id,0,0); } else { if(_savedView){ _savedView=null; render(); } } }
+
+// export
+document.getElementById('btnExport').addEventListener('click',()=>{
+  const {W,H,src,alpha}=S; const fg=S.fgColor; const c=sceneCanvas(W,H), ctx=c.getContext('2d'); const id=ctx.createImageData(W,H), d=id.data;
+  const mode=S.params.outTo;
+  for(let i=0;i<W*H;i++){ const j=i*4,a=alpha[i]; let r=fg?fg[i*3]:src[j],g=fg?fg[i*3+1]:src[j+1],b=fg?fg[i*3+2]:src[j+2];
+    if(mode==='mask'){ const v=a*255; d[j]=v;d[j+1]=v;d[j+2]=v;d[j+3]=255; }
+    else if(mode==='white'){ d[j]=r*a+255*(1-a);d[j+1]=g*a+255*(1-a);d[j+2]=b*a+255*(1-a);d[j+3]=255; }
+    else { d[j]=r;d[j+1]=g;d[j+2]=b;d[j+3]=a*255; }
+  }
+  ctx.putImageData(id,0,0);
+  c.toBlob(bl=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(bl); a.download=`mask-lab-${mode}.png`; a.click(); toast('Exported '+mode+'.png'); });
+});
+
+// stage toggles (pipeline cards) — turn pymatting/decon on/off by clicking cards
+document.getElementById('pipe').addEventListener('click',e=>{ const card=e.target.closest('.stagecard'); if(!card)return; const st=card.dataset.stage;
+  if(st==='refine'){ document.getElementById('pymat').click(); card.classList.toggle('off',!S.params.pymat); }
+});
+
+/* ───── production-mapping modal ───── */
+const MAP_HTML = `
+<h4>Pipeline at a glance</h4>
+<div class="flow">
+  <div class="node">Image + prompt<small>click · box · "the dog"</small></div><span class="ar">→</span>
+  <div class="node">SAM 3.1<small>coarse mask / box</small></div><span class="ar">→</span>
+  <div class="node">Trimap<small>erode / dilate</small></div><span class="ar">→</span>
+  <div class="node">ZIM / ViTMatte<small>alpha matte</small></div><span class="ar">→</span>
+  <div class="node">PyMatting<small>closed-form refine</small></div><span class="ar">→</span>
+  <div class="node">Layer mask<small>megashader chain</small></div>
+</div>
+<p>This mockup runs the <b style="color:var(--good)">real</b> classical stages (trimap morphology, guided-filter matte, hole-fill/despeckle, global refinements, colour decontamination) so you can judge the UX and edge quality offline. The <b style="color:var(--warn)">simulated</b> stages below are swapped for the deep models in production.</p>
+
+<h4>Stage → real model mapping</h4>
+<table class="map">
+<tr><th>Mockup stage</th><th>Production model</th><th>Phosmith wiring</th></tr>
+<tr><td><b>1 · Coarse mask</b> <span class="tag sim">sim</span><br>baked silhouette / saliency</td><td><b>SAM 3.1</b> (Meta) — promptable points/box/<i>text</i>. Falls back to SAM 2 (already loaded).</td><td><code>services/segment/main.py</code> already has <code>_load_sam3</code>/<code>_sam3_ground_results</code>. Route: <code>/api/ai/sam2</code>, <code>/api/ai/ground</code>.</td></tr>
+<tr><td><b>2 · Trimap</b> <span class="tag real">real</span><br>erode→255 / dilate→128</td><td>OpenCV morphology — identical to <b>Matte-Anything</b>'s <code>generate_trimap</code>.</td><td>Add to the service's matte path; the JS here is the same algorithm at preview res.</td></tr>
+<tr><td><b>3 · Alpha matte</b> <span class="tag sim">sim</span><br>guided filter</td><td><b>ZIM</b> (naver-ai, ICCV’25) <i>or</i> <b>ViTMatte</b> (Matte-Anything). Hierarchical decoder recovers hair/fur.</td><td>New service endpoint <code>/matte</code>: trimap + image → alpha. Lazy-load like SAM 2 / Depth.</td></tr>
+<tr><td><b>4 · Refine</b> <span class="tag real">real</span><br>hole-fill + despeckle</td><td><b>PyMatting</b> closed-form / KNN <code>cutout()</code> for final edge polish.</td><td>Optional CPU/CuPy pass after the matting net; gate behind a quality toggle.</td></tr>
+<tr><td><b>5 · Composite</b></td><td>Non-destructive layer mask + decontamination.</td><td>Becomes a <code>maskTextureKey</code> on a megashader chain layer — exactly today's mask model.</td></tr>
+</table>
+
+<h4>Real integration code (from the Executive Summary)</h4>
+<pre><span class="c"># 1 — SAM 3.1 coarse mask (text or click prompt)</span>
+<span class="k">from</span> sam3 <span class="k">import</span> Sam3Predictor
+sam = Sam3Predictor(checkpoint=<span class="s">"sam3-concept"</span>)
+sam.set_image(np_image)
+mask = sam.predict(text_prompt=<span class="s">"the dog"</span>)[<span class="f">0</span>]
+
+<span class="c"># 2 — trimap (Matte-Anything generate_trimap)</span>
+<span class="k">import</span> cv2, numpy <span class="k">as</span> np
+k = np.ones((<span class="f">15</span>,<span class="f">15</span>), np.uint8)
+fg = cv2.erode(mask, k); bg = <span class="f">1</span> - cv2.dilate(mask, k)
+trimap = np.full(mask.shape, <span class="f">128</span>); trimap[fg==<span class="f">1</span>]=<span class="f">255</span>; trimap[bg==<span class="f">1</span>]=<span class="f">0</span>
+
+<span class="c"># 3 — ZIM alpha matte (naver-ai/ZIM)</span>
+<span class="k">from</span> zim_anything <span class="k">import</span> zim_model_registry, ZimPredictor
+model = zim_model_registry[<span class="s">"vit_l"</span>](checkpoint=<span class="s">"zim_vit_l"</span>)
+pred  = ZimPredictor(model); pred.set_image(image)
+alpha = pred.predict([{<span class="s">"mask_input"</span>: trimap, <span class="s">"has_mask"</span>: <span class="k">True</span>}])[<span class="f">0</span>]
+
+<span class="c"># 4 — PyMatting closed-form refine</span>
+<span class="k">from</span> pymatting <span class="k">import</span> cutout
+cutout(<span class="s">"image.png"</span>, <span class="s">"trimap.png"</span>, <span class="s">"result.png"</span>)</pre>
+
+<h4>Reverse-engineered references</h4>
+<p>
+• <a class="lnk" href="https://github.com/hustvl/Matte-Anything" target="_blank">hustvl/Matte-Anything</a> — SAM+GroundingDINO+ViTMatte, auto-trimap (the model for stages 2–3).<br>
+• <a class="lnk" href="https://github.com/naver-ai/ZIM" target="_blank">naver-ai/ZIM</a> — zero-shot matting from SAM masks (ICCV’25 Highlight).<br>
+• <a class="lnk" href="https://github.com/hustvl/ViTMatte" target="_blank">hustvl/ViTMatte</a> · <a class="lnk" href="https://github.com/pymatting/pymatting" target="_blank">pymatting/pymatting</a> — trimap-based matting + classical solvers.<br>
+• <a class="lnk" href="https://github.com/lucasgelfond/webgpu-sam2" target="_blank">webgpu-sam2</a> · <a class="lnk" href="https://huggingface.co/Xenova/segment-anything-web" target="_blank">transformers.js SAM</a> — in-browser SAM (optional client path).<br>
+• <a class="lnk" href="https://github.com/kingfolk/shared_matting_webgl" target="_blank">shared_matting_webgl</a> — real-time GLSL alpha matting (WebGPU upgrade path).<br>
+• Photoshop <b>Select &amp; Mask</b> — the View-modes + Global-Refinements UX mirrored here.
+</p>`;
+document.getElementById('mapScroll').innerHTML=MAP_HTML;
+function openModal(){ document.getElementById('modal').classList.add('show'); }
+function closeModal(){ document.getElementById('modal').classList.remove('show'); }
+document.getElementById('btnMapping').addEventListener('click',openModal);
+document.getElementById('btnMapping2').addEventListener('click',openModal);
+document.getElementById('modalClose').addEventListener('click',closeModal);
+document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal')closeModal(); });
+
+/* ───────────────────────── boot ───────────────────────── */
+loadScene('portrait');
+toast('Mask Lab ready — try the Refine Edge brush (R) on the hair');
+</script>
+</body>
+</html>

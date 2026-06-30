@@ -235,6 +235,26 @@ export const BRUSH_SCHEMA = {
 }
 
 /**
+ * Pen / Bézier path mask (Photoshop "Pen tool" parity).
+ *
+ * Engine-identical to `lasso`: the closed Bézier path is rasterised
+ * client-side (Canvas2D `bezierCurveTo`, filled) to an offscreen alpha
+ * canvas — white inside, transparent outside — and uploaded by the renderer
+ * as a per-layer sampler2D keyed by `maskTextureKey`. The only difference
+ * from the lasso is the authoring geometry (smooth curves between anchors vs
+ * straight segments); `feather` softens the edge via a smoothstep around 0.5.
+ */
+export const PATH_SCHEMA = {
+    kind: 'path',
+    uniforms: [
+        { name: 'feather', glsl: 'uLayer_<S>_kind_path_feather', type: 'float', min: 0, max: 1, default: 0.04 },
+    ],
+    samplers: [
+        { name: 'mask', glsl: 'uLayer_<S>_kind_path_mask' },
+    ],
+}
+
+/**
  * Step 4 stub kind. Empty schema (no uniforms, no samplers) and a
  * builder that returns 0.0 — kept for any kind we want to revert to a
  * no-op in a hotfix. The compiler and renderer treat stubs identically
@@ -252,6 +272,7 @@ export const KIND_SCHEMAS = {
     depth:      DEPTH_SCHEMA,
     lasso:      LASSO_SCHEMA,
     brush:      BRUSH_SCHEMA,
+    path:       PATH_SCHEMA,
 }
 
 /* ─── GLSL Body Builders ───────────────────────────────────────────────── */
@@ -633,6 +654,25 @@ export const buildBrush = (slot) => /* glsl */ `
     `
 
 /**
+ * Build the GLSL body for a Pen / Bézier path selection layer. Identical to
+ * the lasso: samples the rasterised path alpha texture (R channel, ~1 inside
+ * the filled path, ~0 outside) and softens the edge by `feather` around 0.5.
+ *
+ * @param {number} slot    The layer slot index (0..7).
+ * @returns {string}       A complete `float evalLayer_<slot>_body()` GLSL function.
+ */
+export const buildPath = (slot) => /* glsl */ `
+        uniform sampler2D uLayer_${slot}_kind_path_mask;
+        uniform float uLayer_${slot}_kind_path_feather;
+
+        float evalLayer_${slot}_body() {
+            float raw = texture2D(uLayer_${slot}_kind_path_mask, vTextureCoord).r;
+            float feather = max(uLayer_${slot}_kind_path_feather, 0.001);
+            return smoothstep(0.5 - feather, 0.5 + feather, raw);
+        }
+    `
+
+/**
  * Build a stub GLSL body for kinds not yet implemented (Steps 4-6).
  * Returns 0.0 — the layer contributes no alpha, same as Step 1.
  *
@@ -666,6 +706,7 @@ export const KIND_BUILDERS = {
     smartBrush: buildSmartBrush,
     lasso:      buildLasso,
     brush:      buildBrush,
+    path:       buildPath,
 }
 
 /**

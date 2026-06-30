@@ -15,7 +15,8 @@ import usePixelMaskTool, { MIN_BRUSH, MAX_BRUSH } from '../../../../../../../hoo
 import useMaskLayers from '../../../../../../../hooks/useMaskLayers'
 import { computeImageHistogram, getHistogramSourceElement } from '@/lib/image-histogram'
 import { rgbToHsb } from '@/lib/color-utils'
-import { setMaskTexture } from '@/lib/megashader'
+import { setMaskTexture, rasterisePath, smoothToBezier } from '@/lib/megashader'
+import { buildPackedLutFromCurves } from '@/lib/curve-lut'
 import { expandLayerBoundary } from '@/lib/mask-grow'
 import { AI_CAPABILITIES, getRoutingPolicy, resetRoutingPolicy, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
 import { getClientAIState, runClientAISelfTest, subscribeClientAI } from '@/lib/client-ai'
@@ -239,6 +240,22 @@ const MaskControls = ({ dominantColor }) => {
     // layer still exists without re-binding on every chain edit.
     const chainStackRef = useRef(stack)
     useEffect(() => { chainStackRef.current = stack }, [stack])
+
+    // Per-mask tone curves: build the packed 256×1 RGBA LUT from the curve
+    // points (master/R/G/B), register it as a texture, and point the layer at
+    // it via `curveLutKey`; identity curves clear the LUT so the engine skips
+    // the lookup. Drives the `LayerGradeEditor`'s curve graph in each mask card
+    // (gamma + colour wheels are plain layer fields and flow through onUpdate).
+    const applyCurve = useCallback((id, curves) => {
+        const { packed, identity } = buildPackedLutFromCurves(curves || {})
+        if (identity) {
+            updateLayer(id, { curveLutKey: undefined, curves: undefined })
+            return
+        }
+        const key = `curve-${id}`
+        setMaskTexture(key, new ImageData(new Uint8ClampedArray(packed), 256, 1))
+        updateLayer(id, { curveLutKey: key, curves })
+    }, [updateLayer])
 
     // Persistence rehydrate: if the primary image already carries a persisted
     // MegashaderFilter (restored from project state by loadFromJSON, with its
@@ -1090,6 +1107,9 @@ const MaskControls = ({ dominantColor }) => {
     const [lassoSink, setLassoSink] = useState('select')   // 'select' | 'erase'
     const [lassoModifier, setLassoModifier] = useState('new') // new|add|subtract|intersect
     const [lassoFeather, setLassoFeather] = useState(0.04)
+    // Pen mode: smooth the captured anchors into a Bézier 'path' layer (vs the
+    // straight-edged 'lasso' layer). Reuses the whole lasso capture pipeline.
+    const [lassoSmooth, setLassoSmooth] = useState(false)
     const [lassoVertexCount, setLassoVertexCount] = useState(0)
     // ─── Magnetic lasso (edge-snapping) options — Photoshop parity ───
     // Width = search radius (image px), Contrast = edge threshold (0..100),
@@ -1846,6 +1866,21 @@ const MaskControls = ({ dominantColor }) => {
         return c
     }, [imageSize])
 
+    // Pen mode — smooth the captured anchors into a Bézier path and rasterise
+    // it to the same capped-scale alpha canvas the lasso uses. Reuses the exact
+    // capture pipeline; only the rasterisation (curves) and layer kind differ.
+    const rasterizePenPath = useCallback((points) => {
+        if (!imageSize || !points || points.length < 3) return null
+        const longEdge = Math.max(imageSize.width, imageSize.height)
+        const scale = longEdge > BRUSH_CANVAS_MAX_DIM ? BRUSH_CANVAS_MAX_DIM / longEdge : 1
+        const W = Math.max(1, Math.round(imageSize.width * scale))
+        const H = Math.max(1, Math.round(imageSize.height * scale))
+        const anchors = smoothToBezier(points, { closed: true })
+        const sc = (p) => (p ? { x: p.x * scale, y: p.y * scale } : undefined)
+        const scaled = anchors.map((a) => ({ x: a.x * scale, y: a.y * scale, cOut: sc(a.cOut), cIn: sc(a.cIn) }))
+        return rasterisePath(scaled, W, H, { closed: true })
+    }, [imageSize])
+
     // ─── Magnetic lasso edge engine ───
     // Build (and cache) a Sobel gradient-magnitude map of the source image,
     // normalised to 0..1, at the SAME capped scale rasterizeLasso uses so the
@@ -1916,15 +1951,19 @@ const MaskControls = ({ dominantColor }) => {
     const finishLassoSelection = useCallback((rawEvent) => {
         const pts = lassoPointsRef.current
         if (!pts || pts.length < 3) { resetLassoPath(); return }
-        const canvas = rasterizeLasso(pts)
+        const usePen = lassoSmooth
+        const canvas = usePen ? rasterizePenPath(pts) : rasterizeLasso(pts)
         if (!canvas) { resetLassoPath(); return }
-        const key = `lasso-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+        const prefix = usePen ? 'path' : 'lasso'
+        const key = `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
         setMaskTexture(key, canvas)
-        const id = addChainLayer('lasso', {
+        const id = addChainLayer(usePen ? 'path' : 'lasso', {
             maskTextureKey: key,
             feather: lassoFeather,
             fillMode: lassoSink === 'erase' ? 'erase' : 'fill',
-            label: lassoSink === 'erase' ? 'Lasso cut' : 'Lasso selection',
+            label: usePen
+                ? (lassoSink === 'erase' ? 'Pen cut' : 'Pen path')
+                : (lassoSink === 'erase' ? 'Lasso cut' : 'Lasso selection'),
         })
         if (id) {
             const mod = resolveLassoModifier(rawEvent)
@@ -1937,7 +1976,7 @@ const MaskControls = ({ dominantColor }) => {
             toast.success(lassoSink === 'erase' ? 'Lasso cut added to layers' : 'Lasso selection added to layers')
         }
         resetLassoPath()
-    }, [rasterizeLasso, addChainLayer, setLayerOp, lassoFeather, lassoSink, resolveLassoModifier, resetLassoPath])
+    }, [rasterizeLasso, rasterizePenPath, lassoSmooth, addChainLayer, setLayerOp, lassoFeather, lassoSink, resolveLassoModifier, resetLassoPath])
 
     const removeLastLassoVertex = useCallback(() => {
         if (lassoPointsRef.current.length === 0) return
@@ -2875,6 +2914,8 @@ const MaskControls = ({ dominantColor }) => {
                                 onMove={moveLayer}
                                 onSetOp={setLayerOp}
                                 onSetFillMode={setFillMode}
+                                onApplyCurve={applyCurve}
+                                histogram={histogram}
                                 dominantColor={dominantColor}
                                 onExpandBoundary={(layerId, px) => {
                                     // Regenerates the layer's texture from its
@@ -3617,6 +3658,23 @@ const MaskControls = ({ dominantColor }) => {
                             />
                         </div>
                     )}
+
+                    {/* Pen mode — smooth the captured anchors into a Bézier 'path'
+                        layer (Photoshop Pen-tool parity) instead of a straight lasso. */}
+                    <button
+                        type="button"
+                        onClick={() => setLassoSmooth((v) => !v)}
+                        title="Smooth the captured points into a Bézier pen path before committing"
+                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
+                        style={{
+                            background: lassoSmooth ? 'rgba(83,216,255,0.12)' : 'var(--bg-elevated)',
+                            border: `1px solid ${lassoSmooth ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                            color: lassoSmooth ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                        }}
+                    >
+                        <Spline className="h-3.5 w-3.5" />
+                        {lassoSmooth ? 'Pen: smooth curves ON' : 'Pen: smooth curves'}
+                    </button>
 
                     {/* Output: select (fill) vs erase (cut) */}
                     <div className="grid grid-cols-2 gap-1.5">

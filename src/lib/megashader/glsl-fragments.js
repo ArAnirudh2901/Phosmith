@@ -106,11 +106,11 @@ export const buildFragmentTemplate = () => /* glsl */ `
     uniform float uMaskOverlay;
     uniform vec3 uMaskOverlayColor;
 
-    // {{MASK_FUNCTIONS}}
+    {{MASK_FUNCTIONS}}
 
-    // {{ADJUST_FUNCTIONS}}
+    {{ADJUST_FUNCTIONS}}
 
-    // {{EVAL_DISPATCHER}}
+    {{EVAL_DISPATCHER}}
 
     /**
      * Branchless RGB → HSB conversion (Hue in degrees 0..360, S and B 0..1).
@@ -137,7 +137,7 @@ export const buildFragmentTemplate = () => /* glsl */ `
         vec4 src = texture2D(uImage, vTextureCoord);
         vec3 srcRgb = src.rgb;
 
-        // {{BOOLEAN_CHAIN}}
+        {{BOOLEAN_CHAIN}}
 
         // Global invert flips the whole composited selection (Lightroom
         // "Invert mask"). Applied to both the recolour and erase channels so
@@ -238,10 +238,14 @@ export const buildLayerFunction = (slotIndex, kind, params = {}) => {
     const builder = getKindBuilder(kind)
     const bodyFn = builder(slotIndex)
 
+    // commonUniforms MUST be declared at global scope — GLSL ES 1.00 forbids
+    // `uniform` inside a function body. (Previously injected inside
+    // evalLayer_<slot>(), which made every effect shader fail to compile and
+    // silently fall back to CPU passthrough — i.e. masks never rendered.)
     return /* glsl */ `
         ${bodyFn}
+        ${commonUniforms}
         float evalLayer_${slotIndex}() {
-            ${commonUniforms}
             ${commonApply}
         }
     `
@@ -294,6 +298,23 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
     const bk = `uLayer_${slotIndex}_adjust_blacks`
     const tp = `uLayer_${slotIndex}_adjust_temperature`
     const tn = `uLayer_${slotIndex}_adjust_tint`
+    const vb = `uLayer_${slotIndex}_adjust_vibrance`
+    // Detail — local-contrast ops. Unlike the per-pixel adjustments above
+    // these sample the SOURCE neighbourhood (uImage at vTextureCoord ± texel),
+    // exactly like the smartBrush. uImage/uImageSize are always in the header.
+    const tx = `uLayer_${slotIndex}_adjust_texture`
+    const dh = `uLayer_${slotIndex}_adjust_dehaze`
+    // Pro colour-grading extensions (per mask, adjust.jsx parity): gamma
+    // (per-channel power, identity 1.0), 3-way colour wheels (shadows/midtones/
+    // highlights tonal colour balance, vec3 offsets), and a tone-curve LUT
+    // (256×1 RGBA built by the renderer via buildLut/packLutsRgba; same lookup
+    // as PhosmithCurvesFilter). curveOn gates the extra texture reads.
+    const gm = `uLayer_${slotIndex}_adjust_gamma`
+    const wlS = `uLayer_${slotIndex}_wheel_shadows`
+    const wlM = `uLayer_${slotIndex}_wheel_midtones`
+    const wlH = `uLayer_${slotIndex}_wheel_highlights`
+    const cvL = `uLayer_${slotIndex}_curveLut`
+    const cvOn = `uLayer_${slotIndex}_curveOn`
     // Per-layer fill output (root-cause #1 fix). `fillMode` selects how the
     // layer turns its mask alpha into a visible result:
     //   0 = adjust  → recolour the masked region via the adjustments above
@@ -317,6 +338,15 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
         uniform float ${bk};
         uniform float ${tp};
         uniform float ${tn};
+        uniform float ${vb};
+        uniform float ${tx};
+        uniform float ${dh};
+        uniform float ${gm};
+        uniform vec3  ${wlS};
+        uniform vec3  ${wlM};
+        uniform vec3  ${wlH};
+        uniform sampler2D ${cvL};
+        uniform float ${cvOn};
         uniform float ${fm};
         uniform vec3  ${fc};
         uniform float ${fs};
@@ -324,16 +354,26 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
         vec3 applyLayerAdjust_${slotIndex}(vec3 rgb) {
             // Early-out: identity adjustments. Saves the per-pixel cost for
             // the common "no-op adjust" case (a freshly created layer before
-            // the user touches any slider). All ten fields must be 0.
+            // the user touches any slider). All thirteen fields must be 0.
             if (${e} == 0.0 && ${c} == 0.0 && ${s} == 0.0 && ${b} == 0.0
                 && ${hi} == 0.0 && ${sh} == 0.0 && ${wh} == 0.0 && ${bk} == 0.0
-                && ${tp} == 0.0 && ${tn} == 0.0) {
+                && ${tp} == 0.0 && ${tn} == 0.0 && ${vb} == 0.0
+                && ${tx} == 0.0 && ${dh} == 0.0
+                && ${gm} == 1.0 && ${cvOn} < 0.5
+                && ${wlS} == vec3(0.0) && ${wlM} == vec3(0.0) && ${wlH} == vec3(0.0)) {
                 return rgb;
             }
 
             // Exposure: multiply by 2^stops. Defensive clamp even though
             // sanitiseLayer already clamps to [-3, 3].
             rgb *= pow(2.0, clamp(${e}, -3.0, 3.0));
+
+            // Gamma: per-channel power (adjust.jsx filters.Gamma parity). 1.0 is
+            // identity; <1 brightens midtones, >1 darkens. Guard so the pow only
+            // runs when the curve isn't flat.
+            if (${gm} != 1.0) {
+                rgb = pow(clamp(rgb, 0.0, 1.0), vec3(1.0 / clamp(${gm}, 0.2, 2.2)));
+            }
 
             // White balance — Temperature (warm/cool) shifts R up & B down;
             // Tint (magenta/green) shifts the green channel. Scaled small so
@@ -369,6 +409,84 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
             // deviation from grey.
             float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
             rgb = mix(vec3(lum), rgb, 1.0 + ${s} * 0.01);
+
+            // Vibrance: a smarter saturation that protects pixels that are
+            // already vivid (and skin tones) by scaling the boost by the
+            // pixel's current saturation. satC = max-min channel spread.
+            float vbAmt = ${vb} * 0.01;
+            float vMax = max(rgb.r, max(rgb.g, rgb.b));
+            float vMin = min(rgb.r, min(rgb.g, rgb.b));
+            float satC = vMax - vMin;                 // 0 (grey) .. 1 (pure hue)
+            float lumV = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+            rgb = mix(vec3(lumV), rgb, 1.0 + vbAmt * (1.0 - satC));
+
+            // 3-way colour wheels — tonal colour balance (shadows / midtones /
+            // highlights). Each wheel is a vec3 offset (-1..1); weight it by the
+            // pixel's luma so each tonal range gets its own tint. This is the
+            // classic lift/gamma/gain colour-grade, applied only inside the mask.
+            if (${wlS} != vec3(0.0) || ${wlM} != vec3(0.0) || ${wlH} != vec3(0.0)) {
+                float lwG = dot(clamp(rgb, 0.0, 1.0), vec3(0.2126, 0.7152, 0.0722));
+                float wgSh = 1.0 - smoothstep(0.0, 0.5, lwG);
+                float wgHi = smoothstep(0.5, 1.0, lwG);
+                float wgMid = 1.0 - wgSh - wgHi;
+                rgb += ${wlS} * wgSh * 0.5 + ${wlM} * wgMid * 0.5 + ${wlH} * wgHi * 0.5;
+                rgb = clamp(rgb, 0.0, 1.0);
+            }
+
+            // Detail (Texture / Dehaze) — LOCAL contrast, so they sample the
+            // SOURCE neighbourhood (uImage) using uImageSize for the texel step.
+            // Guarded so the extra texture reads only cost when actually used.
+            if (${tx} != 0.0 || ${dh} != 0.0) {
+                vec2 texel = 1.0 / max(uImageSize, vec2(1.0, 1.0));
+                vec3 LW = vec3(0.2126, 0.7152, 0.0722);
+                if (${tx} != 0.0) {
+                    // Texture / clarity: mid-frequency local contrast =
+                    // source luma minus its 3×3 mean (unsharp mask on luma).
+                    float m = 0.0;
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2(-1.0, -1.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2( 0.0, -1.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2( 1.0, -1.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2(-1.0,  0.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2( 1.0,  0.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2(-1.0,  1.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2( 0.0,  1.0)).rgb, LW);
+                    m += dot(texture2D(uImage, vTextureCoord + texel * vec2( 1.0,  1.0)).rgb, LW);
+                    float srcL = dot(texture2D(uImage, vTextureCoord).rgb, LW);
+                    float detail = srcL - (m / 8.0);
+                    rgb += (${tx} * 0.01) * detail * 2.0;
+                }
+                if (${dh} != 0.0) {
+                    // Dehaze: local-contrast + saturation lift (negative = add
+                    // haze / soften). Mean colour from a wider source sample.
+                    float d = ${dh} * 0.01;
+                    vec3 meanC = (
+                        texture2D(uImage, vTextureCoord + texel * vec2(-3.0,  0.0)).rgb +
+                        texture2D(uImage, vTextureCoord + texel * vec2( 3.0,  0.0)).rgb +
+                        texture2D(uImage, vTextureCoord + texel * vec2( 0.0, -3.0)).rgb +
+                        texture2D(uImage, vTextureCoord + texel * vec2( 0.0,  3.0)).rgb
+                    ) * 0.25;
+                    rgb += d * 0.5 * (rgb - meanC);
+                    float gD = dot(clamp(rgb, 0.0, 1.0), LW);
+                    rgb = mix(vec3(gD), rgb, 1.0 + d * 0.4);
+                }
+                rgb = clamp(rgb, 0.0, 1.0);
+            }
+
+            // Tone curves — per-channel then master LUT (256×1 RGBA: R/G/B in
+            // the colour channels, master in alpha). Identical lookup to
+            // curves-filter.js FRAGMENT_SOURCE; the renderer uploads the packed
+            // LUT and sets curveOn when the layer's curve isn't the identity.
+            if (${cvOn} > 0.5) {
+                vec3 cc = clamp(rgb, 0.0, 1.0);
+                float cr = texture2D(${cvL}, vec2(cc.r, 0.5)).r;
+                float cg = texture2D(${cvL}, vec2(cc.g, 0.5)).g;
+                float cb = texture2D(${cvL}, vec2(cc.b, 0.5)).b;
+                rgb = vec3(
+                    texture2D(${cvL}, vec2(cr, 0.5)).a,
+                    texture2D(${cvL}, vec2(cg, 0.5)).a,
+                    texture2D(${cvL}, vec2(cb, 0.5)).a
+                );
+            }
 
             return clamp(rgb, 0.0, 1.0);
         }

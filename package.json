@@ -24,6 +24,7 @@
     "verify:auto-crop": "bun scripts/verify-auto-crop.mjs",
     "verify:extend": "bun scripts/verify-extend-frame.mjs",
     "verify:nl-mask": "bun scripts/verify-nl-mask.mjs",
+    "verify:subject-cleanup": "cd scripts/mask-verify && bun --preload ./_canvas-shim.mjs ./verify-subject-cleanup.mjs",
     "verify:client-ai": "bun scripts/verify-client-ai.mjs",
     "verify:agent": "bun scripts/verify-agent-loop.mjs",
     "verify:inpaint": "bun scripts/verify-inpaint.mjs",
