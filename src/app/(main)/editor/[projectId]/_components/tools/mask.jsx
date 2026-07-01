@@ -3070,6 +3070,35 @@ const MaskControls = ({ dominantColor }) => {
                     AI selects the main subject as a layer — background stays intact
                 </p>
 
+                {/* ── AI Background: subject mask, inverted ─────────────── */}
+                <motion.button
+                    type="button"
+                    onClick={handleSelectBackground}
+                    disabled={isSegmenting}
+                    whileTap={{ scale: 0.97 }}
+                    className="mask-btn w-full py-2 text-[11px] font-semibold"
+                    style={{
+                        background: 'rgba(6,184,212,0.10)',
+                        border: '1px solid rgba(6,184,212,0.30)',
+                        color: '#67E8F9',
+                    }}
+                >
+                    {isSegmenting ? (
+                        <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Selecting Background…
+                        </>
+                    ) : (
+                        <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Select Background
+                        </>
+                    )}
+                </motion.button>
+                <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
+                    Everything except the subject — the reliable way to grade sky / backdrop
+                </p>
+
                 {/* ── Multi-subject: per-instance picker ────────────────── */}
                 <motion.button
                     type="button"
