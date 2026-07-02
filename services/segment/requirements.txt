@@ -32,3 +32,21 @@ transformers>=4.45.0
 # ~200 MB model, MIT license, reuses torch/torchvision from above.
 simple-lama-inpainting>=0.1.0
 
+# SAM 3.1 — primary AI subject / instance / text-grounding engine (SAM3_ENABLE=1).
+# The package itself is gated and not on PyPI; install from Meta's GitHub:
+#   pip install "git+https://github.com/facebookresearch/sam3.git"
+# and authenticate for the gated checkpoint (downloads from facebook/sam3.1):
+#   hf auth login        # account must be approved at hf.co/facebook/sam3.1
+# sam3 hard-imports NVIDIA `triton`, which has NO macOS / Apple-Silicon wheel.
+# On non-CUDA hosts main.py installs a CPU triton stub (_ensure_triton_stub) so
+# the import succeeds; sam3.perflib already dispatches NMS / connected-components
+# to numpy/skimage off-GPU, and inference runs on CPU (slow). On a CUDA host the
+# real triton is used and the stub is a no-op.
+# These two are runtime deps sam3 needs but does NOT declare in its metadata:
+pycocotools>=2.0.7          # sam3.train.data COCO loaders (pulled in transitively)
+opencv-python-headless>=4.8 # cv2, used across sam3 image ops
+# Alpha matting for SAM3_REFINE_MATTING (hair-level edge refinement). The
+# PyMatting closed-form solver is the quality path; the cv2 guided-filter
+# fallback needs only opencv. scipy/numpy come transitively.
+pymatting>=1.1
+

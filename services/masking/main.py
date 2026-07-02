@@ -94,6 +94,16 @@ SAM3_INSTANCES_MAX = int(os.getenv("SAM3_INSTANCES_MAX", "24").strip())
 SAM3_EAGER = os.getenv("SAM3_EAGER", "0").strip() not in ("0", "false", "False", "")
 SAM2_MAX_CLICKS = int(os.getenv("SAM2_MAX_CLICKS", "50").strip())
 
+# High-precision matting refinement of SAM 3 masks: turn the coarse binary SAM
+# mask into a hair-accurate soft alpha via a trimap + alpha-matting solve guided
+# by the RGB image (PyMatting closed-form, with a pure-cv2 guided-filter
+# fallback). Off by default (adds CPU latency); enable with SAM3_REFINE_MATTING=1.
+SAM3_REFINE_MATTING = os.getenv("SAM3_REFINE_MATTING", "0").strip() not in ("0", "false", "False", "")
+SAM3_REFINE_METHOD = os.getenv("SAM3_REFINE_METHOD", "pymatting_cf").strip()  # pymatting_cf | pymatting_knn | guided
+SAM3_REFINE_MAX_SIDE = int(os.getenv("SAM3_REFINE_MAX_SIDE", "1024").strip())  # cap matting resolution (CPU perf/RAM)
+SAM3_REFINE_ERODE = int(os.getenv("SAM3_REFINE_ERODE", "6").strip())          # sure-fg shrink (px @ full res)
+SAM3_REFINE_DILATE = int(os.getenv("SAM3_REFINE_DILATE", "18").strip())       # unknown-band width — room for hair
+
 # Matte-cleanup tuning (see clean_matte).
 MATTE_HOLE_FILL_MAX_FRAC = float(os.getenv("MATTE_HOLE_FILL_MAX_FRAC", "0.02").strip())
 MATTE_FAINT_RECOVER_MAX = int(os.getenv("MATTE_FAINT_RECOVER_MAX", "96").strip())
@@ -190,6 +200,90 @@ def _depth_predict(app, img: Image.Image) -> np.ndarray:
         while len(DEPTH_CACHE) > DEPTH_CACHE_MAX:
             DEPTH_CACHE.popitem(last=False)
     return normalised
+
+
+# ─── High-precision matting refinement (hair-level edges) ────────────────────
+# SAM 3 returns a coarse object mask; to reach pixel precision on fine structure
+# (hair, fur, thin/wispy edges) we build a trimap from the binary mask (erode →
+# sure-foreground, dilate → unknown band, outside → sure-background) and solve a
+# matting problem guided by the RGB image, so the soft alpha follows real image
+# gradients inside the unknown band. PyMatting closed-form is the quality path; a
+# pure-cv2 guided filter is the no-extra-dependency fallback.
+
+def _disk(px: int) -> np.ndarray:
+    px = max(1, int(px))
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+
+
+def _make_trimap(binary_u8: np.ndarray, erode_px: int, dilate_px: int) -> np.ndarray:
+    """Binary mask (0/255) → trimap float32: 1.0 sure-fg, 0.0 sure-bg, 0.5 unknown.
+    A wide dilate band gives the matting solver room to recover hair / fine strands
+    that extend past the coarse SAM mask boundary."""
+    m = (binary_u8 > 127).astype(np.uint8) * 255
+    fg = cv2.erode(m, _disk(erode_px))
+    near = cv2.dilate(m, _disk(dilate_px))
+    tri = np.full(m.shape, 0.5, np.float32)
+    tri[near == 0] = 0.0
+    tri[fg == 255] = 1.0
+    return tri
+
+
+def _guided_filter_np(I: np.ndarray, p: np.ndarray, r: int = 8, eps: float = 1e-4) -> np.ndarray:
+    """Edge-aware guided filter (He et al.) — pure numpy/cv2, the fast matting
+    fallback. I = grayscale guide [0,1], p = trimap [0,1]."""
+    k = (2 * r + 1, 2 * r + 1)
+    blur = lambda x: cv2.blur(x, k)
+    mean_I, mean_p = blur(I), blur(p)
+    var_I = blur(I * I) - mean_I * mean_I
+    cov_Ip = blur(I * p) - mean_I * mean_p
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+    return blur(a) * I + blur(b)
+
+
+def _fine_matte(rgb: np.ndarray, tri: np.ndarray, method: str) -> np.ndarray:
+    """Trimap + RGB → refined alpha float32 [0,1]."""
+    if method.startswith("pymatting"):
+        from pymatting import estimate_alpha_cf, estimate_alpha_knn  # type: ignore
+        img = rgb.astype(np.float64) / 255.0
+        fn = estimate_alpha_knn if "knn" in method else estimate_alpha_cf
+        return np.clip(fn(img, tri.astype(np.float64)), 0.0, 1.0).astype(np.float32)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    q = _guided_filter_np(gray, tri.astype(np.float32))
+    return np.where(tri == 1.0, 1.0, np.where(tri == 0.0, 0.0, np.clip(q, 0.0, 1.0))).astype(np.float32)
+
+
+def _refine_alpha_with_matting(alpha_u8: np.ndarray, rgb: np.ndarray, binary_mask: np.ndarray) -> np.ndarray:
+    """Refine a coarse SAM 3 binary mask into a hair-accurate soft alpha via a
+    trimap + matting solve guided by the RGB image. Runs at SAM3_REFINE_MAX_SIDE
+    for CPU perf / RAM, then upsamples the alpha. Returns HxW uint8; falls back to
+    the input alpha on any error or if cv2 is missing."""
+    if not SAM3_REFINE_MATTING or cv2 is None:
+        return alpha_u8
+    try:
+        if rgb is None or getattr(rgb, "ndim", 0) != 3:
+            return alpha_u8
+        H, W = binary_mask.shape[:2]
+        bin255 = (binary_mask > 0).astype(np.uint8) * 255
+        ms = SAM3_REFINE_MAX_SIDE
+        scale = min(1.0, ms / float(max(H, W))) if ms > 0 else 1.0
+        if scale < 1.0:
+            w2, h2 = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
+            rgb_s = cv2.resize(rgb, (w2, h2), interpolation=cv2.INTER_AREA)
+            bin_s = cv2.resize(bin255, (w2, h2), interpolation=cv2.INTER_NEAREST)
+            er = max(2, int(round(SAM3_REFINE_ERODE * scale)))
+            di = max(3, int(round(SAM3_REFINE_DILATE * scale)))
+        else:
+            rgb_s, bin_s, er, di = rgb, bin255, SAM3_REFINE_ERODE, SAM3_REFINE_DILATE
+        tri = _make_trimap(bin_s, er, di)
+        alpha_f = _fine_matte(np.ascontiguousarray(rgb_s), tri, SAM3_REFINE_METHOD)
+        out = (np.clip(alpha_f, 0.0, 1.0) * 255.0).astype(np.uint8)
+        if scale < 1.0:
+            out = cv2.resize(out, (W, H), interpolation=cv2.INTER_LINEAR)
+        return out
+    except Exception as e:
+        log.warning("SAM 3 matting refine failed (%s); using coarse alpha", e)
+        return alpha_u8
 
 
 # ─── Saliency-matte cleanup ──────────────────────────────────────────────────
@@ -311,18 +405,180 @@ def _patch_sam3_fused_mlp_for_cpu() -> None:
     _SAM3_CPU_PATCHED = True
 
 
+def _ensure_triton_stub() -> None:
+    """SAM 3's kernels (edt / nms / connected-components) do a bare ``import
+    triton`` at module load, but Triton ships no wheel for macOS / Apple
+    Silicon, so that import raises ``ModuleNotFoundError`` before SAM 3 can load
+    and the service silently falls back to saliency. The actual CPU compute
+    paths already exist -- ``sam3.perflib`` dispatches to numpy/skimage whenever
+    tensors are not CUDA, and the fused MLP is patched above -- so the only
+    missing piece is the ``triton`` symbol itself. Install a permissive stub
+    that satisfies the import-time references; its callables are never executed
+    because every dispatcher routes to its CPU branch off-GPU. No-op on a real
+    CUDA host where the genuine Triton package is importable."""
+    try:
+        import triton  # noqa: F401  (real Triton present, e.g. a CUDA box)
+        return
+    except Exception:
+        pass
+    # Load torch's compile stack (and torchvision, which pulls it in) WHILE
+    # Triton is genuinely absent, so torch._inductor records "no Triton" and
+    # won't later try to import real-Triton submodules (triton.backends.*)
+    # through our stub. SAM 3's import drags in torchvision ->
+    # torch._dynamo -> torch._inductor, which probes Triton; doing it here
+    # first makes that probe resolve to "absent" and cache it.
+    try:
+        import torch  # noqa: F401
+        import torchvision  # noqa: F401
+        import torch._inductor.runtime.hints  # noqa: F401
+    except Exception:
+        pass
+    import sys
+    import types
+
+    class _Dummy:
+        # Usable as @triton.jit (returns the fn), @triton.autotune(...) (returns
+        # a decorator), triton.Config(...) / triton.cdiv(...) (returns self), and
+        # is subscriptable / iterable so nothing raises at decoration time.
+        def __call__(self, *args, **kwargs):
+            if len(args) == 1 and callable(args[0]) and not kwargs:
+                return args[0]
+            return self
+
+        def __getattr__(self, name):
+            return self
+
+        def __getitem__(self, key):
+            return self
+
+        def __iter__(self):
+            return iter(())
+
+    _dummy = _Dummy()
+
+    class _Stub(types.ModuleType):
+        def __getattr__(self, name):
+            return _dummy
+
+    triton_mod = _Stub("triton")
+    triton_mod.__path__ = []  # mark as a package so `import triton.language` resolves
+    triton_mod.__version__ = "3.0.0"  # satisfy any version probes
+    triton_mod.__file__ = "triton_stub/__init__.py"
+    triton_mod.jit = _dummy
+    triton_mod.autotune = _dummy
+    triton_mod.heuristics = _dummy
+    triton_mod.Config = _dummy
+    triton_mod.cdiv = lambda a, b: (int(a) + int(b) - 1) // int(b)
+    language_mod = _Stub("triton.language")
+    language_mod.__file__ = "triton_stub/language.py"
+    language_mod.constexpr = _dummy
+    triton_mod.language = language_mod
+    sys.modules["triton"] = triton_mod
+    sys.modules["triton.language"] = language_mod
+    log.warning(
+        "Triton is unavailable (expected on macOS/Apple Silicon); installed a CPU "
+        "stub so SAM 3 can load. Inference runs on CPU and will be slow."
+    )
+
+
+_SAM3_CUDA_REDIRECTED = False
+
+
+def _redirect_cuda_to_cpu() -> None:
+    """sam3 hardcodes ``device="cuda"`` / ``.cuda()`` in several spots that run on
+    the IMAGE path regardless of the requested device — e.g.
+    ``position_encoding.PositionEmbeddingSine`` precompute, ``vl_combiner``,
+    ``decoder`` — which crashes on a CUDA-less torch (macOS / Apple Silicon) with
+    "Torch not compiled with CUDA enabled". On a host without CUDA, coerce every
+    cuda tensor placement to cpu. This only changes behaviour for cuda requests,
+    which would otherwise hard-crash here, so it cannot affect the working
+    CPU / CoreML paths. No-op on a real CUDA box."""
+    global _SAM3_CUDA_REDIRECTED
+    if _SAM3_CUDA_REDIRECTED:
+        return
+    import torch  # type: ignore
+
+    if torch.cuda.is_available():
+        return
+
+    def _coerce(device):
+        if device is None:
+            return device
+        try:
+            text = str(device)
+        except Exception:
+            return device
+        return "cpu" if text.startswith("cuda") else device
+
+    for _name in (
+        "zeros", "ones", "empty", "full", "tensor", "as_tensor", "arange",
+        "randn", "rand", "randint", "zeros_like", "ones_like", "linspace",
+    ):
+        _orig = getattr(torch, _name, None)
+        if _orig is None:
+            continue
+
+        def _make(orig):
+            def _wrapped(*args, **kwargs):
+                if "device" in kwargs:
+                    kwargs["device"] = _coerce(kwargs["device"])
+                return orig(*args, **kwargs)
+
+            return _wrapped
+
+        setattr(torch, _name, _make(_orig))
+
+    # TorchScript's frontend rejects the *args/**kwargs wrappers above, and
+    # sam3's interactive predictor scripts its transform pipeline at build time
+    # (SAM2Transforms: torch.jit.script(...) → torchvision Normalize →
+    # torch.as_tensor, now a wrapper). Off-GPU, scripting buys nothing over
+    # eager — and eager keeps the device coercions applying — so hand back the
+    # object unscripted. No-op on a real CUDA host (guarded above).
+    torch.jit.script = lambda obj, *a, **k: obj
+
+    _orig_to = torch.Tensor.to
+
+    def _tensor_to(self, *args, **kwargs):
+        args = tuple(
+            _coerce(a) if isinstance(a, (str, torch.device)) else a for a in args
+        )
+        if "device" in kwargs:
+            kwargs["device"] = _coerce(kwargs["device"])
+        return _orig_to(self, *args, **kwargs)
+
+    torch.Tensor.to = _tensor_to
+    torch.Tensor.cuda = lambda self, *a, **k: self  # already cpu -> stay cpu
+    # pin_memory() pins to the MPS "accelerator" on Apple Silicon, yielding an
+    # mps:0 storage that then collides with cpu tensors (e.g. sam3
+    # geometry_encoders._encode_boxes: `scale.pin_memory().to(cpu)`). Pinning
+    # only helps async host->GPU copies we never do on cpu, so make it a no-op.
+    torch.Tensor.pin_memory = lambda self, *a, **k: self
+    try:
+        torch.cuda.current_device = lambda: 0  # avoid raise in unguarded callers
+    except Exception:
+        pass
+
+    _SAM3_CUDA_REDIRECTED = True
+    log.warning(
+        "CUDA unavailable; redirecting SAM 3's hardcoded cuda tensor placement to "
+        "cpu. Inference runs on CPU (slow). No-op on a real CUDA host."
+    )
+
+
 def _load_sam3(app: FastAPI) -> bool:
     """Load SAM 3 into app.state (blocking; caller holds _SAM3_LOCK)."""
     if not SAM3_ENABLE:
         app.state.sam3_load_failed = True
         return False
     try:
+        _ensure_triton_stub()
         from sam3.model.sam3_image_processor import Sam3Processor  # type: ignore
         from sam3.model_builder import build_sam3_image_model  # type: ignore
 
         device = _sam3_device_label()
         if device == "cpu":
             _patch_sam3_fused_mlp_for_cpu()
+            _redirect_cuda_to_cpu()
         log.info("loading SAM 3 model %r onto %s ...", SAM3_MODEL_ID, device)
         t0 = time.perf_counter()
         kwargs = _sam3_checkpoint_kwargs()
@@ -551,6 +807,8 @@ def _sam3_ground_results(app, img: Image.Image, phrases: "list[str]", rgb: np.nd
                 continue
             union = _union_from_instances(instances, img.width, img.height) > 0
             alpha = _soft_alpha_from_mask(union)
+            if SAM3_REFINE_MATTING:
+                alpha = _refine_alpha_with_matting(alpha, rgb, union)
             if _MATTE_CLEANUP:
                 try:
                     alpha = clean_matte(alpha, rgb)
@@ -800,9 +1058,12 @@ async def segment(image: UploadFile = File(..., alias="image")) -> Response:
             instances = []
         if instances:
             subjects = len(instances)
-            final_alpha = _soft_alpha_from_mask(
-                _union_from_instances(instances, img.width, img.height) > 0
-            )
+            union_bin = _union_from_instances(instances, img.width, img.height) > 0
+            final_alpha = _soft_alpha_from_mask(union_bin)
+            if SAM3_REFINE_MATTING:
+                final_alpha = await run_in_threadpool(
+                    _refine_alpha_with_matting, final_alpha, np_rgb, union_bin
+                )
 
     if final_alpha is None:
         subject_mode = "saliency"
@@ -910,11 +1171,13 @@ async def segment_instances(
     def _build_payload():
         frame_area = float(w * h) or 1.0
         union = np.zeros((h, w), dtype=np.uint8)
+        union_bin = np.zeros((h, w), dtype=bool)
         items = []
         for idx, inst in enumerate(instances):
             mb = inst["mask"]
             alpha = _soft_alpha_from_mask(mb)
             union = np.maximum(union, alpha)
+            union_bin |= mb
             ys, xs = np.nonzero(mb)
             items.append({
                 "index": idx, "label": inst["label"], "class_id": inst["class_id"],
@@ -924,7 +1187,10 @@ async def segment_instances(
                 "centroid": [round(float(xs.mean()), 1), round(float(ys.mean()), 1)],
                 "mask_png": _mask_png_b64(alpha),
             })
-        return items, (_mask_png_b64(union) if items else None)
+        union_out = union
+        if items and SAM3_REFINE_MATTING:
+            union_out = _refine_alpha_with_matting(union, np.asarray(img_rgb), union_bin)
+        return items, (_mask_png_b64(union_out) if items else None)
 
     items, union_b64 = await run_in_threadpool(_build_payload)
     elapsed = time.perf_counter() - t0
