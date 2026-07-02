@@ -725,6 +725,14 @@ def _redirect_cuda_to_cpu() -> None:
 
         setattr(torch, _name, _make(_orig))
 
+    # TorchScript's frontend rejects the *args/**kwargs wrappers above, and
+    # sam3's interactive predictor scripts its transform pipeline at build time
+    # (SAM2Transforms: torch.jit.script(...) → torchvision Normalize →
+    # torch.as_tensor, now a wrapper). Off-GPU, scripting buys nothing over
+    # eager — and eager keeps the device coercions applying — so hand back the
+    # object unscripted. No-op on a real CUDA host (guarded above).
+    torch.jit.script = lambda obj, *a, **k: obj
+
     _orig_to = torch.Tensor.to
 
     def _tensor_to(self, *args, **kwargs):
