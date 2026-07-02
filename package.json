@@ -1,5 +1,5 @@
 {
-  "name": "pixxel",
+  "name": "phosmith",
   "version": "0.1.0",
   "private": true,
   "packageManager": "bun@1.3.11",
@@ -30,7 +30,10 @@
     "verify:inpaint": "bun scripts/verify-inpaint.mjs",
     "verify:history": "node scripts/verify-history-journal.mjs",
     "mask:install": "pip install -r services/segment/requirements.txt",
-    "mask:dev": "python services/segment/main.py"
+    "mask:dev": "python services/segment/main.py",
+    "masking:install": "pip install -r services/masking/requirements.txt",
+    "masking:dev": "python services/masking/main.py",
+    "masking:preload": "python services/masking/preload_local.py"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.0.6",

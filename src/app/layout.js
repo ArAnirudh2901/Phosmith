@@ -74,19 +74,19 @@ const clerkAppearance = {
 
 export const metadata = {
   title: {
-    default: "Pixxel — AI Image Studio",
-    template: "%s · Pixxel",
+    default: "Phosmith — AI Image Studio",
+    template: "%s · Phosmith",
   },
   description: "Professional AI-powered image editing. Generative fill, collage maker, background removal, AI agent chat — all in the browser.",
-  keywords: ["AI image editor", "photo editor", "generative fill", "background removal", "collage maker", "Pixxel"],
-  applicationName: "Pixxel",
-  authors: [{ name: "Pixxel" }],
-  creator: "Pixxel",
+  keywords: ["AI image editor", "photo editor", "generative fill", "background removal", "collage maker", "Phosmith"],
+  applicationName: "Phosmith",
+  authors: [{ name: "Phosmith" }],
+  creator: "Phosmith",
   metadataBase: new URL("https://phosmith.vercel.app"),
   openGraph: {
     type: "website",
-    siteName: "Pixxel",
-    title: "Pixxel — AI Image Studio",
+    siteName: "Phosmith",
+    title: "Phosmith — AI Image Studio",
     description: "Professional AI-powered image editing. Generative fill, collage maker, background removal, AI agent chat — all in the browser.",
     url: "https://phosmith.vercel.app",
     images: [
@@ -94,13 +94,13 @@ export const metadata = {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "Pixxel — AI Image Studio",
+        alt: "Phosmith — AI Image Studio",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Pixxel — AI Image Studio",
+    title: "Phosmith — AI Image Studio",
     description: "Professional AI-powered image editing. Generative fill, collage maker, background removal, AI agent chat.",
     images: ["/og-image.png"],
   },
@@ -119,7 +119,7 @@ export default function RootLayout({ children }) {
       appearance={clerkAppearance}
     >
       <html lang="en" className="dark" suppressHydrationWarning>
-        <body className={`${jetbrainsMono.variable} pixxel-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
+        <body className={`${jetbrainsMono.variable} phosmith-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
           <ThemeProvider
             attribute="class"
             defaultTheme="dark"

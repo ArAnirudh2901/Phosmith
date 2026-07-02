@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Beaker, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
+import { Bot, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -10,7 +10,7 @@ import usePlanAccess from '../../../../../../hooks/usePlanAccess'
 import UpgradeModel from '@/components/upgradeModel'
 import { addImageFilesToCanvas } from '@/lib/canvas-images'
 import ProBadge from '@/components/pro-badge'
-import PixxelWordmark from '@/components/phosmith-wordmark'
+import PhosmithWordmark from '@/components/phosmith-wordmark'
 import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
 import { motion, AnimatePresence } from 'framer-motion'
 import { snapshotCanvasToBlobSafe, isTaintError } from '@/lib/canvas-snapshot'
@@ -48,17 +48,6 @@ const TOOLS = [
     { id: "ai_agent", label: "Agent", icon: Bot },
     { id: "collage", label: "Collage", icon: LayoutGrid },
 ]
-
-// Dev-only tools are appended in `next.config.mjs`-stripped builds via a
-// NODE_ENV check. These IDs map 1:1 to entries in `TOOL_CONFIGS` in
-// `editor-sidebar.jsx`. Production trees never see them.
-const DEV_ONLY_TOOLS = process.env.NODE_ENV === 'production' ? [] : [
-    { id: "megashader_test", label: "Megashader", icon: Beaker, devOnly: true },
-]
-
-// The combined list is what the topbar iterates over. Order is preserved so
-// the Megashader button sits at the end of the bar (visually separated).
-const ALL_TOOLS = [...TOOLS, ...DEV_ONLY_TOOLS]
 
 const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarrowViewport = false }) => {
 
@@ -406,7 +395,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
-                        <PixxelWordmark showText={false} height={24} markScale={2.1} />
+                        <PhosmithWordmark showText={false} height={24} markScale={2.1} />
                     </Link>
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).
@@ -444,7 +433,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     className="editor-topbar-tools flex items-center justify-center gap-1 lg:gap-1.5 xl:gap-2 min-[1700px]:gap-2.5 min-[2000px]:gap-3 overflow-x-auto scrollbar-hide max-w-[100vw]"
                     ref={toolsScrollRef}
                 >
-                    {ALL_TOOLS.map((tool) => {
+                    {TOOLS.map((tool) => {
                         const Icon = tool.icon
                         const isActive = activeTool === tool.id
                         const hasToolAccess = hasAccess(tool.id)

@@ -6,112 +6,48 @@ export const runtime = 'nodejs'
 /* ═══════════════════════════════════════════════════════════════════════════
  * /api/ai/warmup — Proactively warm up all lazy-loaded AI models
  *
- * The Python mask service lazy-loads heavy models (SAM2, Depth, CLIPSeg,
- * LaMa) on first use. This can take 30–120 seconds on a free-tier CPU
- * host (downloading weights from HuggingFace Hub + loading into memory).
- *
- * This route lets the frontend trigger warmup proactively (e.g. when the
- * editor opens) so the first real AI request doesn't surprise the user
- * with a long wait. It's fire-and-forget — the UI can show "AI models
- * warming up" but doesn't need to block on the result.
+ * The Python services lazy-load heavy models (SAM 3.1, Depth, LaMa) on first
+ * use, which can take 30–120s on a free-tier CPU host. This route warms both
+ * the masking service (MASKING_SERVICE_URL — SAM 3.1 / depth / grounding) and
+ * the segment service (MASK_SERVICE_URL — inpaint / auto-crop) so the first
+ * real AI request doesn't surprise the user. Fire-and-forget.
  *
  * No auth required — warmup is idempotent and free (just loads models).
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-const MASK_SERVICE_URL = process.env.MASK_SERVICE_URL?.trim().replace(/\/+$/, '') || ''
+const clean = (v) => v?.trim().replace(/\/+$/, '') || ''
+const MASKING_SERVICE_URL = clean(process.env.MASKING_SERVICE_URL)
+const MASK_SERVICE_URL = clean(process.env.MASK_SERVICE_URL)
+
+// Distinct service URLs to warm (the two may collapse to one combined service).
+const SERVICES = [...new Set([MASKING_SERVICE_URL, MASK_SERVICE_URL].filter(Boolean))]
 
 export async function POST() {
-  if (!MASK_SERVICE_URL) {
+  if (SERVICES.length === 0) {
     return NextResponse.json(
-      { status: 'skipped', reason: 'MASK_SERVICE_URL not configured' },
+      { status: 'skipped', reason: 'no mask service configured' },
       { status: 200 },
     )
   }
 
-  try {
-    // First check if the service is up at all
-    const healthResp = await fetch(`${MASK_SERVICE_URL}/health`, {
-      signal: AbortSignal.timeout(5000),
-    })
-    if (!healthResp.ok) {
-      return NextResponse.json(
-        { status: 'error', reason: `health check failed: HTTP ${healthResp.status}` },
-        { status: 502 },
-      )
+  const warmOne = async (url) => {
+    try {
+      const resp = await fetch(`${url}/warmup`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(290_000), // just under maxDuration
+      })
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '')
+        return { url, status: 'error', reason: `HTTP ${resp.status}: ${text.slice(0, 160)}` }
+      }
+      return { url, status: 'warmed', ...(await resp.json().catch(() => ({}))) }
+    } catch (e) {
+      return { url, status: 'error', reason: e?.message || 'warmup failed' }
     }
-    const health = await healthResp.json()
-
-    // If all models are already loaded, skip warmup
-    const allLoaded =
-      health.sam2_loaded &&
-      health.depth_loaded &&
-      health.ground_loaded &&
-      health.lama_loaded
-    if (allLoaded) {
-      return NextResponse.json({ status: 'already_warm', models: health })
-    }
-
-    // Trigger warmup — this can take 1–3 minutes on cold start
-    console.info('[ai-warmup] triggering warmup at', MASK_SERVICE_URL)
-    const warmupResp = await fetch(`${MASK_SERVICE_URL}/warmup`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(290_000), // just under maxDuration
-    })
-
-    if (!warmupResp.ok) {
-      const text = await warmupResp.text().catch(() => '')
-      return NextResponse.json(
-        { status: 'error', reason: `warmup failed: HTTP ${warmupResp.status}: ${text.slice(0, 200)}` },
-        { status: 502 },
-      )
-    }
-
-    const result = await warmupResp.json()
-    console.info('[ai-warmup] ✓ warmup complete:', result)
-    return NextResponse.json({ status: 'warmed', ...result })
-  } catch (e) {
-    console.warn('[ai-warmup] warmup failed:', e?.message)
-    return NextResponse.json(
-      { status: 'error', reason: e?.message || 'warmup failed' },
-      { status: 502 },
-    )
-  }
-}
-
-// GET for simple health probes
-export async function GET() {
-  if (!MASK_SERVICE_URL) {
-    return NextResponse.json({
-      configured: false,
-      status: 'not_configured',
-    })
   }
 
-  try {
-    const resp = await fetch(`${MASK_SERVICE_URL}/health`, {
-      signal: AbortSignal.timeout(5000),
-    })
-    if (!resp.ok) {
-      return NextResponse.json({ configured: true, status: 'unreachable' }, { status: 502 })
-    }
-    const health = await resp.json()
-    return NextResponse.json({
-      configured: true,
-      status: 'ok',
-      modelsLoaded: {
-        sam2: health.sam2_loaded || false,
-        depth: health.depth_loaded || false,
-        ground: health.ground_loaded || false,
-        lama: health.lama_loaded || false,
-      },
-      allWarm: Boolean(
-        health.sam2_loaded &&
-        health.depth_loaded &&
-        health.ground_loaded &&
-        health.lama_loaded,
-      ),
-    })
-  } catch {
-    return NextResponse.json({ configured: true, status: 'unreachable' }, { status: 502 })
-  }
+  const results = await Promise.all(SERVICES.map(warmOne))
+  const ok = results.some((r) => r.status === 'warmed')
+  console.info('[ai-warmup] results:', results)
+  return NextResponse.json({ status: ok ? 'warmed' : 'error', services: results }, { status: ok ? 200 : 502 })
 }

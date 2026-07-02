@@ -1,7 +1,7 @@
 import { memo } from 'react'
 
 /**
- * Pixxel brand mark — a 5×7 pixel-block capital "P" with one cell of the
+ * Phosmith brand mark — a 5×7 pixel-block capital "P" with one cell of the
  * middle bar (the bar that closes the bowl and joins the descender)
  * replaced with brand cyan. That cell is the structural pivot of the
  * letterform: it sits at the geometric horizontal center and at the
@@ -43,9 +43,9 @@ const InkDropLogo = memo(function InkDropLogo() {
             viewBox="0 0 28 28"
             fill="none"
             role="img"
-            aria-label="Pixxel"
+            aria-label="Phosmith"
         >
-            <title>Pixxel</title>
+            <title>Phosmith</title>
 
             {/* Top bar — 5 white cells across the top of the bowl */}
             <rect x="4" y="0" width="4" height="4" fill="#F4F4F5" />

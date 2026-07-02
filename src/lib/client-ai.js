@@ -38,6 +38,10 @@ const CHANGED_EVENT = 'phosmith:client-ai-changed'
 
 const GROUND_MODEL = 'Xenova/clipseg-rd64-refined'
 const DEPTH_MODEL = 'onnx-community/depth-anything-v2-small'
+// On-device click/box select — offline fallback when the SAM 3.1 service is
+// down. SlimSAM is tiny (~40 MB); the slow ViT encode is cached per image so
+// multi-click refine is fast.
+const SAM_MODEL = 'Xenova/slimsam-77-uniform'
 // Background removal / subject matting engines, in preference order. Chosen
 // empirically via verify:client-ai: BiRefNet-lite and MODNet's pipeline
 // graphs fail in this onnxruntime-web build (WASM: OrtRun std::bad_alloc
@@ -107,6 +111,7 @@ const state = {
     groundReady: false,
     depthReady: false,
     segmentReady: false,
+    samReady: false,
     diagnostics: [],     // last DIAG_MAX runs: {capability, device, ms, ok, error?, at}
 }
 
@@ -135,8 +140,8 @@ const recordDiag = (capability, startedAt, ok, error) => {
     if (state.diagnostics.length > DIAG_MAX) state.diagnostics.shift()
     // Mirror for devtools debugging (read-only convention).
     if (hasWindow()) {
-        window.__pixxel = window.__pixxel || {}
-        window.__pixxel.clientAI = getClientAIState()
+        window.__phosmith = window.__phosmith || {}
+        window.__phosmith.clientAI = getClientAIState()
     }
 }
 
@@ -178,9 +183,12 @@ const withDeviceFallback = async (capability, run) => {
         state.groundReady = false
         state.depthReady = false
         state.segmentReady = false
+        state.samReady = false
         groundPromise = null
         depthPromise = null
         segmentPromise = null
+        samPromise = null
+        samImage = null
         emitState()
         const retryAt = Date.now()
         try {
@@ -199,6 +207,10 @@ const withDeviceFallback = async (capability, run) => {
 let groundPromise = null
 let depthPromise = null
 let segmentPromise = null
+let samPromise = null
+// Cached SAM image encode: { el, w, h, rawImage, embeddings, scale }. The
+// ViT encode is the slow part, so it's reused across clicks on the same image.
+let samImage = null
 
 /** Shared CLIPSeg inference: element + phrase → sigmoid relevance map. */
 const groundLogits = async (bundle, el, phrase, { width, height }) => {
@@ -387,6 +399,7 @@ const CAPABILITY_LOADERS = {
     subjects: { load: loadGroundModel, pending: () => groundPromise != null, ready: () => state.groundReady },
     depth: { load: loadDepthModel, pending: () => depthPromise != null, ready: () => state.depthReady },
     segment: { load: loadSegmentModel, pending: () => segmentPromise != null, ready: () => state.segmentReady },
+    sam: { load: loadSamModel, pending: () => samPromise != null, ready: () => state.samReady },
 }
 
 // Run during browser idle time so a multi-hundred-MB download + ONNX compile
@@ -686,6 +699,135 @@ export const clientSubjectMask = async (el, dims) => {
         throw err
     }
 }
+
+/* ─── On-device SAM (click / box select) ─────────────────────────────────── */
+
+const loadSamModel = () => {
+    if (samPromise) return samPromise
+    samPromise = (async () => {
+        const { SamModel, AutoProcessor } = await import('@huggingface/transformers')
+        const device = await pickDevice()
+        state.loading = 'SlimSAM (click select)'
+        emitState()
+        try {
+            const [model, processor] = await withTimeout(
+                Promise.all([
+                    SamModel.from_pretrained(SAM_MODEL, { device }).catch(() => SamModel.from_pretrained(SAM_MODEL)),
+                    AutoProcessor.from_pretrained(SAM_MODEL),
+                ]),
+                LOAD_TIMEOUT_MS,
+                'SlimSAM model load',
+            )
+            state.samReady = true
+            return { model, processor }
+        } finally {
+            state.loading = null
+            emitState()
+        }
+    })()
+    samPromise.catch(() => { samPromise = null })
+    return samPromise
+}
+
+// Encode the image ONCE (the slow ViT pass) and cache embeddings + the input
+// scale (natural → capped input coords) so every later click reuses them.
+const ensureSamImage = async (el, { width, height }) => {
+    const { model, processor } = await loadSamModel()
+    const w0 = Number(width) || el?.naturalWidth || el?.width || 0
+    const h0 = Number(height) || el?.naturalHeight || el?.height || 0
+    if (samImage && samImage.el === el && samImage.w === w0 && samImage.h === h0) {
+        return { model, processor, ...samImage }
+    }
+    const input = toInputCanvas(el, w0, h0) // capped to INPUT_MAX_SIDE
+    const scale = input.width / w0          // natural → input coords
+    const rawImage = await canvasToRawImage(input)
+    let embeddings = null
+    try { embeddings = await model.get_image_embeddings(await processor(rawImage)) } catch { embeddings = null }
+    samImage = { el, w: w0, h: h0, rawImage, embeddings, scale }
+    return { model, processor, ...samImage }
+}
+
+// SAM output → coverage canvas at outW×outH (white = selected); picks the
+// highest-IoU candidate. Ported from the mask-studio testbed.
+const samMaskToCanvas = (maskTensor, iou, outW, outH) => {
+    const dims = maskTensor.dims
+    const w = dims[dims.length - 1]
+    const h = dims[dims.length - 2]
+    const nMasks = dims.length >= 3 ? dims[dims.length - 3] : 1
+    const scores = iou && iou.data ? Array.from(iou.data) : []
+    let bi = 0
+    let best = -Infinity
+    for (let i = 0; i < nMasks; i += 1) { const s = scores[i] ?? 0; if (s > best) { best = s; bi = i } }
+    const plane = w * h
+    const off = bi * plane
+    const small = document.createElement('canvas')
+    small.width = w
+    small.height = h
+    const sctx = small.getContext('2d')
+    const img = sctx.createImageData(w, h)
+    const d = maskTensor.data
+    for (let p = 0; p < plane; p += 1) {
+        const v = d[off + p] ? 255 : 0
+        const q = p * 4
+        img.data[q] = v
+        img.data[q + 1] = v
+        img.data[q + 2] = v
+        img.data[q + 3] = 255
+    }
+    sctx.putImageData(img, 0, 0)
+    const out = document.createElement('canvas')
+    out.width = Math.max(1, outW || w)
+    out.height = Math.max(1, outH || h)
+    const octx = out.getContext('2d')
+    octx.imageSmoothingEnabled = true
+    octx.imageSmoothingQuality = 'high'
+    octx.drawImage(small, 0, 0, out.width, out.height)
+    return out
+}
+
+const samClickOnce = async (el, points, labels, dims) => {
+    const { model, processor, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
+    const input_points = [[points.map(([x, y]) => [Math.round(x * scale), Math.round(y * scale)])]]
+    const input_labels = [[labels.map((l) => (l ? 1 : 0))]]
+    const inputs = await processor(rawImage, { input_points, input_labels })
+    let outputs
+    if (embeddings) {
+        try {
+            outputs = await model({ ...embeddings, input_points: inputs.input_points, input_labels: inputs.input_labels })
+        } catch { outputs = null }
+    }
+    if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, 'SlimSAM inference')
+    const masks = await processor.post_process_masks(outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
+    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
+}
+
+const samBoxOnce = async (el, box, dims) => {
+    const { model, processor, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
+    const input_boxes = [[[
+        Math.round(box[0] * scale), Math.round(box[1] * scale),
+        Math.round(box[2] * scale), Math.round(box[3] * scale),
+    ]]]
+    const inputs = await processor(rawImage, { input_boxes })
+    let outputs
+    if (embeddings) {
+        try { outputs = await model({ ...embeddings, input_boxes: inputs.input_boxes }) } catch { outputs = null }
+    }
+    if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, 'SlimSAM inference')
+    const masks = await processor.post_process_masks(outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
+    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
+}
+
+/**
+ * In-browser SAM click-select (SlimSAM). `points` are [[x, y], ...] and
+ * `labels` [1|0, ...] in the image's NATURAL pixel coords; returns a coverage
+ * canvas at (width, height). Same timeout + WebGPU→WASM hardening as the rest.
+ */
+export const clientSamClick = (el, points, labels, dims) =>
+    withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims))
+
+/** In-browser SAM box-select (SlimSAM). `box` is [x0, y0, x1, y1] natural px. */
+export const clientSamBox = (el, box, dims) =>
+    withDeviceFallback('sam', () => samBoxOnce(el, box, dims))
 
 /* ─── Self-test ──────────────────────────────────────────────────────────── */
 
