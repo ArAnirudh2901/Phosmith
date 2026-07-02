@@ -18,8 +18,9 @@ import { rgbToHsb } from '@/lib/color-utils'
 import { setMaskTexture, rasterisePath, smoothToBezier } from '@/lib/megashader'
 import { buildPackedLutFromCurves } from '@/lib/curve-lut'
 import { expandLayerBoundary } from '@/lib/mask-grow'
-import { AI_CAPABILITIES, getRoutingPolicy, resetRoutingPolicy, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
-import { getClientAIState, runClientAISelfTest, subscribeClientAI } from '@/lib/client-ai'
+import { AI_CAPABILITIES, getRoutingPolicy, resetRoutingPolicy, setRoutingMode, subscribeRouting, resolveOrder } from '@/lib/ai-routing'
+import { getClientAIState, runClientAISelfTest, subscribeClientAI, clientSamClick, clientSamBox, clientSubjectMask } from '@/lib/client-ai'
+import { serviceSubjectMask, serviceSamClick, serviceSamBox, bboxOfMaskCanvas } from '@/lib/mask-service-client'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 import {
     BrushSizeControl,
@@ -806,119 +807,78 @@ const MaskControls = ({ dominantColor }) => {
         }
     }, [])
 
+    // Run SAM with the current click points and/or box. Routes through the
+    // masking service first (SAM 3.1) and falls back to on-device SlimSAM per
+    // the 'sam' routing policy, so selection still works when the service is
+    // down. Each call supersedes the previous (live per-interaction refine).
     const handleSemanticRun = useCallback(async () => {
         if (!tool.mainImage) return
-        // Read the in-flight flag from a ref, not from closure-captured
-        // state — a fast double-click can otherwise launch two concurrent
-        // fetches and race to overwrite the decoded mask.
-        if (isSemanticRunningRef.current) return
-        if (semanticClicks.length === 0 && !semanticBox) {
-            toast('Add a click or draw a box first')
-            return
-        }
+        const clicks = semanticClicks
+        const box = semanticBox
+        if (clicks.length === 0 && !box) return
         const sourceEl = tool.mainImage._element || tool.mainImage.getElement?.()
-        if (!sourceEl) {
-            toast.error('Image not ready')
-            return
-        }
-        // Cancel any earlier in-flight request so it can't resolve and
-        // clobber our state if it was slower than us.
+        if (!sourceEl) return
+        const origW = sourceEl.naturalWidth || sourceEl.width || 0
+        const origH = sourceEl.naturalHeight || sourceEl.height || 0
+        if (origW < 1 || origH < 1) return // <img> still loading — a later change re-fires
+
+        // Supersede any in-flight request so a fast click burst can't race.
         try { semanticAbortRef.current?.abort() } catch { /* ignore */ }
         const abortController = new AbortController()
         semanticAbortRef.current = abortController
         isSemanticRunningRef.current = true
         setIsSemanticRunning(true)
-        try {
-            // Resize source for the upload (matches the route's MAX_MODEL_SIDE
-            // so we don't burn bandwidth shipping 12MP images over the wire).
-            const origW = sourceEl.naturalWidth || sourceEl.width || 0
-            const origH = sourceEl.naturalHeight || sourceEl.height || 0
-            // An <img> mid-load reports 0 — sending a 1px upload would 400 or
-            // mis-select. Fail with a clear message instead.
-            if (origW < 1 || origH < 1) {
-                throw new Error('Image is still loading — try again in a moment')
-            }
-            const MAX_UPLOAD_SIDE = 1024
-            const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(origW, origH))
-            const uploadW = Math.max(1, Math.round(origW * scale))
-            const uploadH = Math.max(1, Math.round(origH * scale))
 
-            const c = document.createElement('canvas')
-            c.width = uploadW
-            c.height = uploadH
-            const ctx = c.getContext('2d')
-            if (!ctx) throw new Error('Could not allocate upload canvas')
-            ctx.drawImage(sourceEl, 0, 0, uploadW, uploadH)
-            let blob
+        const points = clicks.map(([x, y]) => [x, y])
+        const labels = clicks.map(([, , l]) => l)
+        const dims = { width: origW, height: origH }
+        const runServer = () => (box
+            ? serviceSamBox(sourceEl, box, { ...dims, signal: abortController.signal })
+            : serviceSamClick(sourceEl, points, labels, { ...dims, signal: abortController.signal }))
+        const runClient = () => (box
+            ? clientSamBox(sourceEl, box, dims)
+            : clientSamClick(sourceEl, points, labels, dims))
+
+        let canvas = null
+        let lastErr = null
+        for (const side of resolveOrder('sam')) {
             try {
-                blob = await new Promise((resolve, reject) => {
-                    c.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85)
-                })
-            } catch (e) {
-                // Cross-origin image without CORS taints the canvas → toBlob
-                // throws SecurityError. Say so plainly.
-                if (e?.name === 'SecurityError') {
-                    throw new Error('This image is from another site without CORS, so it can’t be read for AI selection')
-                }
-                throw e
+                canvas = side === 'client' ? await runClient() : await runServer()
+                if (canvas) break
+            } catch (err) {
+                if (err?.name === 'AbortError') return
+                lastErr = err
             }
-
-            // Bug #10: clicks are captured in TRUE-natural image space, but
-            // the route derives "original" dims from the (already downscaled
-            // ≤1024) upload and validates/scales clicks against THAT. Sending
-            // raw natural coords for any >1024px source either 400s
-            // (out-of-bounds) or selects the wrong subject (off by
-            // ~natural/1024). Scale the clicks into the uploaded blob's space
-            // here so both ends agree on one reference frame.
-            const scaledClicks = semanticClicks.map(([x, y, l]) => [
-                Math.round(x * scale * 100) / 100,
-                Math.round(y * scale * 100) / 100,
-                l,
-            ])
-            const form = new FormData()
-            form.append('image', blob, 'image.jpg')
-            if (scaledClicks.length) form.append('clicks', JSON.stringify(scaledClicks))
-            if (semanticBox) {
-                // Same reference-frame fix as clicks: scale the box into the
-                // uploaded blob's space, clamped inside it.
-                const scaledBox = [
-                    Math.max(0, Math.round(semanticBox[0] * scale * 100) / 100),
-                    Math.max(0, Math.round(semanticBox[1] * scale * 100) / 100),
-                    Math.min(uploadW, Math.round(semanticBox[2] * scale * 100) / 100),
-                    Math.min(uploadH, Math.round(semanticBox[3] * scale * 100) / 100),
-                ]
-                form.append('box', JSON.stringify(scaledBox))
-            }
-
-            const resp = await fetch('/api/ai/sam2', { method: 'POST', body: form, signal: abortController.signal })
-            if (!resp.ok) {
-                const errJson = await resp.json().catch(() => ({}))
-                throw new Error(errJson.error || `SAM 2 request failed (${resp.status})`)
-            }
-            const maskBlob = await resp.blob()
-            const decoded = await decodeMaskBlob(maskBlob)
-
-            // If a newer request was kicked off while we were decoding,
-            // its results supersede ours — bail without writing state.
+        }
+        try {
+            // A newer request superseded us while we were running — bail.
             if (semanticAbortRef.current !== abortController) return
-            setLastSemanticMask(decoded.imageData)
-            setLastSemanticPreview(decoded.dataUrl)
-            toast.success(`Subject selected (${decoded.width}×${decoded.height})`)
+            if (!canvas) throw lastErr || new Error('AI selection failed')
+            const ctx = canvas.getContext('2d', { willReadFrequently: true })
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            setLastSemanticMask(imageData)
+            setLastSemanticPreview(canvas.toDataURL('image/png'))
         } catch (err) {
-            // AbortError is the expected outcome of a user-initiated
-            // cancel; don't surface it as a failure toast.
             if (err?.name === 'AbortError') return
-            console.error('[mask] SAM 2 selection failed:', err)
+            console.error('[mask] SAM selection failed:', err)
             toast.error(err?.message || 'AI selection failed')
         } finally {
-            // Only clear the running flag if we're still the latest
-            // request — a newer one will manage its own lifecycle.
             if (semanticAbortRef.current === abortController) {
                 isSemanticRunningRef.current = false
                 setIsSemanticRunning(false)
             }
         }
-    }, [tool, semanticClicks, semanticBox, decodeMaskBlob])
+    }, [tool, semanticClicks, semanticBox])
+
+    // Live per-interaction selection: re-run SAM (debounced) whenever the click
+    // points or box change, so each click/drag immediately updates the preview
+    // — the cumulative-point refine SAM is designed for.
+    useEffect(() => {
+        if (!semanticActive) return undefined
+        if (semanticClicks.length === 0 && !semanticBox) return undefined
+        const t = setTimeout(() => { handleSemanticRun() }, 80)
+        return () => clearTimeout(t)
+    }, [semanticActive, semanticClicks, semanticBox, handleSemanticRun])
 
     // Add the most recent decoded mask as a megashader layer. The
     // texture is stored in the module-level mask cache under a freshly
@@ -2467,72 +2427,91 @@ const MaskControls = ({ dominantColor }) => {
         return id
     }, [addChainLayer, updateLayer])
 
-    const handleSelectSubject = useCallback(async () => {
+    // Subject / Background selection. Routes through the masking service
+    // (SAM 3.1, with a saliency→box-seed upgrade when the service returns a
+    // plain matte) and falls back to on-device RMBG per the 'segment' routing
+    // policy. `invert` flips coverage so the WHOLE background (everything that
+    // isn't the subject) is selected — the only reliable "select the sky"
+    // because text grounding only binds the bright sky blob.
+    const runSubjectSelection = useCallback(async ({ invert = false, label } = {}) => {
         if (!tool.mainImage) return
         if (isSegmentingRef.current) return
+        const sourceEl = tool.mainImage?._element || tool.mainImage?.getElement?.()
+        if (!sourceEl) { toast.error('Cannot access image element'); return }
+        const origW = sourceEl.naturalWidth || sourceEl.width || tool.mainImage.width || 0
+        const origH = sourceEl.naturalHeight || sourceEl.height || tool.mainImage.height || 0
+        if (origW < 1 || origH < 1) { toast('Image is still loading — try again in a moment'); return }
+
         try { segmentAbortRef.current?.abort() } catch { /* ignore */ }
         const abortController = new AbortController()
         segmentAbortRef.current = abortController
         isSegmentingRef.current = true
         setIsSegmenting(true)
-
+        const noun = invert ? 'Background' : 'Subject'
+        const dims = { width: origW, height: origH }
         try {
-            // Get the source image as a blob
-            const fabricObj = tool.mainImage
-            const sourceEl = fabricObj?._element || fabricObj?.getElement?.()
-            if (!sourceEl) throw new Error('Cannot access image element')
-
-            // Draw source to canvas and export as blob
-            const c = document.createElement('canvas')
-            const origW = sourceEl.naturalWidth || sourceEl.width || fabricObj.width
-            const origH = sourceEl.naturalHeight || sourceEl.height || fabricObj.height
-            // Cap the longest side to 2048 before upload. BiRefNet runs at a
-            // fixed 1024² internally so this doesn't change matte detail, but it
-            // gives the service's YOLO pass enough resolution to find small /
-            // distant subjects in group photos (and a crisper mask upscale).
-            // JPEG q=0.92 keeps a 2048-side frame well under the 24 MB cap.
-            const scale = Math.min(1, 2048 / Math.max(origW, origH))
-            c.width = Math.round(origW * scale)
-            c.height = Math.round(origH * scale)
-            const ctx = c.getContext('2d')
-            ctx.drawImage(sourceEl, 0, 0, c.width, c.height)
-
-            const blob = await new Promise((resolve, reject) => {
-                c.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.92)
-            })
-
-            const form = new FormData()
-            form.append('image', blob, 'image.jpg')
-
-            const resp = await fetch('/api/ai/segment', { method: 'POST', body: form, signal: abortController.signal })
-            if (!resp.ok) {
-                const errJson = await resp.json().catch(() => ({}))
-                throw new Error(errJson.error || `Segmentation failed (${resp.status})`)
+            let maskCanvas = null
+            for (const side of resolveOrder('segment')) {
+                try {
+                    if (side === 'client') {
+                        maskCanvas = await clientSubjectMask(sourceEl, dims)
+                    } else {
+                        const r = await serviceSubjectMask(sourceEl, { subjectBox: true, ...dims, signal: abortController.signal })
+                        maskCanvas = r.canvas
+                        // Plain matte → upgrade to a crisp SAM 3.1 mask via a box
+                        // prompt seeded from the matte's bbox (the strongest
+                        // single-object prompt).
+                        if (r.mode !== 'sam3') {
+                            const bb = bboxOfMaskCanvas(maskCanvas)
+                            if (bb && bb[2] - bb[0] >= 8 && bb[3] - bb[1] >= 8) {
+                                try {
+                                    const up = await serviceSamBox(sourceEl, bb, { ...dims, signal: abortController.signal })
+                                    if (up && bboxOfMaskCanvas(up)) maskCanvas = up
+                                } catch { /* keep the matte */ }
+                            }
+                        }
+                    }
+                    if (maskCanvas) break
+                } catch (err) {
+                    if (err?.name === 'AbortError') return
+                    /* try the next side */
+                }
             }
-
-            const maskBlob = await resp.blob()
             if (segmentAbortRef.current !== abortController) return
-            const decoded = await decodeMaskBlob(maskBlob)
-            // A newer request may have superseded us while decoding.
-            if (segmentAbortRef.current !== abortController) return
-            const id = applySubjectSelection(decoded.imageData, 'Subject')
+            if (!maskCanvas) throw new Error(`${noun} detection failed`)
+            const ctx = maskCanvas.getContext('2d', { willReadFrequently: true })
+            const imageData = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
+            if (invert) {
+                const d = imageData.data
+                for (let i = 0; i < d.length; i += 4) {
+                    d[i] = 255 - d[i]
+                    d[i + 1] = 255 - d[i + 1]
+                    d[i + 2] = 255 - d[i + 2]
+                }
+            }
+            const id = applySubjectSelection(imageData, label || (invert ? 'AI Background' : 'Subject'))
             if (id) {
                 setActiveInstanceIndex(null)
-                toast.success('Subject selected — adjust it in Mask Layers, or add a brush/lasso to refine.')
+                toast.success(invert
+                    ? 'Background selected — everything except the subject. Refine in Mask Layers.'
+                    : 'Subject selected — adjust it in Mask Layers, or add a brush/lasso to refine.')
             } else {
-                toast.error('Could not create subject selection')
+                toast.error(`Could not create ${noun.toLowerCase()} selection`)
             }
         } catch (err) {
             if (err?.name === 'AbortError') return
-            console.error('[mask] AI subject selection failed:', err)
-            toast.error(err?.message || 'AI subject selection failed')
+            console.error(`[mask] AI ${noun.toLowerCase()} selection failed:`, err)
+            toast.error(err?.message || `AI ${noun.toLowerCase()} selection failed`)
         } finally {
             if (segmentAbortRef.current === abortController) {
                 isSegmentingRef.current = false
                 setIsSegmenting(false)
             }
         }
-    }, [tool, decodeMaskBlob, applySubjectSelection])
+    }, [tool, applySubjectSelection])
+
+    const handleSelectSubject = useCallback(() => runSubjectSelection({ invert: false }), [runSubjectSelection])
+    const handleSelectBackground = useCallback(() => runSubjectSelection({ invert: true }), [runSubjectSelection])
 
     /* ─── Multi-Subject Detection (Detect All Subjects) ──────────────────────
      * Calls /api/ai/segment-instances to enumerate every subject in the image
@@ -3089,6 +3068,35 @@ const MaskControls = ({ dominantColor }) => {
                 </motion.button>
                 <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
                     AI selects the main subject as a layer — background stays intact
+                </p>
+
+                {/* ── AI Background: subject mask, inverted ─────────────── */}
+                <motion.button
+                    type="button"
+                    onClick={handleSelectBackground}
+                    disabled={isSegmenting}
+                    whileTap={{ scale: 0.97 }}
+                    className="mask-btn w-full py-2 text-[11px] font-semibold"
+                    style={{
+                        background: 'rgba(6,184,212,0.10)',
+                        border: '1px solid rgba(6,184,212,0.30)',
+                        color: '#67E8F9',
+                    }}
+                >
+                    {isSegmenting ? (
+                        <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Selecting Background…
+                        </>
+                    ) : (
+                        <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Select Background
+                        </>
+                    )}
+                </motion.button>
+                <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
+                    Everything except the subject — the reliable way to grade sky / backdrop
                 </p>
 
                 {/* ── Multi-subject: per-instance picker ────────────────── */}

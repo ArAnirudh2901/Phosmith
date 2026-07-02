@@ -33,7 +33,7 @@ export const runtime = 'nodejs'
  *   - X-Elapsed-Ms
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-const MASK_SERVICE_URL = process.env.MASK_SERVICE_URL?.trim().replace(/\/+$/, '') || ''
+const MASKING_SERVICE_URL = (process.env.MASKING_SERVICE_URL || process.env.MASK_SERVICE_URL)?.trim().replace(/\/+$/, '') || ''
 const MAX_INPUT_BYTES = 24 * 1024 * 1024
 // Cap the image's longest side before forwarding to the Python service.
 // Depth Anything V2 runs internally at ~518×518 and the route resizes
@@ -66,10 +66,10 @@ const readImageMeta = async (inputBuffer) => {
 }
 
 const callDepthService = async (imageBuffer) => {
-  if (!MASK_SERVICE_URL) {
-    return { ok: false, reason: 'MASK_SERVICE_URL not configured' }
+  if (!MASKING_SERVICE_URL) {
+    return { ok: false, reason: 'MASKING_SERVICE_URL not configured' }
   }
-  const endpoint = `${MASK_SERVICE_URL}/depth`
+  const endpoint = `${MASKING_SERVICE_URL}/depth`
   try {
     const formData = new FormData()
     formData.append('image', new Blob([imageBuffer], { type: 'image/jpeg' }), 'image.jpg')
@@ -123,9 +123,9 @@ export async function POST(request) {
     const limited = rateLimitResponse(await enforceRateLimit('ai-segment', userId))
     if (limited) return limited
 
-    if (!MASK_SERVICE_URL) {
+    if (!MASKING_SERVICE_URL) {
       return NextResponse.json(
-        { error: 'MASK_SERVICE_URL is not configured. Start services/segment/main.py and set MASK_SERVICE_URL in .env.local.' },
+        { error: 'MASKING_SERVICE_URL is not configured. Start the masking service (bun run masking:dev) and set MASKING_SERVICE_URL in .env.local.' },
         { status: 501 },
       )
     }
