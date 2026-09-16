@@ -143,7 +143,7 @@ const Header = () => {
       >
         <nav className="flex items-center gap-3 sm:gap-6 pl-4 pr-4 sm:pr-6 h-16 w-full max-w-7xl mx-auto">
           <Link href="/" className="flex items-center shrink-0 group transition-opacity group-hover:opacity-90">
-            <PhosmithWordmark height={24} markScale={1.2} showText={false} />
+            <PhosmithWordmark height={30} markScale={1.5} showText={false} />
           </Link>
 
           <div className="hidden md:flex items-center gap-1 ml-4">
@@ -174,6 +174,8 @@ const Header = () => {
                   style={{
                     width: 36,
                     height: 36,
+                    minWidth: 44,
+                    minHeight: 44,
                     background: '#0E1118',
                     border: '2px solid #F4F4F5',
                     color: '#F4F4F5',

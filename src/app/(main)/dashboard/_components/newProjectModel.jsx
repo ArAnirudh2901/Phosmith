@@ -2,11 +2,11 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import usePlanAccess from '../../../../../hooks/usePlanAccess'
 import { useDatabaseMutation } from '../../../../../hooks/useDatabaseQuery'
 import { api } from "@/lib/neon-api";
-import { Crown, ImageIcon, Loader2, Upload, X } from 'lucide-react'
+import { Crown, ImageIcon, Loader2, Trash2, Upload, X } from 'lucide-react'
 import { useDropzone } from 'react-dropzone'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
 import UpgradeModel from '@/components/upgradeModel'
 import { stripImageMetadata } from '@/lib/strip-metadata'
+import { IMAGE_UPLOAD_ACCEPT, isRawFile, resolveSourceFile } from '@/lib/raw-preview'
 
 const loadImageFromObjectUrl = (url) =>
     new Promise((resolve, reject) => {
@@ -56,6 +57,18 @@ const MAX_CANVAS_EDGE = 8192
 const IMAGEKIT_MAX_MP = 24_000_000              // 24 MP — stay safely below ImageKit's 25 MP cap
 const MAX_CANVAS_AREA = IMAGEKIT_MAX_MP         // use the tighter constraint
 const IMAGEKIT_MAX_BYTES = 25 * 1024 * 1024     // 25 MB — ImageKit upload hard limit
+// Container cap only. A RAW is a container whose embedded preview is a fraction
+// of its size, so the real ceiling is IMAGEKIT_MAX_BYTES on the produced blob.
+const MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+// react-dropzone wants { mime: [ext] }. RAW files usually report an empty or
+// octet-stream type, so the extension list is what actually matches them.
+const IMAGE_UPLOAD_ACCEPT_MAP = {
+    "image/*": [
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".apng",
+        ...IMAGE_UPLOAD_ACCEPT.split(",").filter((entry) => entry.startsWith(".")),
+    ],
+}
 
 const fitToCanvasLimits = (srcW, srcH) => {
     let w = srcW
@@ -202,6 +215,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
     const [projectTitle, setProjectTitle] = useState("")
     const [selectedFile, setSelectedFile] = useState(null)
     const [previewUrl, setPreviewUrl] = useState(null)
+    const [isPreparingRaw, setIsPreparingRaw] = useState(false)
     const [showUpgradeModel, setShowUpgradeModel] = useState(false)
     const router = useRouter()
 
@@ -210,26 +224,48 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
 
     const { mutate: createProject } = useDatabaseMutation(api.projects.create)
 
-    const clearSelectedFile = () => {
-        if (previewUrl) {
-            URL.revokeObjectURL(previewUrl)
-        }
+    useEffect(() => () => {
+        if (previewUrl) URL.revokeObjectURL(previewUrl)
+    }, [previewUrl])
 
+    const clearSelectedFile = () => {
         setSelectedFile(null)
         setPreviewUrl(null)
         setIsUploading(false)
+        setIsPreparingRaw(false)
         setProjectTitle("")
     }
 
-    const onDrop = (acceptedFiles) => {
-        const file = acceptedFiles[0]
+    const onDrop = async (acceptedFiles) => {
+        const dropped = acceptedFiles[0]
+        if (!dropped) return
 
-        if (file) {
-            setSelectedFile(file)
-            setPreviewUrl(URL.createObjectURL(file))
+        const nameWithoutExtension = dropped.name.replace(/\.[^/.]+$/, "")
+        setProjectTitle(nameWithoutExtension || "Untitled Project")
 
-            const nameWithoutExtension = file.name.replace(/\.[^/.]+$/, "")
-            setProjectTitle(nameWithoutExtension || "Untitled Project")
+        // A RAW container can't decode in an <img>. Lift its embedded full-res
+        // JPEG preview first so preview, dimension read and upload all see a
+        // normal image.
+        if (!isRawFile(dropped)) {
+            setSelectedFile(dropped)
+            setPreviewUrl(URL.createObjectURL(dropped))
+            return
+        }
+
+        setIsPreparingRaw(true)
+        try {
+            const resolved = await resolveSourceFile(dropped)
+            setSelectedFile(resolved)
+            setPreviewUrl(URL.createObjectURL(resolved))
+        } catch (error) {
+            toast.error(
+                error?.message === "RAW_NO_PREVIEW"
+                    ? "This RAW file has no embedded preview — export a JPEG from your RAW editor first"
+                    : "Could not read this RAW file"
+            )
+            setProjectTitle("")
+        } finally {
+            setIsPreparingRaw(false)
         }
     }
 
@@ -239,9 +275,9 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
 
         const code = rejection.errors?.[0]?.code
         if (code === "file-too-large") {
-            toast.error("Image is too large — please use an image under 20 MB")
+            toast.error("File is too large — please use an image under 64 MB")
         } else if (code === "file-invalid-type") {
-            toast.error("Unsupported image format — try PNG, JPEG, or WebP")
+            toast.error("Unsupported format — use a standard image or a camera RAW file")
         } else {
             toast.error(rejection.errors?.[0]?.message || "Could not accept this file")
         }
@@ -250,12 +286,10 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
         onDropRejected,
-        accept: {
-            "image/*": [".png", ".jpg", ".webp", ".jpeg", ".gif", ".svg", ".avif", ".apng"]
-        },
+        accept: IMAGE_UPLOAD_ACCEPT_MAP,
         maxFiles: 1,
-        maxSize: 20 * 1024 * 1024,   // 20mb file size limit
-        disabled: !canCreate || isUploading,
+        maxSize: MAX_UPLOAD_BYTES,
+        disabled: !canCreate || isUploading || isPreparingRaw,
     })
 
     /** Standard raster formats that can go to ImageKit untouched */
@@ -295,6 +329,17 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
             const megapixels = origW * origH
             const isStandardRaster = DIRECT_UPLOAD_TYPES.has(selectedFile.type)
             const canSkipRaster = isStandardRaster && megapixels <= IMAGEKIT_MAX_MP
+
+            // Silent resolution loss is unacceptable on a photo tool — a 45 MP RAW
+            // quietly becoming 24 MP is something the user has to be told.
+            if (!canSkipRaster) {
+                const fitted = fitToCanvasLimits(origW, origH)
+                if (fitted.w < origW || fitted.h < origH) {
+                    toast.info(
+                        `Resized to ${fitted.w}x${fitted.h} — ${origW}x${origH} exceeds the 24 MP editing limit`
+                    )
+                }
+            }
 
             if (canSkipRaster) {
                 // Strip EXIF, GPS, XMP, IPTC, comments — binary-level, no re-encoding
@@ -361,6 +406,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
             }
 
             toast.success("Project created successfully")
+            clearSelectedFile()
             router.push(`/editor/${projectId}`)
 
         } catch (error) {
@@ -377,7 +423,8 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
         <>
 
             <Dialog open={isOpen} onOpenChange={(open) => {
-                if (!open) {
+                if (!open && !isUploading) {
+                    clearSelectedFile()
                     onClose()
                 }
             }}>
@@ -387,7 +434,9 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                             Create New Project
                         </DialogTitle>
                         <DialogDescription className="text-slate-300">
-                            Start a fresh canvas from your dashboard. Free accounts can keep up to 3 projects at a time.
+                            {isFree
+                                ? "Start a fresh canvas. Free accounts can keep up to 3 projects at a time."
+                                : "Start a fresh canvas from an image or a camera RAW file."}
                         </DialogDescription>
                     </DialogHeader>
 
@@ -405,7 +454,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                 </AlertDescription>
                                 {!canCreate && (
                                     <AlertAction>
-                                        <Button variant="outline" onClick={onClose}>Close</Button>
+                                        <Button variant="outline" onClick={() => { clearSelectedFile(); onClose() }}>Close</Button>
                                     </AlertAction>
                                 )}
                             </Alert>)}
@@ -419,7 +468,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                     : "border-white/20 hover:border-white/40"
                                     } ${!canCreate ? "opacity-50 pointer-events-none" : ""}`}
                             >
-                                <input {...getInputProps()} />
+                                <input {...getInputProps({ "aria-label": "Choose an image to upload" })} />
 
                                 <Upload className='h-12 w-12 text-white/50 mx-auto mb-4' />
 
@@ -427,14 +476,14 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                     {isDragActive ? "Drop your image here" : "Upload an Image"}
                                 </h3>
 
-                                <p className='mb-4 whitespace-nowrap text-sm text-white/70'>
+                                <p className='mb-4 text-sm text-white/70'>
                                     {canCreate
                                         ? "Drag and drop your image, or click to browse"
                                         : "Upgrade to Pro to create more projects"}
                                 </p>{" "}
 
-                                <p className='whitespace-nowrap text-xs text-white/50'>
-                                    Supports all the image formats upto 20MB
+                                <p className='text-xs text-white/50'>
+                                    Images and camera RAW (NEF, CR2, ARW, DNG…) up to 64 MB
                                 </p>
                             </div>
                             : <div className='space-y-6'>
@@ -449,8 +498,10 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                         variant='ghost'
                                         size='sm'
                                         onClick={clearSelectedFile}
+                                        aria-label="Remove selected image"
+                                        title="Remove selected image"
                                     >
-                                        <X className='h-4 w-4' />
+                                        <Trash2 className='h-4 w-4' />
                                     </Button>
                                 </div>
                                 <div className='space-y-2'>
@@ -462,6 +513,9 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                         type="text"
                                         value={projectTitle}
                                         onChange={(e) => setProjectTitle(e.target.value)}
+                                        name="projectTitle"
+                                        autoComplete="off"
+                                        maxLength={160}
                                         onKeyDown={(e) => {
                                             // Enter submits the form when it's valid — no need to
                                             // reach for the Create button.
@@ -470,7 +524,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                                                 handleCreateProject()
                                             }
                                         }}
-                                        placeholder="Enter project name..."
+                                        placeholder="Enter project name…"
                                         className={"bg-slate-700 border-white/20 text-white placeholder-white/50 focus:border-cyan-400 focus:ring-cyan-400"}
                                     >
                                     </Input>
@@ -502,7 +556,7 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                         <Button
                             className="text-white/70 hover:text-white"
                             variant="ghost"
-                            onClick={onClose}
+                            onClick={() => { clearSelectedFile(); onClose() }}
                             disabled={isUploading}
                         >
                             Cancel

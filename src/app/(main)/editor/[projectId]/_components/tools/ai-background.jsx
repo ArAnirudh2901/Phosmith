@@ -342,27 +342,13 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                 evented: imageToReplace.evented,
             })
 
-            // Compute the bounding box of the visible (non-transparent) pixels
+            // Replace in place: the processed PNG has the source's pixel
+            // dimensions, and the scaleX/scaleY above already map it onto the
+            // exact box the original occupied. The previous "recenter" pass
+            // assumed getBoundingRect(true, true) returned alpha-trimmed bounds
+            // (a Fabric v5 signature v7 ignores) and a centered origin, so it
+            // pushed the cut-out off the canvas.
             processedImage.setCoords()
-            const boundingRect = processedImage.getBoundingRect(true, true)
-            const croppedWidth = boundingRect.width
-            const croppedHeight = boundingRect.height
-
-            // If the processed image tightly fits the foreground, recenter it visually
-            if (croppedWidth > 0 && croppedHeight > 0) {
-                const canvasWidth = project.width
-                const canvasHeight = project.height
-
-                // Calculate the offset of the bounding box relative to the image center
-                const offsetX = (processedImage.width * processedImage.scaleX) / 2 - (boundingRect.left - processedImage.left + croppedWidth / 2)
-                const offsetY = (processedImage.height * processedImage.scaleY) / 2 - (boundingRect.top - processedImage.top + croppedHeight / 2)
-
-                // Center the cropped bounding box on the canvas
-                processedImage.set({
-                    left: canvasWidth / 2 + offsetX,
-                    top: canvasHeight / 2 + offsetY,
-                })
-            }
 
             canvasEditor.remove(imageToReplace)
             canvasEditor.add(processedImage)
@@ -736,25 +722,22 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
                 <TabsList className="grid w-full grid-cols-3" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
                     <TabsTrigger
                         value="color"
-                        className="text-xs data-[state=active]:text-white"
+                        className="min-w-0 px-1.5 text-[11px] data-[state=active]:text-white"
                         style={{ '--tw-shadow': 'none' }}
                     >
-                        <Palette className="h-3.5 w-3.5 mr-1.5" />
-                        Color
+                        <span className="truncate">Color</span>
                     </TabsTrigger>
                     <TabsTrigger
                         value="image"
-                        className="text-xs data-[state=active]:text-white"
+                        className="min-w-0 px-1.5 text-[11px] data-[state=active]:text-white"
                     >
-                        <ImageIcon className="h-3.5 w-3.5 mr-1.5" />
-                        Image
+                        <span className="truncate">Image</span>
                     </TabsTrigger>
                     <TabsTrigger
                         value="generate"
-                        className="text-xs data-[state=active]:text-white"
+                        className="min-w-0 px-1.5 text-[11px] data-[state=active]:text-white"
                     >
-                        <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                        Generate
+                        <span className="truncate">Generate</span>
                     </TabsTrigger>
                 </TabsList>
 

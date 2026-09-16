@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import GlassSlider from "@/components/GlassSlider"
-import { Wand2, ChevronRight, ChevronLeft, Square, Circle, Monitor, Smartphone, Maximize2, Sparkles, Eye, EyeOff, RotateCcw } from "lucide-react"
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Circle, Eye, EyeOff, Maximize2, Monitor, RotateCcw, Smartphone, Sparkles, Square, Wand2 } from "lucide-react"
 import { useCanvas } from "../../../../../../context/context"
 import { useDatabaseMutation, useDatabaseQuery } from "../../../../../../hooks/useDatabaseQuery"
 import usePlanAccess from "../../../../../../hooks/usePlanAccess"
@@ -13,8 +13,8 @@ import { api } from "@/lib/neon-api";
 import { serializeCanvasState } from "../../../../../lib/canvas-state"
 
 const DIRECTIONS = [
-  { id: "top", icon: ChevronLeft, label: "Expand Up" },
-  { id: "bottom", icon: ChevronRight, label: "Expand Down" },
+  { id: "top", icon: ChevronUp, label: "Expand Up" },
+  { id: "bottom", icon: ChevronDown, label: "Expand Down" },
   { id: "left", icon: ChevronLeft, label: "Expand Left" },
   { id: "right", icon: ChevronRight, label: "Expand Right" },
 ]
@@ -59,7 +59,7 @@ const FloatingToolbar = ({
   }
 
   const handleGenerate = () => {
-    if (!prompt.trim()) return
+    if (!canUseTool || !prompt.trim() || isGenerating) return
     onGenerate?.({ prompt: prompt.trim(), aspectRatio: selectedRatio, threshold, directions: selectedDirections })
   }
 
@@ -138,6 +138,8 @@ const FloatingToolbar = ({
                       whileTap={{ scale: 0.9 }}
                       whileHover={{ scale: 1.08 }}
                       title={dir.label}
+                      aria-label={dir.label}
+                      aria-pressed={isActive}
                     >
                       <Icon className="h-3.5 w-3.5" />
                     </motion.button>
@@ -155,7 +157,10 @@ const FloatingToolbar = ({
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="Describe what to generate..."
+                  placeholder="Describe what to generate…"
+                  aria-label="Describe the image extension to generate"
+                  name="extensionPrompt"
+                  autoComplete="off"
                   className="w-full bg-transparent text-sm px-3 py-1.5 rounded-full outline-none"
                   style={{
                     background: 'rgba(255, 255, 255, 0.04)',
@@ -182,6 +187,8 @@ const FloatingToolbar = ({
                 <motion.button
                   type="button"
                   onClick={() => setShowRatioDropdown(!showRatioDropdown)}
+                  aria-label="Choose aspect ratio"
+                  aria-expanded={showRatioDropdown}
                   className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-medium pill-control"
                   style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
                   whileTap={{ scale: 0.95 }}
@@ -218,8 +225,9 @@ const FloatingToolbar = ({
 
               {/* Generate button */}
               <motion.button
+                type="button"
                 onClick={handleGenerate}
-                disabled={isGenerating || !prompt.trim()}
+                disabled={isGenerating || !prompt.trim() || !canUseTool}
                 className="flex items-center gap-2 rounded-full px-4 py-2 text-[10px] font-bold pill-control"
                 style={{
                   background: isGenerating ? 'var(--glass-bg-heavy)' : 'linear-gradient(135deg, var(--accent-ink), var(--accent-ink-deep))',
@@ -249,6 +257,8 @@ const FloatingToolbar = ({
               {/* Toggle threshold */}
               <motion.button
                 type="button" onClick={() => setShowThreshold(!showThreshold)}
+                aria-label={showThreshold ? "Hide blend threshold" : "Show blend threshold"}
+                aria-pressed={showThreshold}
                 className="flex items-center justify-center w-7 h-7 rounded-full pill-control"
                 style={{ background: 'rgba(255,255,255,0.03)', borderColor: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}
                 whileTap={{ scale: 0.9 }}

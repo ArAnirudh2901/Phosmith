@@ -1,10 +1,11 @@
 "use client"
 
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useCanvas } from '../../../../../../../context/context'
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
+import { adaptiveTextColor } from '@/lib/color-extraction'
 import {
   AudioLines, BrainCircuit, Check, ChevronDown, Columns3, FlipHorizontal2, Grid3X3, Lasso, Layers, Loader2,
   Minus, Pencil, Route, RotateCcw, Rows3, ScanSearch, Sparkles, Spline, Square, StretchHorizontal,
@@ -179,6 +180,12 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const { canvasEditor, activeTool } = useCanvas()
   const active = activeTool === 'pixel_stretch'
   const accent = dominantColor || '#00E5FF'
+  // `accent` is the photo's dominant colour, so on a dark or muted image it can
+  // fall below AA against the panel. Text uses the contrast-checked variant.
+  const accentText = useMemo(
+    () => adaptiveTextColor(accent, 'rgb(14,17,24)', 1, { min: 4.5 }).color,
+    [accent],
+  )
   const onAccent = contrastingColor || '#03050A'
 
   const [selectedImage, setSelectedImage] = useState(null)
@@ -1894,7 +1901,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   if (!selectedImage) {
     return (
       <div className="panel-card flex flex-col items-center justify-center gap-3 text-center">
-        <AudioLines className="h-6 w-6" style={{ color: accent }} />
+        <AudioLines className="h-6 w-6" style={{ color: accentText }} />
         <div>
           <p className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>Select an image layer</p>
           <p className="mt-1 text-[11px]" style={{ color: 'var(--text-muted)' }}>
@@ -2053,7 +2060,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           </>
         ) : (
           <div className="mt-2.5 flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: accent }}>
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: accentText }}>
               <Check className="h-3.5 w-3.5" /> Region confirmed
             </span>
             <button
@@ -2075,7 +2082,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         <div className="flex items-center justify-between">
           <label className="panel-label inline-flex items-center gap-1.5"><Layers className="h-3 w-3" /> Placement</label>
           {isEditingLayer && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold" style={{ color: accent }}>
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold" style={{ color: accentText }}>
               <Check className="h-3 w-3" /> Editing layer
             </span>
           )}

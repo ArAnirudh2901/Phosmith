@@ -1,4 +1,5 @@
 // /api/ai/inpaint
+import { isServiceOffline, serviceOfflineResponse } from '@/lib/service-availability'
 // ================
 // Backend-selectable AI inpainting route. Supports two backends:
 //   - "lama"  → proxy to the local Python mask service (LaMa, fast, free)
@@ -413,6 +414,7 @@ export async function POST(request) {
     })
   } catch (error) {
     console.error('[ai-inpaint] failed:', error)
+    if (isServiceOffline(error)) return serviceOfflineResponse('Mask service', 'MASK_SERVICE_URL')
     return NextResponse.json(
       { error: error?.message || 'Inpainting failed' },
       { status: 500 }

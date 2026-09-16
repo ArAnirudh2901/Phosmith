@@ -93,6 +93,9 @@ const Editor = () => {
 
     const handleActiveToolChange = useCallback((toolId, subId = null) => {
         setActiveTool(toolId)
+        // In overlay mode the panel is hidden, so picking a tool otherwise looks
+        // like nothing happened — its settings are the point of picking it.
+        if (isNarrowViewport) setIsSidebarOpen(true)
         if (toolId !== "ai_extender") {
             setExpansionPreview(null)
         }
@@ -104,7 +107,7 @@ const Editor = () => {
                 window.dispatchEvent(new CustomEvent("phosmith:tool-sub", { detail: { toolId, subId } }))
             } catch { /* SSR safe */ }
         }
-    }, [])
+    }, [isNarrowViewport])
 
     useEditorShortcuts(canvasEditor, activeTool, handleActiveToolChange, () => setShowCommandPalette(prev => !prev))
 

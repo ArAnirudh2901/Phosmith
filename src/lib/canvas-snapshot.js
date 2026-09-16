@@ -87,12 +87,28 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
     let savedW = null
     let savedH = null
     const hiddenForExport = []
+    // Megashader images whose "show mask" overlay we switched off for the render.
+    const overlaysForExport = []
 
     try {
         for (const obj of canvasEditor.getObjects?.() || []) {
             if (obj.visible !== false && isExportTransientObject(obj)) {
                 hiddenForExport.push(obj)
                 obj.set?.("visible", false)
+            }
+            // The mask overlay is a shader uniform, not an object, so hiding
+            // transient objects does not cover it. Left on, it bakes the
+            // selection tint into the exported pixels.
+            for (const filter of obj?.filters || []) {
+                if (filter?.type === "Megashader" && filter.maskOverlay) {
+                    overlaysForExport.push({ obj, filter })
+                    filter.maskOverlay = false
+                }
+            }
+        }
+        if (overlaysForExport.length) {
+            for (const { obj } of overlaysForExport) {
+                try { obj.applyFilters() } catch { /* renderer may be unavailable */ }
             }
         }
 
@@ -185,6 +201,9 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
         // Always restore viewport dimensions and transform, even if render failed.
         for (const obj of hiddenForExport) {
             try { obj.set?.("visible", true) } catch { /* object may have been removed */ }
+        }
+        for (const { obj, filter } of overlaysForExport) {
+            try { filter.maskOverlay = true; obj.applyFilters() } catch { /* object may have been removed */ }
         }
         if (savedVpt && typeof savedW === "number" && typeof savedH === "number") {
             try {

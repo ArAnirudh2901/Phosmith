@@ -258,7 +258,12 @@ a:focus-visible,
    ══════════════════════════════════════════════════ */
 
 .editor-interactive {
-  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  transition:
+    color 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .glass-panel {
@@ -1039,7 +1044,7 @@ a:focus-visible,
   transition: box-shadow 180ms ease, background 180ms ease, border-color 180ms ease;
 }
 
-.panel-input:focus {
+.panel-input:focus-visible {
   background: var(--bg-elevated, #0E1118);
   border-color: #F4F4F5;
   box-shadow: 2px 2px 0 0 var(--accent-ink-glow, rgba(6, 184, 212, 0.85));
@@ -3986,7 +3991,14 @@ a:focus-visible,
 
 .pro-ruler-label {
   position: absolute;
-  left: clamp(0.65rem, 0.9vw, 0.875rem);
+  left: clamp(0.4rem, 0.6vw, 0.875rem);
+  /* Value is absolutely positioned on the right; reserve exactly its measured
+     width (set by the component) so the two never collide in narrow panels
+     without truncating the label in wide ones. */
+  right: calc(clamp(0.4rem, 0.6vw, 0.7rem) + var(--pro-ruler-value-w, 3ch) + 0.25rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   top: 50%;
   transform: translateY(-50%);
   z-index: 7;
@@ -4419,7 +4431,7 @@ a:focus-visible,
   border-color: rgba(6, 184, 212, 0.3);
 }
 
-.mask-select:focus {
+.mask-select:focus-visible {
   border-color: rgba(6, 184, 212, 0.5);
   box-shadow: 0 0 0 2px rgba(6, 184, 212, 0.08);
 }
@@ -4444,6 +4456,11 @@ a:focus-visible,
 
 .mask-range:hover {
   background: rgba(244, 244, 245, 0.12);
+}
+
+.mask-range:focus-visible {
+  outline: 2px solid rgba(6, 184, 212, 0.72);
+  outline-offset: 3px;
 }
 
 .mask-range::-webkit-slider-thumb {

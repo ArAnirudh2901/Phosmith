@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useCallback, useEffect, useRef, useState } from "react"
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { RotateCcw } from "lucide-react"
 
 const TICK_COUNT = 51
@@ -60,6 +60,20 @@ export function ProRulerSlider({
   const trackRef = useRef(null)
   const thumbRef = useRef(null)
   const valueRef = useRef(null)
+
+  // Publish the value's rendered width so the label can reserve exactly that
+  // lane (see .pro-ruler-label). A fixed ch reserve either truncates wide
+  // labels or still collides in ~100px cards.
+  useLayoutEffect(() => {
+    const v = valueRef.current
+    const host = rootRef.current
+    if (!v || !host) return
+    const sync = () => host.style.setProperty("--pro-ruler-value-w", `${Math.ceil(v.getBoundingClientRect().width)}px`)
+    sync()
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(sync) : null
+    ro?.observe(v)
+    return () => ro?.disconnect()
+  })
   const localRef = useRef(value)
   const draggingRef = useRef(false)
   const previewRafRef = useRef(null)

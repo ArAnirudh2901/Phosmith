@@ -114,9 +114,33 @@ const inMemoryClient = {
     },
 }
 
+// A cache/limiter outage must never take down the request it protects. On the
+// first remote failure, demote to the in-memory client for the rest of the
+// process so limits and caching keep working instead of 500-ing the route.
+let remoteDown = false
+
+const withFallback = (remote) => {
+    const call = async (op, ...args) => {
+        if (remoteDown) return inMemoryClient[op](...args)
+        try {
+            return await remote[op](...args)
+        } catch (error) {
+            remoteDown = true
+            console.error("[redis] remote unavailable, demoting to in-memory:", error?.message || error)
+            return inMemoryClient[op](...args)
+        }
+    }
+    return {
+        get: (key) => call("get", key),
+        set: (key, value, options) => call("set", key, value, options),
+        del: (key) => call("del", key),
+        incr: (key, ttlSeconds) => call("incr", key, ttlSeconds),
+    }
+}
+
 export const getRedis = () => {
-    if (hasUpstash) return upstashClient
-    if (hasNativeRedis) return nativeRedisClient
+    if (hasUpstash) return withFallback(upstashClient)
+    if (hasNativeRedis) return withFallback(nativeRedisClient)
     return inMemoryClient
 }
 
@@ -126,6 +150,7 @@ export const getRedis = () => {
 export const isRedisConfigured = () => true
 
 export const getRedisMode = () => {
+    if (remoteDown) return "memory"
     if (hasUpstash) return "upstash"
     if (hasNativeRedis) return "redis-url"
     return "memory"

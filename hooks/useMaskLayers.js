@@ -117,6 +117,23 @@ export const useMaskLayers = () => {
         } catch { /* SSR safe */ }
     }, [stack])
 
+    // "Show mask" overlay (view mode) + global invert. Like globalAlpha,
+    // these are chain-wide render options the canvas reads via window events
+    // (the canvas re-applies the megashader immediately). Local state mirrors
+    // them so the UI toggles reflect the current value.
+    const [showMaskOverlay, setShowMaskOverlayState] = useState(false)
+    const [globalInvert, setGlobalInvertState] = useState(false)
+    const setShowMaskOverlay = useCallback((value) => {
+        const v = !!value
+        setShowMaskOverlayState(v)
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-overlay', { detail: { value: v } })) } catch { /* SSR safe */ }
+    }, [])
+    const setGlobalInvert = useCallback((value) => {
+        const v = !!value
+        setGlobalInvertState(v)
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-invert', { detail: { value: v } })) } catch { /* SSR safe */ }
+    }, [])
+
     const addLayer = useCallback((kind, params = {}) => {
         if (!kind) return null
         // Hard cap (matches the compiler's MAX_LAYERS). Adding beyond it would
@@ -189,13 +206,14 @@ export const useMaskLayers = () => {
         if (layer && typeof params.growPx === 'number') {
             layer.growPx = params.growPx
         }
-        // Root-cause #1: new layers default to 'fill' mode so the selection
-        // is visible the instant it's added (no slider drag required). The
-        // factory default is 'adjust'; we override here unless the caller
-        // explicitly asked for a mode via params. The lasso factory already
-        // defaults to 'fill', so this is a no-op for it.
+        // A new selection must be VISIBLE but must not EDIT the photo: 'fill'
+        // paints a real colour that exports, so selecting a subject and hitting
+        // Export produced a tinted file. Visibility now comes from the
+        // non-exported "show mask" overlay enabled below; the layer itself
+        // starts in identity 'adjust' mode. Callers that genuinely want a fill
+        // (the lasso cut/erase sink) still pass fillMode explicitly.
         const fillSeed = {
-            fillMode: params.fillMode || layer.fillMode || 'fill',
+            fillMode: params.fillMode || layer.fillMode || 'adjust',
             fillColor: params.fillColor || layer.fillColor,
             fillStrength: typeof params.fillStrength === 'number' ? params.fillStrength : layer.fillStrength,
         }
@@ -203,9 +221,12 @@ export const useMaskLayers = () => {
         snapshot()
         dispatch({ type: 'add', layer })
         setSelectedLayerId(layer.id)
+        // The layer is identity now, so nothing would be visible without this:
+        // turn the non-exported overlay on so the new selection reads instantly.
+        setShowMaskOverlay(true)
         journalMaskEdit(`Mask: add ${kind} layer`)
         return layer.id
-    }, [snapshot])
+    }, [snapshot, setShowMaskOverlay])
 
     const removeLayer = useCallback((id) => {
         // NOTE: we intentionally do NOT free the texture cache entry here.
@@ -350,23 +371,6 @@ export const useMaskLayers = () => {
         try {
             window.dispatchEvent(new CustomEvent('phosmith:mask-global-alpha', { detail: { value } }))
         } catch { /* SSR safe */ }
-    }, [])
-
-    // "Show mask" overlay (view mode) + global invert. Like globalAlpha,
-    // these are chain-wide render options the canvas reads via window events
-    // (the canvas re-applies the megashader immediately). Local state mirrors
-    // them so the UI toggles reflect the current value.
-    const [showMaskOverlay, setShowMaskOverlayState] = useState(false)
-    const [globalInvert, setGlobalInvertState] = useState(false)
-    const setShowMaskOverlay = useCallback((value) => {
-        const v = !!value
-        setShowMaskOverlayState(v)
-        try { window.dispatchEvent(new CustomEvent('phosmith:mask-overlay', { detail: { value: v } })) } catch { /* SSR safe */ }
-    }, [])
-    const setGlobalInvert = useCallback((value) => {
-        const v = !!value
-        setGlobalInvertState(v)
-        try { window.dispatchEvent(new CustomEvent('phosmith:mask-invert', { detail: { value: v } })) } catch { /* SSR safe */ }
     }, [])
 
     return {

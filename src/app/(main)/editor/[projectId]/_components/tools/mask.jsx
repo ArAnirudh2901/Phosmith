@@ -967,7 +967,8 @@ const MaskControls = ({ dominantColor }) => {
         }
     }, [])
 
-    // Sticky latch: server 501/404 (SAM not installed) is permanent for the
+    // Sticky latch: server 501/404/503 (SAM absent or service down) is permanent
+    // for the
     // session — skip server on later clicks instead of 429-storming the proxy.
     // Explicit "Server" routing still forces a try; a server success clears it.
     const serviceSamDownRef = useRef(false)
@@ -1031,11 +1032,11 @@ const MaskControls = ({ dominantColor }) => {
             } catch (err) {
                 if (err?.name === 'AbortError') return
                 lastErr = err
-                if (side === 'server' && (err?.status === 501 || err?.status === 404)) {
+                if (side === 'server' && (err?.status === 501 || err?.status === 404 || err?.status === 503)) {
                     serviceSamDownRef.current = true
                     if (!serviceSamNoticeRef.current) {
                         serviceSamNoticeRef.current = true
-                        toast('Server SAM 3.1 not installed — using on-device SAM 3', { icon: '📱' })
+                        toast('Server SAM 3.1 unavailable — using on-device SAM 3', { icon: '📱' })
                     }
                 }
             }

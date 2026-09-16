@@ -43,7 +43,14 @@ export const enforceRateLimit = async (kind, identifier) => {
     const windowEnd = windowStart + windowMs
     const key = `rl:${kind}:${identifier}:${windowStart}`
 
-    const count = await getRedis().incr(key, cfg.windowSec + 1)
+    // Fail open: a limiter that 500s on infra error is a self-inflicted outage.
+    let count
+    try {
+        count = await getRedis().incr(key, cfg.windowSec + 1)
+    } catch (error) {
+        console.error("[rate-limit] backend unavailable, allowing request:", error?.message || error)
+        return { ok: true }
+    }
     const remaining = Math.max(0, cfg.count - count)
 
     if (count > cfg.count) {

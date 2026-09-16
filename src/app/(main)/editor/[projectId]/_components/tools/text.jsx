@@ -197,7 +197,7 @@ const WORDART_PRESETS = [
     },
 ]
 
-const FONT_SIZES = { min: 8, max: 200, default: 24 }
+const FONT_SIZES = { min: 8, max: 600, default: 24 }
 const DEFAULT_TEXT_COLOR = '#ffffff'
 const HEX_COLOR_PATTERN = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 
@@ -230,6 +230,17 @@ const getCanvasCenter = (c) => {
     return { x: (c?.width || 0) / (2 * z), y: (c?.height || 0) / (2 * z) }
 }
 const getFontSize = (v) => clamp(parseInt(v, 10) || FONT_SIZES.default, FONT_SIZES.min, FONT_SIZES.max)
+
+// Text is placed in document pixels, so a flat 24px default is invisible on a
+// 6000px photo and huge on a 400px one. Size it against the document instead.
+const defaultFontSizeFor = (c) => {
+    const zoom = c?.getZoom?.() || 1
+    const docH = (c?.height || 0) / zoom
+    const docW = (c?.width || 0) / zoom
+    const shortEdge = Math.min(docW, docH)
+    if (!Number.isFinite(shortEdge) || shortEdge <= 0) return FONT_SIZES.default
+    return clamp(Math.round(shortEdge * 0.06), 16, FONT_SIZES.max)
+}
 const isEditable = (t) => t?.isContentEditable || ['input', 'textarea', 'select'].includes(t?.tagName?.toLowerCase())
 
 const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
@@ -418,7 +429,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
         const text = new IText('Edit this text', {
             left: center.x, top: center.y,
             originX: 'center', originY: 'center',
-            fontFamily: 'Inter', fontSize: FONT_SIZES.default,
+            fontFamily: 'Inter', fontSize: defaultFontSizeFor(canvasEditor),
             fill: DEFAULT_TEXT_COLOR, textAlign: 'left',
             fontWeight: 'normal', fontStyle: 'normal',
             underline: false, editable: true, selectable: true,

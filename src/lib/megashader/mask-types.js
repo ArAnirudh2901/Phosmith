@@ -867,20 +867,21 @@ export const semanticLayer = ({ maskTextureKey, feather = 0.1, label } = {}) => 
  * stored with `setMaskTexture(maskTextureKey, canvas)` BEFORE the layer is
  * added, so the renderer never samples a missing texture.
  *
- * Defaults to `fillMode: 'fill'` so the selection is visible the instant
- * it's created (root-cause #1) — the lasso tool switches it to `erase` for
- * the cut/erase sink.
+ * Defaults to `fillMode: 'adjust'` (identity, no visible edit). Selection
+ * visibility comes from the non-exported "show mask" overlay, not from
+ * painting the photo — a `fill` default exported a tinted image. The lasso
+ * tool still passes `erase` explicitly for the cut/erase sink.
  *
  * @param {object} [opts]
  * @param {string} [opts.maskTextureKey]   Required — opaque cache handle.
  * @param {number} [opts.feather=0.05]    0..1 — soft-edge width.
  * @param {string} [opts.label]
- * @param {string} [opts.fillMode='fill']  'fill' | 'adjust' | 'erase'.
+ * @param {string} [opts.fillMode='adjust']  'fill' | 'adjust' | 'erase'.
  * @param {{r:number,g:number,b:number}} [opts.fillColor]
  * @param {number} [opts.fillStrength=0.5]
  * @returns {object}
  */
-export const lassoLayer = ({ maskTextureKey, feather = 0.05, label, fillMode = 'fill', fillColor, fillStrength = 0.5 } = {}) => {
+export const lassoLayer = ({ maskTextureKey, feather = 0.05, label, fillMode = 'adjust', fillColor, fillStrength = 0.5 } = {}) => {
     if (typeof maskTextureKey !== 'string' || !maskTextureKey) {
         throw new Error('[megashader] lassoLayer: `maskTextureKey` is required')
     }
@@ -910,12 +911,12 @@ export const lassoLayer = ({ maskTextureKey, feather = 0.05, label, fillMode = '
  * @param {string} [opts.maskTextureKey]   Required — opaque cache handle.
  * @param {number} [opts.feather=0.04]
  * @param {string} [opts.label]
- * @param {string} [opts.fillMode='fill']  'fill' | 'adjust' | 'erase'.
+ * @param {string} [opts.fillMode='adjust']  'fill' | 'adjust' | 'erase'.
  * @param {{r:number,g:number,b:number}} [opts.fillColor]
  * @param {number} [opts.fillStrength=0.5]
  * @returns {object}
  */
-export const pathLayer = ({ maskTextureKey, feather = 0.04, label, fillMode = 'fill', fillColor, fillStrength = 0.5 } = {}) => {
+export const pathLayer = ({ maskTextureKey, feather = 0.04, label, fillMode = 'adjust', fillColor, fillStrength = 0.5 } = {}) => {
     if (typeof maskTextureKey !== 'string' || !maskTextureKey) {
         throw new Error('[megashader] pathLayer: `maskTextureKey` is required')
     }
@@ -944,12 +945,12 @@ export const pathLayer = ({ maskTextureKey, feather = 0.04, label, fillMode = 'f
  * @param {object} [opts]
  * @param {string} [opts.maskTextureKey]   Required — opaque cache handle.
  * @param {string} [opts.label]
- * @param {string} [opts.fillMode='fill']  'fill' | 'adjust' | 'erase'.
+ * @param {string} [opts.fillMode='adjust']  'fill' | 'adjust' | 'erase'.
  * @param {{r:number,g:number,b:number}} [opts.fillColor]
  * @param {number} [opts.fillStrength=0.5]
  * @returns {object}
  */
-export const brushLayer = ({ maskTextureKey, label, fillMode = 'fill', fillColor, fillStrength = 0.5 } = {}) => {
+export const brushLayer = ({ maskTextureKey, label, fillMode = 'adjust', fillColor, fillStrength = 0.5 } = {}) => {
     if (typeof maskTextureKey !== 'string' || !maskTextureKey) {
         throw new Error('[megashader] brushLayer: `maskTextureKey` is required')
     }

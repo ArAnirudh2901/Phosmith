@@ -37,6 +37,17 @@ const COLOR_SWATCHES = [
 
 const DEFAULT_BRUSH_SIZE = 4
 const DEFAULT_BRUSH_COLOR = '#111827'
+const MAX_BRUSH_SIZE = 400
+
+// Strokes are laid down in document pixels, so a flat 4px default is a hairline
+// on a 6000px photo. Scale it to the document the way a 4px brush reads on a
+// ~1000px image.
+const defaultBrushSizeFor = (c) => {
+    const zoom = c?.getZoom?.() || 1
+    const shortEdge = Math.min((c?.width || 0) / zoom, (c?.height || 0) / zoom)
+    if (!Number.isFinite(shortEdge) || shortEdge <= 0) return DEFAULT_BRUSH_SIZE
+    return Math.min(MAX_BRUSH_SIZE, Math.max(DEFAULT_BRUSH_SIZE, Math.round(shortEdge * 0.005)))
+}
 
 const isPathObject = (obj) => {
     const type = obj?.type?.toLowerCase()
@@ -56,7 +67,28 @@ const DrawControls = ({ dominantColor }) => {
     const [brushColor, setBrushColor] = useState(DEFAULT_BRUSH_COLOR)
     const [brushOpacity, setBrushOpacity] = useState(100)
     const [drawingPaths, setDrawingPaths] = useState(0)
+    const brushSizeSeededRef = useRef(false)
     const strokeStackRef = useRef([])
+
+    // Seed the brush from the document once the canvas actually has dimensions
+    // (it mounts at 0x0 for a frame or two). The user's own choice afterwards is
+    // never overwritten.
+    useEffect(() => {
+        if (!canvasEditor || brushSizeSeededRef.current) return undefined
+        let raf = 0
+        let tries = 0
+        const seed = () => {
+            if (brushSizeSeededRef.current) return
+            if (canvasEditor.width > 0 && canvasEditor.height > 0) {
+                brushSizeSeededRef.current = true
+                setBrushSize(defaultBrushSizeFor(canvasEditor))
+                return
+            }
+            if (tries++ < 60) raf = requestAnimationFrame(seed)
+        }
+        seed()
+        return () => cancelAnimationFrame(raf)
+    }, [canvasEditor])
     const erasingRef = useRef(false)
 
     const hexWithOpacity = (hex, opacityPercent) => {
@@ -402,7 +434,7 @@ const DrawControls = ({ dominantColor }) => {
                         label="Size"
                         value={brushSize}
                         min={1}
-                        max={100}
+                        max={MAX_BRUSH_SIZE}
                         step={1}
                         suffix="px"
                         onChange={setBrushSize}
