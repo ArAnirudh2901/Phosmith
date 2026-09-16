@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isDatabaseSetupError } from "@/lib/database-errors";
 import { getNeonAuthContext } from "@/lib/neon/auth";
+import { toSafeErrorMessage } from "@/lib/neon/safe-error";
 import { runNeonMutation } from "@/lib/neon/functions";
 
 export async function POST(request) {
@@ -20,9 +21,10 @@ export async function POST(request) {
     return NextResponse.json({ data });
   } catch (error) {
     const setupRequired = isDatabaseSetupError(error);
+    console.error(`[neon] ${error?.message || error}`);
     return NextResponse.json(
       {
-        error: error?.message || "Neon mutation failed",
+        error: toSafeErrorMessage(error, "Could not save your change. Please try again."),
         code: error?.code,
         setupRequired,
       },

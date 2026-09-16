@@ -18,6 +18,25 @@ const dropOwnerCache = async (projectIds) => {
 };
 
 const REVISION_LIMIT = 40;
+const MAX_PROJECT_TITLE_LENGTH = 160;
+const MAX_PROJECT_DIMENSION = 32_768;
+
+const normalizeProjectTitle = (value) => {
+  const title = String(value ?? "").trim();
+  if (!title) throw new Error("Project title is required");
+  if (title.length > MAX_PROJECT_TITLE_LENGTH) {
+    throw new Error(`Project title must be ${MAX_PROJECT_TITLE_LENGTH} characters or fewer`);
+  }
+  return title;
+};
+
+const asProjectDimension = (value, name) => {
+  const dimension = Math.round(Number(value));
+  if (!Number.isFinite(dimension) || dimension < 1 || dimension > MAX_PROJECT_DIMENSION) {
+    throw new Error(`${name} must be between 1 and ${MAX_PROJECT_DIMENSION} pixels`);
+  }
+  return dimension;
+};
 
 const clean = (payload) =>
   Object.fromEntries(Object.entries(payload || {}).filter(([, value]) => value !== undefined));
@@ -220,6 +239,9 @@ const functions = {
   "projects.create": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
+    const title = normalizeProjectTitle(args.title);
+    const width = asProjectDimension(args.width, "Width");
+    const height = asProjectDimension(args.height, "Height");
 
     if (user.plan === "free") {
       const count = await db.project.count({ where: { userId: user.id } });
@@ -229,16 +251,18 @@ const functions = {
     }
 
     const now = new Date();
+    // A full canvasState is written twice here (project + its first revision).
+    // On a 45 MP document that overruns Prisma's 5s interactive default.
     const project = await db.$transaction(async (tx) => {
       const created = await tx.project.create({
         data: clean({
-          title: args.title,
+          title,
           userId: user.id,
           originalImageUrl: args.originalImageUrl,
           currentImageUrl: args.currentImageUrl,
           thumbnailUrl: args.thumbnailUrl,
-          width: Math.round(args.width),
-          height: Math.round(args.height),
+          width,
+          height,
           canvasState: args.canvasState ?? null,
           createdAt: now,
           updatedAt: now,
@@ -269,7 +293,7 @@ const functions = {
       });
 
       return created;
-    });
+    }, { maxWait: 15_000, timeout: 30_000 });
 
     return project.id;
   },
@@ -359,8 +383,8 @@ const functions = {
         projectId: project.id,
         userId: user.id,
         canvasState: args.canvasState,
-        width: Math.round(args.width ?? project.width),
-        height: Math.round(args.height ?? project.height),
+        width: args.width === undefined ? project.width : asProjectDimension(args.width, "Width"),
+        height: args.height === undefined ? project.height : asProjectDimension(args.height, "Height"),
         currentImageUrl,
         activeTransformations: args.activeTransformations ?? project.activeTransformations,
         title: args.title,
@@ -407,8 +431,8 @@ const functions = {
       where: { id: args.projectId },
       data: clean({
         canvasState: args.canvasState,
-        width: args.width !== undefined ? Math.round(args.width) : undefined,
-        height: args.height !== undefined ? Math.round(args.height) : undefined,
+        width: args.width !== undefined ? asProjectDimension(args.width, "Width") : undefined,
+        height: args.height !== undefined ? asProjectDimension(args.height, "Height") : undefined,
         currentImageUrl: args.currentImageUrl,
         thumbnailUrl: args.thumbnailUrl,
         activeTransformations: args.activeTransformations,
@@ -985,5 +1009,31 @@ export const runNeonFunction = async (name, args = {}, ctx = {}) => {
   return await fn(ctx, args || {});
 };
 
-export const runNeonQuery = runNeonFunction;
-export const runNeonMutation = runNeonFunction;
+// Keep HTTP reads and writes separate. A new registry entry must be placed in
+// the read allowlist deliberately; all other entries remain mutation-only.
+const QUERY_FUNCTIONS = new Set([
+  "users.getCurrentUser",
+  "projects.getUserProjects",
+  "projects.getProject",
+  "projects.getProjectRevisions",
+  "agentEditSets.listForProject",
+  "agentEditSets.getWithSnapshots",
+  "editPlanCache.getPlan",
+  "editPlanCache.getPlanFuzzy",
+  "canvasTargetCache.getTargets",
+  "editJudgeCache.getVerdict",
+  "agentRun.getResumable",
+]);
+
+const MUTATION_FUNCTIONS = new Set(Object.keys(functions).filter((name) => !QUERY_FUNCTIONS.has(name)));
+
+const runScopedNeonFunction = async (allowedFunctions, name, args = {}, ctx = {}) => {
+  if (!allowedFunctions.has(name)) throw new Error("Operation is not available from this endpoint");
+  return await runNeonFunction(name, args, ctx);
+};
+
+export const runNeonQuery = (name, args = {}, ctx = {}) =>
+  runScopedNeonFunction(QUERY_FUNCTIONS, name, args, ctx);
+
+export const runNeonMutation = (name, args = {}, ctx = {}) =>
+  runScopedNeonFunction(MUTATION_FUNCTIONS, name, args, ctx);

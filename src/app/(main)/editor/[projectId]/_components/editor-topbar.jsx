@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scissors, Sliders, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
+import { Bot, Eraser, ImagePlus, Layers, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scaling, Sliders, SquareDashedMousePointer, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, Wand2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -34,18 +34,18 @@ const SCALE_OPTIONS = [
 ]
 
 const TOOLS = [
-    { id: "resize", label: "Resize", icon: Expand },
+    { id: "resize", label: "Resize", icon: Scaling },
     { id: "crop", label: "Crop", icon: Crop },
-    { id: "images", label: "Images", icon: ImagePlus },
+    { id: "images", label: "Images", icon: Layers },
     { id: "adjust", label: "Adjust", icon: Sliders },
     { id: "draw", label: "Draw", icon: Pen },
     { id: "erase", label: "Erase", icon: Eraser },
-    { id: "mask", label: "Mask", icon: Scissors },
+    { id: "mask", label: "Mask", icon: SquareDashedMousePointer },
     { id: "text", label: "Text", icon: Text },
     { id: "pixel_stretch", label: "Stretch", icon: AudioLines },
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
-    { id: "ai_edit", label: "AI Edit", icon: Eye, proOnly: true },
+    { id: "ai_edit", label: "AI Edit", icon: Wand2, proOnly: true },
     { id: "ai_agent", label: "Agent", icon: Bot },
     { id: "collage", label: "Collage", icon: LayoutGrid },
 ]
@@ -378,7 +378,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     {onToggleSidebar && (
                         <motion.button
                             onClick={onToggleSidebar}
-                            className="editor-icon-button flex lg:hidden items-center justify-center flex-none"
+                            className="editor-icon-button flex lg:hidden items-center justify-center flex-none !min-h-11 !min-w-11"
                             title={isSidebarOpen ? 'Hide tools panel' : 'Show tools panel'}
                             aria-label={isSidebarOpen ? 'Hide tools panel' : 'Show tools panel'}
                             aria-expanded={isSidebarOpen}
@@ -396,7 +396,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         title="Go to dashboard"
                         aria-label="Go to dashboard"
                     >
-                        <PhosmithWordmark showText={false} height={24} markScale={2.1} />
+                        <PhosmithWordmark showText={false} height={24} markScale={1.4} />
                     </Link>
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).

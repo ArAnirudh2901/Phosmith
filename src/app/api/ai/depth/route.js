@@ -1,4 +1,5 @@
 import { auth } from '@clerk/nextjs/server'
+import { isServiceOffline, serviceOfflineResponse } from '@/lib/service-availability'
 import { NextResponse } from 'next/server'
 import sharp from 'sharp'
 import { enforceRateLimit, rateLimitResponse } from '@/lib/rate-limit'
@@ -199,6 +200,7 @@ export async function POST(request) {
     })
   } catch (error) {
     console.error('[ai-depth] ✗', error?.message)
+    if (isServiceOffline(error)) return serviceOfflineResponse('Masking service', 'MASKING_SERVICE_URL')
     const msg = error?.message || 'Depth estimation failed'
     const status = /not configured/i.test(msg) ? 501 : 400
     return NextResponse.json({ error: msg }, { status })

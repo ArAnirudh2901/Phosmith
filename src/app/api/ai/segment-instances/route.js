@@ -1,4 +1,5 @@
 import { auth } from '@clerk/nextjs/server'
+import { isServiceOffline, serviceOfflineResponse } from '@/lib/service-availability'
 import { NextResponse } from 'next/server'
 import sharp from 'sharp'
 import { enforceRateLimit, rateLimitResponse } from '@/lib/rate-limit'
@@ -200,6 +201,7 @@ export async function POST(request) {
     })
   } catch (error) {
     console.error('[ai-segment-instances] ✗', error?.message)
+    if (isServiceOffline(error)) return serviceOfflineResponse('Masking service', 'MASKING_SERVICE_URL')
     const timeout = /abort|timeout/i.test(error?.message || '')
     return NextResponse.json(
       { error: error?.message || 'Instance segmentation failed' },

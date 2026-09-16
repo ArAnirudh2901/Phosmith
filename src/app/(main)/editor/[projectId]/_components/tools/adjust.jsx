@@ -693,6 +693,11 @@ const applyAdjustmentFilters = (canvasEditor, values, sigRef, { commit = false }
             img.phosmithAdjustValues = normalized
             img._phosmithAdjustValues = normalized
             img.applyFilters()
+            const previewScale = img.__phosmithAdjustmentPreviewScale
+            if (previewScale) {
+                img._filterScalingX = previewScale.x
+                img._filterScalingY = previewScale.y
+            }
             img.set("dirty", true)
             applyVignetteLayer(canvasEditor, img, normalized)
             if (commit) canvasEditor.fire("object:modified", { target: img })
@@ -1294,7 +1299,19 @@ const AdjustControls = () => {
             const id = img?.phosmithAdjustmentId || img?._phosmithAdjustmentId
             const entry = id ? proxyCacheRef.current.get(id) : null
             if (entry?.canvas && img._originalElement && img._originalElement !== entry.canvas) {
-                swapped.push({ img, fullEl: img._originalElement })
+                const fullEl = img._originalElement
+                const logicalWidth = Math.max(1, Number(img.width) || fullEl.naturalWidth || fullEl.width || 1)
+                const logicalHeight = Math.max(1, Number(img.height) || fullEl.naturalHeight || fullEl.height || 1)
+                const previewScale = {
+                    x: entry.canvas.width / logicalWidth,
+                    y: entry.canvas.height / logicalHeight,
+                }
+                swapped.push({
+                    img,
+                    fullEl,
+                    filterScalingX: img._filterScalingX,
+                    filterScalingY: img._filterScalingY,
+                })
                 img._originalElement = entry.canvas
                 // Point _element at the proxy too so applyFilters() allocates a
                 // FRESH proxy-sized canvas. If _element still referenced the
@@ -1303,6 +1320,15 @@ const AdjustControls = () => {
                 // original source canvas and corrupt it.
                 img._element = entry.canvas
                 img._filteredEl = undefined
+                // Fabric's renderer uses _filterScaling* to convert a filtered
+                // element back into the image object's logical dimensions. Its
+                // applyFilters() method sees proxy → proxy as scale 1, which made
+                // a 1000px proxy render as a physically tiny image during drag.
+                // Keep this marker so applyAdjustmentFilters can restore it after
+                // every proxy filter pass (including a neutral first frame).
+                img.__phosmithAdjustmentPreviewScale = previewScale
+                img._filterScalingX = previewScale.x
+                img._filterScalingY = previewScale.y
                 // WebGL caches the SOURCE texture by cacheKey and applyFilters()
                 // only evicts the _filtered texture — evict the source ourselves
                 // on every _originalElement change or the proxy/full-res textures
@@ -1319,7 +1345,7 @@ const AdjustControls = () => {
     const exitPreviewMode = () => {
         if (!previewActiveRef.current) return
         previewActiveRef.current = false
-        for (const { img, fullEl } of previewSwapRef.current) {
+        for (const { img, fullEl, filterScalingX, filterScalingY } of previewSwapRef.current) {
             img._originalElement = fullEl
             // Fabric reuses a stale _filteredEl (still at proxy size) and only
             // clears it, never resizes it — so a full-res commit would render
@@ -1327,6 +1353,9 @@ const AdjustControls = () => {
             // drop _filteredEl so applyFilters() rebuilds a full-res canvas.
             img._element = fullEl
             img._filteredEl = undefined
+            delete img.__phosmithAdjustmentPreviewScale
+            img._filterScalingX = filterScalingX
+            img._filterScalingY = filterScalingY
             img.removeTexture?.(img.cacheKey) // evict the proxy SOURCE texture too
         }
         previewSwapRef.current = []

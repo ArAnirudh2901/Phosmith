@@ -278,3 +278,53 @@ export const extractRawPreview = async (file) => {
     if (!(await validSoi(blob))) return null
     return { blob, width: full.w, height: full.h, orientation }
 }
+
+// Bake an EXIF orientation into pixels. A RAW's rotation lives in the container
+// (IFD0), NOT in the extracted preview's own EXIF, and we strip metadata before
+// upload — so a portrait shot would arrive sideways unless we rotate it here.
+export const bakeOrientation = async (blob, orientation) => {
+  if (!orientation || orientation === 1) return blob
+  const bmp = await createImageBitmap(blob).catch(() => null)
+  if (!bmp) return blob
+  const w = bmp.width, h = bmp.height
+  const swap = orientation >= 5 && orientation <= 8
+  const cw = swap ? h : w
+  const ch = swap ? w : h
+  const canvas = typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(cw, ch)
+    : Object.assign(document.createElement('canvas'), { width: cw, height: ch })
+  canvas.width = cw; canvas.height = ch
+  const ctx = canvas.getContext('2d')
+  // Canonical EXIF-orientation canvas transforms (w/h are pre-rotation dims).
+  switch (orientation) {
+    case 2: ctx.transform(-1, 0, 0, 1, w, 0); break   // flip horizontal
+    case 3: ctx.transform(-1, 0, 0, -1, w, h); break  // rotate 180
+    case 4: ctx.transform(1, 0, 0, -1, 0, h); break   // flip vertical
+    case 5: ctx.transform(0, 1, 1, 0, 0, 0); break    // transpose
+    case 6: ctx.transform(0, 1, -1, 0, h, 0); break   // rotate 90 CW
+    case 7: ctx.transform(0, -1, -1, 0, h, w); break  // transverse
+    case 8: ctx.transform(0, -1, 1, 0, 0, w); break   // rotate 90 CCW
+    default: break
+  }
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bmp, 0, 0)
+  bmp.close?.()
+  const out = canvas.convertToBlob
+    ? await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.95 })
+    : await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.95))
+  return out || blob
+}
+
+// Camera RAW is a container: lift out its full-res embedded JPEG preview (the
+// camera's own render) and edit THAT — a normal image/jpeg the rest of the
+// pipeline uploads, grades, serializes and restores like any photo. Throws
+// RAW_NO_PREVIEW when the container has no usable preview.
+export const resolveSourceFile = async (file) => {
+  if (!isRawFile(file)) return file
+  const preview = await extractRawPreview(file).catch(() => null)
+  if (!preview?.blob) throw new Error('RAW_NO_PREVIEW')
+  const upright = await bakeOrientation(preview.blob, preview.orientation).catch(() => preview.blob)
+  const base = (file.name || 'photo').replace(/\.[^.]+$/, '')
+  return new File([upright], `${base}.jpg`, { type: 'image/jpeg', lastModified: Date.now() })
+}

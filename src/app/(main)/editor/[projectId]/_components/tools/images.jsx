@@ -462,8 +462,6 @@ const ImageManager = ({ project, dominantColor }) => {
                         const isDragging = draggingImage === img
                         const isDragTarget = dragOverImage === img && draggingImage !== img
                         const imageLayerIndex = images.indexOf(img)
-                        const canMoveUp = imageLayerIndex < images.length - 1
-                        const canMoveDown = imageLayerIndex > 0
                         const thumb = getImageThumbSrc(img)
 
                         const rowKey = ensureUid(img)
@@ -550,24 +548,6 @@ const ImageManager = ({ project, dominantColor }) => {
                                     title="Rename layer"
                                 >
                                     <Pencil className="h-3 w-3" style={{ color: 'var(--text-muted)' }} />
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={(e) => { e.stopPropagation(); moveImageLayer(img, 1) }}
-                                    disabled={!canMoveUp}
-                                    className="p-1 rounded editor-interactive shrink-0 disabled:opacity-30"
-                                    title="Move layer up"
-                                >
-                                    <MoveUp className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={(e) => { e.stopPropagation(); moveImageLayer(img, -1) }}
-                                    disabled={!canMoveDown}
-                                    className="p-1 rounded editor-interactive shrink-0 disabled:opacity-30"
-                                    title="Move layer down"
-                                >
-                                    <MoveDown className="h-3 w-3" style={{ color: 'var(--text-secondary)' }} />
                                 </button>
                                 <button
                                     type="button"

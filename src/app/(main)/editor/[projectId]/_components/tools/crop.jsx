@@ -1090,7 +1090,7 @@ const CropContent = ({ dominantColor }) => {
                                 </span>
                             ) : null}
                         </label>
-                        <div className='grid grid-cols-2 gap-1.5'>
+                        <div className='grid grid-cols-1 gap-1.5'>
                             {AUTO_CROP_MODES.map((mode) => {
                                 const Icon = mode.icon
                                 const busy = autoBusy === mode.id
@@ -1122,7 +1122,7 @@ const CropContent = ({ dominantColor }) => {
                                                     style={{ color: active ? dominantColor || 'var(--accent-primary)' : 'var(--text-secondary)' }} />
                                             )}
                                             <div className='min-w-0'>
-                                                <div className='truncate text-[11px] font-semibold'
+                                                <div className='text-[11px] font-semibold'
                                                     style={{ color: active ? activeTextColor : 'var(--text-primary)' }}>
                                                     {mode.label}
                                                 </div>

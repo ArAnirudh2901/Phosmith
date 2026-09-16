@@ -31,8 +31,9 @@ import NeoButton from "@/components/neo/NeoButton"
 const loadingCards = Array.from({ length: 6 })
 
 const formatRelativeTime = (timestamp) => {
-    if (!timestamp) return "just now"
-    const elapsedMs = timestamp - Date.now()
+    const value = timestamp instanceof Date ? timestamp.getTime() : Number(timestamp)
+    if (!Number.isFinite(value)) return "just now"
+    const elapsedMs = value - Date.now()
     const relativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" })
     const units = [
         ["year", 1000 * 60 * 60 * 24 * 365],
@@ -95,9 +96,14 @@ const ProjectCard = ({
             }}
             whileHover={!isSelectionMode ? { y: -4 } : {}}
             onClick={isSelectionMode ? (event) => onSelect(event, project._id) : undefined}
+            onKeyDown={isSelectionMode ? (event) => {
+                if (event.target !== event.currentTarget) return
+                if (event.key === "Enter" || event.key === " ") onSelect(event, project._id)
+            } : undefined}
             role={isSelectionMode ? "button" : undefined}
             tabIndex={isSelectionMode ? 0 : undefined}
             aria-pressed={isSelectionMode ? isSelected : undefined}
+            aria-label={isSelectionMode ? `${isSelected ? "Deselect" : "Select"} ${project.title}` : undefined}
             data-project-card-id={project._id}
             data-pending-delete={isPendingDelete ? "true" : undefined}
             className={cn(
@@ -152,7 +158,7 @@ const ProjectCard = ({
                                     "flex items-center justify-center rounded-full border backdrop-blur-sm transition duration-200",
                                     isSelected
                                         ? "size-8 border-white/95 bg-white text-slate-950 shadow-[0_12px_30px_rgba(2,6,23,0.28)]"
-                                        : "size-7 border-white/20 bg-black/30 text-white/70"
+                                        : "size-7 max-md:size-11 border-white/20 bg-black/30 text-white/70"
                                 )}
                                 style={isSelected ? {
                                     borderColor: "rgba(255,255,255,0.96)",
@@ -168,7 +174,7 @@ const ProjectCard = ({
                                 type="button"
                                 onClick={(event) => onDelete(event, project._id, project.title)}
                                 disabled={isDeletingThisProject || isBulkDeleting}
-                                className="flex size-7 items-center justify-center rounded-full border border-white/15 bg-black/30 text-white/70 opacity-0 backdrop-blur-sm transition-all duration-300 group-hover/card:opacity-100 focus-visible:opacity-100 hover:bg-black/50 disabled:opacity-60"
+                                className="flex size-7 max-md:size-11 items-center justify-center rounded-full border border-white/15 bg-black/30 text-white/70 opacity-0 max-md:opacity-100 backdrop-blur-sm transition-all duration-300 group-hover/card:opacity-100 focus-visible:opacity-100 hover:bg-black/50 disabled:opacity-60"
                                 aria-label={`Delete ${project.title}`}
                             >
                                 {isDeletingThisProject ? (
@@ -497,7 +503,7 @@ const Dashboard = () => {
                                 {hasProjects && (
                                     <span className="inline-flex items-center gap-1.5">
                                         <Calendar className="h-3.5 w-3.5" />
-                                        Last created {formatRelativeTime(Math.max(...visibleProjects.map((p) => p._creationTime || p.updatedAt)))}
+                                        Last created {formatRelativeTime(Math.max(...visibleProjects.map((p) => p.createdAt || p.updatedAt)))}
                                     </span>
                                 )}
                             </div>
@@ -541,7 +547,7 @@ const Dashboard = () => {
                                     </Button>
                                 </>
                             ) : (
-                                <Button variant="glass" className="h-9 px-3 rounded-full text-xs pill-control" onClick={handleSelectionModeToggle}>
+                                <Button variant="glass" className="h-9 max-md:h-11 px-3 rounded-full text-xs pill-control" onClick={handleSelectionModeToggle}>
                                     <Check className="h-3.5 w-3.5" /> Select
                                 </Button>
                             )}

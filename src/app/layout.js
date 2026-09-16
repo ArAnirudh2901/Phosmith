@@ -12,6 +12,13 @@ import { DatabaseClientProvider } from "./DatabaseClientProvider";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 
+// Clerk renders {{applicationName}} from the dashboard instance name; override it
+// here so the auth screens stay on-brand no matter which instance is wired up.
+const clerkLocalization = {
+  signIn: { start: { title: "Sign in to Phosmith" } },
+  signUp: { start: { title: "Create your Phosmith account" } },
+};
+
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
@@ -56,7 +63,7 @@ const clerkAppearance = {
       "bg-[#53D8FF] !text-[#050508] hover:!text-[#050508] focus:!text-[#050508] !justify-center !items-center !text-center gap-2 border border-white/10 rounded-xl font-semibold hover:brightness-110 transition-all",
     footerActionText: "text-white",
     footerActionLink: "text-[#53D8FF] hover:text-[#53D8FF]",
-    userButtonAvatarBox: "ring-2 ring-[#53D8FF]/30",
+    userButtonAvatarBox: "ring-2 ring-[#53D8FF]/30 max-md:!size-11",
     userButtonPopoverCard: "bg-[#0C0F15]/95 border border-white/10 shadow-2xl backdrop-blur-xl !text-white",
     userButtonPopoverMain: "text-white",
     userButtonPopoverActions: "border-t border-white/10",
@@ -112,13 +119,19 @@ export const metadata = {
   manifest: "/manifest.json",
 };
 
+export const viewport = {
+  colorScheme: "dark",
+  themeColor: "#0B0D12",
+};
+
 export default function RootLayout({ children }) {
   return (
     <ClerkProvider
       afterSignOutUrl="/"
       appearance={clerkAppearance}
+      localization={clerkLocalization}
     >
-      <html lang="en" className="dark" suppressHydrationWarning>
+      <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
         <body className={`${jetbrainsMono.variable} phosmith-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
           <ThemeProvider
             attribute="class"

@@ -218,7 +218,9 @@ export async function POST(request) {
           ? 'Mask service is not running — start it with `bun run mask:dev` and try again'
           : msg || 'Auto-crop failed',
       },
-      { status: timeout ? 504 : 500 },
+      // 503 (not 500) for an unreachable service: it is an availability
+      // condition, and the client latches on it like the other AI routes.
+      { status: timeout ? 504 : (connRefused ? 503 : 500) },
     )
   }
 }
