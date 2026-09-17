@@ -414,8 +414,10 @@ a:focus-visible,
   pointer-events: auto;
 }
 
+/* Toasts keep Sonner's own absolute stacking: forcing relative put them in
+   flow, doubled the expand offsets and broke the hover bridge between toasts,
+   so hovering made them jump apart and flicker. */
 [data-sonner-toaster] [data-sonner-toast] {
-  position: relative;
   pointer-events: auto;
 }
 
@@ -3719,10 +3721,23 @@ a:focus-visible,
 .grade-gamma-row .pro-ruler-slider { flex: 1 1 auto; min-width: 0; }
 .grade-num { width: 3.4rem; flex: 0 0 auto; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(244, 244, 245, 0.12); border-radius: 5px; color: var(--text-secondary, #cbd5e1); font: inherit; font-size: 0.72rem; padding: 0.28rem 0.4rem; text-align: right; -moz-appearance: textfield; }
 .grade-num::-webkit-inner-spin-button, .grade-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-.grade-wheels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.45rem; }
+.grade-wheels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.45rem; container-type: inline-size; }
 .grade-wheel { padding: 0.5rem; gap: 0.4rem; }
 .grade-wheel .adjust-wheel-picker { width: 86%; }
 .grade-wheel .adjust-color-wheel-top div { font-size: 0.64rem; font-weight: 700; }
+.grade-wheel { position: relative; }
+.grade-wheel .adjust-color-wheel-top { gap: 0.25rem; }
+.grade-wheel .adjust-color-wheel-top div,
+.grade-wheel .adjust-color-wheel-top span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grade-wheel .adjust-curve-reset { padding: 0.15rem; }
+/* Narrow cards: title gets the full width (reset floats into the wheel box corner), value-only luma. */
+@container (max-width: 320px) {
+  .grade-wheel { padding: 0.35rem; }
+  .grade-wheel .adjust-color-wheel-top div { font-size: 0.6rem; letter-spacing: 0; }
+  .grade-wheel .adjust-curve-reset { position: absolute; top: 1.45rem; right: 0.2rem; z-index: 1; }
+  .grade-wheel .pro-ruler-label { display: none; }
+  .grade-wheel .pro-ruler-value { font-size: 0.72rem; }
+}
 
 .adjust-look-strip,
 .adjust-toggle-grid,
@@ -4420,7 +4435,7 @@ a:focus-visible,
   background:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 6px center,
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent),
-    var(--bg-base);
+    var(--bg-surface);
   color: var(--text-primary);
   cursor: pointer;
   transition: all 150ms ease;
@@ -5128,3 +5143,21 @@ a:focus-visible,
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
+
+/* Icon+label button rows: stack icon over label when the row is too narrow to fit inline. */
+.seg-row { container-type: inline-size; }
+.seg-row .seg-btn { min-width: 0; white-space: nowrap; }
+@container (max-width: 300px) {
+  .seg-row--3 .seg-btn { flex-direction: column; gap: 3px; padding-left: 3px; padding-right: 3px; font-size: 10px; }
+}
+@container (max-width: 270px) {
+  .seg-row--2 .seg-btn { flex-direction: column; gap: 3px; padding-left: 3px; padding-right: 3px; font-size: 10px; }
+}
+
+/* Mask panel is a dense properties panel: compact controls sized to its 10–11px type. */
+.mask-panel .pro-ruler-bar--instrument { height: 2.25rem; border-radius: 8px; }
+.mask-panel .pro-ruler-label,
+.mask-panel .pro-ruler-value { font-size: 0.75rem; letter-spacing: 0; }
+.mask-panel .pro-ruler-label { font-weight: 600; }
+.mask-panel .grade-num { height: 2.25rem; width: 3.25rem; padding: 0 0.3rem; border-radius: 8px; font-size: 0.75rem; text-align: center; }
+.mask-panel .adjust-curve-select { min-height: 1.875rem; font-size: 0.72rem; }

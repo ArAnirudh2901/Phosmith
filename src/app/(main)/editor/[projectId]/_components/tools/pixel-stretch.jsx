@@ -1972,7 +1972,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
                 type="button"
                 onClick={confirmRegion}
                 disabled={!regionReady}
-                className={`flex h-10 flex-[2] items-center justify-center gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-40 ${tapClass}`}
+                className={`flex h-10 flex-[2] items-center justify-center whitespace-nowrap gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-40 ${tapClass}`}
                 style={{ background: accent, color: onAccent, border: 'none', boxShadow: `0 0 28px ${accent}45`, transition: `all 0.25s ${EASE}` }}
               >
                 <Check className="h-3.5 w-3.5" />
@@ -2432,6 +2432,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       <button
         type="button"
         onClick={() => setShowAdvanced((s) => !s)}
+        aria-expanded={showAdvanced}
         className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-[11px] font-medium editor-interactive"
         style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
       >
@@ -2500,7 +2501,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           type="button"
           onClick={applyStretch}
           disabled={applying}
-          className={`flex h-10 flex-[2] items-center justify-center gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-50 ${tapClass}`}
+          className={`flex h-10 flex-[2] items-center justify-center whitespace-nowrap gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-50 ${tapClass}`}
           style={{ background: accent, color: onAccent, border: 'none', boxShadow: `0 0 28px ${accent}45`, transition: `all 0.25s ${EASE}` }}
         >
           {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : isEditingLayer ? <Check className="h-3.5 w-3.5" /> : <Layers className="h-3.5 w-3.5" />}

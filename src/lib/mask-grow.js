@@ -22,8 +22,11 @@ import {
     getMaskTexture,
     sanitiseLayer,
     setMaskTexture,
+    setMaskTextureResolver,
+    clearMaskTexture,
+    listMaskTextureKeys,
 } from '@/lib/megashader'
-import { growCoverage, MAX_GROW_PX } from './mask-grow-core'
+import { growCoverage, refineCoverage, MAX_GROW_PX } from './mask-grow-core'
 import { isAgentActing, recordChange } from './change-journal'
 
 // Re-export the pure core so consumers (commands, UI) import one module.
@@ -32,7 +35,7 @@ export { growCoverage, MAX_GROW_PX } from './mask-grow-core'
 const MEGASHADER_TYPE = 'Megashader'
 
 /** Mask kinds whose selection lives in a registered texture. */
-export const TEXTURE_BACKED_KINDS = ['semantic', 'lasso', 'brush', 'smartBrush']
+export const TEXTURE_BACKED_KINDS = ['semantic', 'lasso', 'path', 'brush', 'smartBrush']
 
 /**
  * Grow/shrink a mask texture canvas. Preserves the channel convention of the
@@ -44,45 +47,94 @@ export const TEXTURE_BACKED_KINDS = ['semantic', 'lasso', 'brush', 'smartBrush']
  * @param {number} px
  * @returns {HTMLCanvasElement} a NEW canvas (the input is untouched)
  */
-export const growMaskCanvas = (source, px) => {
-    // Accept every shape setMaskTexture stores: HTMLCanvasElement (brush /
-    // lasso rasters), ImageData (the AI Select Subject path stores the decoded
-    // matte's ImageData directly — calling getContext on it threw
-    // "canvas.getContext is not a function" and silently broke the Boundary
-    // slider for AI subject layers), or any drawable (ImageBitmap /
-    // HTMLImageElement from texture restore).
-    const w = source.width
-    const h = source.height
+// Working-resolution cap for boundary growth. The shader samples masks by UV,
+// so a capped texture renders at any size; full-res growth on a 24 MP matte
+// took ~1.2 s per release and each variant pinned ~96 MB.
+const GROW_MAX_DIM = 2048
+// Decoded coverage per pristine texture and working size: decoding reads the
+// whole texture, and the pristine base never changes between slider releases.
+const coverageCache = new WeakMap()
+
+const readCoverage = (source, w, h) => {
+    let perSize = coverageCache.get(source)
+    const sizeKey = `${w}x${h}`
+    const cached = perSize?.get(sizeKey)
+    if (cached) return cached
+
+    const sw = source.width || source.naturalWidth
+    const sh = source.height || source.naturalHeight
     let data
-    if (typeof ImageData !== 'undefined' && source instanceof ImageData) {
+    if (typeof ImageData !== 'undefined' && source instanceof ImageData && sw === w && sh === h) {
         data = source
-    } else if (typeof source.getContext === 'function') {
-        data = source.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h)
     } else {
+        let drawable = source
+        if (typeof ImageData !== 'undefined' && source instanceof ImageData) {
+            drawable = document.createElement('canvas')
+            drawable.width = sw
+            drawable.height = sh
+            drawable.getContext('2d').putImageData(source, 0, 0)
+        }
         const tmp = document.createElement('canvas')
         tmp.width = w
         tmp.height = h
         const tctx = tmp.getContext('2d', { willReadFrequently: true })
-        tctx.drawImage(source, 0, 0)
+        tctx.imageSmoothingQuality = 'high'
+        tctx.drawImage(drawable, 0, 0, w, h)
         data = tctx.getImageData(0, 0, w, h)
     }
     const pxs = data.data
-
     let alphaStyled = false
-    const cover = new Uint8ClampedArray(w * h)
-    for (let i = 0, p = 0; i < pxs.length; i += 4, p += 1) {
-        if (pxs[i + 3] < 250) alphaStyled = true
-        const luma = 0.2126 * pxs[i] + 0.7152 * pxs[i + 1] + 0.0722 * pxs[i + 2]
-        cover[p] = Math.max(luma, pxs[i + 3] < 250 ? pxs[i + 3] : 0)
+    for (let i = 3; i < pxs.length; i += 4) {
+        if (pxs[i] < 250) { alphaStyled = true; break }
     }
-    // Opaque canvas: coverage is the luma itself.
-    if (!alphaStyled) {
+    const cover = new Uint8ClampedArray(w * h)
+    if (alphaStyled) {
+        for (let i = 0, p = 0; i < pxs.length; i += 4, p += 1) {
+            const luma = 0.2126 * pxs[i] + 0.7152 * pxs[i + 1] + 0.0722 * pxs[i + 2]
+            cover[p] = Math.max(luma, pxs[i + 3] < 250 ? pxs[i + 3] : 0)
+        }
+    } else {
         for (let i = 0, p = 0; i < pxs.length; i += 4, p += 1) {
             cover[p] = 0.2126 * pxs[i] + 0.7152 * pxs[i + 1] + 0.0722 * pxs[i + 2]
         }
     }
+    const entry = { cover, alphaStyled }
+    if (!perSize) { perSize = new Map(); coverageCache.set(source, perSize) }
+    perSize.set(sizeKey, entry)
+    return entry
+}
 
-    const grown = growCoverage(cover, w, h, px)
+/**
+ * Grow/shrink a mask texture canvas. Preserves the channel convention of the
+ * input: alpha-styled canvases (the brush kind samples painted alpha) get the
+ * result written to alpha; opaque luma-styled canvases (lasso/semantic — the
+ * shader samples R) get it written to RGB.
+ *
+ * Accepts every shape setMaskTexture stores (canvas, ImageData from the AI
+ * subject path, or any drawable from texture restore). Works at a capped
+ * resolution, stepping finer only when the grow distance would otherwise round
+ * to under ~2 working pixels, so small adjustments stay exact.
+ *
+ * @param {HTMLCanvasElement|ImageData|CanvasImageSource} source
+ * @param {number} px  signed distance in SOURCE pixels
+ * @param {{ smooth?: number, contrast?: number }} [edge]  Select-and-Mask refinement (0..100 each)
+ * @returns {HTMLCanvasElement} a NEW canvas (the input is untouched)
+ */
+export const growMaskCanvas = (source, px, edge = {}) => {
+    const sw = source.width || source.naturalWidth
+    const sh = source.height || source.naturalHeight
+    const dist = Math.round(Number(px) || 0)
+    const capScale = Math.min(1, GROW_MAX_DIM / Math.max(sw, sh))
+    const scale = dist === 0 ? capScale : Math.min(1, Math.max(capScale, 2 / Math.abs(dist)))
+    const w = Math.max(1, Math.round(sw * scale))
+    const h = Math.max(1, Math.round(sh * scale))
+
+    const { cover, alphaStyled } = readCoverage(source, w, h)
+    const grown = refineCoverage(growCoverage(cover, w, h, dist * (w / sw)), w, h, {
+        smooth: edge.smooth,
+        contrast: edge.contrast,
+        scale: Math.max(w, h) / GROW_MAX_DIM,
+    })
 
     const out = document.createElement('canvas')
     out.width = w
@@ -90,22 +142,38 @@ export const growMaskCanvas = (source, px) => {
     const ctx = out.getContext('2d')
     const outData = ctx.createImageData(w, h)
     const op = outData.data
-    for (let i = 0, p = 0; i < op.length; i += 4, p += 1) {
-        const v = grown[p]
-        if (alphaStyled) {
-            op[i] = 255
-            op[i + 1] = 255
-            op[i + 2] = 255
-            op[i + 3] = v
-        } else {
-            op[i] = v
-            op[i + 1] = v
-            op[i + 2] = v
-            op[i + 3] = 255
+    if (alphaStyled) {
+        op.fill(255)
+        for (let p = 0, i = 3; p < grown.length; p += 1, i += 4) op[i] = grown[p]
+    } else {
+        for (let i = 0, p = 0; i < op.length; i += 4, p += 1) {
+            const v = grown[p]
+            op[i] = v; op[i + 1] = v; op[i + 2] = v; op[i + 3] = 255
         }
     }
     ctx.putImageData(outData, 0, 0)
     return out
+}
+
+const GROW_KEY = /^(.*)::grow(-?\d+)(?:~s(\d+)c(\d+))?$/
+const edgeKey = (baseKey, dist, smooth, contrast) =>
+    `${baseKey}::grow${dist}${smooth || contrast ? `~s${smooth}c${contrast}` : ''}`
+
+// Undo can point a layer back at a grown variant that was evicted below.
+setMaskTextureResolver((key) => {
+    const m = GROW_KEY.exec(key)
+    if (!m) return null
+    const base = getMaskTexture(m[1])
+    return base ? growMaskCanvas(base, Number(m[2]), { smooth: Number(m[3]) || 0, contrast: Number(m[4]) || 0 }) : null
+})
+
+// Keep only the newest grown variant per pristine base.
+const evictOtherGrowVariants = (baseKey, keepKey, liveKeys) => {
+    for (const key of listMaskTextureKeys()) {
+        if (key === keepKey || liveKeys.has(key)) continue
+        const m = GROW_KEY.exec(key)
+        if (m && m[1] === baseKey) clearMaskTexture(key)
+    }
 }
 
 const getFilter = (image) => (image?.filters || []).find((f) => f && f.type === MEGASHADER_TYPE) || null
@@ -125,7 +193,7 @@ const getFilter = (image) => (image?.filters || []).find((f) => f && f.type === 
  * @param {number} px       signed pixels, clamped to ±MAX_GROW_PX
  * @returns {{ id: string, growPx: number }}
  */
-export const expandLayerBoundary = (image, layerId, px) => {
+export const expandLayerBoundary = (image, layerId, px, edge) => {
     const filter = getFilter(image)
     const chain = filter?.stack?.chain
     if (!Array.isArray(chain)) throw new Error('[mask-grow] no mask chain on this image')
@@ -146,13 +214,19 @@ export const expandLayerBoundary = (image, layerId, px) => {
     if (!base) throw new Error('[mask-grow] base mask texture is gone (reload the project)')
 
     const dist = Math.max(-MAX_GROW_PX, Math.min(MAX_GROW_PX, Math.round(Number(px) || 0)))
+    // Omitted edge params keep the layer's current smooth/contrast.
+    const clampPct = (v) => Math.max(0, Math.min(100, Math.round(Number(v) || 0)))
+    const smooth = clampPct(edge?.smooth ?? layer.edgeSmooth)
+    const contrast = clampPct(edge?.contrast ?? layer.edgeContrast)
     let nextKey = baseKey
-    if (dist !== 0) {
-        nextKey = `${baseKey}::grow${dist}`
+    if (dist !== 0 || smooth || contrast) {
+        nextKey = edgeKey(baseKey, dist, smooth, contrast)
         if (!getMaskTexture(nextKey)) {
-            setMaskTexture(nextKey, growMaskCanvas(base, dist))
+            setMaskTexture(nextKey, growMaskCanvas(base, dist, { smooth, contrast }))
         }
     }
+    const liveKeys = new Set(chain.map((e) => e?.layer?.maskTextureKey).filter(Boolean))
+    evictOtherGrowVariants(baseKey, nextKey, liveKeys)
 
     const nextChain = chain.slice()
     nextChain[idx] = {
@@ -162,6 +236,8 @@ export const expandLayerBoundary = (image, layerId, px) => {
             maskTextureKey: nextKey,
             baseTextureKey: baseKey,
             growPx: dist,
+            edgeSmooth: smooth,
+            edgeContrast: contrast,
         }),
     }
     const stack = { chain: nextChain }
@@ -176,11 +252,13 @@ export const expandLayerBoundary = (image, layerId, px) => {
     // only the panel's Boundary slider logs here.
     if (!isAgentActing()) {
         recordChange({
-            label: `Mask: boundary ${dist > 0 ? '+' : ''}${dist}px`,
+            label: edge && (edge.smooth !== undefined || edge.contrast !== undefined)
+                ? `Mask: refine edge (smooth ${smooth}, contrast ${contrast})`
+                : `Mask: boundary ${dist > 0 ? '+' : ''}${dist}px`,
             domain: 'mask',
         })
     }
-    return { id: layerId, growPx: dist }
+    return { id: layerId, growPx: dist, edgeSmooth: smooth, edgeContrast: contrast }
 }
 
 /* ─── Brush-refine (ported from mask-studio) ────────────────────────────────
@@ -260,6 +338,8 @@ export const beginLayerRefine = (image, layerId, dims) => {
             // always readjusts from the latest painted edge.
             baseTextureKey: key,
             growPx: 0,
+            edgeSmooth: 0,
+            edgeContrast: 0,
         }),
     }
     const stack = { chain: nextChain }

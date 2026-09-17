@@ -20,6 +20,7 @@ import { isPhosmithMaskOverlay } from "@/lib/canvas-mask"
 // tool's live overlay and anything explicitly flagged excludeFromExport.
 export const isExportTransientObject = (obj) =>
     obj?.excludeFromExport ||
+    obj?.type === 'CollageSlot' ||
     isPhosmithMaskOverlay(obj)
 
 export const isTaintError = (error) =>

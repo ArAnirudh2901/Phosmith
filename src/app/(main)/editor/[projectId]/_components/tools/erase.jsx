@@ -270,7 +270,7 @@ const EraseControls = ({ project, dominantColor }) => {
             setIsAutoErasing(false)
             if (abortRef.current === controller) abortRef.current = null
         }
-    }, [canvasEditor, isAutoErasing, canUseAi, backgroundRemovalUrls, setProcessingMessage, tool])
+    }, [canvasEditor, isAutoErasing, canUseAi, backgroundRemovalUrls, setProcessingMessage, registerProcessingAbort, tool])
 
     // Keep the ref pointing at the latest handler so the sub-action listener can
     // call it without re-binding on every dependency change.
@@ -329,8 +329,8 @@ const EraseControls = ({ project, dominantColor }) => {
                 the WHOLE object under the pointer and erases it. Click more
                 objects to erase each (multi-subject by accumulation). */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                <div className="flex items-center justify-between gap-2">
-                    <label className="panel-label" style={{ margin: 0 }}>AI Object Remover</label>
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
+                    <label className="panel-label whitespace-nowrap" style={{ margin: 0 }}>AI Object Remover</label>
                     <div className="mask-fill-modes" style={{ marginTop: 0 }}>
                         {(['auto', 'client', 'server']).map((mode) => (
                             <button

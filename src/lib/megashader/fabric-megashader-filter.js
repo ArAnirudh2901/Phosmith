@@ -28,9 +28,9 @@
  * @module megashader/fabric-megashader-filter
  */
 
-import { filters, classRegistry } from 'fabric'
+import { filters, classRegistry, config as fabricConfig, Canvas2dFilterBackend, getFilterBackend, setFilterBackend } from 'fabric'
 import { renderMegashader, disposeRenderer } from './megashader-renderer'
-import { getMaskTexture, setMaskTexture, semanticLayer } from './mask-types'
+import { getMaskTexture, getMaskTextureVersion, setMaskTexture, semanticLayer, stackIsNeutral } from './mask-types'
 import { buildPackedLutFromCurves } from '../curve-lut'
 
 // Base (whole-image pre-grade) helpers — gate + full-white mask texture.
@@ -63,6 +63,23 @@ const MEGASHADER_FILTER_TYPE = 'Megashader'
 // grows from the already-grown mask (cumulative drift). The textures map is
 // keyed by texture key, so base === mask (the common case) dedupes to one entry.
 const TEXTURE_KEY_FIELDS = ['maskTextureKey', 'baseTextureKey', 'brushTextureKey', 'depthMapKey']
+
+// toObject runs on every autosave and history push; PNG-encoding every mask
+// texture each time blocked the main thread for hundreds of ms. setMaskTexture
+// bumps a per-key version on every write, so re-encode only when it changes.
+const DATA_URL_CACHE_MAX = 32
+const dataUrlCache = new Map()
+const cachedTextureDataUrl = (key) => {
+    const version = getMaskTextureVersion(key)
+    const hit = dataUrlCache.get(key)
+    if (hit && hit.version === version) return hit.url
+    const url = textureToDataUrl(getMaskTexture(key))
+    if (!url) return null
+    dataUrlCache.delete(key)
+    dataUrlCache.set(key, { version, url })
+    if (dataUrlCache.size > DATA_URL_CACHE_MAX) dataUrlCache.delete(dataUrlCache.keys().next().value)
+    return url
+}
 
 /**
  * Convert a cached texture (ImageData | HTMLCanvasElement | HTMLImageElement |
@@ -155,6 +172,7 @@ export class MegashaderFilter extends filters.BaseFilter {
         // property); maskOverlay/overlayColor are transient view state.
         this.globalInvert = options.globalInvert === true
         this.maskOverlay = options.maskOverlay === true
+        this.maskView = options.maskView === 'bw' ? 'bw' : 'tint'
         this.overlayColor = options.overlayColor || null
     }
 
@@ -169,6 +187,14 @@ export class MegashaderFilter extends filters.BaseFilter {
      *
      * @param {object} options  Fabric's pipelineState object.
      */
+    // Fabric drops neutral filters from the render pass but still serializes
+    // them, so an ungraded mask chain persists without costing a full-res pass.
+    isNeutralState() {
+        if (this.enabled === false) return true
+        if (this.maskOverlay) return false
+        return stackIsNeutral(this.stack)
+    }
+
     applyTo(options) {
         try {
             this.applyTo2d(options)
@@ -194,17 +220,25 @@ export class MegashaderFilter extends filters.BaseFilter {
      */
     applyTo2d(options) {
         if (!this.enabled) return
-
         const { canvasEl, ctx, sourceWidth, sourceHeight } = options || {}
         if (!canvasEl || !ctx) return
-
-        // The canvasEl holds the current filtered pixels (accumulated from
-        // all prior filters in the chain). We need to flush the current
-        // imageData to it first, because prior filters may have modified
-        // imageData in-place without drawing it back to the canvas.
-        if (options.imageData) {
-            ctx.putImageData(options.imageData, 0, 0)
+        // Prior filters may have modified imageData in place without drawing
+        // it back, so the canvas must be synced before rendering from it.
+        if (options.imageData) ctx.putImageData(options.imageData, 0, 0)
+        if (this.renderInto(canvasEl, ctx, sourceWidth, sourceHeight)) {
+            options.imageData = ctx.getImageData(0, 0, sourceWidth || canvasEl.width, sourceHeight || canvasEl.height)
         }
+    }
+
+    /**
+     * Render the megashader from `canvasEl`'s current pixels and draw the
+     * result back into it. Shared by the ImageData pipeline above and the
+     * backend fast path, which skips every full-resolution ImageData copy.
+     *
+     * @returns {boolean} true when the canvas was changed
+     */
+    renderInto(canvasEl, ctx, sourceWidth, sourceHeight) {
+
 
         // Pass 1 (base grade): pre-bake the whole-image grade into the source,
         // because per-layer grading samples the ORIGINAL source — without the
@@ -238,16 +272,17 @@ export class MegashaderFilter extends filters.BaseFilter {
                 globalMaskAlpha: this.globalMaskAlpha,
                 globalInvert: this.globalInvert,
                 maskOverlay: this.maskOverlay,
+                maskView: this.maskView,
                 overlayColor: this.overlayColor,
             })
         } catch (e) {
             console.warn('[megashader] render failed, passing through source:', e)
-            return  // Leave pipelineState unchanged — passthrough.
+            return false  // Leave the canvas unchanged — passthrough.
         }
         // Base-only stack (no layers): pass-1 output IS the result.
         if (!result && source !== canvasEl) result = source
 
-        if (!result) return  // Passthrough — renderMegashader returned null.
+        if (!result) return false  // Passthrough — renderMegashader returned null.
 
         // Draw the megashader result back onto the pipeline canvas and
         // re-read imageData so downstream filters see the megashader's
@@ -256,7 +291,7 @@ export class MegashaderFilter extends filters.BaseFilter {
         const h = sourceHeight || canvasEl.height
         ctx.clearRect(0, 0, w, h)
         ctx.drawImage(result, 0, 0)
-        options.imageData = ctx.getImageData(0, 0, w, h)
+        return true
     }
 
     /**
@@ -291,7 +326,7 @@ export class MegashaderFilter extends filters.BaseFilter {
             for (const field of TEXTURE_KEY_FIELDS) {
                 const key = layer[field]
                 if (typeof key === 'string' && key && !textures[key]) {
-                    const url = textureToDataUrl(getMaskTexture(key))
+                    const url = cachedTextureDataUrl(key)
                     if (url) textures[key] = url
                 }
             }
@@ -318,6 +353,8 @@ export class MegashaderFilter extends filters.BaseFilter {
      * @param {{ target: any }} [options]
      */
     static async fromObject(object, options = {}) {
+        // Reload renders through applyFilters before any tool calls apply.
+        ensureMegashaderFilterBackend()
         const textures = object && object.textures
         if (textures && typeof textures === 'object') {
             await Promise.all(
@@ -356,6 +393,51 @@ export class MegashaderFilter extends filters.BaseFilter {
 // a filter's type in v7 — the same pattern PhosmithCurvesFilter uses — and it
 // replaces the illegal `this.type = …` instance assignment in the constructor.
 Object.defineProperty(MegashaderFilter, 'type', { value: MEGASHADER_FILTER_TYPE })
+
+// Fabric's 2D backend reads the whole source into ImageData twice before any
+// filter runs, then writes it back after; at 24 MP that was ~0.5 s per mask
+// commit. When the megashader is the last filter it can render straight from
+// and into the target canvas, so skip every ImageData round trip. Any other
+// filter mix falls back to Fabric's own pipeline unchanged.
+class MegashaderFilterBackend extends Canvas2dFilterBackend {
+    applyFilters(filterList, sourceElement, sourceWidth, sourceHeight, targetCanvas, cacheKey) {
+        const last = filterList[filterList.length - 1]
+        if (!(last instanceof MegashaderFilter) || last.enabled === false) {
+            return super.applyFilters(filterList, sourceElement, sourceWidth, sourceHeight, targetCanvas, cacheKey)
+        }
+        const prior = filterList.slice(0, -1)
+        if (prior.length) {
+            super.applyFilters(prior, sourceElement, sourceWidth, sourceHeight, targetCanvas, cacheKey)
+        }
+        const ctx = targetCanvas.getContext('2d')
+        if (!ctx) return undefined
+        if (!prior.length) {
+            if (targetCanvas.width !== sourceWidth) targetCanvas.width = sourceWidth
+            if (targetCanvas.height !== sourceHeight) targetCanvas.height = sourceHeight
+            ctx.clearRect(0, 0, sourceWidth, sourceHeight)
+            ctx.drawImage(sourceElement, 0, 0, sourceWidth, sourceHeight)
+        }
+        try {
+            last.renderInto(targetCanvas, ctx, sourceWidth, sourceHeight)
+        } catch (e) {
+            console.warn('[megashader] render failed, passing through:', e)
+        }
+        return undefined
+    }
+}
+
+/**
+ * Install the fast backend once Fabric's config is final. Only replaces the
+ * plain 2D backend: with GL filtering enabled the megashader would need its
+ * own WebGL filter path, so that case is left alone.
+ */
+export const ensureMegashaderFilterBackend = () => {
+    if (fabricConfig.enableGLFiltering !== false) return
+    const current = getFilterBackend(false)
+    if (current instanceof MegashaderFilterBackend) return
+    if (current && !(current instanceof Canvas2dFilterBackend)) return
+    setFilterBackend(new MegashaderFilterBackend())
+}
 
 // Register with Fabric's classRegistry so `loadFromJSON` can rehydrate
 // `type: "Megashader"` filters. Importing this file is the side effect

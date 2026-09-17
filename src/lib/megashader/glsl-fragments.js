@@ -104,6 +104,8 @@ export const buildFragmentTemplate = () => /* glsl */ `
     // red overlay) instead of applying the edit.
     uniform float uGlobalInvert;
     uniform float uMaskOverlay;
+    // 0 = tint the selection over the photo, 1 = black & white mask view.
+    uniform float uMaskView;
     uniform vec3 uMaskOverlayColor;
 
     // RGB → HSB (H in degrees). MUST stay above the mask-function block:
@@ -149,7 +151,9 @@ export const buildFragmentTemplate = () => /* glsl */ `
         // the normal output path.
         if (uMaskOverlay > 0.5) {
             float cover = clamp(max(runningAlpha, eraseAlpha) * uMaskAlpha, 0.0, 1.0);
-            gl_FragColor = vec4(mix(srcRgb, uMaskOverlayColor, cover), src.a);
+            gl_FragColor = uMaskView > 0.5
+                ? vec4(vec3(cover), 1.0)
+                : vec4(mix(srcRgb, uMaskOverlayColor, cover), src.a);
             return;
         }
 

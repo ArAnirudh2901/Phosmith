@@ -177,6 +177,7 @@ export async function POST(request) {
     const result = await callDepthService(imageBuffer)
     if (!result.ok) {
       console.warn('[ai-depth] service failed:', result.reason)
+      if (isServiceOffline({ message: result.reason })) return serviceOfflineResponse('Masking service', 'MASKING_SERVICE_URL')
       const status = /not configured|not available/i.test(result.reason) ? 501 : 502
       return NextResponse.json({ error: result.reason }, { status })
     }

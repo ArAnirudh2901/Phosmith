@@ -123,6 +123,17 @@ const Editor = () => {
     // the sidebar enters overlay mode — hidden by default, slides over the
     // canvas when toggled. matchMedia is used directly so this stays in sync
     // with the corresponding @media query in globals.css.
+    // Phones get only the notice; mounting the hidden editor would still load
+    // the full-res image, Fabric and autosave. null until measured on the client.
+    const [isPhoneViewport, setIsPhoneViewport] = useState(null)
+    useEffect(() => {
+        const mql = window.matchMedia("(max-width: 767.98px)")
+        const apply = () => setIsPhoneViewport(mql.matches)
+        apply()
+        mql.addEventListener?.("change", apply)
+        return () => mql.removeEventListener?.("change", apply)
+    }, [])
+
     useEffect(() => {
         if (typeof window === "undefined") return undefined
         const mql = window.matchMedia("(max-width: 1023.98px)")
@@ -385,7 +396,7 @@ const Editor = () => {
             {/* editor-shell is hidden below md (768px) — the editor is too cramped
                 on phones. At md–lg (768–1023px, tablet) the sidebar enters overlay
                 mode via data-sidebar-mode="overlay"; at lg+ it's persistent. */}
-            <div
+            {isPhoneViewport === false && <div
                 className="editor-shell hidden h-screen min-h-screen flex-col overflow-hidden md:flex"
                 data-agent-mode={activeTool === "ai_agent"}
                 data-sidebar-mode={isNarrowViewport ? "overlay" : "persistent"}
@@ -504,7 +515,7 @@ const Editor = () => {
                         </motion.div>
                     )
                 })()}
-            </div>
+            </div>}
 
             {/* Mobile fallback — below 768px (sm and smaller) the editor's
                 canvas + toolbar can't fit usefully even with overlays. iPad

@@ -46,6 +46,8 @@ const journalMaskEdit = (label) => {
  */
 const MAX_STACK_HISTORY = 50
 
+const SHAPELESS_KINDS = new Set(['luminance', 'color', 'depth'])
+
 export const useMaskLayers = () => {
     const initial = useMemo(() => ({ chain: [], base: null }), [])
     const [stack, dispatch] = useReducer(reducer, initial)
@@ -77,11 +79,12 @@ export const useMaskLayers = () => {
         // textures live in the module cache keyed by string, so cloning the
         // chain (which only holds the key strings) is sufficient.
         try {
-            pastRef.current.push(structuredClone({ chain, base }))
+            pastRef.current.push({ ...structuredClone({ chain, base }), at: Date.now() })
         } catch {
             pastRef.current.push({
                 chain: chain.map((e) => ({ op: e.op, layer: { ...e.layer } })),
                 base: base ? { ...base } : null,
+                at: Date.now(),
             })
         }
         if (pastRef.current.length > MAX_STACK_HISTORY) pastRef.current.shift()
@@ -127,6 +130,13 @@ export const useMaskLayers = () => {
         const v = !!value
         setShowMaskOverlayState(v)
         try { window.dispatchEvent(new CustomEvent('phosmith:mask-overlay', { detail: { value: v } })) } catch { /* SSR safe */ }
+    }, [])
+    // Show-mask presentation: 'tint' (overlay colour) or 'bw' (black & white).
+    const [maskView, setMaskViewState] = useState('tint')
+    const setMaskView = useCallback((value) => {
+        const v = value === 'bw' ? 'bw' : 'tint'
+        setMaskViewState(v)
+        try { window.dispatchEvent(new CustomEvent('phosmith:mask-view', { detail: { value: v } })) } catch { /* SSR safe */ }
     }, [])
     const setGlobalInvert = useCallback((value) => {
         const v = !!value
@@ -206,6 +216,8 @@ export const useMaskLayers = () => {
         if (layer && typeof params.growPx === 'number') {
             layer.growPx = params.growPx
         }
+        // Tool that made a shared-kind selection (Magic Wand / marquee → lasso).
+        if (layer && typeof params.tool === 'string') layer.tool = params.tool
         // A new selection must be VISIBLE but must not EDIT the photo: 'fill'
         // paints a real colour that exports, so selecting a subject and hitting
         // Export produced a tinted file. Visibility now comes from the
@@ -221,10 +233,11 @@ export const useMaskLayers = () => {
         snapshot()
         dispatch({ type: 'add', layer })
         setSelectedLayerId(layer.id)
-        // The layer is identity now, so nothing would be visible without this:
-        // turn the non-exported overlay on so the new selection reads instantly.
-        setShowMaskOverlay(true)
-        journalMaskEdit(`Mask: add ${kind} layer`)
+        // Identity layers change nothing on screen. Texture masks get a traced
+        // boundary and radial/linear get handles, so only shapeless range masks
+        // need the (non-exported) overlay to show what they selected.
+        if (SHAPELESS_KINDS.has(kind)) setShowMaskOverlay(true)
+        journalMaskEdit(`Mask: add ${params.tool || kind} layer`)
         return layer.id
     }, [snapshot, setShowMaskOverlay])
 
@@ -317,7 +330,7 @@ export const useMaskLayers = () => {
     const undo = useCallback(() => {
         if (pastRef.current.length === 0) return false
         const prev = pastRef.current.pop()
-        futureRef.current.push(currentEntry())
+        futureRef.current.push({ ...currentEntry(), at: prev?.at || 0 })
         restoreEntry(prev)
         return true
     }, [])
@@ -325,7 +338,7 @@ export const useMaskLayers = () => {
     const redo = useCallback(() => {
         if (futureRef.current.length === 0) return false
         const next = futureRef.current.pop()
-        pastRef.current.push(currentEntry())
+        pastRef.current.push({ ...currentEntry(), at: next?.at || 0 })
         restoreEntry(next)
         return true
     }, [])
@@ -334,6 +347,13 @@ export const useMaskLayers = () => {
         paramSnapshot()
         dispatch({ type: 'setBase', base: patch })
     }, [paramSnapshot])
+
+    // When the newest undo/redo entry was made (-1 = none); lets the Mask tool
+    // interleave this stack with its brush-stroke stack.
+    const historyAt = useCallback(() => ({
+        undo: pastRef.current.length ? pastRef.current[pastRef.current.length - 1].at || 0 : -1,
+        redo: futureRef.current.length ? futureRef.current[futureRef.current.length - 1].at || 0 : -1,
+    }), [])
 
     const canUndo = pastRef.current.length > 0
     const canRedo = futureRef.current.length > 0
@@ -348,6 +368,14 @@ export const useMaskLayers = () => {
         dispatch({ type: 'set', chain: safe })
     }, [])
 
+    // Load a saved chain + base in one step with no undo entry (opening a
+    // project is not an undoable edit).
+    const hydrate = useCallback((chain, base) => {
+        pastRef.current = []
+        futureRef.current = []
+        dispatch({ type: 'restore', chain: Array.isArray(chain) ? chain : [], base: base || null })
+    }, [])
+
     // Reconcile with the agent command layer: when an agent (or any non-UI
     // caller) mutates the chain on the image via src/lib/agent/mask-commands,
     // it dispatches `phosmith:mask-chain-replaced` so this panel re-syncs. The
@@ -356,11 +384,15 @@ export const useMaskLayers = () => {
     useEffect(() => {
         const onReplaced = (e) => {
             const chain = e?.detail?.stack?.chain
-            if (Array.isArray(chain)) setChain(chain)
+            if (!Array.isArray(chain)) return
+            // In-session edits (boundary, brush-refine, agent) stay undoable;
+            // setChain's history reset is only right for project hydration.
+            snapshot()
+            dispatch({ type: 'set', chain })
         }
         try { window.addEventListener('phosmith:mask-chain-replaced', onReplaced) } catch { /* SSR */ }
         return () => { try { window.removeEventListener('phosmith:mask-chain-replaced', onReplaced) } catch { /* SSR */ } }
-    }, [setChain])
+    }, [snapshot])
 
     const setGlobalAlpha = useCallback((value) => {
         // The global alpha is NOT part of MaskStack — it's a separate UI
@@ -385,6 +417,8 @@ export const useMaskLayers = () => {
         setGlobalAlpha,
         showMaskOverlay,
         setShowMaskOverlay,
+        maskView,
+        setMaskView,
         globalInvert,
         setGlobalInvert,
         selectedLayerId,
@@ -392,9 +426,11 @@ export const useMaskLayers = () => {
         setBase,
         undo,
         redo,
+        historyAt,
         canUndo,
         canRedo,
         setChain,
+        hydrate,
         isReady,
     }
 }

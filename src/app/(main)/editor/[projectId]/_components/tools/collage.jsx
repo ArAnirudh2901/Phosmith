@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { LayoutGrid, Rows, Check, Sparkles, Palette, Square, Circle, Loader2, X, Replace, SlidersHorizontal, Wand2, Shuffle } from 'lucide-react'
-import { FabricImage } from 'fabric'
+import { FabricImage, Rect } from 'fabric'
 import { FastAverageColor } from 'fast-average-color'
 import { useCanvas } from '../../../../../../../context/context'
 import { applyCanvasSizedBackground } from '@/lib/canvas-background'
@@ -30,6 +30,10 @@ import {
     cellFromClipPath,
 } from '@/lib/collage-layout'
 import { toast } from 'sonner'
+import CollageComposer, { sourceElement } from './collage-composer'
+import { analyzeElement } from '@/lib/collage/analyze'
+import { cellFromImage, placeImageInCell, swapFramedPhotos } from '@/lib/collage/render'
+import { cellFromSlot, createSlot, isCollageSlot } from '@/lib/collage/slot'
 
 const fac = new FastAverageColor()
 
@@ -182,9 +186,6 @@ export default function CollageControls({ project, dominantColor }) {
     // Latest applyRecipe, so autoTemplate can call it without a definition-order
     // dependency cycle (applyRecipe is defined below autoTemplate).
     const applyRecipeRef = useRef(null)
-    // Photo count we've already run a vision plan for — so opening the tool fires
-    // the AI matcher once per photo set, not on every render.
-    const aiPlannedRef = useRef(0)
 
     const syncImageCount = useCallback(() => {
         const images = canvasEditor?.getObjects?.().filter(isVisibleImage) || []
@@ -252,6 +253,133 @@ export default function CollageControls({ project, dominantColor }) {
             canvasEditor.requestRenderAll()
         }
     }, [canvasEditor])
+
+    // Empty slots + rearranging. Click a "+" slot to upload into it (extra files
+    // fill the next empty slots); drag a framed photo onto another photo to swap,
+    // or onto a slot to move it there.
+    const slotInputRef = useRef(null)
+    const pendingSlotRef = useRef(null)
+    const shortSide = Math.min(Number(project?.width) || 1000, Number(project?.height) || 1000)
+
+    const fillSlots = useCallback(async (files, firstSlot) => {
+        if (!canvasEditor || !files.length) return
+        const toastId = toast.loading(files.length > 1 ? `Adding ${files.length} photos…` : 'Adding photo…')
+        let added = 0
+        try {
+            for (const file of files) {
+                const slots = canvasEditor.getObjects().filter(isCollageSlot)
+                const slot = added === 0 && firstSlot && slots.includes(firstSlot) ? firstSlot : slots[0]
+                if (!slot) break
+                const image = await loadFabricImageFromFile(file, { silent: true })
+                const photo = analyzeElement(sourceElement(image))
+                placeImageInCell(image, cellFromSlot(slot), photo, { shadow: 0.45, S: shortSide })
+                const index = canvasEditor.getObjects().indexOf(slot)
+                canvasEditor.remove(slot)
+                if (typeof canvasEditor.insertAt === 'function' && index >= 0) canvasEditor.insertAt(index, image)
+                else canvasEditor.add(image)
+                added += 1
+            }
+            canvasEditor.requestRenderAll()
+            canvasEditor.__pushHistoryState?.({ label: added > 1 ? `Added ${added} collage photos` : 'Added collage photo', domain: 'collage' })
+            canvasEditor.__saveCanvasState?.()
+            const left = canvasEditor.getObjects().filter(isCollageSlot).length
+            toast.success(left ? `Added. ${left} empty slot${left === 1 ? '' : 's'} left` : 'Collage filled', { id: toastId })
+        } catch (error) {
+            console.warn('[collage] slot fill failed:', error)
+            toast.error(added ? `Added ${added}, then an upload failed` : 'Could not add that photo', { id: toastId })
+        }
+    }, [canvasEditor, shortSide])
+
+    useEffect(() => {
+        if (!canvasEditor) return undefined
+        const highlight = new Rect({
+            left: 0, top: 0, width: 1, height: 1, originX: 'left', originY: 'top',
+            fill: 'rgba(6, 184, 212, 0.16)', stroke: '#06b8d4', strokeWidth: shortSide * 0.004,
+            strokeDashArray: [shortSide * 0.012, shortSide * 0.008],
+            selectable: false, evented: false, excludeFromExport: true, visible: false,
+        })
+        canvasEditor.add(highlight)
+        let down = null
+        let drag = null
+
+        const boxOf = (obj) => {
+            if (isCollageSlot(obj)) return obj.getBoundingRect()
+            return obj.phosmithCollageCell
+                ? { left: obj.phosmithCollageCell.x, top: obj.phosmithCollageCell.y, width: obj.phosmithCollageCell.w, height: obj.phosmithCollageCell.h }
+                : obj.getBoundingRect()
+        }
+        const inside = (box, pt) => pt.x >= box.left && pt.x <= box.left + box.width && pt.y >= box.top && pt.y <= box.top + box.height
+        const targetAt = (pt, self) => {
+            const objs = canvasEditor.getObjects()
+            for (let i = objs.length - 1; i >= 0; i -= 1) {
+                const o = objs[i]
+                if (o === self || o === highlight) continue
+                if (isCollageSlot(o) || (isVisibleImage(o) && cellFromImage(o))) {
+                    if (inside(boxOf(o), pt)) return o
+                }
+            }
+            return null
+        }
+        const hide = () => {
+            if (highlight.visible) { highlight.set({ visible: false }); canvasEditor.requestRenderAll() }
+        }
+
+        const onDown = (opt) => {
+            const t = opt.target
+            down = { x: opt.e.clientX, y: opt.e.clientY, target: t }
+            drag = t && isVisibleImage(t) && cellFromImage(t) ? { image: t, target: null } : null
+        }
+        const onMove = (opt) => {
+            if (!drag || !opt.e.buttons) return
+            const pt = canvasEditor.getScenePoint(opt.e)
+            const own = boxOf(drag.image)
+            const t = inside(own, pt) ? null : targetAt(pt, drag.image)
+            drag.target = t
+            if (!t) { hide(); return }
+            const b = boxOf(t)
+            highlight.set({ left: b.left, top: b.top, width: b.width, height: b.height, visible: true })
+            canvasEditor.bringObjectToFront(highlight)
+            canvasEditor.requestRenderAll()
+        }
+        const onUp = (opt) => {
+            const wasClick = down && Math.hypot(opt.e.clientX - down.x, opt.e.clientY - down.y) < 6
+            if (wasClick && isCollageSlot(down.target)) {
+                pendingSlotRef.current = down.target
+                slotInputRef.current?.click()
+            } else if (drag?.target) {
+                const { image, target } = drag
+                const photo = analyzeElement(sourceElement(image))
+                if (isCollageSlot(target)) {
+                    const from = cellFromImage(image)
+                    const fromIndex = canvasEditor.getObjects().indexOf(image)
+                    const slotIndex = canvasEditor.getObjects().indexOf(target)
+                    placeImageInCell(image, cellFromSlot(target), photo, { shadow: image.shadow ? 0.45 : 0, S: shortSide })
+                    canvasEditor.remove(target)
+                    if (typeof canvasEditor.moveObjectTo === 'function') canvasEditor.moveObjectTo(image, Math.min(slotIndex, canvasEditor.getObjects().length - 1))
+                    const back = createSlot(from)
+                    if (typeof canvasEditor.insertAt === 'function') canvasEditor.insertAt(Math.max(0, fromIndex), back)
+                    else canvasEditor.add(back)
+                    canvasEditor.__pushHistoryState?.({ label: 'Moved collage photo', domain: 'collage' })
+                } else if (swapFramedPhotos(canvasEditor, image, target, photo, analyzeElement(sourceElement(target)), shortSide)) {
+                    canvasEditor.__pushHistoryState?.({ label: 'Swapped collage photos', domain: 'collage' })
+                }
+                canvasEditor.discardActiveObject()
+                canvasEditor.__saveCanvasState?.()
+            }
+            hide()
+            down = null
+            drag = null
+        }
+        canvasEditor.on('mouse:down', onDown)
+        canvasEditor.on('mouse:move', onMove)
+        canvasEditor.on('mouse:up', onUp)
+        return () => {
+            canvasEditor.off('mouse:down', onDown)
+            canvasEditor.off('mouse:move', onMove)
+            canvasEditor.off('mouse:up', onUp)
+            canvasEditor.remove(highlight)
+        }
+    }, [canvasEditor, shortSide])
 
     const applyLayout = useCallback(() => {
         if (!canvasEditor) return
@@ -537,19 +665,12 @@ export default function CollageControls({ project, dominantColor }) {
         requestAiTemplates()
     }, [imageCount, isPlanning, requestAiTemplates])
 
-    // Keep suggestions ready: show the instant heuristic set immediately, then
-    // upgrade to vision-matched templates ONCE per photo set (not every render).
+    // Instant heuristic suggestions; the vision planner runs only on Shuffle /
+    // Auto-generate (opening the tool used to spend a model call and lock the panel).
     useEffect(() => {
-        if (imageCount < 2) {
-            aiPlannedRef.current = 0
-            return
-        }
+        if (imageCount < 2) return
         setTemplateRecipes((current) => (current.length ? current : generateTemplateRecipes(imageCount, 6)))
-        if (aiPlannedRef.current !== imageCount) {
-            aiPlannedRef.current = imageCount
-            requestAiTemplates().catch(() => {})
-        }
-    }, [imageCount, requestAiTemplates])
+    }, [imageCount])
 
     // Apply one generated template: layout + frame style + its backdrop (instant)
     // or AI theme (generated to fit the photos).
@@ -620,7 +741,14 @@ export default function CollageControls({ project, dominantColor }) {
         try {
             const newImage = await loadFabricImageFromFile(file)
             const index = canvasEditor.getObjects().indexOf(selectedPhoto)
-            fitImageToCell(newImage, cell, { shape, radiusPct, shadow })
+            // Composer cells (shards, words, seams, prints) keep their exact shape.
+            const shaped = cellFromImage(selectedPhoto)
+            if (shaped && (shaped.kind !== 'rect' || shaped.maskClip)) {
+                const photo = analyzeElement(sourceElement(newImage))
+                placeImageInCell(newImage, shaped, photo, { shadow: selectedPhoto.shadow ? 0.45 : 0, S: Math.min(Number(project?.width) || 1000, Number(project?.height) || 1000) })
+            } else {
+                fitImageToCell(newImage, cell, { shape, radiusPct, shadow })
+            }
             canvasEditor.remove(selectedPhoto)
             if (index >= 0 && typeof canvasEditor.insertAt === 'function') {
                 canvasEditor.insertAt(Math.min(index, canvasEditor.getObjects().length), newImage)
@@ -639,7 +767,7 @@ export default function CollageControls({ project, dominantColor }) {
         } finally {
             setIsReplacing(false)
         }
-    }, [canvasEditor, selectedPhoto, shape, radiusPct, shadow])
+    }, [canvasEditor, selectedPhoto, shape, radiusPct, shadow, project?.width, project?.height])
 
     // Jump to the Adjust tool with this photo selected to fine-tune it.
     const handleEditPhoto = useCallback(() => {
@@ -662,6 +790,29 @@ export default function CollageControls({ project, dominantColor }) {
                 accept="image/*"
                 hidden
                 onChange={onReplaceFileChange}
+            />
+            <input
+                ref={slotInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                aria-label="Add photos to collage slots"
+                onChange={(e) => {
+                    const files = Array.from(e.target.files || [])
+                    e.target.value = ''
+                    const first = pendingSlotRef.current
+                    pendingSlotRef.current = null
+                    fillSlots(files, first)
+                }}
+            />
+
+            <CollageComposer
+                canvasEditor={canvasEditor}
+                project={project}
+                imageCount={imageCount}
+                busyElsewhere={Boolean(generatingTheme) || Boolean(processingMessage)}
+                setProcessingMessage={setProcessingMessage}
             />
 
             <Section title="Auto Template" icon={Wand2}>

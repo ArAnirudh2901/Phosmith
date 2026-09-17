@@ -4,7 +4,7 @@ import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     ChevronDown, ChevronUp, Eye, EyeOff, Lock, LockOpen, Minus, Plus,
-    Eraser, Paintbrush, RotateCcw, Redo2, Trash2, Undo2,
+    Eraser, Paintbrush, Redo2, Trash2, Undo2, Contrast,
 } from 'lucide-react'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
 import { LayerGradeEditor } from './_layer-grade-editor.jsx'
@@ -106,10 +106,11 @@ export function BrushSizeControl({ value, setValue, min, max, dominantColor }) {
     )
 }
 
-export function LabeledSlider({ label, value, min, max, step = 1, suffix = '%', onChange, dominantColor }) {
+export function LabeledSlider({ label, value, min, max, step = 1, suffix = '%', format, onChange, dominantColor }) {
+    // The slider draws its own label; a caption above repeated every label and
+    // doubled each card's height.
     return (
-        <div className="space-y-1.5">
-            <label className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{label}</label>
+        <div>
             <ProRulerSlider
                 label={label}
                 value={value}
@@ -117,6 +118,7 @@ export function LabeledSlider({ label, value, min, max, step = 1, suffix = '%', 
                 max={max}
                 step={step}
                 suffix={suffix}
+                format={format}
                 onChange={onChange}
                 visual={{
                     fill: 'rgba(47, 143, 203, 0.45)',
@@ -158,7 +160,7 @@ export function MaskActionButtons({ hasMask, undoDepth, redoDepth, onUndo, onRed
                 disabled={!hasMask}
                 className="mask-btn w-full"
             >
-                <RotateCcw className="h-3.5 w-3.5" />
+                <Contrast className="h-3.5 w-3.5" />
                 Invert
             </button>
             <button
@@ -215,7 +217,14 @@ const KIND_META = {
     path:       { label: 'Pen Path',  color: '#53d8ff', step: null },
 }
 
-export const getKindMeta = (kind) => KIND_META[kind] || { label: kind, color: '#94a3b8', step: null }
+// Selections made by tools that share a kind (Magic Wand, marquees) badge by tool.
+const TOOL_META = {
+    wand:    { label: 'Magic Wand', color: '#2dd4bf', step: null },
+    marquee: { label: 'Marquee',    color: '#38bdf8', step: null },
+    harmony: { label: 'Harmony',    color: '#fbbf24', step: null },
+}
+
+export const getKindMeta = (kind, tool) => TOOL_META[tool] || KIND_META[kind] || { label: kind, color: '#94a3b8', step: null }
 
 const OPS = [
     { id: 'add', label: 'Add' },
@@ -405,7 +414,7 @@ function LayerAdjustEditor({ layer, onUpdate, dominantColor }) {
  * underneath the kind-specific controls, so adjustments are universal.
  */
 export function KindParamEditor({ layer, onUpdate, onApplyCurve, histogram, dominantColor, imageSize }) {
-    const meta = getKindMeta(layer.kind)
+    const meta = getKindMeta(layer.kind, layer.tool)
     let kindSpecific = null
     if (layer.kind === 'luminance') {
         kindSpecific = (
@@ -721,51 +730,56 @@ export function KindParamEditor({ layer, onUpdate, onApplyCurve, histogram, domi
  */
 /** Mask kinds whose selection lives in a texture and can therefore have its
  *  boundary grown/shrunk (mirrors TEXTURE_BACKED_KINDS in mask-grow.js). */
-const GROWABLE_KINDS = ['semantic', 'lasso', 'brush', 'smartBrush']
+const GROWABLE_KINDS = ['semantic', 'lasso', 'path', 'brush', 'smartBrush']
 const GROW_UI_MAX_PX = 60
 
 /**
- * "Boundary" slider: extend (+) or shrink (−) a texture-backed selection's
- * edge by N pixels. Regenerating the mask texture isn't per-frame cheap, so
- * the slider tracks locally and COMMITS on release — and because the commit
- * is absolute (derived from the layer's pristine base texture every time),
- * scrubbing back to 0 restores the original AI-detected edge exactly.
+ * Select-and-Mask edge controls for texture-backed selections: Boundary (shift
+ * edge, ±px), Smooth and Contrast. Regenerating the texture isn't per-frame
+ * cheap, so each slider tracks locally and commits on release; commits derive
+ * from the layer's pristine base, so returning to 0 restores the original edge.
  */
-function BoundaryGrowControl({ layer, locked, onCommit }) {
-    const committed = Math.round(layer.growPx || 0)
-    const [local, setLocal] = useState(null)
-    const value = local ?? committed
-    const commit = () => {
-        if (local == null) return
-        const px = local
-        setLocal(null)
-        if (px !== committed) onCommit(px)
+const EDGE_ROWS = [
+    { key: 'px', field: 'growPx', label: 'Boundary', min: -GROW_UI_MAX_PX, max: GROW_UI_MAX_PX, fmt: (v) => `${v > 0 ? '+' : ''}${v}px`, title: 'Extend (+) or shrink (−) the edge, in image pixels. 0 restores the original edge.' },
+    { key: 'smooth', field: 'edgeSmooth', label: 'Smooth', min: 0, max: 100, fmt: (v) => `${v}`, title: 'Round off jagged or noisy outlines without feathering.' },
+    { key: 'contrast', field: 'edgeContrast', label: 'Contrast', min: 0, max: 100, fmt: (v) => `${v}%`, title: 'Sharpen soft edges; 100% gives a hard edge.' },
+]
+
+function EdgeRefineControls({ layer, locked, onCommit }) {
+    const [local, setLocal] = useState({})
+    const committed = (row) => Math.round(layer[row.field] || 0)
+    const commit = (row) => {
+        const v = local[row.key]
+        if (v == null) return
+        setLocal((cur) => { const next = { ...cur }; delete next[row.key]; return next })
+        if (v === committed(row)) return
+        const px = row.key === 'px' ? v : committed(EDGE_ROWS[0])
+        onCommit(px, row.key === 'px' ? undefined : { [row.key]: v })
     }
-    return (
-        <div className="mask-param-row mt-1.5">
-            <span
-                className="mask-param-label"
-                title="Extend (+) or shrink (−) this selection's boundary, in image pixels. Works on AI-detected subject masks too; 0 restores the original edge."
-            >
-                Boundary
-            </span>
-            <input
-                type="range"
-                min={-GROW_UI_MAX_PX}
-                max={GROW_UI_MAX_PX}
-                step={1}
-                disabled={locked}
-                value={value}
-                onChange={(e) => setLocal(Number(e.target.value))}
-                onMouseUp={commit}
-                onTouchEnd={commit}
-                onKeyUp={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Enter') commit() }}
-                onBlur={commit}
-                className="mask-range flex-1"
-            />
-            <span className="mask-param-value">{value > 0 ? `+${value}` : value}px</span>
-        </div>
-    )
+    return EDGE_ROWS.map((row) => {
+        const value = local[row.key] ?? committed(row)
+        return (
+            <div key={row.key} className="mask-param-row mt-1.5">
+                <span className="mask-param-label" title={row.title}>{row.label}</span>
+                <input
+                    type="range"
+                    min={row.min}
+                    max={row.max}
+                    step={1}
+                    disabled={locked}
+                    value={value}
+                    aria-label={row.label}
+                    onChange={(e) => setLocal((cur) => ({ ...cur, [row.key]: Number(e.target.value) }))}
+                    onMouseUp={() => commit(row)}
+                    onTouchEnd={() => commit(row)}
+                    onKeyUp={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Enter') commit(row) }}
+                    onBlur={() => commit(row)}
+                    className="mask-range flex-1"
+                />
+                <span className="mask-param-value">{row.fmt(value)}</span>
+            </div>
+        )
+    })
 }
 
 export const MaskChainCard = React.memo(function MaskChainCard({
@@ -776,12 +790,11 @@ export const MaskChainCard = React.memo(function MaskChainCard({
     onApplyCurve, histogram,
 }) {
     const layer = entry.layer
-    const meta = getKindMeta(layer.kind)
+    const meta = getKindMeta(layer.kind, layer.tool)
     const locked = !!layer.lock
     const fillMode = layer.fillMode || 'adjust'
-    // New selection layers default to 'fill' and start expanded so the user
-    // immediately sees the fill controls (rather than a collapsed, dead-
-    // looking card — the original "I added a mask and nothing happened" UX).
+    // Fill/erase layers open expanded so their colour/strength controls show;
+    // adjust (the default) stays compact.
     const [expanded, setExpanded] = useState(fillMode !== 'adjust')
 
     return (
@@ -817,6 +830,7 @@ export const MaskChainCard = React.memo(function MaskChainCard({
                 <button
                     type="button"
                     onClick={() => setExpanded((v) => !v)}
+                    aria-expanded={expanded}
                     className="mask-icon-btn"
                     title={expanded ? 'Hide params' : 'Edit params'}
                 >
@@ -951,10 +965,10 @@ export const MaskChainCard = React.memo(function MaskChainCard({
             {typeof onExpandBoundary === 'function'
                 && GROWABLE_KINDS.includes(layer.kind)
                 && layer.maskTextureKey && (
-                <BoundaryGrowControl
+                <EdgeRefineControls
                     layer={layer}
                     locked={locked}
-                    onCommit={(px) => onExpandBoundary(layer.id, px)}
+                    onCommit={(px, edge) => onExpandBoundary(layer.id, px, edge)}
                 />
             )}
 
@@ -964,12 +978,12 @@ export const MaskChainCard = React.memo(function MaskChainCard({
             {typeof onRefineRegion === 'function'
                 && GROWABLE_KINDS.includes(layer.kind)
                 && (layer.maskTextureKey || layer.brushTextureKey) && (
-                <div className="grid grid-cols-2 gap-1.5 mt-1.5">
+                <div className="seg-row seg-row--2 grid grid-cols-2 gap-1.5 mt-1.5">
                     <button
                         type="button"
                         disabled={locked}
                         onClick={() => onRefineRegion(layer.id, 'erase')}
-                        className="mask-fill-mode-btn flex items-center justify-center gap-1 disabled:opacity-40"
+                        className="mask-fill-mode-btn seg-btn flex items-center justify-center gap-1 disabled:opacity-40"
                         title="Paint a region to remove from this mask — the rest of the layer stays"
                     >
                         <Eraser className="h-3 w-3" />
@@ -979,7 +993,7 @@ export const MaskChainCard = React.memo(function MaskChainCard({
                         type="button"
                         disabled={locked}
                         onClick={() => onRefineRegion(layer.id, 'add')}
-                        className="mask-fill-mode-btn flex items-center justify-center gap-1 disabled:opacity-40"
+                        className="mask-fill-mode-btn seg-btn flex items-center justify-center gap-1 disabled:opacity-40"
                         title="Paint a new region to add to this mask"
                     >
                         <Paintbrush className="h-3 w-3" />

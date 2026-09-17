@@ -577,6 +577,7 @@ export default function usePixelMaskTool({
     const pushUndo = useCallback(() => {
         const snap = snapshot()
         if (!snap) return
+        snap.at = Date.now()
         undoStackRef.current.push(snap)
         if (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift()
         redoStackRef.current = []
@@ -657,7 +658,7 @@ export default function usePixelMaskTool({
         if (undoStackRef.current.length === 0) return false
         const current = snapshot()
         const prev = undoStackRef.current.pop()
-        if (current) redoStackRef.current.push(current)
+        if (current) { current.at = prev?.at || 0; redoStackRef.current.push(current) }
         applySnapshot(prev)
         setUndoDepth(undoStackRef.current.length)
         setRedoDepth(redoStackRef.current.length)
@@ -678,7 +679,7 @@ export default function usePixelMaskTool({
         if (redoStackRef.current.length === 0) return false
         const current = snapshot()
         const next = redoStackRef.current.pop()
-        if (current) undoStackRef.current.push(current)
+        if (current) { current.at = next?.at || 0; undoStackRef.current.push(current) }
         applySnapshot(next)
         setUndoDepth(undoStackRef.current.length)
         setRedoDepth(redoStackRef.current.length)
@@ -1119,6 +1120,14 @@ export default function usePixelMaskTool({
         const el = cursorElRef.current
         if (el) el.style.display = visible ? 'block' : 'none'
     }, [])
+
+    // Hide the ring (and restore the system cursor) as soon as the tool is disabled.
+    useEffect(() => {
+        if (!disabled) return
+        setCursorVisible(false)
+        const el = canvasEditor?.upperCanvasEl
+        if (el?.style.cursor === 'none') el.style.cursor = ''
+    }, [disabled, canvasEditor, setCursorVisible])
 
     /* ─── painting ─── */
 
@@ -1657,6 +1666,7 @@ export default function usePixelMaskTool({
             // Inpaint failed: keep the (hole-filled) region erased to transparency
             // as a graceful fallback, and make it a single undoable step.
             if (beforeFill) {
+                beforeFill.at = Date.now()
                 undoStackRef.current.push(beforeFill)
                 if (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift()
                 redoStackRef.current = []
@@ -1805,6 +1815,11 @@ export default function usePixelMaskTool({
         const applyCanvasCursor = () => {
             const el = canvasEditor.upperCanvasEl
             if (!el) return
+            // Disabled (another mask mode owns the canvas): leave the cursor to Fabric.
+            if (disabledRef.current) {
+                if (el.style.cursor === 'none') el.style.cursor = ''
+                return
+            }
             // Hide the system cursor under the ring for the brush; show a crosshair
             // for the click modes (magic flood / AI object — no brush size there).
             el.style.cursor = (magicRef.current || objectSelectRef.current)
@@ -1817,7 +1832,7 @@ export default function usePixelMaskTool({
             overCanvasRef.current = inside
             lastClientRef.current = { x: e.clientX, y: e.clientY }
             applyCanvasCursor()
-            if (inside && !magicRef.current && !objectSelectRef.current) {
+            if (inside && !disabledRef.current && !magicRef.current && !objectSelectRef.current) {
                 positionCursor(e.clientX, e.clientY)
                 // The ring's SIZE only changes with brush/zoom, not on move —
                 // skip the restyle while painting so a heavy stroke can't stall
@@ -1903,6 +1918,7 @@ export default function usePixelMaskTool({
             })
             if (affected > 0) {
                 if (before) {
+                    before.at = Date.now()
                     undoStackRef.current.push(before)
                     if (undoStackRef.current.length > MAX_HISTORY) undoStackRef.current.shift()
                     redoStackRef.current = []
@@ -2115,12 +2131,23 @@ export default function usePixelMaskTool({
 
         // Route the tool's Cmd+Z/Cmd+Shift+Z to its own per-stroke stack first; fall
         // back to the global canvas history only when the local stack is exhausted.
+        // The Mask tool also keeps a layer-chain stack: step whichever changed
+        // last, and fall back to canvas history only when both are empty.
+        const lastAt = (stack) => (stack.length ? stack[stack.length - 1].at || 0 : -1)
         const onMaskUndo = () => {
-            if (undoStackRef.current.length > 0) undo()
+            const chain = canvasEditor.__maskChainHistory
+            const chainAt = chain ? chain.at().undo : -1
+            const pixelAt = lastAt(undoStackRef.current)
+            if (chainAt >= 0 && chainAt >= pixelAt) chain.undo()
+            else if (pixelAt >= 0) undo()
             else canvasEditor.__undoCanvasState?.()
         }
         const onMaskRedo = () => {
-            if (redoStackRef.current.length > 0) redo()
+            const chain = canvasEditor.__maskChainHistory
+            const chainAt = chain ? chain.at().redo : -1
+            const pixelAt = lastAt(redoStackRef.current)
+            if (chainAt >= 0 && chainAt >= pixelAt) chain.redo()
+            else if (pixelAt >= 0) redo()
             else canvasEditor.__redoCanvasState?.()
         }
 
@@ -2238,7 +2265,9 @@ export default function usePixelMaskTool({
     useEffect(() => {
         cursorElRef.current?.__restyle?.()
         cursorElRef.current?.__applyCanvasCursor?.()
-        if (!magic && overCanvasRef.current && lastClientRef.current) {
+        if (disabledRef.current) {
+            setCursorVisible(false)
+        } else if (!magic && overCanvasRef.current && lastClientRef.current) {
             positionCursor(lastClientRef.current.x, lastClientRef.current.y)
             setCursorVisible(true)
         } else if (magic) {

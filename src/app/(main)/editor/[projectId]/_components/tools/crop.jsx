@@ -1150,7 +1150,7 @@ const CropContent = ({ dominantColor }) => {
                 {activeImage && (
                     <div>
                         <label className='panel-label mb-2.5 block'>Crop Presets</label>
-                        <div className='grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))] gap-1.5'>
+                        <div className='grid gap-1.5' style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
                             {CROP_PRESETS.map((preset) => {
                                 const IconComponent = preset.icon
                                 const isSelected = isCropMode && selectedPresetId === preset.id
@@ -1172,7 +1172,7 @@ const CropContent = ({ dominantColor }) => {
                                                 <div className="truncate text-[10px] font-semibold" style={{ color: isSelected ? activeTextColor : 'var(--text-primary)' }}>
                                                     {preset.label}
                                                 </div>
-                                                <div className="mt-0.5 text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                                                <div className="mt-0.5 truncate text-[9px]" style={{ color: 'var(--text-muted)' }}>
                                                     {preset.ratio}{preset.size ? ` · ${preset.size}` : ''}
                                                 </div>
                                             </div>

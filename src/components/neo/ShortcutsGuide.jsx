@@ -64,6 +64,19 @@ const EDITOR_SECTIONS = [
         ],
     },
     {
+        title: "Mask tool",
+        items: [
+            { keys: ["W"], desc: "Magic Wand (Shift / Alt + click adds / subtracts)" },
+            { keys: ["M"], desc: "Marquee" },
+            { keys: ["Shift", "M"], desc: "Rectangle / ellipse marquee" },
+            { keys: ["L"], desc: "Lasso" },
+            { keys: ["\\"], desc: "Mask view: overlay → black & white → off" },
+            { keys: [MOD, "Shift", "I"], desc: "Invert mask" },
+            { keys: ["Delete"], desc: "Remove selected layer" },
+            { keys: ["Esc"], desc: "Stop the active selection tool" },
+        ],
+    },
+    {
         title: "Help",
         items: [{ keys: ["?"], desc: "Toggle this guide" }],
     },

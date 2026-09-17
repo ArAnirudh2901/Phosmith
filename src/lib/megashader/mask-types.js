@@ -401,6 +401,11 @@ const layerHasAdjustment = (l) => {
     return wheelActive(l.wheelShadows) || wheelActive(l.wheelMidtones) || wheelActive(l.wheelHighlights)
 }
 
+// True when rendering the stack would change no pixel: no visible chain effect
+// and an identity base grade. The filter still installs (so the chain persists
+// with the canvas) but reports itself neutral so Fabric skips the render.
+export const stackIsNeutral = (stack) => stackHasNoVisibleEffect(stack) && !layerHasAdjustment(stack?.base)
+
 export const isAdjustmentsIdentity = (stack) => {
     if (!stack || !Array.isArray(stack.chain)) return true
     for (const entry of stack.chain) {
@@ -807,9 +812,20 @@ export const getMaskTextureVersion = (key) => {
  * @param {string} key
  * @returns {ImageData | HTMLCanvasElement | HTMLImageElement | ImageBitmap | undefined}
  */
+// Rebuilds derived textures (boundary-grown masks) that were evicted to bound
+// memory, so undo/redo back to an older variant still renders.
+let maskTextureResolver = null
+export const setMaskTextureResolver = (fn) => {
+    maskTextureResolver = typeof fn === 'function' ? fn : null
+}
+
 export const getMaskTexture = (key) => {
     if (typeof key !== 'string' || !key) return undefined
-    return maskTextureCache.get(key)
+    const hit = maskTextureCache.get(key)
+    if (hit || !maskTextureResolver) return hit
+    const rebuilt = maskTextureResolver(key)
+    if (rebuilt) setMaskTexture(key, rebuilt)
+    return rebuilt || undefined
 }
 
 /**
@@ -820,6 +836,8 @@ export const getMaskTexture = (key) => {
  *
  * @param {string} [key]
  */
+export const listMaskTextureKeys = () => [...maskTextureCache.keys()]
+
 export const clearMaskTexture = (key) => {
     if (typeof key !== 'string' || !key) return
     maskTextureCache.delete(key)

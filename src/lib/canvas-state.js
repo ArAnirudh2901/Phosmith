@@ -115,9 +115,17 @@ export const serializeCanvasState = (canvas) => {
                     cleaned.data = { ...(cleaned.data || {}), pixelStretch: matchingObj.data.pixelStretch }
                 }
 
-                const maskCanvas =
+                // Only a committed pixel mask persists (flag or clipPath). The mask
+                // tools attach a full-res blank canvas on mount; scanning it on every
+                // save allocated ~100 MB for nothing.
+                // Absolute clips are collage cell shapes, never pixel masks.
+                const pixelClip = matchingObj?.clipPath && !matchingObj.clipPath.absolutePositioned ? matchingObj.clipPath : null
+                const committedMask = matchingObj?._phosmithHasMask === true
+                    || matchingObj?.phosmithHasMask === true
+                    || !!pixelClip
+                const maskCanvas = !committedMask || (matchingObj?.clipPath && !pixelClip) ? null :
                     matchingObj?._phosmithMaskCanvas ||
-                    (matchingObj?.clipPath
+                    (pixelClip
                         ? maskCanvasFromClipPath(matchingObj.clipPath, matchingObj.width || cleaned.width || 1, matchingObj.height || cleaned.height || 1)
                         : null)
                 const encodedMask = maskCanvas && !isMaskCanvasEmpty(maskCanvas)
