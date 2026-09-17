@@ -27,6 +27,7 @@ const LIMITERS = {
     "ai-mask-plan":      { count: 30,  windowSec: 60 },  // 30 / minute — NL mask planning (Gemini text-only)
     "ai-collage-plan":   { count: 12,  windowSec: 60 },  // 12 / minute — vision collage planner (up to ~6 thumbnails per call)
     "ai-collage-direct": { count: 12,  windowSec: 60 },  // 12 / minute — Composer art director (vision)
+    "ai-crop-analyze":   { count: 20,  windowSec: 60 },  // 20 / minute — subject-aware crop vision pass
     "ai-stretch-plan":   { count: 10,  windowSec: 60 },  // 10 / minute — AI pixel stretch planner (one-shot per image)
     "shape-mask":        { count: 120, windowSec: 60 },  // 120/minute — deterministic local shape rasterization
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
