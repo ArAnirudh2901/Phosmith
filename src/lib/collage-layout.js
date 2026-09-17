@@ -325,7 +325,9 @@ export const restyleImage = (image, style) => {
     image.phosmithCollageCell = cell
     image._phosmithCollageCell = cell
     image.phosmithCollageCoverScale = image.phosmithCollageCoverScale || getCellCoverScale(image, cell)
-    image.set({ shadow: buildCellShadow(style), clipPath: buildCellClipPath(cell, style) })
+    // Composer polygon cells keep their shape; only the shadow restyles.
+    const polygonal = (image.clipPath?.type || '').toLowerCase() === 'polygon'
+    image.set(polygonal ? { shadow: buildCellShadow(style) } : { shadow: buildCellShadow(style), clipPath: buildCellClipPath(cell, style) })
     clampToCell(image)
     image.setCoords()
     return true
@@ -366,6 +368,18 @@ export const cellFromClipPath = (image) => {
     const cp = image?.clipPath
     if (!cp || !cp.absolutePositioned) return null
     const type = (cp.type || '').toLowerCase()
+    // Composer shards/strata cells: the points are absolute scene coords.
+    if (type === 'polygon' && Array.isArray(cp.points) && cp.points.length >= 3) {
+        const xs = cp.points.map((p) => p.x)
+        const ys = cp.points.map((p) => p.y)
+        const x = Math.min(...xs), y = Math.min(...ys)
+        return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }
+    }
+    // Composer silhouette (path) and tapestry (seam-mask image) clips.
+    if (type === 'path' || type === 'image') {
+        const w = (cp.width || 0) * (cp.scaleX || 1), h = (cp.height || 0) * (cp.scaleY || 1)
+        return w > 0 && h > 0 ? { x: cp.left, y: cp.top, w, h } : null
+    }
     if (type === 'ellipse') {
         return {
             x: cp.left,

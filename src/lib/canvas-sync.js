@@ -19,6 +19,8 @@
 // UI-decoupled on purpose: the editor wires it; the in-app agent (or any other
 // driver) can reuse the same manager.
 
+import { recordWrittenRevision } from "./canvas-content-hash.js"
+
 const DB_NAME = "phosmith-canvas-sync"
 const STORE = "states"
 const DB_VERSION = 1
@@ -224,7 +226,10 @@ export const createCanvasSync = ({
                 console.warn(`[canvas-sync] flush returned non-flushed, non-conflict:`, res)
             }
             if (res?.flushed) {
-                if (typeof res.revision === "number") baseRevision = res.revision
+                if (typeof res.revision === "number") {
+                    baseRevision = res.revision
+                    recordWrittenRevision(projectId, res.revision)
+                }
                 conflicted = false
                 // Only declare clean if nothing newer slipped in while we flushed.
                 if (latest && latest.hash === flushHash) {
@@ -485,6 +490,20 @@ export const createCanvasSync = ({
         setBaseRevision(rev) {
             if (lastSentHash) return
             if (Number.isFinite(Number(rev))) baseRevision = Number(rev)
+        },
+
+        // The "newer" server revision was this client's own earlier write (an
+        // unload save landing after a reload had already read the project), so
+        // it is not a conflict: adopt it as the base and resend the latest state.
+        rebaseAndRetry(rev) {
+            if (!Number.isFinite(Number(rev))) return
+            conflicted = false
+            baseRevision = Number(rev)
+            if (!latest) return
+            pendingSync = true
+            lastSentHash = null
+            pending = { fullState: latest.fullState, currentImageUrl: latest.currentImageUrl, hash: latest.hash, immediate: true }
+            processPending()
         },
 
         isOnline: () => online,

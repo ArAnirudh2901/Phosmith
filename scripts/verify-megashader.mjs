@@ -1517,7 +1517,7 @@ const log = (ok, name, detail) => {
     const lasso = lassoLayer({ maskTextureKey: 'lasso-test-key' })
     const c = compileMegashader({ chain: [{ layer: lasso, op: 'replace' }] })
     log(lasso.kind === 'lasso', 'lassoLayer factory produces a lasso layer')
-    log(lasso.fillMode === 'fill', 'lasso defaults to fill mode (visible selection)')
+    log(lasso.fillMode === 'adjust', 'lasso defaults to adjust mode (non-destructive, no painted fill)')
     log(c.frag.includes('uLayer_0_kind_lasso_mask'), 'lasso kind emits its mask sampler')
     log(c.frag.includes('smoothstep(0.5 - feather, 0.5 + feather, raw)'), 'lasso body smoothsteps the polygon alpha')
     clearMaskTexture('lasso-test-key')

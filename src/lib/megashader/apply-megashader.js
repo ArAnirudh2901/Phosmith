@@ -14,9 +14,9 @@
  * @module megashader/apply-megashader
  */
 
-import { MegashaderFilter } from './fabric-megashader-filter'
+import { MegashaderFilter, ensureMegashaderFilterBackend } from './fabric-megashader-filter'
 import { hasWebGL2, disposeRenderer } from './megashader-renderer'
-import { stackHasNoVisibleEffect } from './mask-types'
+import { stackIsNeutral } from './mask-types'
 
 /**
  * Returns true if the runtime has WebGL2 (or WebGL1, as a degraded
@@ -96,6 +96,7 @@ export const applyMegashaderFilter = (image, stack, options = {}) => {
     const globalMaskAlpha = typeof options.globalMaskAlpha === 'number' ? options.globalMaskAlpha : 1
     const globalInvert = options.globalInvert === true
     const maskOverlay = options.maskOverlay === true
+    const maskView = options.maskView === 'bw' ? 'bw' : 'tint'
     const overlayColor = options.overlayColor || null
 
     stripExistingMegashaderFilters(image)
@@ -107,8 +108,13 @@ export const applyMegashaderFilter = (image, stack, options = {}) => {
     // Exception: the "show mask" overlay must render the selection even for
     // an all-adjust-zero chain, so it installs whenever the chain is
     // non-empty.
-    const isEmpty = !stack || !Array.isArray(stack.chain) || stack.chain.length === 0
-    if (isEmpty || (stackHasNoVisibleEffect(stack) && !maskOverlay)) {
+    // Install whenever there is a chain or a graded base, even if nothing is
+    // visible yet: the chain only persists through this filter, so skipping it
+    // silently dropped ungraded masks on reload. MegashaderFilter.isNeutralState
+    // lets Fabric skip the render when it would change nothing.
+    const hasChain = !!stack && Array.isArray(stack.chain) && stack.chain.length > 0
+    const hasBaseGrade = !!stack?.base && !stackIsNeutral({ chain: [], base: stack.base })
+    if (!hasChain && !hasBaseGrade) {
         // No filter to install. Re-run the chain in case a previous filter
         // was removed, so the image re-renders without the megashader.
         try {
@@ -120,7 +126,8 @@ export const applyMegashaderFilter = (image, stack, options = {}) => {
         return null
     }
 
-    const filter = new MegashaderFilter({ stack, globalMaskAlpha, globalInvert, maskOverlay, overlayColor })
+    ensureMegashaderFilterBackend()
+    const filter = new MegashaderFilter({ stack, globalMaskAlpha, globalInvert, maskOverlay, maskView, overlayColor })
     image.filters.push(filter)
     try {
         image.applyFilters()

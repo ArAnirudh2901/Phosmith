@@ -22,6 +22,8 @@ import "../../../../../lib/curves-filter"
 // loadFromJSON (the class wouldn't be registered yet — it was previously only
 // imported lazily when the mask tool fired its first change event).
 import "@/lib/megashader/fabric-megashader-filter"
+// Empty collage slots must rehydrate as their own class.
+import "@/lib/collage/slot"
 
 // Force the Canvas2D filter backend instead of WebGL. The custom curves LUT filter
 // has a WebGL fragment-shader path that worked in isolation but had subtle issues
@@ -65,6 +67,7 @@ import { describeCanvasChange } from "../../../../../lib/canvas-change-describe"
 import { isExpansionFrameLike, removeExpansionFramesFromCanvas } from "../../../../../lib/expansion-pipeline"
 import { addImageFilesToCanvas, fabricImageFromUrl } from "../../../../../lib/canvas-images"
 import { isRawFile } from "../../../../../lib/raw-preview"
+import { canvasContentHash, recordSavedContent, savedContentTime, writtenRevision } from "../../../../../lib/canvas-content-hash"
 import {
     fetchCachedSnapshot,
     flushToNeon,
@@ -81,7 +84,14 @@ const MIN_ZOOM = 0.05
 const MAX_ZOOM = 64
 const MIN_PREVIEW_ZOOM_PERCENT = 5
 const MAX_PREVIEW_ZOOM_PERCENT = 300
-const PREVIEW_ZOOM_STEP_PERCENT = 1
+// Button zoom walks preset stops (Photoshop-style); the slider stays 1% fine.
+const PREVIEW_ZOOM_STOPS = [5, 8, 10, 12, 16, 20, 25, 33, 40, 50, 67, 75, 100, 125, 150, 200, 250, 300]
+const nextPreviewZoomStop = (percent, dir) => {
+    const p = Math.round(Number(percent) || 100)
+    return dir > 0
+        ? PREVIEW_ZOOM_STOPS.find((z) => z > p) ?? MAX_PREVIEW_ZOOM_PERCENT
+        : [...PREVIEW_ZOOM_STOPS].reverse().find((z) => z < p) ?? MIN_PREVIEW_ZOOM_PERCENT
+}
 const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
 const MIN_PERSISTED_HISTORY_ENTRIES = 3
@@ -352,16 +362,21 @@ const CanvasEditor = ({ project }) => {
     // dedup, single-flight, the durable IndexedDB mirror, reconnect replay, and
     // the unload beacon. We never let two managers exist for the same project.
     const syncRef = useRef(null)
+    // Content the editor loaded from, to recognise our own write racing a reload.
+    const loadedContentHashRef = useRef(null)
+    const rebasedRevisionRef = useRef(null)
+    const scheduleSaveRef = useRef(null)
     // Stable indirection to the latest direct-Neon writer so the sync manager
     // (created once per project) always calls the current updateProject mutation.
     const directWriteRef = useRef(async () => {})
     const wasOfflineRef = useRef(false)
-    // 'idle' | 'saving' | 'saved' | 'offline' | 'error' — drives the status pill.
+    // 'idle' | 'saving' | 'saved' | 'offline' | 'error' | 'conflict' | 'paused' — drives the status pill.
     const [syncStatus, setSyncStatus] = useState("idle")
 
     // Surface sync-manager status: update the pill and toast on offline/online
     // transitions (deduped via wasOfflineRef so we don't spam).
     const handleSyncStatus = useCallback((status) => {
+        if (canvasInstanceRef.current?.__phosmithRestoreFailed) return
         setSyncStatus(status)
         if (status === "offline") {
             if (!wasOfflineRef.current) {
@@ -420,6 +435,31 @@ const CanvasEditor = ({ project }) => {
     // We resolve it NON-DESTRUCTIVELY — both versions land in version history —
     // then let the user pick which becomes current.
     const handleConflict = useCallback(async (serverProject) => {
+        // A reload can read the project before the previous page's unload save
+        // lands, so our own write shows up as "another device". If the server
+        // holds exactly what we loaded, nobody diverged: rebase instead of forking.
+        // Also rebase when the server holds an OLDER state this browser saved
+        // (a slow in-flight save from the previous page) and we loaded a newer one.
+        const serverRev = Number(serverProject?.revision)
+        const loadedHash = loadedContentHashRef.current
+        const serverHash = canvasContentHash(serverProject?.canvasState)
+        const projectId = projectRef.current?._id
+        const serverT = savedContentTime(projectId, serverHash)
+        const loadedT = savedContentTime(projectId, loadedHash)
+        const ownOlderWrite = serverT !== null && loadedT !== null && serverT <= loadedT
+        // Server revision is the last one this tab wrote (e.g. a stale cached
+        // snapshot's base after a remount): same lineage, not another device.
+        const ownLatestRevision = Number.isFinite(serverRev) && writtenRevision(projectId) === serverRev
+        if (
+            Number.isFinite(serverRev)
+            && rebasedRevisionRef.current !== serverRev
+            && ((loadedHash && (serverHash === loadedHash || ownOlderWrite)) || ownLatestRevision)
+        ) {
+            rebasedRevisionRef.current = serverRev
+            setSyncStatus("saving")
+            syncRef.current?.rebaseAndRetry?.(serverRev)
+            return
+        }
         setSyncStatus("conflict")
         const canvas = canvasInstanceRef.current
         const proj = projectRef.current
@@ -455,6 +495,12 @@ const CanvasEditor = ({ project }) => {
         const forkProjectId = await forkLiveCanvasToProject("your device's copy")
 
         if (forkProjectId) {
+            // The fork owns our work now. Point the original's caches at the server
+            // copy, or a plain reload replays the stale snapshot and forks again.
+            clearLocalState(proj._id).catch(() => {})
+            if (serverProject?.canvasState) {
+                snapshotToCache(proj._id, serverProject.canvasState, serverProject.currentImageUrl || null, serverProject.revision).catch(() => {})
+            }
             // Fork succeeded: auto-reload this tab to the server's version so the
             // two devices no longer compete for the same project. The user can open
             // the forked project separately at any time.
@@ -601,6 +647,11 @@ const CanvasEditor = ({ project }) => {
         const canvas = canvasInstanceRef.current
         const proj = projectRef.current
         if (!canvas || !proj) return
+        // Saved state failed to load: never overwrite it with the fallback canvas.
+        if (canvas.__phosmithRestoreFailed) {
+            if (rethrow) throw new Error("Saved edits failed to load — reload before saving")
+            return
+        }
 
         const canvasJSON = serializeCanvasState(canvas)
         const currentImageUrl = getPrimaryRemoteImageUrl(canvas)
@@ -659,6 +710,7 @@ const CanvasEditor = ({ project }) => {
             }
             return
         }
+        recordSavedContent(projectRef.current?._id, canvasContentHash(fullState))
         try {
             await manager.save(fullState, currentImageUrl, { immediate, rethrow })
         } catch (error) {
@@ -912,6 +964,7 @@ const CanvasEditor = ({ project }) => {
             // so its first flush is checked against the right baseline.
             try { syncRef.current?.setBaseRevision(effectiveBaseRevision) } catch { /* manager may not exist yet */ }
 
+            loadedContentHashRef.current = canvasContentHash(rawCanvasState)
             const canvasState = normalizeCanvasState(rawCanvasState)
             const persistedHistory = Array.isArray(rawCanvasState?.history) ? rawCanvasState.history : null
             let hasRestoredViewport = false
@@ -957,6 +1010,11 @@ const CanvasEditor = ({ project }) => {
                 // Fallback: if loadFromJSON threw or produced an empty canvas (e.g. a
                 // saved filter type Fabric can no longer enliven), still show the project
                 // image so the user doesn't stare at a blank canvas.
+                if (!loadedFromState && initGen === initGenerationRef.current && mounted) {
+                    canvas.__phosmithRestoreFailed = true
+                    setSyncStatus("paused")
+                    toast.error("Couldn't restore your saved edits. Reload to try again — autosave is paused so they aren't overwritten.", { duration: Infinity, id: "restore-failed" })
+                }
                 if (!loadedFromState) {
                     const imageUrl = effectiveCurrentImageUrl || proj.originalImageUrl
                     if (imageUrl && canvas.getObjects().length === 0) {
@@ -1030,7 +1088,9 @@ const CanvasEditor = ({ project }) => {
                     activeToolRef.current === 'erase'
                 ) {
                     const cursor = wantsPan ? 'grab' : 'crosshair'
-                    canvas.skipTargetFind = true
+                    // Mask gizmo handles are Fabric objects and need hit-testing;
+                    // the pixel-tool lock already makes the photo non-evented.
+                    canvas.skipTargetFind = !canvas.__maskGizmoActive
                     canvas.defaultCursor = cursor
                     canvas.hoverCursor = cursor
                     canvas.moveCursor = cursor
@@ -1295,6 +1355,7 @@ const CanvasEditor = ({ project }) => {
     // "Show mask" overlay + global invert — chain-wide render options driven
     // by the Mask tool via window events; mirror globalAlpha's ref pattern.
     const megashaderOverlayRef = useRef(false)
+    const megashaderViewRef = useRef('tint')
     const megashaderInvertRef = useRef(false)
     const getLastAppliedStackRef = useRef(/** @type {import('@/lib/megashader/mask-types').MaskStack} */ ({ chain: [] }))
     const recompileTimerRef = useRef(/** @type {ReturnType<typeof setTimeout> | null} */ (null))
@@ -1325,24 +1386,43 @@ const CanvasEditor = ({ project }) => {
             // (or a Step 2+ tool) actually subscribes.
             import('@/lib/megashader')
                 .then((mod) => {
-                    // Split the dynamic-import failure (module genuinely absent
-                    // in a non-test build — safe to ignore) from a failure
-                    // INSIDE applyMegashaderFilter. The latter used to be
-                    // swallowed here, which silently hid a real render bug (the
-                    // MegashaderFilter constructor threw on every call, so no
-                    // mask layer ever rendered). Surface apply errors loudly.
-                    try {
-                        mod.applyMegashaderFilter(image, stack, {
-                            globalMaskAlpha: megashaderAlphaRef.current,
-                            globalInvert: megashaderInvertRef.current,
-                            maskOverlay: megashaderOverlayRef.current,
+                    // A new chain structure would link its shader synchronously
+                    // inside the render. Link it in the background first, then
+                    // apply the latest stack.
+                    if (mod.isMegashaderProgramReady && !mod.isMegashaderProgramReady(stack)) {
+                        mod.prewarmMegashaderProgram(stack).then((linked) => {
+                            if (linked) doApply(getLastAppliedStackRef.current)
+                            else applyNow(mod, stack)
                         })
-                        canvasInstanceRef.current?.requestRenderAll?.()
-                    } catch (err) {
-                        console.error('[megashader] applyMegashaderFilter failed:', err)
+                        return
                     }
+                    applyNow(mod, stack)
                 })
                 .catch(() => { /* noop — module not available in non-test paths */ })
+        }
+
+        const applyNow = (mod, stack) => {
+            const image = findPrimaryImage()
+            if (!image) return
+            // Split the dynamic-import failure (module genuinely absent
+            // in a non-test build — safe to ignore) from a failure
+            // INSIDE applyMegashaderFilter. The latter used to be
+            // swallowed here, which silently hid a real render bug (the
+            // MegashaderFilter constructor threw on every call, so no
+            // mask layer ever rendered). Surface apply errors loudly.
+            try {
+                mod.applyMegashaderFilter(image, stack, {
+                    globalMaskAlpha: megashaderAlphaRef.current,
+                    globalInvert: megashaderInvertRef.current,
+                    maskOverlay: megashaderOverlayRef.current,
+                    maskView: megashaderViewRef.current,
+                })
+                canvasInstanceRef.current?.requestRenderAll?.()
+                // Mask edits fire no object:* events; persist via the debounced autosave.
+                scheduleSaveRef.current?.('major')
+            } catch (err) {
+                console.error('[megashader] applyMegashaderFilter failed:', err)
+            }
         }
 
         // ── Draft-preview session ─────────────────────────────────────
@@ -1456,6 +1536,15 @@ const CanvasEditor = ({ project }) => {
             import('@/lib/megashader').then((mod) => {
                 // Guard: session may have committed while the module loaded.
                 if (previewSessionRef.current !== session) return
+                // Never block a live-preview frame on a shader link: link in
+                // the background and repaint once ready.
+                if (mod.isMegashaderProgramReady && !mod.isMegashaderProgramReady(stack)) {
+                    mod.prewarmMegashaderProgram(stack).then((linked) => {
+                        if (linked) scheduleImmediateApply()
+                        else if (previewSessionRef.current === session) endPreviewSession(true)
+                    })
+                    return
+                }
                 try {
                     // Position the overlay on the image's on-screen quad.
                     // oCoords are fabric's own viewport-space (CSS px)
@@ -1482,6 +1571,7 @@ const CanvasEditor = ({ project }) => {
                         globalMaskAlpha: megashaderAlphaRef.current,
                         globalInvert: megashaderInvertRef.current,
                         maskOverlay: megashaderOverlayRef.current,
+                        maskView: megashaderViewRef.current,
                     })
                     if (!result) return
                     ctx.imageSmoothingEnabled = true
@@ -1547,6 +1637,7 @@ const CanvasEditor = ({ project }) => {
         // but long enough to coalesce a fast slider drag into a
         // single recompile.
         const RECOMPILE_DEBOUNCE_MS = 150
+        let structuralGen = 0
         const handleLayersChanged = () => {
             // A structural change mid-drag invalidates the preview's
             // compiled assumptions — drop the overlay; the debounced
@@ -1557,10 +1648,19 @@ const CanvasEditor = ({ project }) => {
             }
             recompileTimerRef.current = setTimeout(() => {
                 recompileTimerRef.current = null
-                // Apply the LATEST stack, not the triggering event's — uniform
-                // drags may have landed via the fast path while this debounce
-                // was pending, and re-applying an older snapshot would revert them.
-                doApply(getLastAppliedStackRef.current)
+                // Link the new structure's program in the background first so
+                // the full apply is a cache hit rather than a ~300 ms sync link.
+                // Only the newest structural change applies.
+                const gen = ++structuralGen
+                import('@/lib/megashader')
+                    .then((mod) => mod.prewarmMegashaderProgram?.(getLastAppliedStackRef.current))
+                    .catch(() => {})
+                    .finally(() => {
+                        // Apply the LATEST stack, not the triggering event's — uniform
+                        // drags may have landed via the fast path while this was
+                        // pending, and re-applying an older snapshot would revert them.
+                        if (gen === structuralGen) doApply(getLastAppliedStackRef.current)
+                    })
             }, RECOMPILE_DEBOUNCE_MS)
         }
 
@@ -1581,6 +1681,10 @@ const CanvasEditor = ({ project }) => {
         // against the last-applied stack.
         const handleOverlay = (event) => {
             megashaderOverlayRef.current = Boolean(event?.detail?.value)
+            scheduleImmediateApply()
+        }
+        const handleView = (event) => {
+            megashaderViewRef.current = event?.detail?.value === 'bw' ? 'bw' : 'tint'
             scheduleImmediateApply()
         }
         const handleInvert = (event) => {
@@ -1609,12 +1713,14 @@ const CanvasEditor = ({ project }) => {
         window.addEventListener('phosmith:mask-global-alpha', handleGlobalAlpha)
         window.addEventListener('phosmith:mask-overlay', handleOverlay)
         window.addEventListener('phosmith:mask-invert', handleInvert)
+        window.addEventListener('phosmith:mask-view', handleView)
 
         return () => {
             window.removeEventListener('phosmith:mask-layers-changed', wrapped)
             window.removeEventListener('phosmith:mask-global-alpha', handleGlobalAlpha)
             window.removeEventListener('phosmith:mask-overlay', handleOverlay)
             window.removeEventListener('phosmith:mask-invert', handleInvert)
+            window.removeEventListener('phosmith:mask-view', handleView)
             // Cancel the live-preview rAF/commit timers and drop any
             // overlay so a mid-drag unmount can't leave a stale <canvas>
             // glued to the DOM or fire an apply against a torn-down renderer.
@@ -1884,6 +1990,7 @@ const CanvasEditor = ({ project }) => {
                 saveCanvasState()
             }, MAJOR_SAVE_DEBOUNCE_MS)
         }
+        scheduleSaveRef.current = scheduleSave
 
         const makeChangeHandler = (eventName) => (event) => {
             // Guard: when restoring from undo/redo, canvas events fire (object:added,
@@ -1892,6 +1999,8 @@ const CanvasEditor = ({ project }) => {
             if (isRestoringRef.current) return
             if (isExpansionFrameLike(event?.target)) return
             if (isPhosmithMaskOverlay(event?.target)) return
+            // UI-only objects (tool overlays, gizmos, rubber bands) never persist.
+            if (event?.target?.excludeFromExport) return
 
             const change = describeCanvasChange(eventName, event)
             // Zero-delta gesture (click without movement) — nothing happened.
@@ -1935,6 +2044,7 @@ const CanvasEditor = ({ project }) => {
         handlers.forEach(([name, handler]) => canvasEditor.on(name, handler))
 
         return () => {
+            scheduleSaveRef.current = null
             clearTimeout(saveTimeout)
             clearTimeout(historyTimeout)
             handlers.forEach(([name, handler]) => canvasEditor.off(name, handler))
@@ -2094,8 +2204,8 @@ const CanvasEditor = ({ project }) => {
         setCanvasPreviewZoom(canvasInstanceRef.current, nextPercent)
     }
 
-    const adjustPreviewZoomPercent = (delta) => {
-        applyPreviewZoomPercent(previewZoomPercentRef.current + delta)
+    const adjustPreviewZoomPercent = (dir) => {
+        applyPreviewZoomPercent(nextPreviewZoomStop(previewZoomPercentRef.current, dir))
     }
 
     const handlePreviewZoomChange = (event) => {
@@ -2208,7 +2318,7 @@ const CanvasEditor = ({ project }) => {
                 <button
                     type="button"
                     className="editor-canvas-preview-button"
-                    onClick={() => adjustPreviewZoomPercent(-PREVIEW_ZOOM_STEP_PERCENT)}
+                    onClick={() => adjustPreviewZoomPercent(-1)}
                     disabled={!canAdjustPreview}
                     title="Shrink preview"
                     aria-label="Shrink preview"
@@ -2229,7 +2339,7 @@ const CanvasEditor = ({ project }) => {
                 <button
                     type="button"
                     className="editor-canvas-preview-button"
-                    onClick={() => adjustPreviewZoomPercent(PREVIEW_ZOOM_STEP_PERCENT)}
+                    onClick={() => adjustPreviewZoomPercent(1)}
                     disabled={!canAdjustPreview}
                     title="Enlarge preview"
                     aria-label="Enlarge preview"
@@ -2251,19 +2361,20 @@ const CanvasEditor = ({ project }) => {
                 </output>
             </div>
 
-            {(syncStatus === "offline" || syncStatus === "error" || syncStatus === "saving" || syncStatus === "conflict") && (
+            {(syncStatus === "offline" || syncStatus === "error" || syncStatus === "saving" || syncStatus === "conflict" || syncStatus === "paused") && (
+                // Top-right: top-centre collided with Sonner toasts.
                 <div
-                    className="absolute left-1/2 z-30 flex items-center gap-2"
+                    className="absolute z-30 flex items-center gap-2"
                     style={{
                         top: 12,
-                        transform: "translateX(-50%)",
+                        right: 12,
                         pointerEvents: "none",
                         padding: "5px 12px",
                         background: "var(--bg-elevated, #0a0d14)",
                         border: "2px solid",
                         borderColor:
                             syncStatus === "offline" ? "var(--accent-amber, #f5b945)"
-                                : (syncStatus === "error" || syncStatus === "conflict") ? "var(--accent-coral, #ff6b5e)"
+                                : (syncStatus === "error" || syncStatus === "conflict" || syncStatus === "paused") ? "var(--accent-coral, #ff6b5e)"
                                     : "var(--accent-primary, #38e0c8)",
                         boxShadow: "3px 3px 0 0 rgba(0,0,0,0.55)",
                         borderRadius: 6,
@@ -2285,7 +2396,7 @@ const CanvasEditor = ({ project }) => {
                             borderRadius: "50%",
                             background:
                                 syncStatus === "offline" ? "var(--accent-amber, #f5b945)"
-                                    : (syncStatus === "error" || syncStatus === "conflict") ? "var(--accent-coral, #ff6b5e)"
+                                    : (syncStatus === "error" || syncStatus === "conflict" || syncStatus === "paused") ? "var(--accent-coral, #ff6b5e)"
                                         : "var(--accent-primary, #38e0c8)",
                         }}
                     />
@@ -2293,6 +2404,8 @@ const CanvasEditor = ({ project }) => {
                         ? "Offline · saved locally"
                         : syncStatus === "conflict"
                             ? "Edited elsewhere"
+                            : syncStatus === "paused"
+                                ? "Autosave paused · reload"
                             : syncStatus === "error"
                                 ? "Sync retrying…"
                                 : "Syncing…"}

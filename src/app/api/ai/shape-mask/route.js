@@ -1,4 +1,5 @@
 import { auth } from '@clerk/nextjs/server'
+import { isServiceOffline, serviceOfflineResponse } from '@/lib/service-availability'
 import { NextResponse } from 'next/server'
 import { enforceRateLimit, rateLimitResponse } from '@/lib/rate-limit'
 
@@ -103,6 +104,7 @@ export async function POST(request) {
 
     const result = await callShapeMaskService({ width, height, points })
     if (!result.ok) {
+      if (isServiceOffline({ message: result.reason })) return serviceOfflineResponse('Mask service', 'MASK_SERVICE_URL')
       const status = /not configured/i.test(result.reason) ? 501 : 502
       return NextResponse.json({ error: result.reason }, { status })
     }

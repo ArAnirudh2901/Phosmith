@@ -93,7 +93,7 @@ export async function POST(request) {
 
   // Still preparing
   if (isIntermediate || contentType.includes('text/html')) {
-    try { await response.body?.cancel?.() } catch { /* ignore */ }
+    controller.abort()
     return NextResponse.json({ ready: false, status: 'preparing' })
   }
 
@@ -107,7 +107,7 @@ export async function POST(request) {
   }
 
   if (!contentType.startsWith('image/')) {
-    try { await response.body?.cancel?.() } catch { /* ignore */ }
+    controller.abort()
     return NextResponse.json({ ready: false, status: 'preparing' })
   }
 

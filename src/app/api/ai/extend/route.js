@@ -21,6 +21,7 @@ const MAX_DIM = 4096
 const MAX_SOURCE_UPLOAD_BYTES = 24 * 1024 * 1024
 const GENFILL_READY_TIMEOUT_MS = 110 * 1000  // use most of the 120s maxDuration
 const GENFILL_POLL_DELAY_MS = 5 * 1000       // check every 5s for faster detection
+const GENFILL_FETCH_TIMEOUT_MS = 30 * 1000
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -161,7 +162,9 @@ const getReadableResponseText = async (response) => {
   }
 }
 
-const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) => {
+const abortedError = () => Object.assign(new Error('Request aborted'), { name: 'AbortError' })
+
+const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS, signal) => {
   const startedAt = Date.now()
   let attempt = 0
   let firstImageSize = null
@@ -172,13 +175,28 @@ const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) 
   await sleep(4000)
 
   while (Date.now() - startedAt < timeoutMs) {
+    if (signal?.aborted) throw abortedError()
     attempt += 1
     const elapsed = Date.now() - startedAt
+
+    // Per-poll controller: a stalled body can't wedge the loop, and skipping an
+    // early image aborts the socket (awaiting body.cancel() on Next's patched
+    // fetch never settled, hanging the route forever).
+    const pollController = new AbortController()
+    const pollTimer = setTimeout(() => pollController.abort(), GENFILL_FETCH_TIMEOUT_MS)
+    const onClientAbort = () => pollController.abort()
+    signal?.addEventListener?.('abort', onClientAbort, { once: true })
+    const endPoll = () => {
+      clearTimeout(pollTimer)
+      signal?.removeEventListener?.('abort', onClientAbort)
+      pollController.abort()
+    }
 
     let response
     try {
       response = await fetch(url, {
         cache: 'no-store',
+        signal: pollController.signal,
         headers: {
           Accept: 'image/*,*/*',
           'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -186,6 +204,8 @@ const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) 
         },
       })
     } catch (fetchErr) {
+      endPoll()
+      if (signal?.aborted) throw abortedError()
       console.warn(`[AI Extend] Poll ${attempt} fetch failed:`, fetchErr.message)
       await sleep(GENFILL_POLL_DELAY_MS)
       continue
@@ -209,6 +229,7 @@ const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) 
     // Case 1: Still preparing (HTML or intermediate response)
     if (isIntermediate || contentType.includes('text/html')) {
       const txt = await getReadableResponseText(response)
+      endPoll()
       console.log('[AI Extend] Still preparing:', txt.slice(0, 80))
       await sleep(GENFILL_POLL_DELAY_MS)
       continue
@@ -217,6 +238,7 @@ const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) 
     // Case 2: Non-OK response
     if (!response.ok) {
       const txt = await getReadableResponseText(response)
+      endPoll()
       throw new Error(
         txt
           ? `ImageKit rejected the generated image: ${txt}`
@@ -243,9 +265,10 @@ const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) 
         try {
           imageBuffer = Buffer.from(await response.arrayBuffer())
         } catch (readErr) {
+          if (signal?.aborted) { endPoll(); throw abortedError() }
           console.warn('[AI Extend] Could not read image bytes, will re-fetch:', readErr.message)
-          await response.body?.cancel?.()
         }
+        endPoll()
         console.log('[AI Extend] Accepting image:', {
           reason: sizeChanged ? 'size-changed' : 'waited-long-enough',
           firstImageSize,
@@ -256,11 +279,12 @@ const waitForGeneratedImage = async (url, timeoutMs = GENFILL_READY_TIMEOUT_MS) 
       }
 
       // Too early — might be the unprocessed pad_resize placeholder
-      await response.body?.cancel?.()
+      endPoll()
       console.log('[AI Extend] Skipping early image (likely unprocessed pad_resize)')
     } else {
       // Unknown content type — check if it's an error
       const txt = await getReadableResponseText(response)
+      endPoll()
       if (txt.toLowerCase().includes('currently being prepared')) {
         console.log('[AI Extend] Still preparing (text response)')
       } else {
@@ -434,7 +458,7 @@ export async function POST(request) {
     })
 
     try {
-      const readyResult = await waitForGeneratedImage(genfillUrl)
+      const readyResult = await waitForGeneratedImage(genfillUrl, GENFILL_READY_TIMEOUT_MS, request.signal)
 
       console.log('[AI Extend] Genfill ready:', {
         attempts: readyResult.attempt,
@@ -484,6 +508,10 @@ export async function POST(request) {
         height: h,
       })
     } catch (readyError) {
+      if (readyError?.name === 'AbortError' || request.signal?.aborted) {
+        console.log('[AI Extend] Client aborted; stopped polling')
+        return new NextResponse(null, { status: 499 })
+      }
       if (!localFallbackBuffer) {
         throw readyError
       }

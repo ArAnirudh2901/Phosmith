@@ -285,6 +285,10 @@ export async function POST(request) {
     const result = await callSam2Service(prepared.buffer, clicksScaled, boxScaled)
     if (!result.ok) {
       console.warn('[ai-sam3] service failed:', result.reason)
+      // callSam2Service swallows the connection error into a reason string, so
+      // an unreachable service must be recognised here too or it reads as a
+      // 502 the client never latches on.
+      if (isServiceOffline({ message: result.reason })) return serviceOfflineResponse('Masking service', 'MASKING_SERVICE_URL')
       const status = /not configured|not available/i.test(result.reason) ? 501 : 502
       return NextResponse.json({ error: result.reason }, { status })
     }
@@ -322,7 +326,8 @@ export async function POST(request) {
       },
     })
   } catch (error) {
-    console.error('[ai-sam3] ✗', error?.message)
+    // Aborted live clicks truncate the multipart body; not a server fault.
+    if (!request.signal?.aborted) console.error('[ai-sam3] ✗', error?.message)
     if (isServiceOffline(error)) return serviceOfflineResponse('Masking service', 'MASKING_SERVICE_URL')
     const msg = error?.message || 'SAM 3.1 click failed'
     const status = /not configured/i.test(msg) ? 501 : 400

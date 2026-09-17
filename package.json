@@ -18,6 +18,8 @@
     "verify": "bun scripts/verify-megashader.mjs",
     "verify:mask-render": "bun scripts/verify-mask-render.mjs",
     "verify:fuzz": "bun scripts/verify-fuzz.mjs",
+    "verify:selection": "bun scripts/verify-selection-tools.mjs",
+    "verify:collage": "bun scripts/verify-collage-composer.mjs",
     "verify:stretch": "node scripts/verify-flow-stretch.mjs",
     "verify:mask": "bun scripts/verify-mask-edge-snap.mjs",
     "verify:segment": "bun scripts/verify-segment.mjs",

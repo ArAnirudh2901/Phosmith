@@ -86,3 +86,26 @@ export const growCoverage = (cover, w, h, px) => {
     }
     return out
 }
+
+/**
+ * Select-and-Mask style edge refinement on 0..255 coverage.
+ * smooth 0..100: blur, then re-harden around 50% so jagged outlines round off
+ * without turning into a feather. contrast 0..100: steepen the soft edge
+ * (100 = binary). `scale` maps the smooth radius to the working resolution.
+ */
+export const refineCoverage = (cover, w, h, { smooth = 0, contrast = 0, scale = 1 } = {}) => {
+    const s = Math.max(0, Math.min(100, Number(smooth) || 0))
+    const c = Math.max(0, Math.min(100, Number(contrast) || 0))
+    if (!s && !c) return cover
+    let src = cover
+    if (s) {
+        const r = Math.max(1, Math.round((s / 100) * 12 * Math.max(0.1, scale)))
+        src = boxBlur(boxBlur(cover, w, h, r), w, h, r)
+    }
+    const half = Math.max(0.5, (s ? 40 : 127.5) * (1 - c / 100))
+    const out = new Uint8ClampedArray(w * h)
+    for (let i = 0; i < out.length; i += 1) {
+        out[i] = Math.round(smoothstep(127.5 - half, 127.5 + half, src[i]) * 255)
+    }
+    return out
+}

@@ -88,7 +88,7 @@ const buildExtendRequest = ({ sourceUrl, sourceRender, expansion, prompt }) => {
 }
 
 const AIExtender = ({ project }) => {
-    const { canvasEditor, setProcessingMessage, setExpansionPreview } = useCanvas()
+    const { canvasEditor, setProcessingMessage, setExpansionPreview, registerProcessingAbort } = useCanvas()
     const { mutate: updateProject } = useDatabaseMutation(api.projects.updateProject)
 
     const [prompt, setPrompt] = useState(
@@ -364,6 +364,19 @@ const AIExtender = ({ project }) => {
 
         canvasEditor.on('mouse:down', guardPointer)
 
+        // Other code (poller swap, history) can clear selection; handles must stay live.
+        const keepFrameActive = () => {
+            requestAnimationFrame(() => {
+                if (setupGen !== setupGenerationRef.current || !isCanvasLive(canvasEditor)) return
+                if (!canvasEditor.__expansionMode || !frame.selectable) return
+                if (!canvasEditor.getObjects().includes(frame) || canvasEditor.getActiveObject()) return
+                canvasEditor.setActiveObject(frame)
+                showEdgeControlsOnly(frame)
+                canvasEditor.requestRenderAll()
+            })
+        }
+        canvasEditor.on('selection:cleared', keepFrameActive)
+
         const focusFrame = requestAnimationFrame(() => {
             if (setupGen !== setupGenerationRef.current || !isCanvasLive(canvasEditor)) return
             canvasEditor.setActiveObject(frame)
@@ -375,6 +388,7 @@ const AIExtender = ({ project }) => {
         return () => {
             cancelAnimationFrame(focusFrame)
             canvasEditor.off('mouse:down', guardPointer)
+            canvasEditor.off('selection:cleared', keepFrameActive)
             frame.off('scaling', schedulePreviewSync)
             frame.off('modified', commitFrameSize)
             if (frameDimsRafRef.current) {
@@ -439,6 +453,8 @@ const AIExtender = ({ project }) => {
         }
         const controller = new AbortController()
         abortControllerRef.current = controller
+        // Overlay Cancel must stop this request, not just hide the overlay.
+        registerProcessingAbort?.(controller)
 
         // A previous extension's real result may still be cooking. Starting a
         // new one supersedes it — and the visible pixels being extended are
@@ -760,8 +776,8 @@ const AIExtender = ({ project }) => {
 
             <div className="panel-card text-[11px]" style={{ borderColor: 'rgba(125, 235, 255, 0.12)' }}>
                 <p style={{ color: 'var(--text-muted)' }}>
-                    Drag the <strong style={{ color: 'var(--text-secondary)' }}>cyan edge handles</strong> outward
-                    past the photo (into the dark area you want filled). The badge shows output size. Click{' '}
+                    Drag the <strong style={{ color: 'var(--text-secondary)' }}>edge handles</strong> outward
+                    past the photo into the dark area you want filled. <em>Target output</em> shows the final size. Click{' '}
                     <strong style={{ color: 'var(--text-secondary)' }}>Extend Image</strong> to generate.
                 </p>
             </div>

@@ -69,6 +69,9 @@ export {
     setMaskTexture,
     getMaskTexture,
     clearMaskTexture,
+    setMaskTextureResolver,
+    listMaskTextureKeys,
+    stackIsNeutral,
 } from './mask-types'
 
 export { rasterisePath, smoothToBezier } from './path-raster'
@@ -80,4 +83,10 @@ export { KIND_SCHEMAS, KIND_BUILDERS, getKindBuilder, getKindSchema } from './gl
 // the dev test panel ("Perf" badge) so engineers can see compile
 // time, cache hit rate, draw count, and identity-short-circuit
 // count without opening devtools.
-export { getRenderMetrics, resetRenderMetrics, renderMegashader } from './megashader-renderer'
+export {
+    getRenderMetrics,
+    resetRenderMetrics,
+    renderMegashader,
+    prewarmMegashaderProgram,
+    isMegashaderProgramReady,
+} from './megashader-renderer'

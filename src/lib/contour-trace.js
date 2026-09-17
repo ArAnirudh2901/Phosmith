@@ -105,49 +105,41 @@ export function traceContour(matteCanvas, opts = {}) {
  * pixel coordinates forming a closed contour.
  */
 function mooreTrace(binary, W, H, sx, sy) {
-  // 8-connected neighbours: right, down-right, down, down-left, left, up-left, up, up-right
-  const dx = [1, 1, 0, -1, -1, -1, 0, 1]
-  const dy = [0, 1, 1, 1, 0, -1, -1, -1]
-
+  // Clockwise neighbours starting West. The start pixel is the first
+  // foreground pixel in scan order, so its West neighbour is background.
+  const nx = [-1, -1, 0, 1, 1, 1, 0, -1]
+  const ny = [0, -1, -1, -1, 0, 1, 1, 1]
   const isFg = (x, y) => x >= 0 && y >= 0 && x < W && y < H && binary[y * W + x] === 1
-
-  const points = []
-  let x = sx, y = sy
-  // Start searching from the left neighbour (direction 4)
-  let dir = 4
-  const maxSteps = W * H * 2 // safety limit
-  let steps = 0
-
-  do {
-    points.push({ x, y })
-    // Search for next boundary pixel by rotating around current pixel
-    // Start from (dir + 5) % 8 to look back and to the left
-    let startDir = (dir + 5) % 8
-    let found = false
-
-    for (let i = 0; i < 8; i++) {
-      const d = (startDir + i) % 8
-      const nx = x + dx[d]
-      const ny = y + dy[d]
-      if (isFg(nx, ny)) {
-        x = nx
-        y = ny
-        dir = d
-        found = true
-        break
-      }
-    }
-
-    if (!found) break // isolated pixel
-    if (++steps > maxSteps) break // safety
-  } while (x !== sx || y !== sy || points.length < 3)
-
-  // Close the contour
-  if (points.length >= 3 && (points[0].x !== x || points[0].y !== y)) {
-    points.push({ x: points[0].x, y: points[0].y })
+  const dirOf = (dx, dy) => {
+    for (let i = 0; i < 8; i++) if (nx[i] === dx && ny[i] === dy) return i
+    return 0
   }
 
-  return points.length >= 3 ? points : null
+  const points = [{ x: sx, y: sy }]
+  let cx = sx, cy = sy
+  let back = 0 // backtrack neighbour (always background), relative to the current pixel
+  const maxSteps = W * H * 4 // safety limit
+
+  for (let step = 0; step < maxSteps; step++) {
+    let found = -1
+    for (let i = 1; i <= 8; i++) {
+      const d = (back + i) % 8
+      if (isFg(cx + nx[d], cy + ny[d])) { found = d; break }
+    }
+    if (found < 0) break // isolated pixel
+    // The neighbour examined just before `found` was background: it becomes
+    // the backtrack point for the next pixel.
+    const pd = (found + 7) % 8
+    const bx = cx + nx[pd], by = cy + ny[pd]
+    cx += nx[found]
+    cy += ny[found]
+    back = dirOf(bx - cx, by - cy)
+    if (cx === sx && cy === sy) break
+    points.push({ x: cx, y: cy })
+  }
+
+  if (points.length >= 3) points.push({ x: sx, y: sy })
+  return points.length >= 4 ? points : null
 }
 
 // ─── Douglas-Peucker Simplification ─────────────────────────────────────────

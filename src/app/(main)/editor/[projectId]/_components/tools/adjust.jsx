@@ -1400,6 +1400,7 @@ const AdjustControls = () => {
             committedSigRef.current = getValuesSignature(next)
             setValues((cur) => (getValuesSignature(cur) === getValuesSignature(next) ? cur : next))
         }
+        const proxyCache = proxyCacheRef.current
         sync()
         canvasEditor.on("selection:created", sync)
         canvasEditor.on("selection:updated", sync)
@@ -1407,7 +1408,7 @@ const AdjustControls = () => {
         canvasEditor.on("object:added", sync)
         return () => {
             exitPreviewMode() // restore any swapped source before teardown
-            proxyCacheRef.current.clear()
+            proxyCache.clear()
             pendingPreviewRef.current = null
             if (previewFrame.current) cancelAnimationFrame(previewFrame.current)
             if (histogramFrameRef.current) {

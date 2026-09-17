@@ -45,6 +45,8 @@ export function ProRulerSlider({
   step = 1,
   label,
   suffix = "",
+  // Optional display formatter; a unit suffix alone mislabels 0–1 values as %.
+  format,
   disabled = false,
   variant = "instrument",
   visual = {},
@@ -112,11 +114,11 @@ export function ProRulerSlider({
       const pct = ratio != null ? ratio * 100 : valueToPct(snapped)
       setPct(pct)
       if (valueRef.current) {
-        valueRef.current.textContent = `${snapped}${suffix}`
+        valueRef.current.textContent = format ? format(snapped) : `${snapped}${suffix}`
       }
       return snapped
     },
-    [snapValue, suffix, setPct, valueToPct]
+    [snapValue, suffix, format, setPct, valueToPct]
   )
 
   useEffect(() => {
@@ -284,8 +286,7 @@ export function ProRulerSlider({
       <span className={`pro-ruler-label ${isStudio ? "pro-ruler-label--center" : ""}`}>{label}</span>
       {!isStudio && (
         <span ref={valueRef} className="pro-ruler-value">
-          {value}
-          {suffix}
+          {format ? format(value) : <>{value}{suffix}</>}
         </span>
       )}
       {bottomAccent && (
@@ -318,8 +319,7 @@ export function ProRulerSlider({
           <div {...trackProps}>{trackDecor}</div>
           <div className="pro-ruler-value-box" aria-hidden="true">
             <span ref={valueRef}>
-              {value}
-              {suffix}
+              {format ? format(value) : <>{value}{suffix}</>}
             </span>
           </div>
           {resetButton}

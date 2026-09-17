@@ -312,7 +312,7 @@ function ColorWheel({ label, value, onChange }) {
     return (
         <div className="adjust-color-wheel-card grade-wheel">
             <div className="adjust-color-wheel-top">
-                <div><span>{label}</span></div>
+                <div title={label}><span>{label}</span></div>
                 <button
                     type="button"
                     className="adjust-curve-reset"

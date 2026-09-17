@@ -17,7 +17,8 @@ const ContextualActionBar = ({ visible = false, position = { x: 0, y: 0 } }) => 
         if (!canvasEditor) return
         const handleSelection = () => {
             const activeObject = canvasEditor.getActiveObject()
-            if (activeObject) {
+            // Tool helpers (extender frame, overlays) are not user objects: no duplicate/delete/rotate.
+            if (activeObject && !activeObject._isExpansionFrame && !activeObject.excludeFromExport) {
                 setSelectedObject(activeObject)
                 setObjectType(activeObject.type?.toLowerCase() || 'unknown')
             } else {

@@ -121,6 +121,12 @@ let programCache = /** @type {Map<string, WebGLProgram>} */ (new Map())
 // texture that was bound earlier in the current frame.
 let maskGlTextureCache = /** @type {Map<string, { tex: WebGLTexture, version: number }>} */ (new Map())
 const MAX_MASK_GL_TEXTURES = 64
+// Full-res masks are ~100 MB each on a 24 MP photo; the count cap alone could
+// pin gigabytes of VRAM. Byte budget evicts older entries but never the 16 most
+// recent (a single frame binds at most 16).
+const MAX_MASK_GL_BYTES = 512 * 1024 * 1024
+const MIN_KEPT_MASK_GL_TEXTURES = 16
+let maskGlTextureBytes = 0
 let quadProgram = /** @type {WebGLProgram | null} */ (null)
 let quadVbo = /** @type {WebGLBuffer | null} */ (null)
 let quadVao = /** @type {WebGLVertexArrayObject | null} */ (null)
@@ -164,6 +170,87 @@ const ensureGl = () => {
  * @param {import('./mask-types').CompiledShader} compiled
  * @returns {WebGLProgram | null}
  */
+// Insert a linked program, evicting the oldest past MAX_PROGRAM_CACHE (Map
+// iteration order is insertion order, so the first key is the oldest).
+const cacheProgram = (gl, key, program) => {
+    if (programCache.size >= MAX_PROGRAM_CACHE) {
+        const oldest = programCache.keys().next().value
+        if (oldest) {
+            const oldProgram = programCache.get(oldest)
+            if (oldProgram) gl.deleteProgram(oldProgram)
+            programCache.delete(oldest)
+            renderMetrics.evictions += 1
+        }
+    }
+    programCache.set(key, program)
+    renderMetrics.compileCount += 1
+}
+
+// A new chain structure otherwise links synchronously inside the render
+// (~300 ms on the main thread). With KHR_parallel_shader_compile the driver
+// links in the background: poll completion per frame, then cache the program
+// so the render that follows is a cache hit. Resolves immediately when there
+// is nothing to link or the extension is missing (the render path then links
+// as before and reports any link error).
+const pendingPrograms = new Map()
+// True when rendering `stack` will not trigger a synchronous shader link.
+export const isMegashaderProgramReady = (stack) => {
+    try {
+        const compiled = compileMegashader(stack)
+        return !compiled || compiled.passthrough || programCache.has(compiled.cacheKey)
+    } catch {
+        return true
+    }
+}
+
+export const prewarmMegashaderProgram = (stack) => {
+    const gl = ensureGl()
+    if (!gl || typeof requestAnimationFrame !== 'function') return Promise.resolve(false)
+    let compiled
+    try { compiled = compileMegashader(stack) } catch { return Promise.resolve(false) }
+    if (!compiled || compiled.passthrough || programCache.has(compiled.cacheKey)) return Promise.resolve(true)
+    const ext = gl.getExtension('KHR_parallel_shader_compile')
+    if (!ext) return Promise.resolve(false)
+    const pending = pendingPrograms.get(compiled.cacheKey)
+    if (pending) return pending
+
+    const stage = (type, src) => {
+        const sh = gl.createShader(type)
+        gl.shaderSource(sh, src)
+        gl.compileShader(sh)
+        return sh
+    }
+    const vert = stage(gl.VERTEX_SHADER, compiled.vert)
+    const frag = stage(gl.FRAGMENT_SHADER, compiled.frag)
+    const program = gl.createProgram()
+    if (!vert || !frag || !program) return Promise.resolve(false)
+    gl.attachShader(program, vert)
+    gl.attachShader(program, frag)
+    gl.bindAttribLocation(program, 0, 'aPosition')
+    gl.linkProgram(program)
+
+    const promise = new Promise((resolve) => {
+        const poll = () => {
+            if (!gl.getProgramParameter(program, ext.COMPLETION_STATUS_KHR)) {
+                requestAnimationFrame(poll)
+                return
+            }
+            pendingPrograms.delete(compiled.cacheKey)
+            gl.deleteShader(vert)
+            gl.deleteShader(frag)
+            if (programCache.has(compiled.cacheKey) || !gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                gl.deleteProgram(program)
+            } else {
+                cacheProgram(gl, compiled.cacheKey, program)
+            }
+            resolve(programCache.has(compiled.cacheKey))
+        }
+        requestAnimationFrame(poll)
+    })
+    pendingPrograms.set(compiled.cacheKey, promise)
+    return promise
+}
+
 const getOrCreateProgram = (compiled) => {
     const gl = ensureGl()
     if (!gl) return null
@@ -202,19 +289,7 @@ const getOrCreateProgram = (compiled) => {
     gl.deleteShader(vert)
     gl.deleteShader(frag)
 
-    if (programCache.size >= MAX_PROGRAM_CACHE) {
-        // Drop the oldest entry. Map iteration order is insertion order, so
-        // the first key is the oldest.
-        const oldest = programCache.keys().next().value
-        if (oldest) {
-            const oldProgram = programCache.get(oldest)
-            if (oldProgram) gl.deleteProgram(oldProgram)
-            programCache.delete(oldest)
-            renderMetrics.evictions += 1
-        }
-    }
-    programCache.set(compiled.cacheKey, program)
-    renderMetrics.compileCount += 1
+    cacheProgram(gl, compiled.cacheKey, program)
     const t1 = (typeof performance !== 'undefined' && typeof performance.now === 'function')
         ? performance.now()
         : Date.now()
@@ -550,7 +625,7 @@ const writeLayerFillUniforms = (gl, program, layer, slotIndex) => {
  * @param {{ kindUnits: Map<number, number> }} textureBindings
  */
 const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBindings) => {
-    const { globalMaskAlpha, globalInvert, maskOverlay, overlayColor } = renderOpts || {}
+    const { globalMaskAlpha, globalInvert, maskOverlay, maskView, overlayColor } = renderOpts || {}
     // Chain-wide uniforms.
     const sizeLoc = gl.getUniformLocation(program, 'uImageSize')
     if (sizeLoc) gl.uniform2f(sizeLoc, imageSize.width, imageSize.height)
@@ -565,6 +640,8 @@ const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBinding
     if (invertLoc) gl.uniform1f(invertLoc, globalInvert ? 1.0 : 0.0)
     const overlayLoc = gl.getUniformLocation(program, 'uMaskOverlay')
     if (overlayLoc) gl.uniform1f(overlayLoc, maskOverlay ? 1.0 : 0.0)
+    const viewLoc = gl.getUniformLocation(program, 'uMaskView')
+    if (viewLoc) gl.uniform1f(viewLoc, maskView === 'bw' ? 1.0 : 0.0)
     const overlayColLoc = gl.getUniformLocation(program, 'uMaskOverlayColor')
     if (overlayColLoc) {
         const c = overlayColor || { r: 1, g: 0, b: 0.25 }
@@ -596,8 +673,11 @@ const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBinding
  * stroke, boundary grow, AI mask, curve LUT, undo/redo restore), so a version
  * mismatch is the exact, complete signal that the pixels changed — a match
  * proves they are byte-identical and the cached texture is still correct.
- * `gl.isTexture` guards against a context-loss-invalidated handle (forces a
- * fresh upload). Returns true if a texture is bound to the active unit.
+ * A handle is only reused if it belongs to this live context. gl.isTexture was
+ * used for that, but it is a synchronous GPU round trip on every bind and
+ * stalled behind queued uploads (~190 ms per commit); context loss invalidates
+ * every handle at once, so one isContextLost check is equivalent.
+ * Returns true if a texture is bound to the active unit.
  *
  * @param {WebGL2RenderingContext} gl
  * @param {string} key
@@ -609,7 +689,8 @@ const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBinding
 const bindCachedMaskTexture = (gl, key, data, flipY, filter) => {
     const version = getMaskTextureVersion(key)
     const entry = maskGlTextureCache.get(key)
-    if (entry && entry.version === version && gl.isTexture(entry.tex)) {
+    const live = !gl.isContextLost()
+    if (entry && entry.version === version && entry.gl === gl && live) {
         // Reuse: pixels unchanged (version match) and the GL texture is valid.
         // Bind only — no re-upload. Refresh LRU recency (move to tail) so a
         // texture used this frame is never the eviction target.
@@ -619,7 +700,8 @@ const bindCachedMaskTexture = (gl, key, data, flipY, filter) => {
         return true
     }
     // Miss or stale version → (re)upload. Delete the stale GL texture first.
-    if (entry && entry.tex && gl.isTexture(entry.tex)) gl.deleteTexture(entry.tex)
+    if (entry && entry.tex && entry.gl === gl && live) gl.deleteTexture(entry.tex)
+    if (entry) { maskGlTextureBytes -= entry.bytes || 0; maskGlTextureCache.delete(key) }
     const tex = gl.createTexture()
     if (!tex) { maskGlTextureCache.delete(key); return false }
     gl.bindTexture(gl.TEXTURE_2D, tex)
@@ -638,17 +720,22 @@ const bindCachedMaskTexture = (gl, key, data, flipY, filter) => {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    maskGlTextureCache.set(key, { tex, version })
+    const bytes = Math.max(0, (data?.width || 0) * (data?.height || 0) * 4)
+    maskGlTextureCache.set(key, { tex, version, gl, bytes })
+    maskGlTextureBytes += bytes
     // Evict least-recently-used orphans beyond the cap. Never evict `key`
     // (just uploaded) or any key already bound this frame — with the cap
     // (64) far above the <=16 textures a frame can bind, the eviction front
     // only holds stale keys from earlier frames.
-    if (maskGlTextureCache.size > MAX_MASK_GL_TEXTURES) {
+    const overBudget = () => maskGlTextureCache.size > MAX_MASK_GL_TEXTURES
+        || (maskGlTextureBytes > MAX_MASK_GL_BYTES && maskGlTextureCache.size > MIN_KEPT_MASK_GL_TEXTURES)
+    if (overBudget()) {
         for (const oldKey of [...maskGlTextureCache.keys()]) {
-            if (maskGlTextureCache.size <= MAX_MASK_GL_TEXTURES) break
+            if (!overBudget()) break
             if (oldKey === key) continue
             const old = maskGlTextureCache.get(oldKey)
-            if (old && old.tex && gl.isTexture(old.tex)) gl.deleteTexture(old.tex)
+            if (old && old.tex && old.gl === gl && live) gl.deleteTexture(old.tex)
+            maskGlTextureBytes -= old?.bytes || 0
             maskGlTextureCache.delete(oldKey)
         }
     }
@@ -974,6 +1061,7 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             globalMaskAlpha: options.globalMaskAlpha ?? 1,
             globalInvert: options.globalInvert === true,
             maskOverlay: options.maskOverlay === true,
+            maskView: options.maskView,
             overlayColor: options.overlayColor,
         },
         imageSize,
@@ -988,34 +1076,39 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
         gl.bindVertexArray(null)
     }
 
-    // Read back to a 2D canvas. We use `gl.readPixels` rather than
-    // `ctx.drawImage(glCanvas)` because the context was created with
-    // `preserveDrawingBuffer: false` (for perf), and reading a WebGL canvas
-    // via drawImage is undefined behaviour once the buffer has been
-    // presented. readPixels is the spec-blessed way to grab framebuffer
-    // contents, and we Y-flip manually because WebGL's origin is
-    // bottom-left while Canvas2D's is top-left.
+    // Copy the result into a 2D canvas. drawImage(glCanvas) runs in the same
+    // task as drawArrays, so the drawing buffer is still intact even with
+    // preserveDrawingBuffer:false; the browser copies it GPU-side in top-left
+    // orientation. The readPixels path costs a 4-bytes-per-pixel buffer plus a
+    // JS row flip (~0.5 s and ~200 MB at 24 MP), so it is only the fallback.
     const out = document.createElement('canvas')
     out.width = w
     out.height = h
     const ctx = out.getContext('2d')
     if (ctx) {
-        const pixels = new Uint8Array(w * h * 4)
+        let copied = false
         try {
-            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
-        } catch {
-            gl.deleteTexture(texture)
-            for (const tex of ownedTextures) gl.deleteTexture(tex)
-            return renderCpuFallback(sourceCanvas, stack)
+            ctx.drawImage(glCanvas, 0, 0)
+            copied = true
+        } catch { /* fall through to readPixels */ }
+        if (!copied) {
+            const pixels = new Uint8Array(w * h * 4)
+            try {
+                gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+            } catch {
+                gl.deleteTexture(texture)
+                for (const tex of ownedTextures) gl.deleteTexture(tex)
+                return renderCpuFallback(sourceCanvas, stack)
+            }
+            const imageData = ctx.createImageData(w, h)
+            const rowBytes = w * 4
+            for (let y = 0; y < h; y += 1) {
+                const srcStart = (h - 1 - y) * rowBytes
+                const dstStart = y * rowBytes
+                imageData.data.set(pixels.subarray(srcStart, srcStart + rowBytes), dstStart)
+            }
+            ctx.putImageData(imageData, 0, 0)
         }
-        const imageData = ctx.createImageData(w, h)
-        const rowBytes = w * 4
-        for (let y = 0; y < h; y += 1) {
-            const srcStart = (h - 1 - y) * rowBytes
-            const dstStart = y * rowBytes
-            imageData.data.set(pixels.subarray(srcStart, srcStart + rowBytes), dstStart)
-        }
-        ctx.putImageData(imageData, 0, 0)
     }
 
     gl.deleteTexture(texture)
@@ -1109,6 +1202,7 @@ export const disposeRenderer = () => {
         }
     }
     maskGlTextureCache = new Map()
+    maskGlTextureBytes = 0
     programCache.clear()
     quadProgram = null
     quadVbo = null

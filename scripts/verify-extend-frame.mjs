@@ -18,6 +18,7 @@ import {
   frameToPixelExpansion,
   unionFrameBounds,
   validateExpansion,
+  buildExtensionPrompt,
   MAX_OUTPUT_DIMENSION,
 } from '../src/lib/expansion-pipeline.js'
 
@@ -149,6 +150,23 @@ const check = (label, cond, detail = '') => {
     insets: { top: 0, left: 0, right: MAX_OUTPUT_DIMENSION + 10 - 4000, bottom: 0 },
   }
   check('over-cap output is rejected', validateExpansion(overCap).valid === false)
+}
+
+// ── buildExtensionPrompt: genfill has no negative prompt ────────────────────
+{
+  const p = buildExtensionPrompt
+  check('empty prompt uses neutral continuation', p('  ') === 'seamless natural continuation')
+  check('vague meta prompt uses neutral continuation', p('idk make it bigger') === 'seamless natural continuation')
+  check('ratio/platform talk is dropped', p('extend it to 16:9 for youtube thumbnail') === 'seamless natural continuation')
+  const neg = p('snowy peaks, no people, without boats')
+  check('negated nouns never reach genfill', !/people|boats/.test(neg) && /snowy peaks/.test(neg), neg)
+  check('negated people become an unpopulated cue', /unpopulated/.test(neg), neg)
+  check('words containing "no" survive', /snow/.test(p('snow on the ridge')))
+  const loc = p('On the left: a red cabin ✨')
+  check('location words and emoji are dropped', loc === 'a red cabin', loc)
+  check('long prompts are capped', p('forest '.repeat(80)).length <= 240)
+  check('unbroken long prompt is capped, not collapsed', p('x'.repeat(400)).length === 240)
+  check('visual brief is kept', p('soft cinematic continuation, realistic background') === 'soft cinematic continuation, realistic background')
 }
 
 if (failures > 0) {

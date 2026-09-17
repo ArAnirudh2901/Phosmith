@@ -344,11 +344,57 @@ export function validateExpansion(expansion) {
  * single-phrase prompts like "flowers". The model inherently uses
  * the source image as context for seamless continuation.
  */
+const DEFAULT_EXTENSION_PROMPT = 'seamless natural continuation'
+const MAX_EXTENSION_PROMPT_CHARS = 240
+
+// Genfill has no negative prompt: "no people" plants people. Negated clauses
+// run to the next clause break.
+const NEGATION_RE = /\b(?:no|not|without|w\/o|never|avoid|exclude|excluding|minus|free of|don'?t (?:add|include|show|put|want)|do not (?:add|include|show|put|want))\b[^,.;:!?\u2014\u2013\n]*/gi
+const PEOPLE_RE = /\b(?:people|person|persons|humans?|crowds?|tourists?|hikers?|guests?|visitors?|pedestrians?|passersby|figures?|men|women|kids|children)\b/i
+// Instructions about the edit itself, not what should appear; the frame already says where.
+const META_RES = [
+  /\b(?:idk|i don'?t know|dunno|whatever|pls|please|kindly|thanks?|thank you)\b/gi,
+  /\b(?:can|could|would|will) you\b/gi,
+  /\b(?:make|making) (?:it|this|that|the (?:image|photo|picture|pic|canvas|shot))(?: a (?:bit|little|lot))? (?:bigger|larger|wider|taller|longer|more (?:wide|tall))\b/gi,
+  /\b(?:extend|expand|outpaint|uncrop|stretch|widen|enlarge|fill)(?: out)? (?:it|this|that|the (?:image|photo|picture|pic|canvas|scene|shot|frame|gaps?|space|area|rest|edges?|sides?|borders?))\b/gi,
+  /\b(?:zoom(?:ed)? out)\b/gi,
+  /\b(?:turn|convert|change|make|resize|reframe) (?:it|this|that|the (?:image|photo|picture|pic|shot))(?: into| to| for)?\b/gi,
+  /\b(?:to |into |as )?(?:an? )?\d+(?:\.\d+)?\s*[:x\u00D7]\s*\d+(?:\.\d+)?\b(?: (?:aspect|ratio|format|crop))*/gi,
+  /\b(?:for|as) (?:an? |my |the )?(?:youtube|yt|instagram|insta|ig|tiktok|twitter|x|facebook|fb|linkedin|pinterest|reels?|stories|story|posts?|banners?|thumbnails?|covers?|wallpapers?|headers?|desktop|phone|mobile)(?: (?:thumbnails?|story|stories|posts?|reels?|banners?|covers?|headers?|wallpapers?|screens?))?\b/gi,
+  /\b(?:on|to|at|in|along) (?:the )?(?:left|right|top|bottom|both|all|each|either)(?: (?:and|&) (?:the )?(?:left|right|top|bottom))?(?: (?:sides?|edges?|ends?))?\b/gi,
+]
+const FILLER_WORDS = new Set(['a', 'an', 'the', 'and', 'or', 'it', 'this', 'that', 'just', 'some', 'more', 'bit', 'little', 'lot', 'also', 'too', 'so', 'very', 'bigger', 'larger', 'wider', 'taller', 'with', 'of', 'to', 'in', 'on', 'side', 'sides', 'area', 'image', 'photo', 'picture', 'make', 'turn', 'into', 'rest'])
+
+/**
+ * Turn a free-form brief into a genfill prompt: drops negated clauses, emoji and
+ * edit meta-talk; falls back to a neutral continuation when nothing visual is left.
+ */
 export function buildExtensionPrompt(userPrompt) {
-  const trimmed = (userPrompt || '').trim()
-  if (trimmed) return trimmed
-  // Short default: genfill already does seamless extension by design
-  return 'seamless natural continuation'
+  let text = String(userPrompt || '').normalize('NFC')
+  const negatedPeople = [...text.matchAll(NEGATION_RE)].some((m) => PEOPLE_RE.test(m[0]))
+  text = text.replace(NEGATION_RE, ' ')
+  for (const re of META_RES) text = text.replace(re, ' ')
+  text = text
+    .replace(/\p{Extended_Pictographic}|\uFE0F|\u200D/gu, ' ')
+    .replace(/["\u201C\u201D\u2018\u2019`]/g, '')
+    .replace(/\s*[\u2014\u2013]\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/([,.;:!?])(?:\s*[,.;:!?])+/g, '$1')
+    .replace(/^[\s,.;:!?&/-]+|[\s,;:&/-]+$/g, '')
+    .replace(/^(?:(?:and|with|of|to|also|then|add|adding|put|place|insert|include|show|some)\b[\s,]*)+/i, '')
+    .trim()
+
+  const meaningful = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 1 && !FILLER_WORDS.has(w))
+  if (!meaningful.length) text = DEFAULT_EXTENSION_PROMPT
+  if (negatedPeople) text = `${text}, deserted and unpopulated`
+
+  if (text.length > MAX_EXTENSION_PROMPT_CHARS) {
+    const cut = text.slice(0, MAX_EXTENSION_PROMPT_CHARS)
+    const space = cut.lastIndexOf(' ')
+    text = (space > 40 ? cut.slice(0, space) : cut).replace(/[\s,;:&/-]+$/, '')
+  }
+  return text
 }
 
 /**

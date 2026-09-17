@@ -493,6 +493,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                 <button
                     type="button"
                     onClick={() => setShowWordArt(!showWordArt)}
+                    aria-expanded={showWordArt}
                     className="flex w-full items-center justify-between text-left"
                 >
                     <span className="panel-label flex items-center gap-1.5">
@@ -517,7 +518,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                                         onClick={() => applyWordArt(preset)}
                                         disabled={!selectedText}
                                         whileTap={{ scale: 0.95 }}
-                                        className="flex flex-col items-center gap-1 rounded-lg p-2 editor-interactive disabled:opacity-35"
+                                        className="flex min-w-0 flex-col items-center gap-1 rounded-lg px-1 py-2 editor-interactive disabled:opacity-35"
                                         style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
                                         title={preset.label}
                                     >
@@ -563,6 +564,8 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                         <button
                             type="button"
                             onClick={() => setShowFontPicker(!showFontPicker)}
+                            aria-expanded={showFontPicker}
+                            aria-haspopup="listbox"
                             className="flex w-full items-center justify-between rounded-lg px-3 py-2 panel-input"
                             style={{ fontFamily }}
                         >
@@ -756,7 +759,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
 
                     {/* Advanced Section */}
                     <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                        <button type="button" onClick={() => setShowAdvanced(!showAdvanced)}
+                        <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} aria-expanded={showAdvanced}
                             className="flex w-full items-center justify-between text-left">
                             <span className="panel-label flex items-center gap-1.5">
                                 <Palette className="h-3 w-3" /> Advanced
