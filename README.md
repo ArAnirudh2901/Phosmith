@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>A professional-grade, AI-powered image editor built for the browser.</strong><br />
-  Combines Photoshop-class editing tools with cutting-edge AI models — all running locally in WebGL2 and on-device Python services.
+  Photoshop-class editing in WebGL2, with the AI running in your browser by default and optional Python services for the heavy models.
 </p>
 
 <p align="center">
@@ -97,7 +97,7 @@ The project dashboard provides a grid view of all saved projects with live canva
 
 ### Editor
 
-The full-featured editor with a 13-tool topbar, a left-hand property panel (shown: Resize tool), the WebGL2 canvas with selection handles, and a zoom slider at the bottom.
+The full-featured editor with a 14-tool topbar, a left-hand property panel (shown: Resize tool), the WebGL2 canvas with selection handles, and a zoom slider at the bottom.
 
 <p align="center">
   <img src="docs/screenshots/editor.png" alt="Editor — Resize tool with canvas, topbar, and property panel" width="100%" />
@@ -110,13 +110,14 @@ The full-featured editor with a 13-tool topbar, a left-hand property panel (show
 | Category | Highlights |
 |---|---|
 | **Non-Destructive Editing** | 100+ procedural mask layers composited in real-time on the GPU |
-| **AI Selection & Masking** | Subject detection (BiRefNet), point-based segmentation (SAM 2), depth estimation (Depth Anything V2), NL mask descriptions |
+| **Runs without a backend** | Selection, text grounding and auto-crop run in the browser; only depth and object-fill need a service |
+| **AI Selection & Masking** | Click / box select and subject cutout from one local model (SlimSAM), magic wand, marquee, magnetic lasso, natural-language masks, depth selection when the masking service runs |
 | **Professional Adjustments** | 15+ parameters — Exposure, Curves, Temperature, Vibrance, Film Grain, and more |
 | **AI Agent Chat** | Type any edit or collage prompt — the agent executes it autonomously with a full command registry |
-| **Collage Builder** | Stylish multi-image templates with rounded/circle frames, drop shadows, AI-generated backgrounds, per-cell replace/edit, and an auto-template generator |
+| **Collage Builder** | 14 grid templates plus the **Composer**: 8 generative layout families (mosaic, shards, strata, orbit, prints, lens, silhouette, seamless tapestry), empty slots you click to fill, drag-to-swap photos, and a Gemini art director that reads your brief |
 | **AI Background** | Generate, replace, or remove backgrounds using AI inpainting/outpainting |
-| **AI Extender** | Expand canvas boundaries with AI-generated content (outpainting) |
-| **AI Object Remover** | Click any object → SAM 2 segments it → LaMa fills the hole seamlessly |
+| **AI Extender** | Drag the frame outward and fill the new area (ImageKit generative fill), with prompt clean-up, a soft preview while the real result finishes, and a background poller that swaps it in |
+| **AI Object Remover** | Click any object → SlimSAM segments it in-browser → LaMa (service) or Stable Diffusion (hosted) fills the hole |
 | **NL Masking** | Describe a region in plain text ("the dog on the left", "everything except the sky") and the agent masks it |
 | **Rich Text Engine** | Google Fonts integration, text effects, shadows, outlines, curved text |
 | **Export** | PNG / JPEG / WebP at 1×, 2×, or 3× resolution, plus clipboard copy |
@@ -136,15 +137,22 @@ The full-featured editor with a 13-tool topbar, a left-hand property panel (show
 │                     │        │  /api/neon/*         │  │
 │                     ▼        └────────────────────┘  │
 │            ┌────────────┐                            │
-│            │ Megashader  │    ┌────────────────────┐  │
-│            │  (WebGL2    │    │  Local Mask Service │  │
-│            │   GLSL)     │    │  (FastAPI + PyTorch) │  │
-│            └────────────┘    │  BiRefNet, SAM2,     │  │
-│                              │  Depth Anything V2,  │  │
-│                              │  LaMa (inpaint),     │  │
-│                              │  YOLO (instances),   │  │
-│                              │  CLIPSeg (grounding) │  │
-│                              └────────────────────┘  │
+│            │ Megashader  │   ┌─────────────────────┐  │
+│            │  (WebGL2    │   │ In-browser AI       │  │
+│            │   GLSL)     │   │ (transformers.js)   │  │
+│            └────────────┘   │ SlimSAM (+ CLIPSeg  │  │
+│                             │ for text grounding) │  │
+│                             │                     │  │
+│                             └─────────────────────┘  │
+│                             ┌─────────────────────┐  │
+│                             │ Optional services   │  │
+│                             │ (FastAPI, HF Space) │  │
+│                             │ masking :8002 —     │  │
+│                             │  rembg/BiRefNet,    │  │
+│                             │  SAM 3.1, Depth     │  │
+│                             │ segment :8001 —     │  │
+│                             │  LaMa, shape fill   │  │
+│                             └─────────────────────┘  │
 │  ┌──────────┐  ┌──────────┐  ┌────────────────────┐  │
 │  │  Clerk   │  │  Neon    │  │  ImageKit CDN      │  │
 │  │  (Auth)  │  │ (Postgres│  │  (Image Storage    │  │
@@ -157,18 +165,18 @@ The full-featured editor with a 13-tool topbar, a left-hand property panel (show
 
 ## 🛠 Editor Tools
 
-The editor topbar exposes **13 tools**, each with its own property panel:
+The editor topbar exposes **14 tools**, each with its own property panel:
 
 ### Core Editing
 
 | Tool | Description |
 |---|---|
 | **Resize** | Change canvas and image dimensions. Includes Original, 50%, Fit, and Fill presets. Maintains aspect ratio with linked width/height fields. |
-| **Crop** | Freeform and preset ratio cropping (1:1, 4:3, 16:9, 3:2, etc.) with a live preview overlay. Includes flip horizontal/vertical. AI Auto-Crop suggests 4 strategies: subject-aware, aspect-ratio, content-fill, and depth-guided. |
+| **Crop** | Freeform and preset ratio cropping (1:1, 4:5, 16:9, 9:16, 2:3, etc.) with a live preview overlay. **AI Auto-Crop** reads the photo first — a Gemini vision pass reports scene type, subjects, which way they face, must-keep details, eye line and horizon; the subject edge is tightened with the in-browser matte; then the crop is composed (lead room, eyes on the upper third, horizon on a third, never cutting what must stay). Four strategies: subject-aware, aspect-ratio, content-fill, depth-guided. Runs entirely in the browser. |
 | **Images** | Multi-layer image management. Upload, reorder, rename, merge, show/hide, and duplicate layers. Drag-and-drop support. |
 | **Adjust** | Professional-grade color and tone adjustments — see [Adjustments](#adjustments) below. |
 | **Draw** | Freehand drawing with configurable brush size, color, and opacity. Supports pen/marker styles. |
-| **Erase** | Smart eraser with AI Object Remover mode: click an object → SAM 2 segments it → LaMa fills the hole with background content. |
+| **Erase** | Smart eraser with AI Object Remover mode: click an object → SlimSAM segments it in-browser → the hole is filled with background content (LaMa on the service, Stable Diffusion as the hosted fallback). |
 | **Mask** | Comprehensive selection and masking system — see [Masking Tools](#masking-tools) below. |
 | **Text** | Rich text engine with 50+ Google Fonts, text shadows, outlines, letter spacing, and alignment controls. |
 
@@ -180,7 +188,7 @@ The editor topbar exposes **13 tools**, each with its own property panel:
 | **AI Extender** | Expand canvas boundaries (outpaint) in any direction with contextually coherent AI-generated content. |
 | **AI Edit** | Describe edits in natural language. The AI plan engine generates an edit sequence applied via ImageKit transforms. |
 | **Agent** | A fully autonomous agentic editing assistant — see [AI Agent](#-ai-agent-agentic-editing). Also handles collage commands via natural language. |
-| **Collage** | Stylish multi-image collage layouts with 14 grid templates, rounded/circle photo frames, drop shadows, per-cell Replace & Edit actions, AI-generated themed backgrounds, and an auto-template generator. |
+| **Collage** | 14 grid templates with rounded/circle frames, drop shadows, per-cell Replace & Edit, and AI-generated themed backgrounds — plus the **Composer**, which solves layouts from your brief across 8 families, scores candidates, leaves clickable empty slots, and lets you drag photos to swap or move them. |
 
 ---
 
@@ -213,11 +221,14 @@ The **Adjust** tool provides 15+ parameters, all computed in real-time via WebGL
 The mask system is organized into four categories:
 
 #### AI Tools
-- **Select Subject** — One-click subject isolation using **BiRefNet**. Falls back to HuggingFace APIs if the local mask service is unavailable.
-- **Click to Select** — Point-based semantic segmentation powered by **SAM 2**. Click anywhere on the image and SAM 2 predicts the object boundary. Supports box prompts ("Draw box" drag mode) for strong whole-object selection.
-- **Detect All Subjects** — Runs YOLO instance detection + BiRefNet refinement to enumerate every subject in the image as individual clickable chips (person 1, the dog, etc.).
-- **Depth Range** — Select objects based on 3D depth estimation using **Depth Anything V2**.
-- **Natural Language** — Describe the region in plain text ("the red jacket", "everything except the sky") — routes through the agent's `mask.fromDescription` command which chains CLIPSeg grounding + SAM 2 refinement.
+- **Select Subject / Select Background** — One-click subject isolation. In the browser this is **SlimSAM** prompted with a saliency box; **rembg / BiRefNet** is used instead when the masking service is running. Background mode inverts the matte, and a sensitivity slider plus fill-holes toggle clean up soft mattes.
+- **Click to Select** — Click (or drag a box) and the object boundary is predicted by **SlimSAM in the browser**. The service's SAM 3.1 is not used for this any more. Shift-click adds, Alt-click subtracts, and "Refine" composites each result into the selected layer.
+- **Magic Wand** — Tolerance-based flood fill on the unfiltered source pixels, with contiguous, anti-alias and 1×1/3×3/5×5 sampling options.
+- **Marquee** — Rectangular and elliptical selections (Shift to constrain, Alt to draw from the centre).
+- **Detect All Subjects** — Enumerates every subject as clickable chips (person 1, the dog, …). Needs the masking service: it uses **SAM 3.1** open-vocabulary detection, with a saliency-blob fallback when SAM is unavailable.
+- **Depth Range** — Selects by distance using **Depth Anything V2** on the masking service. Without the service this tool reports that it needs it.
+- **Natural Language** — Describe the region in plain text ("the red jacket", "everything except the sky"). The plan comes from Gemini (or an on-device rule parser), then each step resolves through subject detection, text grounding (**SAM 3.1** on the service, **CLIPSeg** in the browser), depth, luminance, colour or geometry — composed with add / subtract / intersect so every part stays editable.
+- **Select-and-Mask edge controls** — Boundary, Smooth and Contrast per texture layer, derived non-cumulatively from the pristine matte.
 
 #### Draw Selection
 - **Selection Brush** — Paint a selection mask with adjustable size and feather. Includes *Edge Snapping* mode (bilateral filter) that snaps brush strokes to detected edges.
@@ -243,16 +254,38 @@ Every mask layer (including AI-detected subjects) supports a **Boundary** slider
 
 ### Computer Vision Models
 
-| Model | Task | Provider |
+**SlimSAM is the only segmentation model that runs locally.** Everything else is
+either a cloud API or an optional service you deploy yourself.
+
+**In the browser** (transformers.js, WebGPU → WASM, downloaded once and cached):
+
+| Model | Task | Size |
 |---|---|---|
-| **BiRefNet** | Subject segmentation (background removal) | Local FastAPI / HuggingFace fallback |
-| **SAM 2** | Point and box-based semantic segmentation | Local FastAPI |
-| **Depth Anything V2** | Monocular depth estimation | Local FastAPI |
-| **YOLO26n-seg** | Multi-instance subject detection | Local FastAPI |
-| **CLIPSeg** | Open-vocabulary text grounding | Local FastAPI (lazy) / in-browser fallback |
-| **LaMa** | Object removal inpainting | Local FastAPI (lazy) |
-| **RMBG-1.4** | Client-side background removal | In-browser (WASM/WebGPU via transformers.js) |
-| **FLUX.1** | AI background / collage background generation | HuggingFace Inference API |
+| **SlimSAM** (`Xenova/slimsam-77-uniform`) | Click select, box select, **and** one-click Select Subject (a saliency box + prompt points seed it, and the best-scoring candidate mask wins) | ~40 MB |
+| **CLIPSeg** (`Xenova/clipseg-rd64-refined`) | Text grounding for natural-language masks — the one job SlimSAM cannot do without a service | ~150 MB |
+
+Models that used to run in the browser and were removed on purpose: **SAM 3
+Tracker** and **MODNet** (duplicated SlimSAM's job), **RMBG-1.4** (subject cutout
+now comes from SlimSAM), **Depth Anything V2** (depth is a service capability),
+and the hosted **SegFormer / DETR** segmentation fallback.
+
+**On the optional Python services** (both deployable to a Hugging Face Space):
+
+| Model | Task | Service |
+|---|---|---|
+| **rembg** (`isnet-general-use` default, BiRefNet optional) | Subject matte | masking (:8002) |
+| **SAM 3.1** (`facebook/sam3.1`, gated checkpoint) | Click / box prompts, multi-subject detection, open-vocabulary grounding | masking (:8002) |
+| **Depth Anything V2 Small** | Monocular depth — the only source of depth masks and depth-guided crop | masking (:8002) |
+| **LaMa** (`simple-lama-inpainting`) | Object-removal fill | segment (:8001) |
+
+**Hosted APIs:**
+
+| Model / service | Task | Provider |
+|---|---|---|
+| **Gemini 3.5 Flash** | Edit planner, 12-axis judge, mask planner, collage art director, crop analysis, pixel-stretch planner | Google AI API |
+| **FLUX.1-schnell** | AI background / collage background generation | HuggingFace Inference API |
+| **Stable Diffusion Inpainting** | Object-fill fallback when LaMa is not running | HuggingFace Inference API |
+| **ImageKit generative fill** | AI Extender outpainting | ImageKit |
 
 ### AI Transform Pipeline
 
@@ -261,7 +294,7 @@ Every mask layer (including AI-detected subjects) supports a **Boundary** slider
 - **Outpainting** — Expand canvas boundaries via `/api/ai/extend`
 - **Edit planning** — Natural language → edit parameter mapping via `/api/ai/edit-plan` (Gemini, heuristic fallback, grade loop with Gemini judge + critic)
 - **Mask planning** — Natural language → mask step plan via `/api/ai/mask-plan`
-- **Auto-crop** — 4-strategy crop via `/api/ai/auto-crop` (subject-aware, aspect-ratio, content-fill, depth-guided)
+- **Auto-crop** — reads the photo via `/api/ai/crop-analyze` (Gemini vision), then composes the crop in the browser (`src/lib/auto-crop-core.js`); `/api/ai/auto-crop` remains as the service-side pipeline but the editor no longer needs it
 
 ### AI Routing
 
@@ -284,7 +317,7 @@ At the core of the editing experience is a custom **WebGL2** compositing engine:
 - **Real-time preview** — All adjustments, masks, and blends are computed per-frame.
 - **Blend modes** — Photoshop-parity blend modes: Normal, Screen, Multiply, Overlay, Soft Light, Hard Light, Darken, Lighten, Color Dodge, Color Burn, Difference, Exclusion, Add, Subtract, Divide.
 - **Mask chain composition** — Multiple mask layers compose via union, intersection, subtraction, and XOR.
-- **230 GLSL invariant tests** — The shader pipeline is validated by `bun run verify`.
+- **278 GLSL invariant tests** — The shader pipeline is validated by `bun run verify`.
 
 ### How It Works
 
@@ -293,8 +326,9 @@ Image Layer → [Adjustment Shaders] → [Mask Chain (GLSL)] → [Blend Modes] �
                                            ↑
                                     Mask Layers (N):
                                     ├─ Brush strokes
-                                    ├─ AI segmentation (BiRefNet / SAM 2 / YOLO)
-                                    ├─ CLIPSeg text grounding
+                                    ├─ AI segmentation (RMBG-1.4 / SlimSAM,
+                                    │   or BiRefNet / SAM 3.1 on the service)
+                                    ├─ Text grounding (CLIPSeg / SAM 3.1)
                                     ├─ Lasso / Color Range / Luminance
                                     ├─ Gradient masks
                                     └─ Depth maps
@@ -317,7 +351,7 @@ All editor capabilities are exposed through a **command registry** at `src/lib/a
 The AI agent chat routes typed prompts to the appropriate domain:
 - **Edit prompts** → `edit-plan` (Gemini grade loop)
 - **Collage prompts** → `collage.fromDescription` (detected via `COLLAGE_INTENT_RE`)
-- **Mask prompts** → `mask.fromDescription` (NL → CLIPSeg + SAM 2)
+- **Mask prompts** → `mask.fromDescription` (NL → grounding + subject/depth/colour layers)
 
 Every command run is logged in the **History panel** (pinned in the editor sidebar) with a cyan Bot badge, separate from user-driven changes.
 
@@ -348,9 +382,9 @@ The dashboard provides a grid view of all projects with:
 | **Database** | Neon (serverless Postgres) + Prisma ORM |
 | **Caching** | Redis (Upstash) for canvas snapshot caching |
 | **Image CDN** | ImageKit (storage, transforms, AI pipeline) |
-| **AI Models** | BiRefNet, SAM 2, Depth Anything V2, YOLO, CLIPSeg, LaMa, RMBG-1.4, FLUX.1 |
-| **AI Service** | Python FastAPI + PyTorch (local inference, lazy model loading) |
-| **In-Browser AI** | RMBG-1.4 via transformers.js (WebGPU → WASM fallback) |
+| **AI Models** | In-browser: SlimSAM (+ CLIPSeg for text grounding). Services: rembg/BiRefNet, SAM 3.1, Depth Anything V2, LaMa. Hosted: Gemini 3.5 Flash, FLUX.1-schnell, Stable Diffusion |
+| **AI Services** | Two Python FastAPI services (lazy model loading), deployable to Hugging Face Spaces — optional |
+| **In-Browser AI** | transformers.js + onnxruntime-web (WebGPU → WASM fallback), models cached after first use |
 | **Billing** | Clerk Billing (Pro tier for AI tools) |
 
 ---
@@ -361,7 +395,7 @@ The dashboard provides a grid view of all projects with:
 
 - [Bun](https://bun.sh) ≥ 1.3
 - [Node.js](https://nodejs.org/) ≥ 18 (required by some Next.js internals)
-- [Python](https://www.python.org/) ≥ 3.10 (for the local AI mask service)
+- [Python](https://www.python.org/) 3.11 — only if you want the optional AI services (the editor's AI works without them)
 
 ### Installation
 
@@ -411,18 +445,22 @@ NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY=public_...
 IMAGEKIT_PRIVATE_KEY=private_...
 NEXT_PUBLIC_IMAGEKIT_URL_ENDPOINT=https://ik.imagekit.io/your-id
 
-# ── AI (Gemini — edit planning & mask planning) ──
+# ── AI (Gemini — edit / mask planning, collage art direction, crop analysis) ──
 GEMINI_API_KEY=AIza...
+
+# ── Hugging Face Inference (optional — AI background generation, inpaint fallback) ──
+HUGGINGFACE_API_TOKEN=hf_...
 
 # ── Caching (Redis / Upstash — optional) ──
 UPSTASH_REDIS_REST_URL=https://...
 UPSTASH_REDIS_REST_TOKEN=...
 
-# ── Local AI Mask Service (optional) ──
-MASK_SERVICE_URL=http://127.0.0.1:8001
+# ── AI services (both optional) ──
+MASKING_SERVICE_URL=http://127.0.0.1:8002   # selection: subject / SAM 3.1 / depth / grounding
+MASK_SERVICE_URL=http://127.0.0.1:8001      # erase: LaMa inpaint, shape fill, service auto-crop
 ```
 
-> **Note:** The editor works without the optional services — AI mask tools fall back to HuggingFace APIs, and the agent uses a local visual-metrics planner instead of Gemini.
+> **Note:** The editor works without the optional services. Selection, depth, text grounding and auto-crop all run in the browser, and without `GEMINI_API_KEY` the planners fall back to on-device rule parsers and heuristics.
 
 ---
 
@@ -505,7 +543,7 @@ The agent has a persistent chat interface with conversation history stored per-p
 | `bun run imagekit:docs` | Crawl ImageKit docs into a local JSON knowledge base |
 | `bun run mask:install` | Install Python deps for the local mask service |
 | `bun run mask:dev` | Start the FastAPI mask service on port 8001 |
-| `bun run verify` | Run all 230 Megashader GLSL invariant tests |
+| `bun run verify` | Run all 278 Megashader GLSL invariant tests |
 | `bun run verify:mask` | Mask edge-snap bilateral filter |
 | `bun run verify:segment` | BiRefNet subject segmentation |
 | `bun run verify:semantic` | SAM 2 point-based segmentation |

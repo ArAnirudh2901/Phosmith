@@ -146,7 +146,7 @@ const errorFromResponse = async (resp, fallback) => {
     return err
 }
 
-/** GET /api/ai/health — is the masking service up, and is SAM 3.1 loaded? */
+/** GET /api/ai/health — is the masking service up? */
 export const checkMaskService = async (timeoutMs = 4000) => {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), timeoutMs)
@@ -161,65 +161,6 @@ export const checkMaskService = async (timeoutMs = 4000) => {
     }
 }
 
-/**
- * POST /api/ai/sam3 — point-click selection. `points` are [[x, y], ...] and
- * `labels` [1|0, ...] in ORIGINAL image coords. Returns a coverage canvas at
- * (width, height) (defaults to the natural image size).
- */
-export const serviceSamClick = async (sourceEl, points, labels, { width, height, signal } = {}) => {
-    const up = await imageToUploadBlob(sourceEl, { maxSide: SAM_INPUT })
-    const clicks = points.map(([x, y], i) => [
-        clamp(Math.round(x * up.scale), 0, up.width - 1),
-        clamp(Math.round(y * up.scale), 0, up.height - 1),
-        labels[i] ? 1 : 0,
-    ])
-    const form = new FormData()
-    form.append('image', up.blob, 'image.jpg')
-    form.append('clicks', JSON.stringify(clicks))
-    const r = await fetch('/api/ai/sam3', { method: 'POST', body: form, signal })
-    if (!r.ok) throw await errorFromResponse(r, 'SAM click failed')
-    const blob = await r.blob()
-    const url = URL.createObjectURL(blob)
-    try {
-        return await pngToMaskCanvas(url, width || up.origWidth, height || up.origHeight)
-    } finally {
-        URL.revokeObjectURL(url)
-    }
-}
-
-/**
- * POST /api/ai/sam3 — box-prompted selection. `box` is [x0, y0, x1, y1] in
- * ORIGINAL image coords. Returns a coverage canvas at (width, height).
- */
-export const serviceSamBox = async (sourceEl, box, { width, height, signal } = {}) => {
-    const up = await imageToUploadBlob(sourceEl, { maxSide: SAM_INPUT })
-    const scaled = [
-        clamp(Math.round(box[0] * up.scale), 0, up.width - 1),
-        clamp(Math.round(box[1] * up.scale), 0, up.height - 1),
-        clamp(Math.round(box[2] * up.scale), 1, up.width),
-        clamp(Math.round(box[3] * up.scale), 1, up.height),
-    ]
-    if (scaled[2] <= scaled[0] || scaled[3] <= scaled[1]) throw new Error('box too small')
-    const form = new FormData()
-    form.append('image', up.blob, 'image.jpg')
-    form.append('box', JSON.stringify(scaled))
-    const r = await fetch('/api/ai/sam3', { method: 'POST', body: form, signal })
-    if (!r.ok) throw await errorFromResponse(r, 'SAM box failed')
-    const blob = await r.blob()
-    const url = URL.createObjectURL(blob)
-    try {
-        return await pngToMaskCanvas(url, width || up.origWidth, height || up.origHeight)
-    } finally {
-        URL.revokeObjectURL(url)
-    }
-}
-
-/**
- * POST /api/ai/segment-instances — subject/concept mask. With subjectBox the
- * service takes the fast saliency-bbox → SAM 3 box-seed path. Returns the union
- * coverage canvas plus mode/model/instances so callers can decide whether to
- * upgrade a saliency matte with a SAM 3 box prompt (`mode !== 'sam3'`).
- */
 export const serviceSubjectMask = async (
     sourceEl,
     { concept = SUBJECT_CONCEPT, subjectBox = true, width, height, signal } = {},

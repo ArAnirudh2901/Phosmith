@@ -38,7 +38,7 @@ import {
     setMaskTexture,
 } from '@/lib/megashader'
 import { growMaskCanvas } from '@/lib/mask-grow'
-import { clientDepthMap, clientGroundPhrase } from '@/lib/client-ai'
+import { clientGroundPhrase } from '@/lib/client-ai'
 import { getRoutingMode, prefersClient, resolveOrder } from '@/lib/ai-routing'
 import {
     COLOR_NAME_HEX,
@@ -262,26 +262,15 @@ export const createNlMaskRunner = (deps) => {
                 return { canvas, label: `NL ${titleCase(target.phrase)}` }
             }
             case 'depth': {
+                // Depth is a service capability: the browser ships SlimSAM only.
                 let cover = null
-                let lastErr = null
-                for (const side of resolveOrder('depth')) {
-                    try {
-                        if (side === 'client') {
-                            const el = sourceElOf(image)
-                            const { w, h } = deps.naturalSize(image)
-                            cover = await clientDepthMap(el, { width: w, height: h })
-                            helpers.notes.push('depth estimated on-device (in-browser Depth Anything V2)')
-                        } else {
-                            const depthBlob = await deps.postMask('/api/ai/depth')
-                            cover = deps.toCoverageCanvas(await deps.decodePng(depthBlob))
-                        }
-                        break
-                    } catch (err) {
-                        lastErr = err
-                        helpers.notes.push(`${side === 'client' ? 'on-device' : 'server'} depth failed (${err?.message})`)
-                    }
+                try {
+                    const depthBlob = await deps.postMask('/api/ai/depth')
+                    cover = deps.toCoverageCanvas(await deps.decodePng(depthBlob))
+                } catch (err) {
+                    helpers.notes.push(`depth needs the masking service (${err?.message})`)
+                    throw err
                 }
-                if (!cover) throw lastErr || new Error('depth estimation failed on every configured side')
                 const key = uniqueKey('nl-depth')
                 setMaskTexture(key, cover)
                 const range = DEPTH_RANGES[target.region]

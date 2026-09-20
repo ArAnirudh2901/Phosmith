@@ -164,7 +164,7 @@ const HeroFeatures = () => {
                                 letterSpacing: "-0.01em",
                             }}
                         >
-                            Nine tools.<br />
+                            Fourteen tools.<br />
                             One canvas.<br />
                             <span className="liquid-reactive-text-stroke">Zero round-trips.</span>
                         </h2>

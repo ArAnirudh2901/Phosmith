@@ -3,9 +3,9 @@
 // READ the photo with Gemini vision (/api/ai/crop-analyze), tighten subject
 // edges with the Mask studio's on-device matte (RMBG-1.4), then compose.
 // Without a vision key it analyses on-device (matte + saliency + horizon).
-// Returns the /api/ai/auto-crop payload shape.
+// Returns { width, height, aspect, crops, subjects, recommended, source, analysis }.
 
-import { clientDepthMap, clientSubjectMask } from './client-ai'
+import { clientSubjectMask } from './client-ai'
 import { cleanSubjectMatte } from './subject-mask-cleanup'
 import { analyzePixels } from './collage/analyze'
 import {
@@ -53,6 +53,31 @@ const lumaThumb = (el, W, H) => {
 // Quota (429) applies to the whole key, so stop asking for a while.
 const VISION_COOLDOWN_MS = 90 * 1000
 let visionCooldownUntil = 0
+
+// Depth estimation lives on the masking service; the browser ships SlimSAM only.
+const serviceDepthMap = async (canvas, signal) => {
+    const blob = await new Promise((res, rej) =>
+        canvas.toBlob((b) => (b ? res(b) : rej(new Error('encode failed'))), 'image/jpeg', 0.88))
+    const form = new FormData()
+    form.append('image', blob, 'image.jpg')
+    const res = await fetch('/api/ai/depth', { method: 'POST', body: form, signal })
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `depth request failed (${res.status})`)
+    }
+    const url = URL.createObjectURL(await res.blob())
+    try {
+        const img = await new Promise((resolve, reject) => {
+            const image = new Image()
+            image.onload = () => resolve(image)
+            image.onerror = () => reject(new Error('depth map decode failed'))
+            image.src = url
+        })
+        return img
+    } finally {
+        URL.revokeObjectURL(url)
+    }
+}
 
 const abortError = () => Object.assign(new Error('Auto-crop cancelled'), { name: 'AbortError' })
 const throwIfAborted = (signal) => { if (signal?.aborted) throw abortError() }
@@ -165,11 +190,12 @@ export const runAutoCropEngine = async (sourceEl, { width, height, mode = 'subje
     if (mode === 'depth' || mode === 'all') {
         onStage?.('depth')
         try {
-            const depthCanvas = await clientDepthMap(canvas, { width: w, height: h })
+            const depthCanvas = await serviceDepthMap(canvas, signal)
             throwIfAborted(signal)
             crops.depth = computeDepthCrop(channelOf(depthCanvas, w, h), w, h, { aspect })
         } catch (error) {
-            if (error?.name === 'AbortError' || mode === 'depth') throw error
+            if (error?.name === 'AbortError') throw error
+            if (mode === 'depth') throw new Error(`Depth-guided crop needs the masking service — ${error?.message || 'it is not reachable'}`)
             console.warn('[auto-crop] depth strategy skipped:', error?.message || error)
         }
     }

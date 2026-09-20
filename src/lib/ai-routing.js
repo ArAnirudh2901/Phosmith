@@ -14,8 +14,8 @@
  *   - 'client' / 'server': try the preferred side first; if it fails at
  *     runtime, the executor falls through to the other side (when supported)
  *     rather than failing the user's request. Masking should degrade, not die.
- *   - 'auto': server first (higher quality — SAM 2 refinement, YOLO
- *     instances, Gemini planning), client as the fallback. This is also what
+ *   - 'auto': server first (higher quality — SAM 3.1 refinement, instance
+ *     separation, Gemini planning), client as the fallback. This is also what
  *     makes the editor work out-of-the-box without the Python service.
  *
  * Persistence: localStorage `phosmith:ai-routing` (JSON map). The legacy
@@ -49,14 +49,15 @@ export const AI_CAPABILITIES = {
         client: true,
         server: true,
         clientImpl: 'CLIPSeg in browser',
-        serverImpl: 'CLIPSeg + SAM 2 refine',
+        serverImpl: 'SAM 3.1 concept grounding (service)',
     },
     depth: {
         label: 'Depth estimation',
         hint: 'Foreground / background planes',
-        client: true,
+        // No browser model: the client ships SlimSAM only.
+        client: false,
         server: true,
-        clientImpl: 'Depth Anything V2 in browser',
+        clientImpl: null,
         serverImpl: 'Depth Anything V2 (service)',
     },
     subjects: {
@@ -74,16 +75,18 @@ export const AI_CAPABILITIES = {
         hint: 'One-click subject matte',
         client: true,
         server: true,
-        clientImpl: 'RMBG-1.4 in browser',
-        serverImpl: 'BiRefNet (service)',
+        clientImpl: 'SlimSAM + saliency box (browser)',
+        serverImpl: 'rembg / BiRefNet (service)',
     },
     sam: {
         label: 'Click / box select',
         hint: 'Point or drag to select an object',
+        // Masking uses one selection model: SlimSAM, in the browser. The
+        // service's SAM 3.1 still powers instance detection and grounding.
         client: true,
-        server: true,
-        clientImpl: 'SAM 3 Tracker in browser',
-        serverImpl: 'SAM 3.1 (service)',
+        server: false,
+        clientImpl: 'SlimSAM in browser',
+        serverImpl: null,
     },
     inpaint: {
         label: 'Object fill',

@@ -121,7 +121,8 @@ export const analyzeRange = (map) => {
  *
  * @param {object} results
  * @param {{ found:boolean, score:number, bbox:[number,number,number,number]|null }} results.ground
- * @param {{ width:number, height:number, spread:number }|null} results.depth
+ * @param {{ width:number, height:number, spread:number }|null} [results.depth]
+ *        Depth stats. OPTIONAL: omit to skip (depth runs on the service).
  * @param {{ width:number, height:number, coverage:number, bbox:number[]|null }|null} [results.segment]
  *        Background-removal matte stats. OPTIONAL: omit the key entirely to
  *        skip the segmentation checks; null means it ran and failed.
@@ -151,17 +152,21 @@ export const evaluateSelfTest = ({ ground, depth, segment, sam }, disc) => {
         detail: ground?.bbox ? `bbox ${ground.bbox.join(',')}` : 'no bbox',
     })
 
-    const dOk = Boolean(depth) && depth.width === disc.w && depth.height === disc.h
-    checks.push({
-        label: 'Depth map at expected size',
-        ok: dOk,
-        detail: depth ? `${depth.width}x${depth.height}` : 'no output',
-    })
-    checks.push({
-        label: 'Depth map has tonal spread',
-        ok: Boolean(depth) && depth.spread >= 0.05,
-        detail: depth ? `spread ${depth.spread.toFixed(3)}` : 'no output',
-    })
+    // `depth` is optional: depth estimation is a service capability, so the
+    // in-browser self-test omits it entirely (undefined = skip, null = failed).
+    if (depth !== undefined) {
+        const dOk = Boolean(depth) && depth.width === disc.w && depth.height === disc.h
+        checks.push({
+            label: 'Depth map at expected size',
+            ok: dOk,
+            detail: depth ? `${depth.width}x${depth.height}` : 'no output',
+        })
+        checks.push({
+            label: 'Depth map has tonal spread',
+            ok: Boolean(depth) && depth.spread >= 0.05,
+            detail: depth ? `spread ${depth.spread.toFixed(3)}` : 'no output',
+        })
+    }
 
     if (segment !== undefined) {
         // The disc is the scene's only subject: a sane matte selects a real

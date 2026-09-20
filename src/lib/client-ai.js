@@ -37,31 +37,10 @@ const ENABLED_KEY = 'phosmith:client-ai'
 const CHANGED_EVENT = 'phosmith:client-ai-changed'
 
 const GROUND_MODEL = 'Xenova/clipseg-rd64-refined'
-const DEPTH_MODEL = 'onnx-community/depth-anything-v2-small'
-// On-device click/box select — offline fallback when the SAM 3.1 service is
-// down. Primary engine is the SAM 3 Tracker (the promptable point/box half of
-// SAM 3, ONNX export) — the closest browser match to the service's SAM 3.1.
-// Explicit dtype is mandatory: the default fp32 vision encoder is 1.9 GB
-// (q4f16 ≈ 300 MB on WebGPU, q8 ≈ 530 MB on WASM). SlimSAM (~40 MB) stays as
-// the sticky demotion fallback. The slow image encode is cached per image so
-// multi-click refine is fast on either engine.
-const SAM_ENGINES = [
-    { id: 'onnx-community/sam3-tracker-ONNX', kind: 'sam3', label: 'SAM 3 Tracker' },
-    { id: 'Xenova/slimsam-77-uniform', kind: 'sam1', label: 'SlimSAM' },
-]
-// Background removal / subject matting engines, in preference order. Chosen
-// empirically via verify:client-ai: BiRefNet-lite and MODNet's pipeline
-// graphs fail in this onnxruntime-web build (WASM: OrtRun std::bad_alloc
-// even in isolation; WebGPU: unsupported shader op), while RMBG-1.4 through
-// the canonical MANUAL recipe (AutoModel with model_type:'custom') runs
-// correctly on plain WASM — it's the engine behind the well-known in-browser
-// background-removal demos. NOTE: RMBG-1.4 is CC BY-NC (non-commercial),
-// the same licence caveat the server's bria-rmbg option documents.
-const SEGMENT_ENGINES = [
-    { id: 'briaai/RMBG-1.4', kind: 'rmbg-manual' },
-    { id: 'Xenova/modnet', kind: 'pipeline' },
-]
-
+// Click/box select runs on SlimSAM (~40 MB, distilled SAM) — the one
+// segmentation model this project ships for prompted selection. The slow image
+// encode is cached per image so multi-click refine stays fast.
+const SAM_ENGINE = { id: 'Xenova/slimsam-77-uniform', label: 'SlimSAM' }
 // Mirror the server's peak-relative thresholding (services/segment/main.py):
 // CLIPSeg sigmoids are range-compressed, so absolute cuts drop real targets.
 const GROUND_THRESHOLD_REL = 0.55
@@ -116,8 +95,7 @@ const state = {
     forcedWasm: false,   // sticky downgrade after a WebGPU runtime failure
     loading: null,       // human label of whatever is downloading right now
     groundReady: false,
-    depthReady: false,
-    segmentReady: false,
+    segmentReady: false,   // subject cutout — SlimSAM, mirrors samReady
     samReady: false,
     diagnostics: [],     // last DIAG_MAX runs: {capability, device, ms, ok, error?, at}
 }
@@ -188,12 +166,9 @@ const withDeviceFallback = async (capability, run) => {
         state.forcedWasm = true
         state.device = 'wasm'
         state.groundReady = false
-        state.depthReady = false
         state.segmentReady = false
         state.samReady = false
         groundPromise = null
-        depthPromise = null
-        segmentPromise = null
         samPromise = null
         samImage = null
         emitState()
@@ -245,8 +220,6 @@ const loadTransformers = async () => {
 /* ─── Model singletons ───────────────────────────────────────────────────── */
 
 let groundPromise = null
-let depthPromise = null
-let segmentPromise = null
 let samPromise = null
 // Cached SAM image encode: { el, w, h, rawImage, embeddings, scale }. The
 // ViT encode is the slow part, so it's reused across clicks on the same image.
@@ -342,107 +315,92 @@ const loadGroundModel = () => {
     return groundPromise
 }
 
-const loadDepthModel = () => {
-    if (depthPromise) return depthPromise
-    depthPromise = (async () => {
-        const { pipeline } = await loadTransformers()
-        const device = await pickDevice()
-        state.loading = 'Depth Anything V2'
-        emitState()
-        try {
-            const pipe = await withTimeout(
-                pipeline('depth-estimation', DEPTH_MODEL, { device })
-                    .catch(() => pipeline('depth-estimation', DEPTH_MODEL)),
-                LOAD_TIMEOUT_MS,
-                'Depth model load',
-            )
-            state.depthReady = true
-            return pipe
-        } finally {
-            state.loading = null
-            emitState()
-        }
-    })()
-    depthPromise.catch(() => { depthPromise = null })
-    return depthPromise
-}
-
-// Index into SEGMENT_ENGINES — bumped (sticky) when an engine fails at
-// inference so every later call goes straight to the survivor.
-let segmentEngineIndex = 0
-
-const loadSegmentModel = () => {
-    if (segmentPromise) return segmentPromise
-    segmentPromise = (async () => {
-        const transformers = await loadTransformers()
-        const device = await pickDevice()
-        const engine = SEGMENT_ENGINES[Math.min(segmentEngineIndex, SEGMENT_ENGINES.length - 1)]
-        state.loading = `${engine.id.split('/').pop()} (background removal)`
-        emitState()
-        try {
-            if (engine.kind === 'rmbg-manual') {
-                // Canonical RMBG-1.4 recipe: the repo's config lacks a usable
-                // model_type/preprocessor for the pipeline API, so the model
-                // and processor are constructed explicitly.
-                const { AutoModel, AutoProcessor } = transformers
-                const [model, processor] = await withTimeout(
-                    Promise.all([
-                        AutoModel.from_pretrained(engine.id, { config: { model_type: 'custom' }, device })
-                            .catch(() => AutoModel.from_pretrained(engine.id, { config: { model_type: 'custom' } })),
-                        AutoProcessor.from_pretrained(engine.id, {
-                            config: {
-                                do_normalize: true,
-                                do_pad: false,
-                                do_rescale: true,
-                                do_resize: true,
-                                image_mean: [0.5, 0.5, 0.5],
-                                image_std: [1, 1, 1],
-                                feature_extractor_type: 'ImageFeatureExtractor',
-                                resample: 2,
-                                rescale_factor: 0.00392156862745098,
-                                size: { width: 1024, height: 1024 },
-                            },
-                        }),
-                    ]),
-                    LOAD_TIMEOUT_MS,
-                    'Background-removal model load',
-                )
-                state.segmentReady = true
-                return { kind: engine.kind, model, processor, transformers }
-            }
-            const pipe = await withTimeout(
-                transformers.pipeline('image-segmentation', engine.id, { device })
-                    .catch(() => transformers.pipeline('image-segmentation', engine.id)),
-                LOAD_TIMEOUT_MS,
-                'Background-removal model load',
-            )
-            state.segmentReady = true
-            return { kind: engine.kind, pipe }
-        } finally {
-            state.loading = null
-            emitState()
-        }
-    })()
-    segmentPromise.catch(() => { segmentPromise = null })
-    return segmentPromise
-}
-
-/* ─── Background prefetch ────────────────────────────────────────────────── */
-
-// Map a routing capability → the loader that downloads + caches its model.
-// 'ground' and 'subjects' share CLIPSeg (the on-device subjects path is text
-// grounding). 'maskPlan' (JS rule parser) and 'inpaint' (the LOCAL mask
-// service's LaMa, not in-browser) have no browser model, so they're absent —
-// prefetch silently skips any capability without an entry here.
 const CAPABILITY_LOADERS = {
     ground: { load: loadGroundModel, pending: () => groundPromise != null, ready: () => state.groundReady },
     subjects: { load: loadGroundModel, pending: () => groundPromise != null, ready: () => state.groundReady },
-    depth: { load: loadDepthModel, pending: () => depthPromise != null, ready: () => state.depthReady },
-    segment: { load: loadSegmentModel, pending: () => segmentPromise != null, ready: () => state.segmentReady },
+    // Subject cutout is SlimSAM over a saliency box — same model as click select.
+    segment: { load: () => loadSamModel(), pending: () => samPromise != null, ready: () => state.samReady },
     // loadSamModel is declared further down — reading it eagerly here is a TDZ
     // ReferenceError that crashes the whole module (and the editor) on import;
     // the thunk defers the read to call time.
     sam: { load: () => loadSamModel(), pending: () => samPromise != null, ready: () => state.samReady },
+}
+
+/* ─── Idle release ───────────────────────────────────────────────────────────
+ * One model per job, and none of them squats in RAM: a model untouched for
+ * IDLE_RELEASE_MS is disposed and its promise cleared, so the next call rebuilds
+ * it from the browser's model cache (no re-download). Never fires while an
+ * inference is in flight.
+ */
+const IDLE_RELEASE_MS = 5 * 60 * 1000
+const IDLE_SWEEP_MS = 60 * 1000
+
+const MODEL_SLOTS = {
+    ground: {
+        get: () => groundPromise,
+        clear: () => { groundPromise = null; state.groundReady = false },
+    },
+    sam: {
+        get: () => samPromise,
+        clear: () => { samPromise = null; samImage = null; state.samReady = false },
+    },
+}
+const slotUse = {}   // name → { lastUsed, inFlight }
+let sweepTimer = null
+
+const disposeLoaded = async (value) => {
+    if (!value || typeof value !== 'object') return
+    for (const target of [value, value.model, value.processor, value.session]) {
+        try { await target?.dispose?.() } catch { /* best-effort */ }
+    }
+}
+
+const sweepIdleModels = () => {
+    const now = Date.now()
+    let live = 0
+    for (const [name, slot] of Object.entries(MODEL_SLOTS)) {
+        const pending = slot.get()
+        if (!pending) continue
+        const use = slotUse[name]
+        if (use?.inFlight > 0 || !use?.lastUsed) { live += 1; continue }
+        if (now - use.lastUsed < IDLE_RELEASE_MS) { live += 1; continue }
+        slot.clear()
+        pending.then(disposeLoaded).catch(() => {})
+        emitState()
+    }
+    if (!live && sweepTimer) {
+        clearInterval(sweepTimer)
+        sweepTimer = null
+    }
+}
+
+/** Mark a model in use for the duration of `run` (and keep the sweeper alive). */
+const withModelUse = async (name, run) => {
+    const use = slotUse[name] || (slotUse[name] = { lastUsed: 0, inFlight: 0 })
+    use.inFlight += 1
+    use.lastUsed = Date.now()
+    if (!sweepTimer && hasWindow()) {
+        sweepTimer = setInterval(sweepIdleModels, IDLE_SWEEP_MS)
+        sweepTimer.unref?.()
+    }
+    try {
+        return await run()
+    } finally {
+        use.inFlight -= 1
+        use.lastUsed = Date.now()
+    }
+}
+
+/** Drop every loaded in-browser model now (frees RAM immediately). */
+export const releaseClientModels = async () => {
+    for (const [name, slot] of Object.entries(MODEL_SLOTS)) {
+        const pending = slot.get()
+        slot.clear()
+        delete slotUse[name]
+        if (pending) await pending.then(disposeLoaded).catch(() => {})
+    }
+    if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null }
+    emitState()
 }
 
 // Run during browser idle time so a multi-hundred-MB download + ONNX compile
@@ -614,118 +572,132 @@ const groundOnce = async (el, phrase, { width, height }) => {
  * @returns {Promise<{ canvas: HTMLCanvasElement|null, score: number, bbox: number[]|null }>}
  */
 export const clientGroundPhrase = (el, phrase, dims) =>
-    withDeviceFallback('ground', () => groundOnce(el, phrase, dims))
+    withModelUse('ground', () => withDeviceFallback('ground', () => groundOnce(el, phrase, dims)))
 
-const depthOnce = async (el, { width, height }) => {
-    const pipe = await loadDepthModel()
-    const input = toInputCanvas(el, width, height)
-    const image = await canvasToRawImage(input)
-    const { depth } = await withTimeout(pipe(image), INFER_TIMEOUT_MS, 'Depth inference')
-
-    // `depth` is a single-channel RawImage at model resolution, 0..255.
-    const mw = depth?.width
-    const mh = depth?.height
-    if (!mw || !mh || !depth.data || depth.data.length < mw * mh) {
-        throw new Error('Depth model returned a malformed map')
-    }
-    const map = new Float32Array(mw * mh)
-    for (let i = 0; i < map.length; i += 1) map[i] = depth.data[i] / 255
-
-    const range = analyzeRange(map)
-    const out = mapToCanvas(map, mw, mh, width, height)
-    const verdict = validateDepthOutput(
-        { width: out.width, height: out.height, ...range },
-        { width, height },
-    )
-    if (!verdict.usable) throw new Error(`Depth output rejected: ${verdict.reason}`)
-    return out
-}
-
-/**
- * In-browser depth map (white = near) at the image's natural size, with the
- * same timeout/downgrade/validation hardening as grounding.
- *
- * @param {HTMLImageElement|HTMLCanvasElement} el
- * @param {{ width: number, height: number }} naturalDims
- * @returns {Promise<HTMLCanvasElement>}
+/* ─── Subject cutout (saliency box → SlimSAM) ────────────────────────────────
+ * The browser ships ONE model, so the subject matte is a SlimSAM box prompt
+ * seeded by a saliency box instead of a second segmentation network. Saliency
+ * is frequency-tuned colour distance from the frame's mean with a centre prior
+ * — the same idea the collage Composer uses.
  */
-export const clientDepthMap = (el, dims) =>
-    withDeviceFallback('depth', () => depthOnce(el, dims))
+const SALIENCY_SIDE = 160
+const SUBJECT_MASS = 0.86   // share of saliency mass the seed box must contain
 
-const segmentOnce = async (el, { width, height }) => {
-    const bundle = await loadSegmentModel()
-    const input = toInputCanvas(el, width, height)
-    const image = await canvasToRawImage(input)
-
-    let matte
-    if (bundle.kind === 'rmbg-manual') {
-        const { RawImage } = bundle.transformers
-        const { pixel_values } = await bundle.processor(image)
-        const { output } = await withTimeout(
-            bundle.model({ input: pixel_values }),
-            INFER_TIMEOUT_MS,
-            'Background-removal inference',
-        )
-        matte = await RawImage.fromTensor(output[0].mul(255).to('uint8'))
-            .resize(image.width, image.height)
-    } else {
-        const out = await withTimeout(bundle.pipe(image), INFER_TIMEOUT_MS, 'Background-removal inference')
-        // image-segmentation output for matting models: [{ label, mask }] —
-        // a single entry whose mask is a single-channel soft matte 0..255.
-        matte = Array.isArray(out) ? out[0]?.mask : out?.mask
+const saliencySeed = (el, width, height) => {
+    const k = SALIENCY_SIDE / Math.max(width, height)
+    const w = Math.max(16, Math.round(width * k))
+    const h = Math.max(16, Math.round(height * k))
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('Could not allocate a canvas for subject detection')
+    ctx.drawImage(el, 0, 0, w, h)
+    const px = ctx.getImageData(0, 0, w, h).data
+    const n = w * h
+    let mr = 0, mg = 0, mb = 0
+    for (let i = 0; i < px.length; i += 4) { mr += px[i]; mg += px[i + 1]; mb += px[i + 2] }
+    mr /= n; mg /= n; mb /= n
+    const sal = new Float32Array(n)
+    let total = 0
+    for (let p = 0, i = 0; p < n; p += 1, i += 4) {
+        const d = Math.abs(px[i] - mr) + Math.abs(px[i + 1] - mg) + Math.abs(px[i + 2] - mb)
+        const x = (p % w) / w - 0.5
+        const y = Math.floor(p / w) / h - 0.5
+        // Centre prior: photographers put the subject near the middle.
+        const v = d * (1 - 0.6 * Math.min(1, Math.hypot(x, y) * 1.6))
+        sal[p] = v
+        total += v
     }
-
-    const mw = matte?.width
-    const mh = matte?.height
-    if (!mw || !mh || !matte.data || matte.data.length < mw * mh) {
-        throw new Error('Background-removal model returned no usable matte')
+    if (total <= 0) return { box: [0, 0, width, height], seeds: [[width / 2, height / 2]] }
+    // Smallest interval per axis holding SUBJECT_MASS of the saliency mass.
+    const interval = (marginal, size) => {
+        const target = SUBJECT_MASS * marginal.reduce((a, b) => a + b, 0)
+        let best = [0, size - 1], bestLen = size + 1, lo = 0, acc = 0
+        for (let hi = 0; hi < size; hi += 1) {
+            acc += marginal[hi]
+            while (acc - marginal[lo] >= target) { acc -= marginal[lo]; lo += 1 }
+            if (acc >= target && hi - lo < bestLen) { bestLen = hi - lo; best = [lo, hi] }
+        }
+        return best
     }
-    const map = new Float32Array(mw * mh)
-    for (let i = 0; i < map.length; i += 1) map[i] = matte.data[i] / 255
-
-    const stats = analyzeCoverage(map, mw, mh, 0.5)
-    if (!stats.finite) throw new Error('Segmentation produced non-finite values (broken backend)')
-    if (stats.coverage <= 0.0005) {
-        throw new Error('Background removal found no subject (empty matte)')
+    const cols = new Float32Array(w)
+    const rows = new Float32Array(h)
+    for (let p = 0; p < n; p += 1) { cols[p % w] += sal[p]; rows[Math.floor(p / w)] += sal[p] }
+    const [x0, x1] = interval(Array.from(cols), w)
+    const [y0, y1] = interval(Array.from(rows), h)
+    const pad = 0.02
+    const sx = width / w, sy = height / h
+    // Peak saliency INSIDE the box: a box centre can land on foreground clutter
+    // (a wall, a railing) while the peak sits on the subject itself.
+    let peak = -1, px_ = (x0 + x1) / 2, py_ = (y0 + y1) / 2
+    for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+            // 3×3 mean keeps a single bright speckle from winning.
+            let acc = 0, cnt = 0
+            for (let dy = -1; dy <= 1; dy += 1) {
+                for (let dx = -1; dx <= 1; dx += 1) {
+                    const qx = x + dx, qy = y + dy
+                    if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue
+                    acc += sal[qy * w + qx]
+                    cnt += 1
+                }
+            }
+            const v = cnt ? acc / cnt : 0
+            if (v > peak) { peak = v; px_ = x; py_ = y }
+        }
     }
-    // A near-solid matte means the model failed to separate fore/background
-    // (it returned essentially "everything is subject"). Treat it as a failure
-    // so the demotion/fallback chain can try another engine or the server,
-    // instead of handing back a useless full-frame mask. A genuine subject
-    // never fills the whole frame to within 0.1%.
-    if (stats.coverage >= 0.999) {
-        throw new Error('Background removal could not separate the subject (solid matte)')
+    // Saliency-weighted centroid inside the box: usually the subject's body.
+    let mx = 0, my = 0, mass = 0
+    for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+            const v = sal[y * w + x]
+            mx += x * v; my += y * v; mass += v
+        }
     }
-    // Soft matte rendered as-is — feathered edges come from the model.
-    return mapToCanvas(map, mw, mh, width, height)
+    const box = [
+        Math.max(0, (x0 - pad * w) * sx),
+        Math.max(0, (y0 - pad * h) * sy),
+        Math.min(width, (x1 + 1 + pad * w) * sx),
+        Math.min(height, (y1 + 1 + pad * h) * sy),
+    ]
+    const seeds = [
+        [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2],
+    ]
+    if (mass > 0) seeds.push([(mx / mass + 0.5) * sx, (my / mass + 0.5) * sy])
+    seeds.push([(px_ + 0.5) * sx, (py_ + 0.5) * sy])
+    return { box, seeds }
 }
 
-/** segmentOnce with sticky engine demotion: when the active engine fails AT
- *  INFERENCE (not just load), drop to the next one in SEGMENT_ENGINES and
- *  retry once — every later call goes straight to the survivor. */
-const segmentWithModelFallback = async (el, dims) => {
-    try {
-        return await segmentOnce(el, dims)
-    } catch (err) {
-        if (segmentEngineIndex >= SEGMENT_ENGINES.length - 1) throw err
-        console.warn(`[client-ai] ${SEGMENT_ENGINES[segmentEngineIndex].id} failed (${err?.message}); demoting to ${SEGMENT_ENGINES[segmentEngineIndex + 1].id}`)
-        segmentEngineIndex += 1
-        segmentPromise = null
-        state.segmentReady = false
-        emitState()
-        return segmentOnce(el, dims)
+/** How well a mask fills the saliency box without leaking outside it. */
+const scoreSubjectMask = (canvas, box, width, height) => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    const kx = canvas.width / width, ky = canvas.height / height
+    const bx0 = Math.max(0, Math.floor(box[0] * kx)), bx1 = Math.min(canvas.width, Math.ceil(box[2] * kx))
+    const by0 = Math.max(0, Math.floor(box[1] * ky)), by1 = Math.min(canvas.height, Math.ceil(box[3] * ky))
+    const boxArea = Math.max(1, (bx1 - bx0) * (by1 - by0))
+    let inside = 0, outside = 0
+    for (let y = 0; y < canvas.height; y += 1) {
+        for (let x = 0; x < canvas.width; x += 1) {
+            if (px[(y * canvas.width + x) * 4] <= 127) continue
+            if (x >= bx0 && x < bx1 && y >= by0 && y < by1) inside += 1
+            else outside += 1
+        }
     }
+    const frame = canvas.width * canvas.height || 1
+    const coverage = (inside + outside) / frame
+    // A part of the subject (a knee) fills little of the box; the whole scene leaks out of it.
+    let score = inside / boxArea - 1.5 * (outside / boxArea)
+    if (coverage < 0.01 || coverage > 0.9) score -= 1
+    return { score, coverage }
 }
 
 /**
- * In-browser background removal: a soft subject matte (white = subject) at
- * the image's natural size. Hardening: load/inference timeouts, sticky
- * RMBG-1.4 → MODNet engine demotion (see SEGMENT_ENGINES — the survivor list
- * is empirical, pinned by verify:client-ai), output validation.
- *
- * Deliberately NOT wrapped in withDeviceFallback: downgrading the shared
- * device to WASM on a segmentation failure would needlessly demote the
- * grounding/depth engines that run fine on WebGPU.
+ * In-browser subject cutout: a coverage canvas (white = subject) at the image's
+ * natural size, produced by prompting SlimSAM with a saliency box. One model,
+ * so nothing else has to load. Throws when the result is empty or fills the
+ * frame (no separable subject).
  *
  * @param {HTMLImageElement|HTMLCanvasElement} el
  * @param {{ width: number, height: number }} naturalDims
@@ -734,9 +706,29 @@ const segmentWithModelFallback = async (el, dims) => {
 export const clientSubjectMask = async (el, dims) => {
     const startedAt = Date.now()
     try {
-        const out = await segmentWithModelFallback(el, dims)
+        const width = Number(dims?.width) || el?.naturalWidth || el?.width || 0
+        const height = Number(dims?.height) || el?.naturalHeight || el?.height || 0
+        if (width < 1 || height < 1) throw new Error('Image is not ready for subject detection')
+        const { box, seeds } = saliencySeed(el, width, height)
+        // Each seed is one cheap decoder pass (the image embedding is cached),
+        // so try them all and keep the mask that reads as the whole subject.
+        let best = null
+        let lastErr = null
+        for (const seed of seeds) {
+            try {
+                const candidate = await withModelUse('sam', () =>
+                    withDeviceFallback('sam', () => samBoxOnce(el, box, { width, height }, seed)))
+                const verdict = scoreSubjectMask(candidate, box, width, height)
+                if (!best || verdict.score > best.verdict.score) best = { canvas: candidate, verdict }
+            } catch (err) {
+                lastErr = err
+            }
+        }
+        if (!best) throw lastErr || new Error('Subject detection failed')
+        if (best.verdict.coverage < 0.004) throw new Error('No subject could be separated from the background')
+        if (best.verdict.coverage > 0.985) throw new Error('Subject selection covered the whole frame')
         recordDiag('segment', startedAt, true)
-        return out
+        return best.canvas
     } catch (err) {
         recordDiag('segment', startedAt, false, err)
         throw err
@@ -745,32 +737,17 @@ export const clientSubjectMask = async (el, dims) => {
 
 /* ─── On-device SAM (click / box select) ─────────────────────────────────── */
 
-// Index into SAM_ENGINES — bumped (sticky) when an engine fails so every
-// later call goes straight to the survivor (same pattern as SEGMENT_ENGINES).
-let samEngineIndex = 0
-
 const loadSamModel = () => {
     if (samPromise) return samPromise
     samPromise = (async () => {
-        const { SamModel, Sam3TrackerModel, AutoProcessor } = await loadTransformers()
+        const { SamModel, AutoProcessor } = await loadTransformers()
         const device = await pickDevice()
-        const engine = SAM_ENGINES[Math.min(samEngineIndex, SAM_ENGINES.length - 1)]
+        const engine = SAM_ENGINE
         state.loading = `${engine.label} (click select)`
         emitState()
         try {
-            let loadModel
-            if (engine.kind === 'sam3') {
-                const dtype = device === 'webgpu'
-                    ? { vision_encoder: 'q4f16', prompt_encoder_mask_decoder: 'fp16' }
-                    : { vision_encoder: 'q8', prompt_encoder_mask_decoder: 'q8' }
-                loadModel = () => Sam3TrackerModel.from_pretrained(engine.id, { device, dtype })
-                    .catch(() => Sam3TrackerModel.from_pretrained(engine.id, {
-                        dtype: { vision_encoder: 'q8', prompt_encoder_mask_decoder: 'q8' },
-                    }))
-            } else {
-                loadModel = () => SamModel.from_pretrained(engine.id, { device })
-                    .catch(() => SamModel.from_pretrained(engine.id))
-            }
+            const loadModel = () => SamModel.from_pretrained(engine.id, { device })
+                .catch(() => SamModel.from_pretrained(engine.id))
             const [model, processor] = await withTimeout(
                 Promise.all([loadModel(), AutoProcessor.from_pretrained(engine.id)]),
                 LOAD_TIMEOUT_MS,
@@ -864,16 +841,29 @@ const samClickOnce = async (el, points, labels, dims) => {
     return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
 }
 
-const samBoxOnce = async (el, box, dims) => {
+const samBoxOnce = async (el, box, dims, seedPoint = null) => {
     const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
     const input_boxes = [[[
         Math.round(box[0] * scale), Math.round(box[1] * scale),
         Math.round(box[2] * scale), Math.round(box[3] * scale),
     ]]]
-    const inputs = await processor(rawImage, { input_boxes })
+    // SlimSAM's prompt encoder always reads point tensors: a box-only prompt
+    // throws (`dims` of undefined), so the box centre rides along as a positive
+    // point. The box still constrains the result.
+    const seed = seedPoint || [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]
+    const input_points = [[[[Math.round(seed[0] * scale), Math.round(seed[1] * scale)]]]]
+    const input_labels = [[[1]]]
+    const inputs = await processor(rawImage, { input_boxes, input_points: input_points[0], input_labels })
     let outputs
     if (embeddings) {
-        try { outputs = await model({ ...embeddings, input_boxes: inputs.input_boxes }) } catch { outputs = null }
+        try {
+            outputs = await model({
+                ...embeddings,
+                input_boxes: inputs.input_boxes,
+                input_points: inputs.input_points,
+                input_labels: inputs.input_labels,
+            })
+        } catch { outputs = null }
         if (!outputs?.pred_masks) outputs = null // resolved-but-unusable (see samClickOnce)
     }
     if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
@@ -882,36 +872,17 @@ const samBoxOnce = async (el, box, dims) => {
     return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
 }
 
-/** Sticky engine demotion for click/box select: when SAM 3 Tracker fails
- *  (load OR inference), drop to SlimSAM and retry once — every later call
- *  goes straight to the survivor. Mirrors segmentWithModelFallback. */
-const samWithEngineFallback = async (run) => {
-    try {
-        return await run()
-    } catch (err) {
-        if (samEngineIndex >= SAM_ENGINES.length - 1) throw err
-        console.warn(`[client-ai] ${SAM_ENGINES[samEngineIndex].id} failed (${err?.message}); demoting to ${SAM_ENGINES[samEngineIndex + 1].id}`)
-        samEngineIndex += 1
-        samPromise = null
-        samImage = null
-        state.samReady = false
-        emitState()
-        return run()
-    }
-}
-
 /**
- * In-browser SAM click-select (SAM 3 Tracker → SlimSAM demotion). `points`
- * are [[x, y], ...] and `labels` [1|0, ...] in the image's NATURAL pixel
- * coords; returns a coverage canvas at (width, height). Same timeout +
- * WebGPU→WASM hardening as the rest.
+ * In-browser SlimSAM click-select. `points` are [[x, y], ...] and `labels`
+ * [1|0, ...] in the image's NATURAL pixel coords; returns a coverage canvas at
+ * (width, height). Same timeout + WebGPU→WASM hardening as the rest.
  */
 export const clientSamClick = (el, points, labels, dims) =>
-    withDeviceFallback('sam', () => samWithEngineFallback(() => samClickOnce(el, points, labels, dims)))
+    withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims)))
 
-/** In-browser SAM box-select. `box` is [x0, y0, x1, y1] natural px. */
+/** In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px. */
 export const clientSamBox = (el, box, dims) =>
-    withDeviceFallback('sam', () => samWithEngineFallback(() => samBoxOnce(el, box, dims)))
+    withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims)))
 
 /* ─── Self-test ──────────────────────────────────────────────────────────── */
 
@@ -960,26 +931,10 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
         ground = { found: false, score: 0, bbox: null, error: String(err?.message || err) }
     }
 
-    progress('Loading Depth Anything + estimating depth…')
-    let depth = null
-    try {
-        const d = await clientDepthMap(canvas, { width: disc.w, height: disc.h })
-        // Re-measure spread from the produced canvas for an end-to-end check.
-        const ctx = d.getContext('2d', { willReadFrequently: true })
-        const px = ctx.getImageData(0, 0, d.width, d.height).data
-        let min = 255
-        let max = 0
-        for (let i = 0; i < px.length; i += 4) {
-            if (px[i] < min) min = px[i]
-            if (px[i] > max) max = px[i]
-        }
-        depth = { width: d.width, height: d.height, spread: (max - min) / 255 }
-    } catch (err) {
-        depth = null
-        progress(`Depth failed: ${err?.message}`)
-    }
+    // Depth is not a browser model any more (service only).
+    const depth = undefined
 
-    progress('Loading RMBG-1.4 + removing the background…')
+    progress('Cutting out the subject with SlimSAM…')
     let segment = null
     try {
         const s = await clientSubjectMask(canvas, { width: disc.w, height: disc.h })
@@ -994,7 +949,7 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
         progress(`Background removal failed: ${err?.message}`)
     }
 
-    progress('Loading SAM + click-selecting the disc…')
+    progress('Click-selecting the disc with SlimSAM…')
     let sam = null
     try {
         const m = await clientSamClick(canvas, [[disc.cx, disc.cy]], [1], { width: disc.w, height: disc.h })
@@ -1008,7 +963,7 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
             height: m.height,
             coverage: stats.coverage,
             bbox: stats.bbox,
-            engine: SAM_ENGINES[Math.min(samEngineIndex, SAM_ENGINES.length - 1)].id,
+            engine: SAM_ENGINE.id,
         }
     } catch (err) {
         sam = null

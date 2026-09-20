@@ -71,8 +71,8 @@ import { buildMaskBoundary } from '@/lib/mask-boundary'
 import { buildPackedLutFromCurves } from '@/lib/curve-lut'
 import { expandLayerBoundary, beginLayerRefine, applyRefineStroke } from '@/lib/mask-grow'
 import { AI_CAPABILITIES, getRoutingPolicy, getRoutingMode, resetRoutingPolicy, setRoutingMode, subscribeRouting, resolveOrder } from '@/lib/ai-routing'
-import { getClientAIState, runClientAISelfTest, subscribeClientAI, clientSamClick, clientSamBox, clientSubjectMask, clientGroundPhrase, clientDepthMap } from '@/lib/client-ai'
-import { serviceSubjectMask, serviceSamClick, serviceSamBox, serviceGroundText, bboxOfMaskCanvas, checkMaskService } from '@/lib/mask-service-client'
+import { getClientAIState, runClientAISelfTest, subscribeClientAI, clientSamClick, clientSamBox, clientSubjectMask, clientGroundPhrase } from '@/lib/client-ai'
+import { serviceSubjectMask, serviceGroundText, bboxOfMaskCanvas, checkMaskService } from '@/lib/mask-service-client'
 import { cleanSubjectMatte } from '@/lib/subject-mask-cleanup'
 import { magicWandMask } from '@/lib/magic-wand'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
@@ -517,7 +517,6 @@ const MaskControls = ({ dominantColor }) => {
     const CLIENT_READY = {
         ground: clientAI.groundReady,
         subjects: clientAI.groundReady,
-        depth: clientAI.depthReady,
         segment: clientAI.segmentReady,
         sam: clientAI.samReady,
     }
@@ -822,16 +821,16 @@ const MaskControls = ({ dominantColor }) => {
         return () => window.removeEventListener('keydown', onKey)
     }, [activeDraft])
 
-    /* ─── Semantic (SAM 3) click-to-select (Step 5) ─── */
+    /* ─── Semantic (SlimSAM) click-to-select (Step 5) ─── */
 
     // Active click-mode flag — when true, mouse clicks on the canvas are
-    // captured as SAM 3 click points (positive by default, negative with
+    // captured as SlimSAM click points (positive by default, negative with
     // the Alt key held). Disabled while another tool (color picker,
     // spatial draft) is active so handlers don't fight over mouse:down.
     const [semanticActive, setSemanticActive] = useState(false)
     // List of `[x, y, label]` clicks in *original* (natural) image-pixel
     // coordinates. We accumulate here, then send the whole array to
-    // /api/ai/sam3 in one request when the user hits "Run".
+    // one SlimSAM run when the user hits "Run".
     const [semanticClicks, setSemanticClicks] = useState(/** @type {Array<[number, number, 0 | 1]>} */ ([]))
     const [isSemanticRunning, setIsSemanticRunning] = useState(false)
     const isSemanticRunningRef = useRef(false)
@@ -848,7 +847,7 @@ const MaskControls = ({ dominantColor }) => {
     // so we can draw/erase them in lockstep with `semanticClicks`.
     const semanticMarkerRefs = useRef(/** @type {Array<any>} */ ([]))
 
-    // SAM 3 BOX prompt — the strongest single prompt for whole-object
+    // BOX prompt — the strongest single prompt for whole-object
     // selection. When armed, the next drag on the canvas defines the box
     // (in natural image-pixel coords, [x0, y0, x1, y1]); it can be combined
     // with clicks to refine. One box at a time — a new drag replaces it.
@@ -1078,8 +1077,6 @@ const MaskControls = ({ dominantColor }) => {
     // for the
     // session — skip server on later clicks instead of 429-storming the proxy.
     // Explicit "Server" routing still forces a try; a server success clears it.
-    const serviceSamDownRef = useRef(false)
-    const serviceSamNoticeRef = useRef(false)
 
     // Refine mode: composite each SAM result onto the SELECTED layer's mask
     // (add = lighten, remove = inverted multiply) instead of staging a new one.
@@ -1093,10 +1090,9 @@ const MaskControls = ({ dominantColor }) => {
         && selectedLayer.maskTextureKey) ? selectedLayer : null
     useEffect(() => { if (!refineTargetLayer) setSemanticRefine(false) }, [refineTargetLayer])
 
-    // Run SAM with the current click points and/or box. Routes through the
-    // masking service first (SAM 3.1) and falls back to on-device SAM 3 Tracker per
-    // the 'sam' routing policy, so selection still works when the service is
-    // down. Each call supersedes the previous (live per-interaction refine).
+    // Prompted selection runs on SlimSAM in the browser — the one selection
+    // model this editor uses. Each call supersedes the previous one (live
+    // per-interaction refine). Each call supersedes the previous (live per-interaction refine).
     // Merge a selection canvas into a texture layer (add = lighten, remove =
     // multiply by its inverse) under a new key, re-basing the edge controls.
     const compositeIntoLayer = useCallback((target, canvas, mode) => {
@@ -1152,35 +1148,15 @@ const MaskControls = ({ dominantColor }) => {
         const points = clicks.map(([x, y]) => [x, y])
         const labels = clicks.map(([, , l]) => l)
         const dims = { width: origW, height: origH }
-        const runServer = () => (box
-            ? serviceSamBox(sourceEl, box, { ...dims, signal: abortController.signal })
-            : serviceSamClick(sourceEl, points, labels, { ...dims, signal: abortController.signal }))
-        const runClient = () => (box
-            ? clientSamBox(sourceEl, box, dims)
-            : clientSamClick(sourceEl, points, labels, dims))
-
         let canvas = null
         let lastErr = null
-        const samMode = getRoutingMode('sam')
-        for (const side of resolveOrder('sam')) {
-            if (side === 'server' && serviceSamDownRef.current && samMode !== 'server') continue
-            try {
-                canvas = side === 'client' ? await runClient() : await runServer()
-                if (canvas) {
-                    if (side === 'server') serviceSamDownRef.current = false
-                    break
-                }
-            } catch (err) {
-                if (err?.name === 'AbortError') return
-                lastErr = err
-                if (side === 'server' && (err?.status === 501 || err?.status === 404 || err?.status === 503)) {
-                    serviceSamDownRef.current = true
-                    if (!serviceSamNoticeRef.current) {
-                        serviceSamNoticeRef.current = true
-                        toast('Server SAM 3.1 unavailable — using on-device SAM 3', { icon: '📱' })
-                    }
-                }
-            }
+        try {
+            canvas = box
+                ? await clientSamBox(sourceEl, box, dims)
+                : await clientSamClick(sourceEl, points, labels, dims)
+        } catch (err) {
+            if (err?.name === 'AbortError') return
+            lastErr = err
         }
         try {
             // A newer request superseded us while we were running — bail.
@@ -1256,7 +1232,7 @@ const MaskControls = ({ dominantColor }) => {
 
     /* ─── Depth (Depth Anything V2) (Step 6) ─── */
 
-    // Single-shot depth state. Unlike SAM 3 there's no click accumulation
+    // Single-shot depth state. Unlike SlimSAM there's no click accumulation
     // — the user hits "Generate" once, gets a whole-image depth map, and
     // can then add it to the chain with custom min/max/softness.
     const [isDepthRunning, setIsDepthRunning] = useState(false)
@@ -1334,32 +1310,17 @@ const MaskControls = ({ dominantColor }) => {
                 }
                 return decodeMaskBlob(await resp.blob())
             }
-            // The studio's depth runs in-browser; follow the depth routing
-            // policy so a missing service falls back instead of failing.
-            const runClient = async () => {
-                const canvas = await clientDepthMap(sourceEl, { width: origW, height: origH })
-                const dctx = canvas.getContext('2d', { willReadFrequently: true })
-                return {
-                    imageData: dctx.getImageData(0, 0, canvas.width, canvas.height),
-                    dataUrl: canvas.toDataURL('image/png'),
-                    width: canvas.width,
-                    height: canvas.height,
-                }
-            }
-
+            // Depth runs only on the masking service — the browser ships one
+            // model (SlimSAM), so there is no in-browser depth network.
             let decoded = null
-            let lastErr = null
             const t0 = Date.now()
-            for (const side of resolveOrder('depth')) {
-                try {
-                    decoded = side === 'client' ? await runClient() : await runServer()
-                    if (decoded) break
-                } catch (err) {
-                    if (err?.name === 'AbortError') throw err
-                    lastErr = err
-                }
+            try {
+                decoded = await runServer()
+            } catch (err) {
+                if (err?.name === 'AbortError') throw err
+                throw new Error(`Depth needs the masking service — ${err?.message || 'it is not reachable'}`)
             }
-            if (!decoded) throw lastErr || new Error('Depth generation failed')
+            if (!decoded) throw new Error('Depth generation failed')
 
             if (depthAbortRef.current !== abortController) return
             setLastDepthMap(decoded.imageData)
@@ -3267,7 +3228,7 @@ const MaskControls = ({ dominantColor }) => {
     // a NON-DESTRUCTIVE selection: it's stored in the megashader texture cache
     // and added as a `semantic` chain layer (fillMode 'fill' → the subject is
     // tinted/visible while the background is left fully intact). This is the
-    // same path SAM 3 / Lasso / Brush use, so the selection shows up in the
+    // same path SlimSAM / Lasso / Brush use, so the selection shows up in the
     // MASK LAYERS panel and stays editable (boundary, blend op, feather, and
     // add/subtract brush or lasso layers) "even after subject detection".
     //
@@ -3345,20 +3306,8 @@ const MaskControls = ({ dominantColor }) => {
                             if (cleaned?.canvas) maskCanvas = cleaned.canvas
                         } catch { /* raw matte */ }
                     } else {
-                        const r = await serviceSubjectMask(sourceEl, { subjectBox: true, ...dims, signal: abortController.signal })
+                        const r = await serviceSubjectMask(sourceEl, { ...dims, signal: abortController.signal })
                         maskCanvas = r.canvas
-                        // Plain matte → upgrade to a crisp SAM 3.1 mask via a box
-                        // prompt seeded from the matte's bbox (the strongest
-                        // single-object prompt).
-                        if (r.mode !== 'sam3') {
-                            const bb = bboxOfMaskCanvas(maskCanvas)
-                            if (bb && bb[2] - bb[0] >= 8 && bb[3] - bb[1] >= 8) {
-                                try {
-                                    const up = await serviceSamBox(sourceEl, bb, { ...dims, signal: abortController.signal })
-                                    if (up && bboxOfMaskCanvas(up)) maskCanvas = up
-                                } catch { /* keep the matte */ }
-                            }
-                        }
                     }
                     if (maskCanvas) break
                 } catch (err) {
@@ -4377,11 +4326,11 @@ const MaskControls = ({ dominantColor }) => {
                 )}
             </Section>
 
-            {/* ────────── Click-to-Select (SAM 3) ────────── */}
+            {/* ────────── Click-to-Select (SlimSAM) ────────── */}
             <Section title="Click to Select" icon={MousePointer} badge="AI">
                 <div className="space-y-2">
                     <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Click to mark the subject — or draw a box around it — then run SAM 3. Hold{' '}
+                        Click to mark the subject — or draw a box around it — then run SlimSAM. Hold{' '}
                         <kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Alt</kbd>{' '}
                         to mark background (negative click).
                     </p>
@@ -4443,7 +4392,7 @@ const MaskControls = ({ dominantColor }) => {
                         </motion.button>
                     </div>
 
-                    {/* Box prompt — SAM 3's strongest single prompt for whole
+                    {/* Box prompt — the strongest single prompt for whole
                         objects. One box at a time; a new drag replaces it. */}
                     {semanticActive && (
                         <div className="flex items-center gap-1.5">
@@ -4457,7 +4406,7 @@ const MaskControls = ({ dominantColor }) => {
                                     border: `1px solid ${boxArmed ? 'rgba(6,184,212,0.45)' : 'var(--border-subtle)'}`,
                                     color: boxArmed ? 'var(--accent-primary)' : 'var(--text-secondary)',
                                 }}
-                                title="Drag a rectangle around the object — SAM 3 selects what's inside"
+                                title="Drag a rectangle around the object — SlimSAM selects what is inside"
                             >
                                 <Square className="h-3 w-3" />
                                 {boxArmed ? 'Drag on the image…' : semanticBox ? 'Redraw box' : 'Draw box'}
@@ -4564,9 +4513,7 @@ const MaskControls = ({ dominantColor }) => {
                         {isSemanticRunning ? (
                             <>
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                {serviceSamDownRef.current && !clientAI.samReady
-                                    ? 'Downloading SAM 3 model…'
-                                    : 'Running SAM 3…'}
+                                {clientAI.samReady ? 'Running SlimSAM…' : 'Downloading SlimSAM…'}
                             </>
                         ) : (
                             <>
@@ -4585,7 +4532,7 @@ const MaskControls = ({ dominantColor }) => {
                             <div className="flex items-center gap-2">
                                 <img
                                     src={lastSemanticPreview}
-                                    alt="SAM 3 mask preview"
+                                    alt="SlimSAM mask preview"
                                     className="rounded"
                                     style={{ width: 64, height: 64, objectFit: 'contain', background: '#000' }}
                                 />
@@ -5666,7 +5613,7 @@ const MaskControls = ({ dominantColor }) => {
             </div>
 
             <TipCard>
-                <p><strong>AI Tools</strong> — Select Subject (one-click), Click to Select (SAM 3), and Depth Range use AI models to generate masks automatically.</p>
+                <p><strong>AI Tools</strong> — Select Subject (one-click), Click to Select (SlimSAM), and Depth Range use AI models to generate masks automatically.</p>
                 <p><strong>Draw Selection</strong> — Selection Brush paints a region; Lasso draws freehand, polygonal, or edge-snapping (magnetic) outlines.</p>
                 <p><strong>Range Selection</strong> — Color, Luminance, and Gradient masks select by pixel properties. Combine multiple methods into one mask.</p>
                 <p>Each selection becomes its own <strong>Mask Layer</strong> with per-layer feather, blend mode, and fill / adjust / erase output.</p>

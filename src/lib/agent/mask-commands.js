@@ -36,7 +36,7 @@ import {
 import { rgbToHsb } from '@/lib/color-utils'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 import { expandLayerBoundary, MAX_GROW_PX } from '@/lib/mask-grow'
-import { clientSubjectMask } from '@/lib/client-ai'
+import { clientSamBox, clientSamClick, clientSubjectMask } from '@/lib/client-ai'
 import { resolveOrder } from '@/lib/ai-routing'
 import { createNlMaskRunner } from './nl-mask'
 
@@ -256,6 +256,17 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
         stack.chain.push({ layer: safe, op: stack.chain.length === 0 ? 'replace' : (op || 'add') })
         apply(stack)
         return safe.id
+    }
+
+    // Prompted selection runs on-device, straight off the image element.
+    const samSource = () => {
+        const image = requireImage()
+        const el = image._originalElement || image.getElement?.() || image._element
+        if (!el) throw new Error('[agent.mask] image element is not ready')
+        const width = el.naturalWidth || el.width || 0
+        const height = el.naturalHeight || el.height || 0
+        if (width < 1 || height < 1) throw new Error('[agent.mask] image has no pixel dimensions')
+        return { el, dims: { width, height } }
     }
 
     const postMask = async (route, formBuilder) => {
@@ -510,40 +521,34 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
             },
         },
         addSubjectClicks: {
-            description: 'AI (SAM 3.1): click-select a subject. clicks = [[x,y,label=1|0], …] in image-pixel coords.',
+            description: 'AI (SlimSAM, on-device): click-select a subject. clicks = [[x,y,label=1|0], …] in image-pixel coords.',
             params: { clicks: 'Array<[x,y,label]>', fillMode: 'string' },
             run: async (a) => {
                 const clicks = Array.isArray(a.clicks) ? a.clicks : []
                 if (!clicks.length) throw new Error('[agent.mask] addSubjectClicks needs >=1 click')
-                const maskBlob = await postMask('/api/ai/sam3', (form, scale) => {
-                    form.append('clicks', JSON.stringify(clicks.map(([x, y, l]) => [x * scale, y * scale, l ?? 1])))
-                })
-                const cover = toCoverageCanvas(await decodePng(maskBlob))
-                const key = uniqueKey('sam2')
+                const { el, dims } = samSource()
+                const cover = toCoverageCanvas(await clientSamClick(
+                    el,
+                    clicks.map(([x, y]) => [x, y]),
+                    clicks.map(([, , l]) => (l ?? 1)),
+                    dims,
+                ))
+                const key = uniqueKey('slimsam')
                 setMaskTexture(key, cover)
                 return { id: addLayer({ ...semanticLayer({ maskTextureKey: key, feather: 0.05, label: 'AI Subject' }), fillMode: a.fillMode || 'fill', ...pickFill(a) }, a.op) }
             },
         },
         addSubjectBox: {
-            description: 'AI (SAM 3.1): box-select the object inside a rectangle — SAM 3.1\'s strongest single prompt for whole objects. box = [x, y, w, h] in image-pixel coords; optional clicks refine it.',
-            params: { box: '[x, y, w, h] image px', clicks: 'optional Array<[x,y,label]>', fillMode: 'string' },
+            description: 'AI (SlimSAM, on-device): box-select the object inside a rectangle — the strongest single prompt for a whole object. box = [x, y, w, h] in image-pixel coords.',
+            params: { box: '[x, y, w, h] image px', fillMode: 'string' },
             run: async (a) => {
                 const b = Array.isArray(a.box) && a.box.length === 4 ? a.box.map(Number) : null
                 if (!b || b.some((v) => !Number.isFinite(v)) || b[2] <= 0 || b[3] <= 0) {
                     throw new Error('[agent.mask] addSubjectBox needs box = [x, y, w, h]')
                 }
-                const clicks = Array.isArray(a.clicks) ? a.clicks : []
-                const maskBlob = await postMask('/api/ai/sam3', (form, scale) => {
-                    form.append('box', JSON.stringify([
-                        b[0] * scale, b[1] * scale,
-                        (b[0] + b[2]) * scale, (b[1] + b[3]) * scale,
-                    ]))
-                    if (clicks.length) {
-                        form.append('clicks', JSON.stringify(clicks.map(([x, y, l]) => [x * scale, y * scale, l ?? 1])))
-                    }
-                })
-                const cover = toCoverageCanvas(await decodePng(maskBlob))
-                const key = uniqueKey('sam2-box')
+                const { el, dims } = samSource()
+                const cover = toCoverageCanvas(await clientSamBox(el, [b[0], b[1], b[0] + b[2], b[1] + b[3]], dims))
+                const key = uniqueKey('slimsam-box')
                 setMaskTexture(key, cover)
                 return { id: addLayer({ ...semanticLayer({ maskTextureKey: key, feather: 0.05, label: 'AI Box Subject' }), fillMode: a.fillMode || 'fill', ...pickFill(a) }, a.op) }
             },
@@ -560,7 +565,7 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
             },
         },
         fromDescription: {
-            description: 'AI: mask a region described in natural language (e.g. "the dog on the left", "everything except the sky", "the shadows but not the person", "the red jacket, extend by 12px"). Plans with Gemini (heuristic fallback), then resolves via instance detection, text grounding (CLIPSeg+SAM 3.1), depth, luminance, colour or geometry, composing multiple parts with add/subtract/intersect. Returns {plan, layers, notes}.',
+            description: 'AI: mask a region described in natural language (e.g. "the dog on the left", "everything except the sky", "the shadows but not the person", "the red jacket, extend by 12px"). Plans with Gemini (heuristic fallback), then resolves via instance detection, text grounding (CLIPSeg), depth, luminance, colour or geometry, composing multiple parts with add/subtract/intersect. Returns {plan, layers, notes}.',
             params: {
                 description: 'string — the region in plain language',
                 fillMode: 'string fill|adjust|erase (overrides the language)',

@@ -28,6 +28,7 @@ import {
     strokeMaskSegment,
 } from '@/lib/canvas-mask'
 import { getRoutingMode } from '@/lib/ai-routing'
+import { clientSamClick } from '@/lib/client-ai'
 
 export const MIN_BRUSH = 1
 export const MAX_BRUSH = 400
@@ -315,12 +316,12 @@ export default function usePixelMaskTool({
     const [flow, setFlow] = useState(100)
     const [feather, setFeather] = useState(0)
     const [magic, setMagic] = useState(false)
-    // AI object mode (SAM 2): a click segments the WHOLE object under the
+    // AI object mode (SlimSAM): a click segments the WHOLE object under the
     // pointer and erases/restores it. Mutually exclusive with `magic` (the
     // colour flood) — each setter below clears the other.
     const [objectSelect, setObjectSelectState] = useState(false)
     const [isObjectRunning, setIsObjectRunning] = useState(false)
-    // Phase of the AI object operation: 'detecting' (SAM2), 'filling' (inpaint), or null
+    // Phase of the AI object operation: 'detecting' (SlimSAM), 'filling' (inpaint), or null
     const [objectPhase, setObjectPhase] = useState(null)
     const [tolerance, setTolerance] = useState(24)
     const [altActive, setAltActive] = useState(false)
@@ -1289,8 +1290,8 @@ export default function usePixelMaskTool({
         })
     }, [liveSync])
 
-    /* ─── AI object click (SAM 2) ───
-     * One click = the whole object under the pointer, segmented by SAM 2 and
+    /* ─── AI object click (SlimSAM) ───
+     * One click = the whole object under the pointer, segmented by SlimSAM and
      * composited into the erase mask ADDITIVELY — so clicking several subjects
      * erases each of them in turn (multi-subject by accumulation). The
      * composite is GPU-blended (darken/lighten), no pixel readbacks. */
@@ -1341,50 +1342,25 @@ export default function usePixelMaskTool({
             const upCtx = up.getContext('2d')
             if (!upCtx) throw new Error('Could not allocate an upload canvas')
             upCtx.drawImage(sourceEl, cropX, cropY, bw, bh, 0, 0, up.width, up.height)
-            let blob
+            // On-device SlimSAM segments the clicked object (no service, no SAM 3).
+            let decoded
             try {
-                blob = await new Promise((res, rej) =>
-                    up.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.85))
+                decoded = await clientSamClick(
+                    up,
+                    [[
+                        Math.min(up.width - 1, Math.max(0, local.x * scale)),
+                        Math.min(up.height - 1, Math.max(0, local.y * scale)),
+                    ]],
+                    [1],
+                    { width: up.width, height: up.height },
+                )
             } catch (e) {
+                if (e?.name === 'AbortError') return
                 if (e?.name === 'SecurityError') {
                     throw new Error('This image is from another site without CORS, so it can\u2019t be read for AI selection')
                 }
-                throw e
+                throw new Error(e?.message || 'Object detection failed')
             }
-
-            const form = new FormData()
-            form.append('image', blob, 'image.jpg')
-            form.append('clicks', JSON.stringify([[
-                Math.min(up.width - 1, Math.max(0, local.x * scale)),
-                Math.min(up.height - 1, Math.max(0, local.y * scale)),
-                1,
-            ]]))
-
-            const resp = await fetch('/api/ai/sam2', { method: 'POST', body: form, signal: controller.signal })
-            if (!resp.ok) {
-                const err = await resp.json().catch(() => ({}))
-                // Detect model-loading error for user-friendly message
-                if (resp.status === 502 && /model is loading|downloading weights/i.test(err.error || '')) {
-                    throw Object.assign(
-                        new Error('AI model is loading for the first time — please try again in about 30 seconds'),
-                        { isModelLoading: true },
-                    )
-                }
-                throw new Error(err.error || `Object detection failed (${resp.status})`)
-            }
-            // Detect cold-load from response header
-            const wasColdLoad = resp.headers.get('x-cold-load') === 'true'
-            if (wasColdLoad) {
-                toast('AI model loaded — future clicks will be faster', { icon: '✅', duration: 4000 })
-            }
-            const maskBlob = await resp.blob()
-            const decoded = await new Promise((resolve, reject) => {
-                const url = URL.createObjectURL(maskBlob)
-                const image = new Image()
-                image.onload = () => { URL.revokeObjectURL(url); resolve(image) }
-                image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('mask decode failed')) }
-                image.src = url
-            })
             if (controller.signal.aborted) return
 
             const matteFraction = sampleMaskCoverage(decoded)
@@ -1412,7 +1388,7 @@ export default function usePixelMaskTool({
                     const fctx = fullImg.getContext('2d')
                     fctx.drawImage(sourceEl, cropX, cropY, bw, bh, 0, 0, bw, bh)
 
-                    // Build a mask at the same size from the SAM2 result
+                    // Build a mask at the same size from the SlimSAM result
                     const fullMask = document.createElement('canvas')
                     fullMask.width = bw
                     fullMask.height = bh
@@ -1554,7 +1530,7 @@ export default function usePixelMaskTool({
      * Paint a region (or draw a bounded shape) with the erase brush, then fill
      * the enclosed interior and regenerate the whole region with AI — the SAME
      * inpaint pipeline as the click-to-remove object eraser, but the mask comes
-     * from the brush instead of a SAM 2 click. Lets you erase things SAM 2
+     * from the brush instead of a SlimSAM click. Lets you erase things SlimSAM
      * can't isolate (a fence, scattered litter, a hand-drawn area) and have the
      * background convincingly filled rather than cut to transparency. */
     const generativeFill = useCallback(async () => {
