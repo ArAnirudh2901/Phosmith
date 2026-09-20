@@ -1434,7 +1434,12 @@ const CanvasEditor = ({ project }) => {
         // exactly on the image (GPU work + one small readback per frame,
         // independent of source size), and run the exact full-res pipeline
         // ONCE when the drag goes idle. Lightroom-style draft preview.
-        const MAX_PREVIEW_DIM = 1280
+        // The drag preview used to render at a fixed 1280 px because a full
+        // frame cost too much. The batched renderer with its prefix cache holds
+        // ~60 fps at 4K, so the preview now matches what is actually on screen
+        // (device pixels), capped so a zoomed-in 100 MP file cannot blow up.
+        const PREVIEW_MAX_EDGE = 4096
+        const PREVIEW_MIN_EDGE = 640
         const PREVIEW_COMMIT_IDLE_MS = 160
 
         const startPreviewSession = () => {
@@ -1466,7 +1471,17 @@ const CanvasEditor = ({ project }) => {
             const srcH = cleanSource?.naturalHeight || cleanSource?.height || 0
             if (!srcW || !srcH) return null
 
-            const scale = Math.min(1, MAX_PREVIEW_DIM / Math.max(srcW, srcH))
+            // How many device pixels this image actually occupies right now.
+            const coords = image.oCoords || {}
+            const onScreenW = coords.tr && coords.tl ? Math.abs(coords.tr.x - coords.tl.x) : 0
+            const onScreenH = coords.bl && coords.tl ? Math.abs(coords.bl.y - coords.tl.y) : 0
+            const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1
+            const neededEdge = Math.max(onScreenW, onScreenH) * dpr
+            const targetEdge = Math.min(
+                PREVIEW_MAX_EDGE,
+                Math.max(PREVIEW_MIN_EDGE, Math.round(neededEdge || PREVIEW_MIN_EDGE)),
+            )
+            const scale = Math.min(1, targetEdge / Math.max(srcW, srcH))
             const srcCanvas = document.createElement('canvas')
             srcCanvas.width = Math.max(1, Math.round(srcW * scale))
             srcCanvas.height = Math.max(1, Math.round(srcH * scale))
@@ -1488,6 +1503,10 @@ const CanvasEditor = ({ project }) => {
                 ctx: overlayEl.getContext('2d'),
                 srcCanvas,
                 image,
+                // The session's source is drawn once and never changes, so the
+                // renderer can keep its GPU copy and the composite below the
+                // edited layer across frames (see prefixCache).
+                sourceVersion: `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
             }
             previewSessionRef.current = session
             return session
@@ -1572,6 +1591,8 @@ const CanvasEditor = ({ project }) => {
                         globalInvert: megashaderInvertRef.current,
                         maskOverlay: megashaderOverlayRef.current,
                         maskView: megashaderViewRef.current,
+                        sourceVersion: session.sourceVersion,
+                        reuseOutput: true,
                     })
                     if (!result) return
                     ctx.imageSmoothingEnabled = true
@@ -2193,6 +2214,19 @@ const CanvasEditor = ({ project }) => {
         if (event.key === " " || event.key === "Enter") {
             event.preventDefault()
             setIsComparing(true)
+        }
+    }, [])
+
+    // Perf hook: window.__phosmith.megashaderBench({ size: '4k', counts: [1,4,8] }).
+    // Imported on call, so the benchmark never lands in the editor chunk.
+    useEffect(() => {
+        if (typeof window === "undefined") return undefined
+        const ns = (window.__phosmith = window.__phosmith || {})
+        ns.megashaderBench = (opts) => import("@/lib/megashader/bench").then((m) => m.megashaderBench(opts))
+        ns.megashaderParity = (opts) => import("@/lib/megashader/bench").then((m) => m.megashaderParity(opts))
+        return () => {
+            delete ns.megashaderBench
+            delete ns.megashaderParity
         }
     }, [])
 

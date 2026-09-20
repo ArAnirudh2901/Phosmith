@@ -25,7 +25,10 @@
  * @module megashader/megashader-renderer
  */
 
-import { compileMegashader } from './megashader-compiler'
+import { compileMegashader,
+    compilePass,
+    MAX_LAYERS_PER_PASS,
+} from './megashader-compiler'
 import { getKindSchema, normaliseUniformValue } from './glsl-mask-kinds'
 import { getMaskTexture, getMaskTextureVersion, stackHasNoVisibleEffect, fillModeToFloat } from './mask-types'
 
@@ -60,6 +63,14 @@ const renderMetrics = {
     drawCount: 0,
     /** Number of `renderMegashader` calls that took the identity short-circuit. */
     identityShortCircuits: 0,
+    /** Full-resolution source uploads to the GPU (33 MB each at 4K). */
+    sourceUploads: 0,
+    /** Uploads avoided because the cached GPU copy was still valid. */
+    sourceUploadsSkipped: 0,
+    /** Extra GPU passes run for chains longer than one batch. */
+    statePasses: 0,
+    /** Frames that reused the cached composite below the edited layer. */
+    prefixHits: 0,
 }
 
 /**
@@ -86,6 +97,10 @@ const resetRenderMetrics = () => {
     renderMetrics.totalCompileMs = 0
     renderMetrics.drawCount = 0
     renderMetrics.identityShortCircuits = 0
+    renderMetrics.sourceUploads = 0
+    renderMetrics.sourceUploadsSkipped = 0
+    renderMetrics.statePasses = 0
+    renderMetrics.prefixHits = 0
 }
 
 /**
@@ -112,6 +127,45 @@ void main() {
 
 let glContext = null
 let glCanvas = null
+
+// `getUniformLocation` is a driver-side string lookup, and this shader has
+// ~30 uniform names per layer rewritten on every frame. Cache per program;
+// the WeakMap drops entries when the program cache evicts them.
+const uniformLocationCache = new WeakMap()
+const uloc = (gl, program, name) => {
+    let names = uniformLocationCache.get(program)
+    if (!names) {
+        names = new Map()
+        uniformLocationCache.set(program, names)
+    }
+    if (names.has(name)) return names.get(name)
+    const location = gl.getUniformLocation(program, name)
+    names.set(name, location)
+    return location
+}
+
+// Source pixels re-uploaded per frame cost 33 MB at 4K. Callers that know
+// their canvas is unchanged (a preview session's downscaled source, a
+// benchmark) pass `sourceVersion`; the upload is then skipped while that
+// version holds. Without a version the upload still happens every frame, so
+// the default stays correct for callers that redraw into the same canvas.
+const sourceTextureCache = new WeakMap()
+const liveSourceTextures = new Set()
+
+/** Drop the cached GPU copy of `canvas` (call after redrawing into it). */
+export const invalidateSourceTexture = (canvas) => {
+    const entry = canvas && sourceTextureCache.get(canvas)
+    if (!entry) return
+    entry.version = undefined
+}
+
+// One reusable output canvas for callers that copy the result immediately
+// (`reuseOutput`), instead of allocating a 4K canvas per frame.
+let reusableOutput = null
+
+/** The megashader draws a fullscreen quad; the transform never changes. */
+const IDENTITY_MATRIX = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+
 let programCache = /** @type {Map<string, WebGLProgram>} */ (new Map())
 // Persistent GL texture cache for mask/LUT uploads (Cluster A change 1).
 // Keyed by the mask-texture cache key; each entry records the GL texture and
@@ -388,7 +442,7 @@ const writeKindSamplers = (gl, program, layer, slotIndex, textureBindings) => {
     const unit = textureBindings.kindUnits?.get(slotIndex)
     for (const sampler of samplers) {
         const glslName = sampler.glsl.replace('<S>', String(slotIndex))
-        const loc = gl.getUniformLocation(program, glslName)
+        const loc = uloc(gl, program, glslName)
         if (!loc) continue
         if (unit !== undefined) gl.uniform1i(loc, unit)
     }
@@ -406,13 +460,13 @@ const writeKindSamplers = (gl, program, layer, slotIndex, textureBindings) => {
  * @param {{ curveUnits?: Map<number, number> }} textureBindings
  */
 const writeCurveUniforms = (gl, program, layer, slotIndex, textureBindings) => {
-    const onLoc = gl.getUniformLocation(program, `uLayer_${slotIndex}_curveOn`)
+    const onLoc = uloc(gl, program, `uLayer_${slotIndex}_curveOn`)
     const unit = textureBindings?.curveUnits?.get(slotIndex)
     if (unit === undefined) {
         if (onLoc) gl.uniform1f(onLoc, 0.0)
         return
     }
-    const sLoc = gl.getUniformLocation(program, `uLayer_${slotIndex}_curveLut`)
+    const sLoc = uloc(gl, program, `uLayer_${slotIndex}_curveLut`)
     if (sLoc) gl.uniform1i(sLoc, unit)
     if (onLoc) gl.uniform1f(onLoc, 1.0)
 }
@@ -455,7 +509,7 @@ const writeKindUniforms = (gl, program, layer, slotIndex) => {
     if (!Array.isArray(uniforms) || uniforms.length === 0) return
     for (const field of uniforms) {
         const glslName = field.glsl.replace('<S>', String(slotIndex))
-        const loc = gl.getUniformLocation(program, glslName)
+        const loc = uloc(gl, program, glslName)
         if (!loc) continue
         // Bug #4: the color factory stores the picked colour nested as
         // `target: { h, s, b }`, but COLOR_SCHEMA declares flat
@@ -492,16 +546,16 @@ const writeKindUniforms = (gl, program, layer, slotIndex) => {
  */
 const writeLayerCommonUniforms = (gl, program, layer, slotIndex) => {
     const prefix = `uLayer_${slotIndex}`
-    const opacityLoc = gl.getUniformLocation(program, `${prefix}_opacity`)
+    const opacityLoc = uloc(gl, program, `${prefix}_opacity`)
     if (opacityLoc) {
         const op = (typeof layer.opacity === 'number' && Number.isFinite(layer.opacity))
             ? Math.max(0, Math.min(1, layer.opacity))
             : 1
         gl.uniform1f(opacityLoc, op)
     }
-    const invLoc = gl.getUniformLocation(program, `${prefix}_inverted`)
+    const invLoc = uloc(gl, program, `${prefix}_inverted`)
     if (invLoc) gl.uniform1f(invLoc, layer.inverted === true ? 1.0 : 0.0)
-    const visLoc = gl.getUniformLocation(program, `${prefix}_visible`)
+    const visLoc = uloc(gl, program, `${prefix}_visible`)
     if (visLoc) gl.uniform1f(visLoc, layer.visible === false ? 0.0 : 1.0)
 }
 
@@ -524,7 +578,7 @@ const writeLayerCommonUniforms = (gl, program, layer, slotIndex) => {
 const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
     const prefix = `uLayer_${slotIndex}_adjust_`
     const set = (name, raw, lo, hi) => {
-        const loc = gl.getUniformLocation(program, `${prefix}${name}`)
+        const loc = uloc(gl, program, `${prefix}${name}`)
         if (!loc) return
         const value = (typeof raw === 'number' && Number.isFinite(raw))
             ? Math.max(lo, Math.min(hi, raw))
@@ -549,14 +603,14 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
 
     // Gamma — per-channel power (identity 1.0); different default from the 0.0
     // fields above, so written directly rather than via `set`.
-    const gammaLoc = gl.getUniformLocation(program, `${prefix}gamma`)
+    const gammaLoc = uloc(gl, program, `${prefix}gamma`)
     if (gammaLoc) {
         const g = Number.isFinite(layer.gamma) ? Math.max(0.2, Math.min(2.2, layer.gamma)) : 1.0
         gl.uniform1f(gammaLoc, g)
     }
     // 3-way colour wheels — vec3 offsets (-1..1) on the non-adjust prefix.
     const setWheel = (name, raw) => {
-        const loc = gl.getUniformLocation(program, `uLayer_${slotIndex}_${name}`)
+        const loc = uloc(gl, program, `uLayer_${slotIndex}_${name}`)
         if (!loc) return
         const a = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw.x, raw.y, raw.z] : [])
         const cl = (v) => (Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) : 0)
@@ -581,15 +635,15 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
  */
 const writeLayerFillUniforms = (gl, program, layer, slotIndex) => {
     const prefix = `uLayer_${slotIndex}_`
-    const modeLoc = gl.getUniformLocation(program, `${prefix}fillMode`)
+    const modeLoc = uloc(gl, program, `${prefix}fillMode`)
     if (modeLoc) gl.uniform1f(modeLoc, fillModeToFloat(layer.fillMode))
-    const colorLoc = gl.getUniformLocation(program, `${prefix}fillColor`)
+    const colorLoc = uloc(gl, program, `${prefix}fillColor`)
     if (colorLoc) {
         const c = layer.fillColor || { r: 1, g: 0, b: 0.6 }
         const ch = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : fb)
         gl.uniform3f(colorLoc, ch(c.r, 1), ch(c.g, 0), ch(c.b, 0.6))
     }
-    const strengthLoc = gl.getUniformLocation(program, `${prefix}fillStrength`)
+    const strengthLoc = uloc(gl, program, `${prefix}fillStrength`)
     if (strengthLoc) {
         const s = (typeof layer.fillStrength === 'number' && Number.isFinite(layer.fillStrength))
             ? Math.max(0, Math.min(1, layer.fillStrength))
@@ -627,22 +681,22 @@ const writeLayerFillUniforms = (gl, program, layer, slotIndex) => {
 const writeUniforms = (gl, program, stack, renderOpts, imageSize, textureBindings) => {
     const { globalMaskAlpha, globalInvert, maskOverlay, maskView, overlayColor } = renderOpts || {}
     // Chain-wide uniforms.
-    const sizeLoc = gl.getUniformLocation(program, 'uImageSize')
+    const sizeLoc = uloc(gl, program, 'uImageSize')
     if (sizeLoc) gl.uniform2f(sizeLoc, imageSize.width, imageSize.height)
-    const maskAlphaLoc = gl.getUniformLocation(program, 'uMaskAlpha')
+    const maskAlphaLoc = uloc(gl, program, 'uMaskAlpha')
     if (maskAlphaLoc) {
         const a = (typeof globalMaskAlpha === 'number' && Number.isFinite(globalMaskAlpha))
             ? Math.max(0, Math.min(1, globalMaskAlpha))
             : 1
         gl.uniform1f(maskAlphaLoc, a)
     }
-    const invertLoc = gl.getUniformLocation(program, 'uGlobalInvert')
+    const invertLoc = uloc(gl, program, 'uGlobalInvert')
     if (invertLoc) gl.uniform1f(invertLoc, globalInvert ? 1.0 : 0.0)
-    const overlayLoc = gl.getUniformLocation(program, 'uMaskOverlay')
+    const overlayLoc = uloc(gl, program, 'uMaskOverlay')
     if (overlayLoc) gl.uniform1f(overlayLoc, maskOverlay ? 1.0 : 0.0)
-    const viewLoc = gl.getUniformLocation(program, 'uMaskView')
+    const viewLoc = uloc(gl, program, 'uMaskView')
     if (viewLoc) gl.uniform1f(viewLoc, maskView === 'bw' ? 1.0 : 0.0)
-    const overlayColLoc = gl.getUniformLocation(program, 'uMaskOverlayColor')
+    const overlayColLoc = uloc(gl, program, 'uMaskOverlayColor')
     if (overlayColLoc) {
         const c = overlayColor || { r: 1, g: 0, b: 0.25 }
         const ch = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : fb)
@@ -771,13 +825,130 @@ const bindCachedMaskTexture = (gl, key, data, flipY, filter) => {
  * @param {import('./mask-types').MaskStack} stack
  * @returns {{ kindUnits: Map<number, number>, ownedTextures: WebGLTexture[] }}
  */
-const bindKindTextures = (gl, stack) => {
+/* ─── Multi-pass state targets ──────────────────────────────────────────────
+ * A chain longer than MAX_LAYERS_PER_PASS is split into batches. Each batch
+ * writes its running (colour, alpha) into a texture that the next batch reads,
+ * so the layer count stops being bounded by texture units or uniform slots.
+ * Erase coverage is a max over erase layers — order-independent — so it rides
+ * in its own texture accumulated with MAX blending.
+ */
+let stateTargets = null   // { fbo, texA, texB, texE, width, height }
+
+/* Prefix cache. While one layer is being edited, every batch BELOW it renders
+ * the same pixels frame after frame. Their combined state is kept in its own
+ * texture, so a drag re-runs only the batch holding the edited layer and the
+ * batches above it — the cost stops growing with chain length. Only used when
+ * the caller passes `sourceVersion` (a promise that the pixels are unchanged).
+ */
+let prefixCache = null    // { sourceVersion, width, height, boundary, tex, sigs }
+let lastBatchSigs = null
+
+/** Everything about a layer that changes its pixels, including texture version. */
+const layerSignature = (entry) => {
+    const layer = entry.layer || {}
+    let version = ''
+    for (const key of ['maskTextureKey', 'brushTextureKey', 'depthMapKey', 'curveLutKey']) {
+        const id = layer[key]
+        if (typeof id === 'string' && id) {
+            const data = getMaskTexture(id)
+            version += `|${key}:${id}:${data && data.version !== undefined ? data.version : 'x'}`
+        }
+    }
+    return `${entry.op}|${JSON.stringify(layer)}${version}`
+}
+
+const batchSignature = (entries) => entries.map(layerSignature).join('~')
+
+let cachedMaxUnits = 0
+/** WebGL2 guarantees 16 fragment texture units; most GPUs expose more. */
+const maxTextureUnits = (gl) => {
+    if (!cachedMaxUnits) cachedMaxUnits = Math.max(8, gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) || 16)
+    return cachedMaxUnits
+}
+
+const deleteStateTargets = (gl) => {
+    if (prefixCache && gl && prefixCache.tex && gl.isTexture(prefixCache.tex)) gl.deleteTexture(prefixCache.tex)
+    prefixCache = null
+    lastBatchSigs = null
+    if (!stateTargets || !gl) return
+    for (const tex of [stateTargets.texA, stateTargets.texB, stateTargets.texE]) {
+        if (tex && gl.isTexture(tex)) gl.deleteTexture(tex)
+    }
+    if (stateTargets.fbo && gl.isFramebuffer(stateTargets.fbo)) gl.deleteFramebuffer(stateTargets.fbo)
+    stateTargets = null
+}
+
+const makeStateTexture = (gl, w, h) => {
+    const tex = gl.createTexture()
+    if (!tex) return null
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    // Sampled texel-for-texel, so NEAREST avoids needless filtering work.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    return tex
+}
+
+const ensureStateTargets = (gl, w, h) => {
+    if (stateTargets && stateTargets.width === w && stateTargets.height === h) return stateTargets
+    deleteStateTargets(gl)
+    // Create on a scratch unit: binding here on unit 0 would evict the source
+    // image the passes are about to sample (first-render-only corruption).
+    gl.activeTexture(gl.TEXTURE0 + maxTextureUnits(gl) - 1)
+    const fbo = gl.createFramebuffer()
+    const texA = makeStateTexture(gl, w, h)
+    const texB = makeStateTexture(gl, w, h)
+    const texE = makeStateTexture(gl, w, h)
+    if (!fbo || !texA || !texB || !texE) {
+        deleteStateTargets(gl)
+        return null
+    }
+    stateTargets = { fbo, texA, texB, texE, width: w, height: h }
+    return stateTargets
+}
+
+/** Texture units a single layer needs: its kind mask, plus its curve LUT. */
+const layerUnitCost = (layer) => {
+    const kindNeedsTexture = layer
+        && ['semantic', 'smartBrush', 'depth', 'lasso', 'brush', 'path'].includes(layer.kind)
+    return (kindNeedsTexture ? 1 : 0) + (layer && layer.curveLutKey ? 1 : 0)
+}
+
+/**
+ * Split a chain into batches that each fit the GPU's texture-unit budget.
+ * Units 0–2 are reserved for the source, the incoming state and the erase map.
+ *
+ * @returns {Array<Array<{layer: object, op: string}>>}
+ */
+const planPasses = (gl, chain, limit = MAX_LAYERS_PER_PASS) => {
+    const budget = Math.max(2, maxTextureUnits(gl) - 3)
+    const batches = []
+    let current = []
+    let used = 0
+    for (const entry of chain) {
+        const cost = layerUnitCost(entry.layer)
+        const wouldExceed = current.length >= limit || used + cost > budget
+        if (current.length && wouldExceed) {
+            batches.push(current)
+            current = []
+            used = 0
+        }
+        current.push(entry)
+        used += cost
+    }
+    if (current.length) batches.push(current)
+    return batches.length ? batches : [[]]
+}
+
+const bindKindTextures = (gl, stack, firstUnit = 1) => {
     const ownedTextures = []
     const kindUnits = new Map()
     // Per-layer tone-curve LUT units (orthogonal to the kind mask — ANY kind can
     // carry a curve). Keyed slot → texture unit, filled after the kind loop.
     const curveUnits = new Map()
-    let nextUnit = 1  // 0 is the source image
+    let nextUnit = firstUnit  // unit 0 is the source image
     let nullUnit = -1 // lazily-allocated 1×1 transparent texture unit
 
     // Bug #8: a texture-backed layer whose texture is MISSING (cache miss
@@ -789,7 +960,7 @@ const bindKindTextures = (gl, stack) => {
     // reused for every miss.
     const ensureNullUnit = () => {
         if (nullUnit >= 0) return nullUnit
-        if (nextUnit >= 16) return -1
+        if (nextUnit >= maxTextureUnits(gl)) return -1
         const tex = gl.createTexture()
         if (!tex) return -1
         const unit = nextUnit
@@ -859,7 +1030,7 @@ const bindKindTextures = (gl, stack) => {
         }
         kindUnits.set(i, nextUnit)
         nextUnit += 1
-        if (nextUnit >= 16) {
+        if (nextUnit >= maxTextureUnits(gl)) {
             // WebGL2 guarantees at least 16. We stop allocating rather
             // than overwrite an existing unit (each layer needs its own).
             // The next texture-using layer will silently render with a
@@ -875,7 +1046,7 @@ const bindKindTextures = (gl, stack) => {
     // via setMaskTexture. Upload one texture per such layer to its own unit and
     // record it so writeCurveUniforms can bind the sampler + flip curveOn on.
     for (let i = 0; i < stack.chain.length; i += 1) {
-        if (nextUnit >= 16) break
+        if (nextUnit >= maxTextureUnits(gl)) break
         const layer = stack.chain[i].layer
         const key = layer && typeof layer.curveLutKey === 'string' ? layer.curveLutKey : null
         if (!key) continue
@@ -1008,7 +1179,20 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
     const gl = ensureGl()
     if (!gl) return renderCpuFallback(sourceCanvas, stack)
 
-    const program = getOrCreateProgram(compiled)
+    // Chains longer than one pass are batched: every batch but the last writes
+    // its running state to a texture, and the last one composites to pixels.
+    const fullChain = (stack && Array.isArray(stack.chain)) ? stack.chain : []
+    const batchLimit = Math.max(1, Math.min(MAX_LAYERS_PER_PASS, options.maxLayersPerPass || MAX_LAYERS_PER_PASS))
+    const batches = planPasses(gl, fullChain, batchLimit)
+    const multiPass = batches.length > 1
+    const eraseEntries = multiPass ? fullChain.filter((e) => e.layer && e.layer.fillMode === 'erase') : []
+    const finalEntries = multiPass ? batches[batches.length - 1] : fullChain
+    const finalStack = multiPass ? { chain: finalEntries } : (stack || { chain: [] })
+    const activeCompiled = multiPass
+        ? compilePass(finalEntries, { role: 'final', readsPrevState: true, readsErase: eraseEntries.length > 0 })
+        : compiled
+
+    const program = getOrCreateProgram(activeCompiled)
     if (!program) return renderCpuFallback(sourceCanvas, stack)
 
     const w = sourceCanvas.width
@@ -1019,44 +1203,214 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
 
     const imageSize = { width: w, height: h }
 
-    // Bind the source as a 2D texture.
-    const texture = gl.createTexture()
-    if (!texture) return renderCpuFallback(sourceCanvas, stack)
+    // Bind the source as a 2D texture, reusing the GPU copy when the caller
+    // says the pixels have not changed (see sourceTextureCache).
+    const sourceVersion = options.sourceVersion
+    let sourceEntry = sourceTextureCache.get(sourceCanvas)
+    if (sourceEntry && !gl.isTexture(sourceEntry.tex)) sourceEntry = undefined
+    const reuseSource = Boolean(
+        sourceEntry
+        && sourceVersion !== undefined
+        && sourceEntry.version === sourceVersion
+        && sourceEntry.width === w
+        && sourceEntry.height === h,
+    )
+    let texture = sourceEntry?.tex || null
+    if (!texture) {
+        texture = gl.createTexture()
+        if (!texture) return renderCpuFallback(sourceCanvas, stack)
+        sourceEntry = { tex: texture, width: 0, height: 0, version: undefined }
+        sourceTextureCache.set(sourceCanvas, sourceEntry)
+        liveSourceTextures.add(texture)
+    }
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, texture)
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, /** @type {any} */ (sourceCanvas))
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    if (!reuseSource) {
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, /** @type {any} */ (sourceCanvas))
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        sourceEntry.width = w
+        sourceEntry.height = h
+        sourceEntry.version = sourceVersion
+        renderMetrics.sourceUploads += 1
+    } else {
+        renderMetrics.sourceUploadsSkipped += 1
+    }
+
+    // Units 1 and 2 are reserved for the incoming state and the erase map, so
+    // batch textures start at 3 whenever the chain is split.
+    const PREV_STATE_UNIT = 1
+    const ERASE_UNIT = 2
+    const kindFirstUnit = multiPass ? 3 : 1
+    const preOwned = []
+    let prevStateTex = null
+    let eraseTex = null
+
+    if (multiPass) {
+        const targets = ensureStateTargets(gl, w, h)
+        if (!targets) return renderCpuFallback(sourceCanvas, stack)
+        // Re-assert the source on unit 0 after any texture creation above.
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, texture)
+        const { vao: preVao } = ensureQuadBuffers(gl)
+        const passRenderOpts = { globalMaskAlpha: 1, globalInvert: false, maskOverlay: false }
+
+        const drawPass = (entries, passCompiled, targetTex, prevTex, blendMax) => {
+            const passProgram = getOrCreateProgram(passCompiled)
+            if (!passProgram) return false
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.fbo)
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTex, 0)
+            gl.viewport(0, 0, w, h)
+            gl.useProgram(passProgram)
+            const uImageLoc = uloc(gl, passProgram, 'uImage')
+            if (uImageLoc) gl.uniform1i(uImageLoc, 0)
+            const uMatrixLoc = uloc(gl, passProgram, 'uMatrix')
+            if (uMatrixLoc) gl.uniformMatrix4fv(uMatrixLoc, false, IDENTITY_MATRIX)
+            if (prevTex) {
+                gl.activeTexture(gl.TEXTURE0 + PREV_STATE_UNIT)
+                gl.bindTexture(gl.TEXTURE_2D, prevTex)
+                const uPrev = uloc(gl, passProgram, 'uPrevState')
+                if (uPrev) gl.uniform1i(uPrev, PREV_STATE_UNIT)
+            }
+            const passStack = { chain: entries }
+            const bindings = bindKindTextures(gl, passStack, kindFirstUnit)
+            preOwned.push(...bindings.ownedTextures)
+            writeUniforms(gl, passProgram, passStack, passRenderOpts, imageSize, bindings)
+            if (blendMax) {
+                gl.enable(gl.BLEND)
+                gl.blendEquation(gl.MAX)
+                gl.blendFunc(gl.ONE, gl.ONE)
+            }
+            if (preVao) {
+                gl.bindVertexArray(preVao)
+                gl.drawArrays(gl.TRIANGLES, 0, 6)
+                gl.bindVertexArray(null)
+            }
+            if (blendMax) gl.disable(gl.BLEND)
+            return true
+        }
+
+        // Erase coverage: max over the erase layers, independent of order.
+        if (eraseEntries.length) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targets.fbo)
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targets.texE, 0)
+            gl.viewport(0, 0, w, h)
+            gl.clearColor(0, 0, 0, 0)
+            gl.clear(gl.COLOR_BUFFER_BIT)
+            for (const group of planPasses(gl, eraseEntries, batchLimit)) {
+                drawPass(group, compilePass(group, { role: 'erase' }), targets.texE, null, true)
+            }
+            eraseTex = targets.texE
+        }
+
+        // State batches: every batch but the last, with the prefix cache
+        // skipping the ones whose layers have not changed since last frame.
+        const sigs = batches.map(batchSignature)
+        const cacheable = options.sourceVersion !== undefined
+        let startBatch = 0
+        let previous = null
+
+        if (cacheable
+            && prefixCache
+            && prefixCache.sourceVersion === options.sourceVersion
+            && prefixCache.width === w
+            && prefixCache.height === h
+            && prefixCache.boundary <= batches.length - 1
+            && prefixCache.sigs.length === prefixCache.boundary
+            && prefixCache.sigs.every((sig, i) => sig === sigs[i])
+            && gl.isTexture(prefixCache.tex)) {
+            startBatch = prefixCache.boundary
+            previous = prefixCache.tex
+            renderMetrics.prefixHits += 1
+        }
+
+        // Which batch changed first? That boundary is worth caching, because a
+        // drag keeps touching the same layer.
+        let boundary = batches.length - 1
+        if (lastBatchSigs && lastBatchSigs.length === sigs.length) {
+            const firstChanged = sigs.findIndex((sig, i) => sig !== lastBatchSigs[i])
+            boundary = firstChanged < 0 ? batches.length - 1 : Math.min(firstChanged, batches.length - 1)
+        }
+        lastBatchSigs = sigs
+
+        let prefixTex = prefixCache && gl.isTexture(prefixCache.tex) ? prefixCache.tex : null
+        if (cacheable && boundary > 0 && startBatch < boundary && !prefixTex) {
+            gl.activeTexture(gl.TEXTURE0 + maxTextureUnits(gl) - 1)
+            prefixTex = makeStateTexture(gl, w, h)
+            gl.activeTexture(gl.TEXTURE0)
+            gl.bindTexture(gl.TEXTURE_2D, texture)
+        }
+
+        let target = targets.texA
+        for (let b = startBatch; b < batches.length - 1; b += 1) {
+            const entries = batches[b]
+            const passCompiled = compilePass(entries, { role: 'state', readsPrevState: b > 0 })
+            // Writing the boundary batch straight into the prefix texture keeps
+            // it for the next frame without an extra copy.
+            const writeToPrefix = cacheable && prefixTex && b === boundary - 1
+            const dest = writeToPrefix ? prefixTex : target
+            if (!drawPass(entries, passCompiled, dest, previous, false)) {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+                return renderCpuFallback(sourceCanvas, stack)
+            }
+            previous = dest
+            if (writeToPrefix) {
+                prefixCache = {
+                    sourceVersion: options.sourceVersion,
+                    width: w,
+                    height: h,
+                    boundary,
+                    tex: prefixTex,
+                    sigs: sigs.slice(0, boundary),
+                }
+            } else {
+                target = target === targets.texA ? targets.texB : targets.texA
+            }
+        }
+        prevStateTex = previous
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        gl.viewport(0, 0, w, h)
+        renderMetrics.statePasses += (batches.length - 1 - startBatch) + (eraseEntries.length ? 1 : 0)
+    }
 
     gl.useProgram(program)
-    const uImage = gl.getUniformLocation(program, 'uImage')
+    const uImage = uloc(gl, program, 'uImage')
     if (uImage) gl.uniform1i(uImage, 0)
+    if (multiPass) {
+        if (prevStateTex) {
+            gl.activeTexture(gl.TEXTURE0 + PREV_STATE_UNIT)
+            gl.bindTexture(gl.TEXTURE_2D, prevStateTex)
+            const uPrev = uloc(gl, program, 'uPrevState')
+            if (uPrev) gl.uniform1i(uPrev, PREV_STATE_UNIT)
+        }
+        if (eraseTex) {
+            gl.activeTexture(gl.TEXTURE0 + ERASE_UNIT)
+            gl.bindTexture(gl.TEXTURE_2D, eraseTex)
+            const uErase = uloc(gl, program, 'uEraseMap')
+            if (uErase) gl.uniform1i(uErase, ERASE_UNIT)
+        }
+    }
 
     // Identity matrix for the fullscreen quad — the megashader applies
     // pixel-space effects, not geometry transforms.
-    const uMatrix = gl.getUniformLocation(program, 'uMatrix')
+    const uMatrix = uloc(gl, program, 'uMatrix')
     if (uMatrix) {
-        gl.uniformMatrix4fv(uMatrix, false, new Float32Array([
-            1, 0, 0, 0,
-            0, 1, 0, 0,
-            0, 0, 1, 0,
-            0, 0, 0, 1,
-        ]))
+        gl.uniformMatrix4fv(uMatrix, false, IDENTITY_MATRIX)
     }
 
     // Upload kind-specific textures (semantic masks, depth maps etc.) and
     // capture the slot → texture-unit mapping. The textures live until the
     // gl.deleteTexture calls below.
-    const { kindUnits, curveUnits, ownedTextures } = bindKindTextures(gl, stack || { chain: [] })
+    const { kindUnits, curveUnits, ownedTextures } = bindKindTextures(gl, finalStack, kindFirstUnit)
 
     writeUniforms(
         gl,
         program,
-        stack || { chain: [] },
+        finalStack,
         {
             globalMaskAlpha: options.globalMaskAlpha ?? 1,
             globalInvert: options.globalInvert === true,
@@ -1081,9 +1435,15 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
     // preserveDrawingBuffer:false; the browser copies it GPU-side in top-left
     // orientation. The readPixels path costs a 4-bytes-per-pixel buffer plus a
     // JS row flip (~0.5 s and ~200 MB at 24 MP), so it is only the fallback.
-    const out = document.createElement('canvas')
-    out.width = w
-    out.height = h
+    let out
+    if (options.reuseOutput) {
+        if (!reusableOutput) reusableOutput = document.createElement('canvas')
+        out = reusableOutput
+    } else {
+        out = document.createElement('canvas')
+    }
+    if (out.width !== w) out.width = w
+    if (out.height !== h) out.height = h
     const ctx = out.getContext('2d')
     if (ctx) {
         let copied = false
@@ -1096,7 +1456,6 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             try {
                 gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
             } catch {
-                gl.deleteTexture(texture)
                 for (const tex of ownedTextures) gl.deleteTexture(tex)
                 return renderCpuFallback(sourceCanvas, stack)
             }
@@ -1111,8 +1470,9 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
         }
     }
 
-    gl.deleteTexture(texture)
+    // `texture` belongs to sourceTextureCache and is reused next frame.
     for (const tex of ownedTextures) gl.deleteTexture(tex)
+    for (const tex of preOwned) gl.deleteTexture(tex)
 
     // Step 10.3: count successful draws (one per `renderMegashader`
     // call that reached the readback stage). Identity short-circuits
@@ -1200,7 +1560,13 @@ export const disposeRenderer = () => {
         for (const entry of maskGlTextureCache.values()) {
             if (entry && entry.tex && gl.isTexture(entry.tex)) gl.deleteTexture(entry.tex)
         }
+        for (const tex of liveSourceTextures) {
+            if (gl.isTexture(tex)) gl.deleteTexture(tex)
+        }
+        deleteStateTargets(gl)
     }
+    liveSourceTextures.clear()
+    reusableOutput = null
     maskGlTextureCache = new Map()
     maskGlTextureBytes = 0
     programCache.clear()

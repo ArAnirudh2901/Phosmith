@@ -66,7 +66,7 @@ import usePixelMaskTool, { MIN_BRUSH, MAX_BRUSH } from '../../../../../../../hoo
 import useMaskLayers from '../../../../../../../hooks/useMaskLayers'
 import { computeImageHistogram, getHistogramSourceElement } from '@/lib/image-histogram'
 import { rgbToHsb, hexToRgb, rgbToHsv, hsvToRgb } from '@/lib/color-utils'
-import { setMaskTexture, getMaskTexture, rasterisePath, smoothToBezier } from '@/lib/megashader'
+import { setMaskTexture, getMaskTexture, rasterisePath, smoothToBezier, MAX_LAYERS } from '@/lib/megashader'
 import { buildMaskBoundary } from '@/lib/mask-boundary'
 import { buildPackedLutFromCurves } from '@/lib/curve-lut'
 import { expandLayerBoundary, beginLayerRefine, applyRefineStroke } from '@/lib/mask-grow'
@@ -2118,8 +2118,8 @@ const MaskControls = ({ dominantColor }) => {
             toast('Start painting first')
             return
         }
-        if (stack.chain.length >= 8) {
-            toast.error('Mask layer limit reached (8). Remove a layer to add more.')
+        if (stack.chain.length >= MAX_LAYERS) {
+            toast.error(`Mask layer limit reached (${MAX_LAYERS}). Remove a layer to add more.`)
             return
         }
         const ctx = brushCanvas.getContext('2d', { willReadFrequently: true })
@@ -2904,7 +2904,7 @@ const MaskControls = ({ dominantColor }) => {
     // gives feedback instead of silently failing.
     useEffect(() => {
         const onLimit = (e) => {
-            const max = e?.detail?.max || 8
+            const max = e?.detail?.max || MAX_LAYERS
             toast.error(`Mask layer limit reached (${max}). Remove a layer to add more.`)
         }
         try { window.addEventListener('phosmith:mask-layer-limit', onLimit) } catch { /* SSR */ }

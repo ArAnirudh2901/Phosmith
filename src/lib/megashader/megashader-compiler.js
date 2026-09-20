@@ -29,9 +29,14 @@ import {
 } from './glsl-fragments'
 import { BLEND_OPS, MASK_KINDS } from './mask-types'
 
-/** Hard cap so the megashader doesn't grow unbounded. 8 layers × 5 bytes
- *  per op is well under any GPU's uniform array limit. */
-export const MAX_LAYERS = 8
+/** Layers per GPU pass. One pass declares a sampler per texture-backed layer
+ *  plus one per curve LUT, and WebGL2 only guarantees 16 texture units, so a
+ *  batch stays small; the renderer chains batches through a state texture. */
+export const MAX_LAYERS_PER_PASS = 8
+
+/** Hard cap on a whole chain. Above MAX_LAYERS_PER_PASS the renderer splits
+ *  the chain into batches, so this is a UI/memory bound rather than a GPU one. */
+export const MAX_LAYERS = 64
 
 const truncateChain = (chain) => (Array.isArray(chain) ? chain.slice(0, MAX_LAYERS) : [])
 
@@ -104,6 +109,37 @@ const normaliseStack = (stack) => {
         return { layer, op }
     })
     return { chain: normalised }
+}
+
+/**
+ * Compile one GPU pass over `entries` (a slice of a normalised chain).
+ * Roles: 'state' writes the running state for the next batch, 'final'
+ * composites, 'erase' accumulates erase coverage. Cached like the single-pass
+ * shader, keyed by role and the structural signature of the slice.
+ *
+ * @param {Array<{layer: object, op: string}>} entries
+ * @param {{ role?: 'state'|'final'|'erase', readsPrevState?: boolean, readsErase?: boolean }} [opts]
+ * @returns {import('./mask-types').CompiledShader}
+ */
+export const compilePass = (entries, { role = 'state', readsPrevState = false, readsErase = false } = {}) => {
+    const list = Array.isArray(entries) ? entries : []
+    const kinds = list.map((e) => e.layer?.kind || 'unknown').join(',')
+    const ops = list.map((e) => e.op).join(',')
+    const cacheKey = `mkp|${role}|${readsPrevState ? 1 : 0}${readsErase ? 1 : 0}|${kinds}|${ops}|${list.length}`
+    const memoised = compiledCache.get(cacheKey)
+    if (memoised) return memoised
+
+    const vert = buildVertexShader()
+    const template = buildFragmentTemplate({ role, readsPrevState, readsErase })
+    const layerFns = list.map((entry, i) => buildLayerFunction(i, entry.layer.kind, entry.layer)).join('\n')
+    const adjustFns = list.map((entry, i) => buildLayerAdjustFunction(i, entry.layer)).join('\n')
+    const chain = buildBooleanChain(list, { fromState: readsPrevState, eraseOnly: role === 'erase' })
+    const frag = template
+        .replace('{{MASK_FUNCTIONS}}', layerFns || '// no layers in this pass')
+        .replace('{{ADJUST_FUNCTIONS}}', adjustFns || '// no adjustments in this pass')
+        .replace('{{EVAL_DISPATCHER}}', buildEvalDispatcher(list))
+        .replace('{{BOOLEAN_CHAIN}}', chain)
+    return rememberCompiled(cacheKey, { frag, vert, cacheKey, passthrough: false })
 }
 
 /**

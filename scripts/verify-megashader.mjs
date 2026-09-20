@@ -1235,10 +1235,16 @@ const log = (ok, name, detail) => {
         const expectedKeys = [
             'compileCount', 'cacheHits', 'cacheMisses', 'evictions',
             'lastCompileMs', 'totalCompileMs', 'drawCount', 'identityShortCircuits',
+            // Source-upload counters: full-res uploads vs uploads skipped because
+            // the cached GPU copy was still valid.
+            'sourceUploads', 'sourceUploadsSkipped',
+            // Extra GPU passes for chains split across batches, and frames that
+            // reused the cached composite below the edited layer.
+            'statePasses', 'prefixHits',
         ].sort()
         const actualKeys = Object.keys(shape).sort()
         log(JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
-            'getRenderMetrics returns the expected shape (8 documented keys)')
+            'getRenderMetrics returns the expected shape (12 documented keys)')
     } else {
         log(true, 'getRenderMetrics shape (skipped — module not loadable in Node)')
     }

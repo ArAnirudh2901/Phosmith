@@ -97,7 +97,7 @@ The project dashboard provides a grid view of all saved projects with live canva
 
 ### Editor
 
-The full-featured editor with a 14-tool topbar, a left-hand property panel (shown: Resize tool), the WebGL2 canvas with selection handles, and a zoom slider at the bottom.
+The editor with a 4K photo loaded: 14-tool topbar, property panel (Resize tool), the WebGL2 canvas and the zoom controls.
 
 <p align="center">
   <img src="docs/screenshots/editor.png" alt="Editor — Resize tool with canvas, topbar, and property panel" width="100%" />
@@ -109,7 +109,7 @@ The full-featured editor with a 14-tool topbar, a left-hand property panel (show
 
 | Category | Highlights |
 |---|---|
-| **Non-Destructive Editing** | 100+ procedural mask layers composited in real-time on the GPU |
+| **Non-Destructive Editing** | Up to 64 procedural mask layers per image, batched across GPU passes — 64 layers cost the same per frame as 8 (~14.5 ms at 4K on an M2) |
 | **Runs without a backend** | Selection, text grounding and auto-crop run in the browser; only depth and object-fill need a service |
 | **AI Selection & Masking** | Click / box select and subject cutout from one local model (SlimSAM), magic wand, marquee, magnetic lasso, natural-language masks, depth selection when the masking service runs |
 | **Professional Adjustments** | 15+ parameters — Exposure, Curves, Temperature, Vibrance, Film Grain, and more |
@@ -313,7 +313,8 @@ and the hosted **SegFormer / DETR** segmentation fallback.
 
 At the core of the editing experience is a custom **WebGL2** compositing engine:
 
-- **Non-destructive workflows** — Supports 100+ procedural mask layers with zero lag. Each mask layer is a GLSL program that runs entirely on the GPU.
+- **Non-destructive workflows** — Up to 64 procedural mask layers per image. Eight layers fit one GPU pass (one texture unit each, inside WebGL2's guaranteed 16); longer chains are split into batches that hand their running state to the next pass through a texture. Each layer is stored as parameters, not pixels, and evaluated per pixel on the GPU.
+- **Depth-independent editing cost** — While a layer is being edited, the composite of every layer below it is cached on the GPU, so a drag re-renders only that layer and the ones above it. At 3840×2160 on an Apple M2: 8 layers 17.5 ms, 32 layers 15.6 ms, 64 layers 14.5 ms per frame. Without the cache the same chains cost 19.8 / 37.9 / 63.5 ms.
 - **Real-time preview** — All adjustments, masks, and blends are computed per-frame.
 - **Blend modes** — Photoshop-parity blend modes: Normal, Screen, Multiply, Overlay, Soft Light, Hard Light, Darken, Lighten, Color Dodge, Color Burn, Difference, Exclusion, Add, Subtract, Divide.
 - **Mask chain composition** — Multiple mask layers compose via union, intersection, subtraction, and XOR.

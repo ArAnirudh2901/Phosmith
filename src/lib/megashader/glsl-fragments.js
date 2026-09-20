@@ -79,12 +79,23 @@ export const buildVertexShader = () => /* glsl */ `
  *
  * @returns {string}
  */
-export const buildFragmentTemplate = () => /* glsl */ `
+/**
+ * @typedef {'single'|'state'|'final'|'erase'} PassRole
+ *   single — whole chain in one pass (the classic path, ≤ MAX_LAYERS_PER_PASS)
+ *   state  — a batch that writes the running (colour, alpha) state to a texture
+ *   final  — the last batch: reads the state, composites and writes pixels
+ *   erase  — accumulates eraseAlpha over the chain's erase layers (order-free)
+ *
+ * @param {{ role?: PassRole, readsPrevState?: boolean, readsErase?: boolean }} [opts]
+ */
+export const buildFragmentTemplate = ({ role = 'single', readsPrevState = false, readsErase = false } = {}) => /* glsl */ `
     precision highp float;
 
     varying vec2 vTextureCoord;
 
     uniform sampler2D uImage;
+${readsPrevState ? '    uniform sampler2D uPrevState;' : ''}
+${readsErase ? '    uniform sampler2D uEraseMap;' : ''}
     uniform sampler2D uDepthMap;
     uniform sampler2D uSemanticMask;
     uniform sampler2D uBrushTex;
@@ -138,6 +149,15 @@ export const buildFragmentTemplate = () => /* glsl */ `
         vec3 srcRgb = src.rgb;
 
         {{BOOLEAN_CHAIN}}
+
+${role === 'state' ? `        // Batch output: the running state, picked up by the next pass.
+        gl_FragColor = vec4(runningColor, runningAlpha);
+        return;` : ''}
+${role === 'erase' ? `        // Erase accumulation is a max over the chain's erase layers, which is
+        // order-independent, so it rides in its own pass and its own texture.
+        gl_FragColor = vec4(vec3(eraseAlpha), 1.0);
+        return;` : ''}
+${readsErase ? `        eraseAlpha = max(eraseAlpha, texture2D(uEraseMap, vTextureCoord).r);` : ''}
 
         // Global invert flips the whole composited selection (Lightroom
         // "Invert mask"). Applied to both the recolour and erase channels so
@@ -540,7 +560,15 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
  * @param {{ op: string }[]} chainEntries  Length 0..8. The compiler truncates.
  * @returns {string}
  */
-export const buildBooleanChain = (chainEntries) => {
+/**
+ * @param {Array<{layer: object, op: string}>} chainEntries
+ * @param {{ fromState?: boolean, eraseOnly?: boolean }} [opts]
+ *   fromState — continue a chain whose earlier layers ran in a previous pass:
+ *               the running colour/alpha come from uPrevState and the first
+ *               entry keeps its real blend op instead of being a `replace`.
+ *   eraseOnly — emit just the erase accumulation (used by the erase pass).
+ */
+export const buildBooleanChain = (chainEntries, opts = {}) => {
     if (!chainEntries || chainEntries.length === 0) {
         return /* glsl */ `
             vec3 runningColor = srcRgb;
@@ -560,26 +588,57 @@ export const buildBooleanChain = (chainEntries) => {
     // Per-layer preamble: split the layer's raw mask alpha into a recolour
     // alpha (a_i) and an erase contribution. `isErase_i` is 1.0 when the
     // layer's fillMode uniform is 'erase' (>= 1.5 via step), 0.0 otherwise.
-    const preamble = (i) => {
+    // `alwaysColor` is for slot 0 and any `replace` op: those read the layer
+    // colour even where the layer's alpha is 0, so it must be computed
+    // unconditionally. Every other slot skips the grade (curves LUT, dehaze,
+    // texture taps — dozens of samples) wherever the layer does not cover the
+    // pixel, which is most of the frame for a typical brush or radial mask.
+    const preamble = (i, alwaysColor = false) => {
         lines.push(`float aFull_${i} = evalLayer(${i});`)
         lines.push(`float isErase_${i} = step(1.5, uLayer_${i}_fillMode);`)
         lines.push(`float a_${i} = aFull_${i} * (1.0 - isErase_${i});`)
-        lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb);`)
+        if (alwaysColor) {
+            lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb);`)
+        } else {
+            lines.push(`vec3 c_${i} = srcRgb;`)
+            lines.push(`if (a_${i} > 0.0) { c_${i} = layerColor_${i}(srcRgb); }`)
+        }
         lines.push(`eraseAlpha = max(eraseAlpha, aFull_${i} * isErase_${i});`)
     }
 
     // First layer: REPLACE. The colour starts as the first layer's
     // contributed colour; the recolour alpha starts as a_0 (erase layers
     // contribute 0 to the recolour channel but feed eraseAlpha above).
-    preamble(0)
-    lines.push(`vec3 runningColor = c_0;`)
-    lines.push(`float runningAlpha = a_0;`)
+    // Erase-only pass: coverage of the erase layers, nothing else.
+    if (opts.eraseOnly) {
+        for (let i = 0; i < chainEntries.length; i += 1) {
+            lines.push(`float aFull_${i} = evalLayer(${i});`)
+            lines.push(`float isErase_${i} = step(1.5, uLayer_${i}_fillMode);`)
+            lines.push(`eraseAlpha = max(eraseAlpha, aFull_${i} * isErase_${i});`)
+        }
+        lines.push(`vec3 runningColor = srcRgb;`)
+        lines.push(`float runningAlpha = 0.0;`)
+        return lines.join('\n        ')
+    }
 
-    for (let i = 1; i < chainEntries.length; i += 1) {
+    // Continuation batch: the running state arrives in a texture, so layer 0
+    // of THIS batch keeps its own blend op rather than acting as `replace`.
+    const startAt = opts.fromState ? 0 : 1
+    if (opts.fromState) {
+        lines.push(`vec4 prevState = texture2D(uPrevState, vTextureCoord);`)
+        lines.push(`vec3 runningColor = prevState.rgb;`)
+        lines.push(`float runningAlpha = prevState.a;`)
+    } else {
+        preamble(0, true)
+        lines.push(`vec3 runningColor = c_0;`)
+        lines.push(`float runningAlpha = a_0;`)
+    }
+
+    for (let i = startAt; i < chainEntries.length; i += 1) {
         const op = chainEntries[i].op
         const a = `a_${i}`
         const c = `c_${i}`
-        preamble(i)
+        preamble(i, op === 'replace')
         switch (op) {
             case 'add':
                 // Union — blend colour proportional to the new layer's
