@@ -7,12 +7,20 @@ import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { createPortal } from 'react-dom'
 import { adaptiveTextColor } from '@/lib/color-extraction'
+import { runAutoCropEngine } from '@/lib/auto-crop-client'
+
+const AUTO_CROP_STAGE_TEXT = {
+    reading: 'Reading the photo…',
+    composing: 'Composing the crop…',
+    depth: 'Estimating depth…',
+}
 
 /**
  * Auto-Crop strategies surfaced to the user. Each strategy is one click; the
  * Auto-Crop panel forwards the optional aspect ratio of the active preset
- * (when any) to /api/ai/auto-crop so subject-aware composition can be fitted
- * to e.g. 4:5 / 9:16 in a single round trip.
+ * (when any) to the auto-crop engine so subject-aware composition is fitted
+ * to e.g. 4:5 / 9:16. Subject-aware reads the photo first (vision analysis +
+ * on-device matte); no segmentation service is involved.
  */
 const AUTO_CROP_MODES = [
     {
@@ -634,7 +642,7 @@ const CropContent = ({ dominantColor }) => {
     }, [applyCropPreset, canvasEditor, getActiveImage, initializeCropMode, isCropMode, selectedImage])
 
     // ─── Auto-Crop ──────────────────────────────────────────────────────────
-    // Calls /api/ai/auto-crop, converts the returned image-pixel box to a
+    // Runs the auto-crop engine, converts the returned image-pixel box to a
     // canvas-space cropBox, and either previews it in the existing crop
     // overlay or applies it directly.
     const [autoBusy, setAutoBusy] = useState(null) // null | 'subject' | 'aspect' | ...
@@ -746,31 +754,18 @@ const CropContent = ({ dominantColor }) => {
         const toastId = toast.loading(`Auto-crop (${modeId})…`)
 
         try {
-            // Capture the image source to a sized JPEG (the route caps at 2048).
-            const MAX = 2048
-            const scale = Math.min(1, MAX / Math.max(sw, sh))
-            const w = Math.max(1, Math.round(sw * scale))
-            const h = Math.max(1, Math.round(sh * scale))
-            const off = document.createElement('canvas')
-            off.width = w
-            off.height = h
-            off.getContext('2d').drawImage(sourceEl, 0, 0, w, h)
-            const blob = await new Promise((res, rej) =>
-                off.toBlob((b) => (b ? res(b) : rej(new Error("encode failed"))), 'image/jpeg', 0.88),
-            )
-
             const activeAspect = getActivePresetAspect()
-
-            const form = new FormData()
-            form.append('image', blob, 'image.jpg')
-            form.append('mode', modeId === 'subject' || modeId === 'content' || modeId === 'depth' ? modeId : 'all')
-            if (activeAspect) form.append('aspect', String(activeAspect))
-
-            const resp = await fetch('/api/ai/auto-crop', { method: 'POST', body: form, signal: ac.signal })
-            const data = await resp.json().catch(() => ({}))
-            if (!resp.ok) {
-                throw new Error(data?.error || `Auto-crop failed (${resp.status})`)
-            }
+            const data = await runAutoCropEngine(sourceEl, {
+                width: sw,
+                height: sh,
+                mode: modeId,
+                aspect: activeAspect,
+                signal: ac.signal,
+                onStage: (stage) => {
+                    if (AUTO_CROP_STAGE_TEXT[stage]) toast.loading(AUTO_CROP_STAGE_TEXT[stage], { id: toastId })
+                },
+            })
+            const onDevice = data.source !== 'gemini'
 
             const chosen = data.crops?.[modeId]
             if (!chosen?.box) {
@@ -819,7 +814,7 @@ const CropContent = ({ dominantColor }) => {
                 toast.info(message, { id: toastId, duration: 5000 })
             } else {
                 toast.success(
-                    `Auto-crop ready (${chosen.rationale}${sub ? ' · ' + sub : ''})`,
+                    `${chosen.rationale}${sub ? ' · ' + sub : ''}${onDevice ? ' · on-device analysis' : ''}`,
                     { id: toastId },
                 )
             }
@@ -836,7 +831,7 @@ const CropContent = ({ dominantColor }) => {
                 toast.dismiss(toastId)
                 return
             }
-            console.error('[crop.auto]', err)
+            console.warn('[crop.auto]', err?.message || err)
             toast.error(err?.message || "Auto-crop failed", { id: toastId })
         } finally {
             // Only the latest request owns the busy state. A request that was
@@ -1135,6 +1130,14 @@ const CropContent = ({ dominantColor }) => {
                                 )
                             })}
                         </div>
+                        {autoResults?.analysis && (
+                            <p className='mt-2 text-[10px]' style={{ color: 'var(--text-secondary)' }}>
+                                Read as <strong style={{ color: dominantColor || 'var(--accent-primary)' }}>{autoResults.analysis.scene}</strong>
+                                {autoResults.analysis.subjects?.[0]?.label ? ` · ${autoResults.analysis.subjects[0].label}` : ''}
+                                {autoResults.source === 'gemini' ? '' : ' · on-device analysis'}
+                                {autoResults.analysis.intent ? ` — ${autoResults.analysis.intent}` : ''}
+                            </p>
+                        )}
                         {autoResults?.recommended && (
                             <p className='mt-2 text-[10px]' style={{ color: 'var(--text-muted)' }}>
                                 Recommended: <strong style={{ color: dominantColor || 'var(--accent-primary)' }}>{autoResults.recommended}</strong>

@@ -10,7 +10,7 @@
  *
  * Commands registered (see `command-registry.js` discovery):
  *
- *   crop.auto         — run /api/ai/auto-crop, pick the recommended box (or
+ *   crop.auto         — run the auto-crop engine, pick the recommended box (or
  *                       the requested strategy) and apply it.
  *   crop.subjectAware — alias for crop.auto with mode=subject.
  *   crop.fitAspect    — max-area crop at a given aspect ratio centred on the
@@ -29,6 +29,7 @@
  */
 
 import { FabricImage } from 'fabric'
+import { runAutoCropEngine } from '../auto-crop-client'
 
 const UPLOAD_MAX_SIDE = 2048
 
@@ -63,29 +64,6 @@ const PRESERVED_IMAGE_PROPS = [
     'hoverCursor', 'moveCursor', 'perPixelTargetFind',
     'globalCompositeOperation', 'name', 'id', 'data',
 ]
-
-/**
- * Encode the image source's bitmap to JPEG sized to UPLOAD_MAX_SIDE so the
- * /api/ai/auto-crop endpoint sees the same recipe as /api/ai/segment-instances
- * (cap → JPEG q88).
- */
-const imageToUploadBlob = async (image) => {
-    const { w: origW, h: origH } = naturalSize(image)
-    if (!origW || !origH) throw new Error('[agent.crop] image element not ready')
-    const scale = Math.min(1, UPLOAD_MAX_SIDE / Math.max(origW, origH))
-    const w = Math.max(1, Math.round(origW * scale))
-    const h = Math.max(1, Math.round(origH * scale))
-    const c = document.createElement('canvas')
-    c.width = w
-    c.height = h
-    const ctx = c.getContext('2d')
-    if (!ctx) throw new Error('[agent.crop] could not allocate upload canvas')
-    ctx.drawImage(getSourceEl(image), 0, 0, w, h)
-    const blob = await new Promise((res, rej) =>
-        c.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.88),
-    )
-    return { blob, scale, origW, origH }
-}
 
 const canvasToPngBlob = (canvas) =>
     new Promise((resolve, reject) => {
@@ -243,25 +221,22 @@ const replaceImageWithCrop = async (canvas, image, box) => {
 }
 
 /**
- * POST the current image to /api/ai/auto-crop and return the decoded payload.
- * Results are cached on the Fabric image keyed by (mode, aspect) so repeated
- * agent calls don't re-run BiRefNet/YOLO/depth for the same image.
+ * Run the auto-crop engine (vision analysis + on-device matte, no service) and
+ * return the payload. Results are cached on the Fabric image keyed by
+ * (mode, aspect) so repeated agent calls don't redo the analysis.
  */
 const fetchAutoCrop = async (image, { mode = 'all', aspect = null, padding = null, refresh = false } = {}) => {
     const key = `${mode}|${aspect || ''}|${padding ?? ''}`
     if (!refresh && image.__phosmithAutoCrop?.[key]) return image.__phosmithAutoCrop[key]
-    const { blob } = await imageToUploadBlob(image)
-    const form = new FormData()
-    form.append('image', blob, 'image.jpg')
-    form.append('mode', mode)
-    if (aspect) form.append('aspect', String(aspect))
-    if (padding != null) form.append('padding', String(padding))
-    const resp = await fetch('/api/ai/auto-crop', { method: 'POST', body: form })
-    if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}))
-        throw new Error(err.error || `/api/ai/auto-crop failed (${resp.status})`)
-    }
-    const data = await resp.json()
+    const { w, h } = naturalSize(image)
+    if (!w || !h) throw new Error('[agent.crop] image element not ready')
+    const scale = Math.min(1, UPLOAD_MAX_SIDE / Math.max(w, h))
+    const data = await runAutoCropEngine(getSourceEl(image), {
+        width: Math.max(1, Math.round(w * scale)),
+        height: Math.max(1, Math.round(h * scale)),
+        mode,
+        aspect,
+    })
     image.__phosmithAutoCrop = image.__phosmithAutoCrop || {}
     image.__phosmithAutoCrop[key] = data
     return data
