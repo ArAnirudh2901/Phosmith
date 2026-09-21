@@ -187,6 +187,31 @@ export const megashaderBench = async ({
 }
 
 /**
+ * Compare two RGBA readbacks the way the compositor sees them. getImageData
+ * returns UNPREMULTIPLIED colour, so a 1/255 difference in a pixel the erase
+ * channel has made nearly transparent comes back amplified by 1/alpha. The
+ * premultiplied value is what actually reaches the screen, so that is what a
+ * parity budget should be measured on.
+ */
+const comparePixels = (a, b) => {
+    let maxDiff = 0
+    let over2 = 0
+    for (let i = 0; i < a.length; i += 4) {
+        const aa = a[i + 3]
+        const ba = b[i + 3]
+        for (let ch = 0; ch < 3; ch += 1) {
+            const d = Math.abs((a[i + ch] * aa - b[i + ch] * ba) / 255)
+            if (d > maxDiff) maxDiff = d
+            if (d > 2) over2 += 1
+        }
+        const da = Math.abs(aa - ba)
+        if (da > maxDiff) maxDiff = da
+        if (da > 2) over2 += 1
+    }
+    return { maxDiff: +maxDiff.toFixed(2), pixelsOver2: over2 }
+}
+
+/**
  * Correctness gate for the batched path: render the same chain as one pass and
  * as several small batches, then compare pixels. Both must agree to within the
  * 8-bit rounding of the intermediate state texture.
@@ -203,14 +228,115 @@ export const megashaderParity = async ({ size = { width: 512, height: 512 }, lay
     const batched = renderMegashader(source, stack, { maxLayersPerPass: batch })
     const batchedPixels = batched.getContext('2d', { willReadFrequently: true })
         .getImageData(0, 0, width, height).data
-    let maxDiff = 0
-    let diffCount = 0
-    for (let i = 0; i < singlePixels.length; i += 1) {
-        const d = Math.abs(singlePixels[i] - batchedPixels[i])
-        if (d > maxDiff) maxDiff = d
-        if (d > 2) diffCount += 1
+    const { maxDiff, pixelsOver2 } = comparePixels(singlePixels, batchedPixels)
+    return { layers, batch, pixels: singlePixels.length / 4, maxDiff, pixelsOver2 }
+}
+
+/**
+ * Correctness gate for the SUFFIX FOLD: edit one layer in a deep chain and
+ * compare the folded render against a full single-pass re-render of the same
+ * stack. The fold only engages when exactly one layer changed since the last
+ * frame and the caller promised the source pixels are unchanged, so the first
+ * render here is the baseline the fold detects the edit against.
+ *
+ * `overlayAbove` plants an unfoldable op above the edited layer: the fold must
+ * then refuse to engage and the pixels must still be right.
+ *
+ * @param {{ size?: {width:number,height:number}, layers?: number, hot?: number,
+ *           overlayAbove?: boolean, erase?: boolean }} [opts]
+ */
+export const megashaderFoldParity = async ({
+    size = { width: 512, height: 512 },
+    layers = 24,
+    hot = 3,
+    overlayAbove = false,
+    erase = false,
+} = {}) => {
+    const { width, height } = size
+    const source = makeSource(width, height)
+    const stack = makeBenchStack(layers, { width, height })
+    if (overlayAbove) stack.chain[Math.min(hot + 2, layers - 1)].op = 'overlay'
+    if (erase === true || erase === 'above') stack.chain[Math.min(hot + 1, layers - 1)].layer.fillMode = 'erase'
+    if ((erase === true || erase === 'below') && hot > 1) stack.chain[hot - 1].layer.fillMode = 'erase'
+    if (erase === 'hot') stack.chain[hot].layer.fillMode = 'erase'
+    const opts = { sourceVersion: `fold-parity-${layers}-${hot}-${overlayAbove ? 'o' : ''}${erase ? 'e' : ''}`, maxLayersPerPass: 4 }
+
+    // Frame 1 establishes the per-layer signatures the fold diffs against.
+    renderMegashader(source, stack, opts)
+    stack.chain[hot].layer.exposure = 0.42
+    resetRenderMetrics()
+    const folded = renderMegashader(source, stack, opts)
+    const foldedPixels = folded.getContext('2d', { willReadFrequently: true })
+        .getImageData(0, 0, width, height).data.slice()
+    const metrics = getRenderMetrics()
+
+    // Baseline: the same stack, one pass, no fold and no prefix cache.
+    const full = renderMegashader(source, stack, { maxLayersPerPass: 64 })
+    const fullPixels = full.getContext('2d', { willReadFrequently: true })
+        .getImageData(0, 0, width, height).data
+    const { maxDiff, pixelsOver2 } = comparePixels(foldedPixels, fullPixels)
+    return {
+        layers,
+        hot,
+        overlayAbove,
+        erase,
+        engaged: metrics.foldFrames > 0,
+        foldFrames: metrics.foldFrames,
+        prefixBuilds: metrics.foldPrefixBuilds,
+        suffixBuilds: metrics.foldSuffixBuilds,
+        maxDiff,
+        pixelsOver2,
     }
-    return { layers, batch, pixels: singlePixels.length / 4, maxDiff, pixelsOver2: diffCount }
+}
+
+/**
+ * Throughput of editing one layer at a chosen depth. `hot` layers deep in the
+ * chain are the case the fold exists for: without it the renderer replays
+ * every layer above the edited one on every frame.
+ *
+ * `fold: false` runs the same edits through the batched path with the prefix
+ * cache but no fold, which is the A/B the fold has to justify itself against.
+ *
+ * @param {{ size?: keyof typeof PRESET_SIZES | {width:number,height:number},
+ *           layers?: number, hots?: number[], frames?: number, warmup?: number,
+ *           fold?: boolean }} [opts]
+ */
+export const megashaderEditBench = async ({ size = '4k', layers = 32, hots = [0, 8, 16, 31], frames = 30, warmup = 5, fold = true } = {}) => {
+    const { width, height } = typeof size === 'string' ? (PRESET_SIZES[size] || PRESET_SIZES['4k']) : size
+    const source = makeSource(width, height)
+    const rows = {}
+    for (const hot of hots) {
+        const stack = makeBenchStack(layers, { width, height })
+        const target = stack.chain[Math.min(hot, layers - 1)].layer
+        const opts = { sourceVersion: `edit-${hot}-${fold ? 'f' : 'n'}`, reuseOutput: true, ...(fold ? {} : { disableFold: true }) }
+        renderMegashader(source, stack, opts)
+        for (let i = 0; i < warmup; i += 1) {
+            target.exposure = 0.18 + 0.12 * Math.sin(i / 3)
+            renderMegashader(source, stack, opts)
+        }
+        resetRenderMetrics()
+        let out = null
+        const t0 = performance.now()
+        for (let i = 0; i < frames; i += 1) {
+            target.exposure = 0.18 + 0.12 * Math.sin(i / 4)
+            out = renderMegashader(source, stack, opts)
+        }
+        out.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, 1, 1)
+        const totalMs = performance.now() - t0
+        const metrics = getRenderMetrics()
+        rows[hot] = {
+            hot,
+            meanMs: +(totalMs / frames).toFixed(2),
+            fps: +(1000 / (totalMs / frames)).toFixed(1),
+            foldFrames: metrics.foldFrames,
+            prefixBuilds: metrics.foldPrefixBuilds,
+            suffixBuilds: metrics.foldSuffixBuilds,
+            statePasses: metrics.statePasses,
+            prefixHits: metrics.prefixHits,
+        }
+        await new Promise((r) => setTimeout(r, 400))
+    }
+    return { size: `${width}×${height}`, layers, fold, rows }
 }
 
 export default megashaderBench

@@ -314,11 +314,12 @@ and the hosted **SegFormer / DETR** segmentation fallback.
 At the core of the editing experience is a custom **WebGL2** compositing engine:
 
 - **Non-destructive workflows** — Up to 64 procedural mask layers per image. Eight layers fit one GPU pass (one texture unit each, inside WebGL2's guaranteed 16); longer chains are split into batches that hand their running state to the next pass through a texture. Each layer is stored as parameters, not pixels, and evaluated per pixel on the GPU.
-- **Depth-independent editing cost** — While a layer is being edited, the composite of every layer below it is cached on the GPU, so a drag re-renders only that layer and the ones above it. At 3840×2160 on an Apple M2: 8 layers 17.5 ms, 32 layers 15.6 ms, 64 layers 14.5 ms per frame. Without the cache the same chains cost 19.8 / 37.9 / 63.5 ms.
+- **Depth-independent editing cost** — While a layer is being edited, the composite of every layer below it is cached on the GPU, and every layer above it is folded into two per-pixel transfer maps, so a drag re-renders exactly one layer however deep the chain is and wherever in it the user is working. At 3840×2160 on an Apple M2: 16 layers 11.3 ms, 32 layers 11.6 ms, 64 layers 12.1 ms per frame (83 fps, 688 Mpix/s) — a 64-layer chain costs less than an 8-layer one. Editing the BOTTOM layer of a 64-layer chain goes from 60.1 ms to 17.2 ms.
+- **Proven, not asserted** — The folding algebra is property-tested against a sequential evaluation (`verify:chain-fold`), and the GPU implementation of it is compared pixel-for-pixel against a full re-render on real hardware (`verify:fold`).
 - **Real-time preview** — All adjustments, masks, and blends are computed per-frame.
 - **Blend modes** — Photoshop-parity blend modes: Normal, Screen, Multiply, Overlay, Soft Light, Hard Light, Darken, Lighten, Color Dodge, Color Burn, Difference, Exclusion, Add, Subtract, Divide.
 - **Mask chain composition** — Multiple mask layers compose via union, intersection, subtraction, and XOR.
-- **278 GLSL invariant tests** — The shader pipeline is validated by `bun run verify`.
+- **289 GLSL invariant tests** — The shader pipeline is validated by `bun run verify`.
 
 ### How It Works
 
@@ -544,10 +545,12 @@ The agent has a persistent chat interface with conversation history stored per-p
 | `bun run imagekit:docs` | Crawl ImageKit docs into a local JSON knowledge base |
 | `bun run mask:install` | Install Python deps for the local mask service |
 | `bun run mask:dev` | Start the FastAPI mask service on port 8001 |
-| `bun run verify` | Run all 278 Megashader GLSL invariant tests |
+| `bun run verify` | Run all 289 Megashader GLSL invariant tests |
+| `bun run verify:chain-fold` | Chain-folding algebra, property-tested against a sequential evaluation |
+| `bun run verify:fold` | Suffix fold on a real GPU — folded render vs full re-render, plus edit-depth timings |
 | `bun run verify:mask` | Mask edge-snap bilateral filter |
 | `bun run verify:segment` | BiRefNet subject segmentation |
-| `bun run verify:semantic` | SAM 2 point-based segmentation |
+| `bun run verify:semantic` | SAM 3.1 point-based segmentation |
 | `bun run verify:instances` | YOLO multi-instance detection |
 | `bun run verify:depth` | Depth Anything V2 depth estimation |
 | `bun run verify:depth:full` | Comprehensive depth estimation tests |

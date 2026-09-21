@@ -118,22 +118,31 @@ const normaliseStack = (stack) => {
  * shader, keyed by role and the structural signature of the slice.
  *
  * @param {Array<{layer: object, op: string}>} entries
- * @param {{ role?: 'state'|'final'|'erase', readsPrevState?: boolean, readsErase?: boolean }} [opts]
+ * @param {{ role?: 'state'|'final'|'erase'|'suffixColor'|'suffixAlpha'|'suffixErase',
+ *           readsPrevState?: boolean, readsErase?: boolean, readsSuffix?: boolean }} [opts]
  * @returns {import('./mask-types').CompiledShader}
  */
-export const compilePass = (entries, { role = 'state', readsPrevState = false, readsErase = false } = {}) => {
+export const compilePass = (entries, { role = 'state', readsPrevState = false, readsErase = false, readsSuffix = false } = {}) => {
     const list = Array.isArray(entries) ? entries : []
     const kinds = list.map((e) => e.layer?.kind || 'unknown').join(',')
     const ops = list.map((e) => e.op).join(',')
-    const cacheKey = `mkp|${role}|${readsPrevState ? 1 : 0}${readsErase ? 1 : 0}|${kinds}|${ops}|${list.length}`
+    const flags = `${readsPrevState ? 1 : 0}${readsErase ? 1 : 0}${readsSuffix ? 1 : 0}`
+    const cacheKey = `mkp|${role}|${flags}|${kinds}|${ops}|${list.length}`
     const memoised = compiledCache.get(cacheKey)
     if (memoised) return memoised
 
     const vert = buildVertexShader()
-    const template = buildFragmentTemplate({ role, readsPrevState, readsErase })
+    const template = buildFragmentTemplate({ role, readsPrevState, readsErase, readsSuffix })
     const layerFns = list.map((entry, i) => buildLayerFunction(i, entry.layer.kind, entry.layer)).join('\n')
     const adjustFns = list.map((entry, i) => buildLayerAdjustFunction(i, entry.layer)).join('\n')
-    const chain = buildBooleanChain(list, { fromState: readsPrevState, eraseOnly: role === 'erase' })
+    const suffixKind = role.startsWith('suffix')
+        ? role.slice('suffix'.length).toLowerCase()
+        : null
+    const chain = buildBooleanChain(list, {
+        fromState: readsPrevState,
+        eraseOnly: role === 'erase',
+        suffix: suffixKind,
+    })
     const frag = template
         .replace('{{MASK_FUNCTIONS}}', layerFns || '// no layers in this pass')
         .replace('{{ADJUST_FUNCTIONS}}', adjustFns || '// no adjustments in this pass')

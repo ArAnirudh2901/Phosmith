@@ -27,7 +27,7 @@
  * Fabric, no DOM) so it works in CI without a browser.
  */
 
-import { compileMegashader, computeCacheKey, MAX_LAYERS } from '../src/lib/megashader/megashader-compiler.js'
+import { compileMegashader, compilePass, computeCacheKey, MAX_LAYERS } from '../src/lib/megashader/megashader-compiler.js'
 import { createEmptyStack, sanitiseLayer, isAdjustmentsIdentity, stackHasNoVisibleEffect, isBlendOp, BLEND_OPS, luminanceLayer, colorLayer, linearLayer, radialLayer, smartBrushLayer, semanticLayer, depthLayer, lassoLayer, setMaskTexture, getMaskTexture, clearMaskTexture } from '../src/lib/megashader/mask-types.js'
 import { KIND_SCHEMAS, getKindBuilder, getKindSchema, normaliseUniformValue } from '../src/lib/megashader/glsl-mask-kinds.js'
 
@@ -1241,10 +1241,13 @@ const log = (ok, name, detail) => {
             // Extra GPU passes for chains split across batches, and frames that
             // reused the cached composite below the edited layer.
             'statePasses', 'prefixHits',
+            // Suffix fold: frames served by the fold, and how often each of its
+            // two cached artefacts had to be rebuilt.
+            'foldFrames', 'foldPrefixBuilds', 'foldSuffixBuilds',
         ].sort()
         const actualKeys = Object.keys(shape).sort()
         log(JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
-            'getRenderMetrics returns the expected shape (12 documented keys)')
+            'getRenderMetrics returns the expected shape (15 documented keys)')
     } else {
         log(true, 'getRenderMetrics shape (skipped — module not loadable in Node)')
     }
@@ -1551,6 +1554,70 @@ const log = (ok, name, detail) => {
         'stackHasNoVisibleEffect false for a highlights-only layer')
     log(isAdjustmentsIdentity({ chain: [{ layer: luminanceLayer(), op: 'replace' }] }) === true,
         'isAdjustmentsIdentity still true for an all-zero-adjustment layer')
+}
+
+// ─── Batched passes and the suffix fold ─────────────────────────────────────
+//
+// A chain longer than one GPU pass is split into batches that hand their
+// running state to each other through a texture, and — while one layer is
+// being edited — the layers ABOVE it collapse into two per-pixel maps
+// (chain-fold.js). Both shapes are compiled by `compilePass`, so its output
+// is what these guard.
+{
+    const entries = [
+        { layer: luminanceLayer(), op: 'replace' },
+        { layer: radialLayer(), op: 'add' },
+        { layer: linearLayer(), op: 'intersect' },
+    ]
+
+    const state = compilePass(entries, { role: 'state' })
+    log(state.frag.includes('gl_FragColor = vec4(runningColor, runningAlpha);'),
+        'state pass writes the running state instead of pixels')
+    log(!state.frag.includes('uniform sampler2D uPrevState;'),
+        'the first state pass declares no incoming state sampler')
+
+    const cont = compilePass(entries, { role: 'state', readsPrevState: true })
+    log(cont.frag.includes('uniform sampler2D uPrevState;')
+        && cont.frag.includes('vec4 prevState = texture2D(uPrevState, vTextureCoord);'),
+        'a continuation pass picks the running state up from uPrevState')
+    log(!cont.frag.includes('vec3 runningColor = c_0;'),
+        'a continuation pass does NOT force its first layer to replace')
+
+    const erase = compilePass(entries, { role: 'erase' })
+    log(erase.frag.includes('gl_FragColor = vec4(vec3(eraseAlpha), 1.0);')
+        && !erase.frag.includes('runningAlpha = clamp(runningAlpha'),
+        'the erase pass emits coverage only, so gl.MAX blending stays order-independent')
+
+    // Suffix maps: colour is affine (p, q), alpha is a clamped affine map.
+    const sufColor = compilePass(entries.slice(1), { role: 'suffixColor' })
+    log(sufColor.frag.includes('uniform sampler2D uPrevMap;')
+        && sufColor.frag.includes('vec4 mapOut = vec4(mapQ, mapP);'),
+        'suffixColor folds into an affine colour map carried in RGB + A')
+    const sufAlpha = compilePass(entries.slice(1), { role: 'suffixAlpha' })
+    log(sufAlpha.frag.includes('vec4 mapOut = vec4(mapA, mapB, mapLo, mapHi);')
+        && sufAlpha.frag.includes('if (nLo > nHi) { float k = clamp(inLo, llo, lhi); nLo = k; nHi = k; }'),
+        'suffixAlpha folds into a clamped affine map and collapses crossed intervals')
+    log(!sufColor.frag.includes('runningColor = mix(')
+        && !sufAlpha.frag.includes('runningAlpha = clamp(runningAlpha +'),
+        'a suffix pass composes maps rather than compositing the chain')
+
+    const folded = compilePass([entries[1]], { role: 'final', readsPrevState: true, readsSuffix: true })
+    log(folded.frag.includes('uniform sampler2D uSuffixColor;')
+        && folded.frag.includes('uniform sampler2D uSuffixAlpha;')
+        && folded.frag.includes('runningColor = sc.a * runningColor + sc.rgb;')
+        && folded.frag.includes('runningAlpha = clamp(sa.x * runningAlpha + sa.y, sa.z, sa.w);'),
+        'the folded final pass applies both maps to the edited layer\'s output')
+
+    // The GLSL emits no case for overlay in a suffix pass; the renderer must
+    // refuse to fold it rather than silently drop it.
+    const withOverlay = compilePass([{ layer: radialLayer(), op: 'overlay' }], { role: 'suffixAlpha' })
+    log(!withOverlay.frag.includes('float la ='),
+        'overlay contributes no alpha-map term, so the renderer must not fold past it')
+
+    // Role and flags are part of the cache key: two passes over the same
+    // layers but different roles must not share a compiled program.
+    const keys = new Set([state.cacheKey, cont.cacheKey, erase.cacheKey, sufColor.cacheKey, sufAlpha.cacheKey, folded.cacheKey])
+    log(keys.size === 6, 'each pass role and flag combination gets its own cache key', `${keys.size}/6`)
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────

@@ -34,7 +34,7 @@ jobs:
           set -e
           for suite in verify verify:fuzz verify:selection verify:mask verify:agent verify:history \
                        verify:subject-cleanup verify:nl-mask verify:stretch verify:collage \
-                       verify:extend verify:crop-compose; do
+                       verify:extend verify:crop-compose verify:chain-fold; do
             echo "::group::$suite"
             bun run "$suite"
             echo "::endgroup::"

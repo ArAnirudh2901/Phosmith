@@ -85,10 +85,13 @@ export const buildVertexShader = () => /* glsl */ `
  *   state  — a batch that writes the running (colour, alpha) state to a texture
  *   final  — the last batch: reads the state, composites and writes pixels
  *   erase  — accumulates eraseAlpha over the chain's erase layers (order-free)
+ *   suffixColor / suffixAlpha / suffixErase — fold the layers ABOVE the edited
+ *     one into per-pixel maps (see chain-fold.js) so a drag re-renders a single
+ *     layer whatever the chain depth
  *
  * @param {{ role?: PassRole, readsPrevState?: boolean, readsErase?: boolean }} [opts]
  */
-export const buildFragmentTemplate = ({ role = 'single', readsPrevState = false, readsErase = false } = {}) => /* glsl */ `
+export const buildFragmentTemplate = ({ role = 'single', readsPrevState = false, readsErase = false, readsSuffix = false } = {}) => /* glsl */ `
     precision highp float;
 
     varying vec2 vTextureCoord;
@@ -96,6 +99,8 @@ export const buildFragmentTemplate = ({ role = 'single', readsPrevState = false,
     uniform sampler2D uImage;
 ${readsPrevState ? '    uniform sampler2D uPrevState;' : ''}
 ${readsErase ? '    uniform sampler2D uEraseMap;' : ''}
+${role.startsWith('suffix') ? '    uniform sampler2D uPrevMap;' : ''}
+${readsSuffix ? '    uniform sampler2D uSuffixColor;\n    uniform sampler2D uSuffixAlpha;' : ''}
     uniform sampler2D uDepthMap;
     uniform sampler2D uSemanticMask;
     uniform sampler2D uBrushTex;
@@ -157,6 +162,15 @@ ${role === 'erase' ? `        // Erase accumulation is a max over the chain's er
         // order-independent, so it rides in its own pass and its own texture.
         gl_FragColor = vec4(vec3(eraseAlpha), 1.0);
         return;` : ''}
+${role.startsWith('suffix') ? `        gl_FragColor = mapOut;
+        return;` : ''}
+${readsSuffix ? `        // Everything above the edited layer, folded into two maps. Erase needs
+        // no map: it is a max over erase layers, so uEraseMap already carries
+        // every erase layer except the edited one.
+        vec4 sc = texture2D(uSuffixColor, vTextureCoord);
+        vec4 sa = texture2D(uSuffixAlpha, vTextureCoord);
+        runningColor = sc.a * runningColor + sc.rgb;
+        runningAlpha = clamp(sa.x * runningAlpha + sa.y, sa.z, sa.w);` : ''}
 ${readsErase ? `        eraseAlpha = max(eraseAlpha, texture2D(uEraseMap, vTextureCoord).r);` : ''}
 
         // Global invert flips the whole composited selection (Lightroom
@@ -609,6 +623,79 @@ export const buildBooleanChain = (chainEntries, opts = {}) => {
     // First layer: REPLACE. The colour starts as the first layer's
     // contributed colour; the recolour alpha starts as a_0 (erase layers
     // contribute 0 to the recolour channel but feed eraseAlpha above).
+    // Suffix passes: fold this batch's layers INTO the running map, so the
+    // layers above the edited one collapse to one map per pixel. The algebra
+    // (and its proof) lives in chain-fold.js; this is the GLSL mirror.
+    if (opts.suffix) {
+        const kind = opts.suffix
+        lines.push(`vec4 prevMap = texture2D(uPrevMap, vTextureCoord);`)
+        if (kind === 'color') {
+            lines.push(`vec3 mapQ = prevMap.rgb;`)
+            lines.push(`float mapP = prevMap.a;`)
+        } else if (kind === 'alpha') {
+            lines.push(`float mapA = prevMap.x;`)
+            lines.push(`float mapB = prevMap.y;`)
+            lines.push(`float mapLo = prevMap.z;`)
+            lines.push(`float mapHi = prevMap.w;`)
+        } else {
+            lines.push(`float mapM = prevMap.r;`)
+        }
+        chainEntries.forEach((entry, i) => {
+            lines.push(`float aFull_${i} = evalLayer(${i});`)
+            lines.push(`float isErase_${i} = step(1.5, uLayer_${i}_fillMode);`)
+            lines.push(`float a_${i} = aFull_${i} * (1.0 - isErase_${i});`)
+            const op = entry.op
+            if (kind === 'erase') {
+                lines.push(`mapM = max(mapM, aFull_${i} * isErase_${i});`)
+                return
+            }
+            if (kind === 'color') {
+                // C → p·C + q, composed as outer ∘ inner.
+                if (op === 'subtract') return           // colour untouched
+                lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb);`)
+                if (op === 'replace') {
+                    lines.push(`mapQ = c_${i};`)
+                    lines.push(`mapP = 0.0;`)
+                } else {
+                    lines.push(`float p_${i} = 1.0 - a_${i};`)
+                    lines.push(`mapQ = p_${i} * mapQ + a_${i} * c_${i};`)
+                    lines.push(`mapP = p_${i} * mapP;`)
+                }
+                return
+            }
+            // alpha: A → clamp(α·A + β, lo, hi)
+            const coeffs = {
+                add: ['1.0', `a_${i}`, '0.0', '1.0'],
+                subtract: ['1.0', `-a_${i}`, '0.0', '1.0'],
+                intersect: [`a_${i}`, '0.0', '0.0', '1.0'],
+                screen: [`(1.0 - a_${i})`, `a_${i}`, '0.0', '1.0'],
+                lighten: ['1.0', '0.0', `a_${i}`, '1.0'],
+                darken: ['1.0', '0.0', '0.0', `a_${i}`],
+                replace: ['0.0', `a_${i}`, '0.0', '1.0'],
+            }[op]
+            if (!coeffs) return   // overlay never reaches here: the renderer refuses to fold it
+            const [la, lb, llo, lhi] = coeffs
+            lines.push(`{`)
+            lines.push(`    float la = ${la}; float lb = ${lb}; float llo = ${llo}; float lhi = ${lhi};`)
+            lines.push(`    float inLo = la * mapLo + lb;`)
+            lines.push(`    float inHi = la * mapHi + lb;`)
+            lines.push(`    float nLo = max(llo, inLo);`)
+            lines.push(`    float nHi = min(lhi, inHi);`)
+            // Disjoint intervals mean the composed map is a constant.
+            lines.push(`    if (nLo > nHi) { float k = clamp(inLo, llo, lhi); nLo = k; nHi = k; }`)
+            lines.push(`    mapA = la * mapA;`)
+            lines.push(`    mapB = la * mapB + lb;`)
+            lines.push(`    mapLo = nLo; mapHi = nHi;`)
+            lines.push(`}`)
+        })
+        if (kind === 'color') lines.push(`vec4 mapOut = vec4(mapQ, mapP);`)
+        else if (kind === 'alpha') lines.push(`vec4 mapOut = vec4(mapA, mapB, mapLo, mapHi);`)
+        else lines.push(`vec4 mapOut = vec4(vec3(mapM), 1.0);`)
+        lines.push(`vec3 runningColor = srcRgb;`)
+        lines.push(`float runningAlpha = 0.0;`)
+        return lines.join('\n        ')
+    }
+
     // Erase-only pass: coverage of the erase layers, nothing else.
     if (opts.eraseOnly) {
         for (let i = 0; i < chainEntries.length; i += 1) {

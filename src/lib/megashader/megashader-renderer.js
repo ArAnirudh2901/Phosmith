@@ -31,6 +31,7 @@ import { compileMegashader,
 } from './megashader-compiler'
 import { getKindSchema, normaliseUniformValue } from './glsl-mask-kinds'
 import { getMaskTexture, getMaskTextureVersion, stackHasNoVisibleEffect, fillModeToFloat } from './mask-types'
+import { isFoldableOp } from './chain-fold'
 
 const MAX_PROGRAM_CACHE = 64
 
@@ -71,6 +72,12 @@ const renderMetrics = {
     statePasses: 0,
     /** Frames that reused the cached composite below the edited layer. */
     prefixHits: 0,
+    /** Frames rendered through the suffix fold (one draw, any chain depth). */
+    foldFrames: 0,
+    /** Times the state below the edited layer was rebuilt. */
+    foldPrefixBuilds: 0,
+    /** Times the maps above the edited layer were rebuilt. */
+    foldSuffixBuilds: 0,
 }
 
 /**
@@ -101,6 +108,9 @@ const resetRenderMetrics = () => {
     renderMetrics.sourceUploadsSkipped = 0
     renderMetrics.statePasses = 0
     renderMetrics.prefixHits = 0
+    renderMetrics.foldFrames = 0
+    renderMetrics.foldPrefixBuilds = 0
+    renderMetrics.foldSuffixBuilds = 0
 }
 
 /**
@@ -859,6 +869,67 @@ const layerSignature = (entry) => {
 
 const batchSignature = (entries) => entries.map(layerSignature).join('~')
 
+/* Suffix fold. The prefix cache makes editing the TOP of a chain cheap; this
+ * makes editing any layer cheap. Everything above the edited layer collapses
+ * into three per-pixel maps (colour affine, alpha clamped-affine, erase max —
+ * see chain-fold.js), rebuilt only when those layers change. A frame is then a
+ * single draw: prefix state → edited layer → maps → pixels.
+ *
+ * Only for interactive-sized renders: the maps cost ~32 bytes/pixel.
+ */
+/** Fold budget. Three full-size textures live for as long as the user keeps
+ *  dragging one layer — an RGBA8 prefix state, an RGBA8 colour map and an
+ *  RGBA16F alpha map (the alpha map's offset goes negative, so it cannot be
+ *  8-bit) — plus one scratch texture during a rebuild, freed straight after.
+ *  At the cap (4K) that is ~130 MB resident. An allocation that fails takes
+ *  the fold out of service for the session rather than degrading silently. */
+const FOLD_MAX_PIXELS = 8.7e6
+let foldCache = null      // { sourceVersion, width, height, hot, prefixSig, suffixSig, ... }
+let lastLayerSigs = null
+let floatTargetSupport = null
+let foldDisabled = false
+
+const supportsFloatTargets = (gl) => {
+    if (floatTargetSupport === null) {
+        floatTargetSupport = Boolean(gl.getExtension('EXT_color_buffer_float'))
+    }
+    return floatTargetSupport
+}
+
+const makeMapTexture = (gl, w, h, float) => {
+    const tex = gl.createTexture()
+    if (!tex) return null
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    if (float) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null)
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    return tex
+}
+
+const disposeFoldCache = (gl) => {
+    if (!foldCache || !gl) { foldCache = null; return }
+    for (const key of ['prefixTex', 'colorTex', 'alphaTex']) {
+        const tex = foldCache[key]
+        if (tex && gl.isTexture(tex)) gl.deleteTexture(tex)
+    }
+    foldCache = null
+}
+
+/** Index of the single layer that changed since last frame, or -1. */
+const findHotLayer = (sigs) => {
+    if (!lastLayerSigs || lastLayerSigs.length !== sigs.length) return -1
+    let hot = -1
+    for (let i = 0; i < sigs.length; i += 1) {
+        if (sigs[i] === lastLayerSigs[i]) continue
+        if (hot >= 0) return -1     // more than one layer moved: no fold
+        hot = i
+    }
+    return hot
+}
+
 let cachedMaxUnits = 0
 /** WebGL2 guarantees 16 fragment texture units; most GPUs expose more. */
 const maxTextureUnits = (gl) => {
@@ -867,6 +938,7 @@ const maxTextureUnits = (gl) => {
 }
 
 const deleteStateTargets = (gl) => {
+    disposeFoldCache(gl)
     if (prefixCache && gl && prefixCache.tex && gl.isTexture(prefixCache.tex)) gl.deleteTexture(prefixCache.tex)
     prefixCache = null
     lastBatchSigs = null
@@ -918,12 +990,13 @@ const layerUnitCost = (layer) => {
 
 /**
  * Split a chain into batches that each fit the GPU's texture-unit budget.
- * Units 0–2 are reserved for the source, the incoming state and the erase map.
+ * Units 0–2 are reserved for the source, the incoming state and the erase map;
+ * the fold path reserves two more for the suffix maps, hence `reserved`.
  *
  * @returns {Array<Array<{layer: object, op: string}>>}
  */
-const planPasses = (gl, chain, limit = MAX_LAYERS_PER_PASS) => {
-    const budget = Math.max(2, maxTextureUnits(gl) - 3)
+const planPasses = (gl, chain, limit = MAX_LAYERS_PER_PASS, reserved = 3) => {
+    const budget = Math.max(2, maxTextureUnits(gl) - reserved)
     const batches = []
     let current = []
     let used = 0
@@ -1185,12 +1258,44 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
     const batchLimit = Math.max(1, Math.min(MAX_LAYERS_PER_PASS, options.maxLayersPerPass || MAX_LAYERS_PER_PASS))
     const batches = planPasses(gl, fullChain, batchLimit)
     const multiPass = batches.length > 1
-    const eraseEntries = multiPass ? fullChain.filter((e) => e.layer && e.layer.fillMode === 'erase') : []
-    const finalEntries = multiPass ? batches[batches.length - 1] : fullChain
+
+    // Suffix fold: when exactly one layer changed since the last frame and every
+    // layer above it is affine (see chain-fold.js), collapse those layers into
+    // per-pixel maps and render only the edited one. Editing cost then stops
+    // depending on WHERE in the chain the user is working.
+    const foldW = sourceCanvas.width
+    const foldH = sourceCanvas.height
+    const layerSigs = multiPass ? fullChain.map(layerSignature) : null
+    const hotLayer = layerSigs ? findHotLayer(layerSigs) : -1
+    const foldViable = Boolean(
+        multiPass
+        && hotLayer >= 0
+        && options.sourceVersion !== undefined
+        && !foldDisabled
+        && options.disableFold !== true
+        && foldW * foldH <= FOLD_MAX_PIXELS
+        && supportsFloatTargets(gl)
+        && fullChain.slice(hotLayer + 1).every((e) => isFoldableOp(e.op)),
+    )
+    if (layerSigs) lastLayerSigs = layerSigs
+
+    const eraseEntries = multiPass
+        ? fullChain.filter((e, i) => e.layer && e.layer.fillMode === 'erase' && !(foldViable && i === hotLayer))
+        : []
+    const finalEntries = foldViable
+        ? [fullChain[hotLayer]]
+        : (multiPass ? batches[batches.length - 1] : fullChain)
     const finalStack = multiPass ? { chain: finalEntries } : (stack || { chain: [] })
-    const activeCompiled = multiPass
-        ? compilePass(finalEntries, { role: 'final', readsPrevState: true, readsErase: eraseEntries.length > 0 })
-        : compiled
+    const activeCompiled = foldViable
+        ? compilePass(finalEntries, {
+            role: 'final',
+            readsPrevState: hotLayer > 0,
+            readsErase: eraseEntries.length > 0,
+            readsSuffix: true,
+        })
+        : (multiPass
+            ? compilePass(finalEntries, { role: 'final', readsPrevState: true, readsErase: eraseEntries.length > 0 })
+            : compiled)
 
     const program = getOrCreateProgram(activeCompiled)
     if (!program) return renderCpuFallback(sourceCanvas, stack)
@@ -1245,10 +1350,14 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
     // batch textures start at 3 whenever the chain is split.
     const PREV_STATE_UNIT = 1
     const ERASE_UNIT = 2
-    const kindFirstUnit = multiPass ? 3 : 1
+    const SUFFIX_COLOR_UNIT = 3
+    const SUFFIX_ALPHA_UNIT = 4
+    const kindFirstUnit = multiPass ? (foldViable ? 5 : 3) : 1
     const preOwned = []
     let prevStateTex = null
     let eraseTex = null
+    let suffixColorTex = null
+    let suffixAlphaTex = null
 
     if (multiPass) {
         const targets = ensureStateTargets(gl, w, h)
@@ -1259,7 +1368,9 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
         const { vao: preVao } = ensureQuadBuffers(gl)
         const passRenderOpts = { globalMaskAlpha: 1, globalInvert: false, maskOverlay: false }
 
-        const drawPass = (entries, passCompiled, targetTex, prevTex, blendMax) => {
+        const unitReserve = foldViable ? 5 : 3
+        const PREV_MAP_UNIT = PREV_STATE_UNIT
+        const drawPass = (entries, passCompiled, targetTex, prevTex, blendMax, prevUniform) => {
             const passProgram = getOrCreateProgram(passCompiled)
             if (!passProgram) return false
             gl.bindFramebuffer(gl.FRAMEBUFFER, targets.fbo)
@@ -1273,7 +1384,8 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             if (prevTex) {
                 gl.activeTexture(gl.TEXTURE0 + PREV_STATE_UNIT)
                 gl.bindTexture(gl.TEXTURE_2D, prevTex)
-                const uPrev = uloc(gl, passProgram, 'uPrevState')
+                // Suffix passes read their running map through uPrevMap instead.
+                const uPrev = uloc(gl, passProgram, prevUniform ? 'uPrevMap' : 'uPrevState')
                 if (uPrev) gl.uniform1i(uPrev, PREV_STATE_UNIT)
             }
             const passStack = { chain: entries }
@@ -1301,12 +1413,135 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             gl.viewport(0, 0, w, h)
             gl.clearColor(0, 0, 0, 0)
             gl.clear(gl.COLOR_BUFFER_BIT)
-            for (const group of planPasses(gl, eraseEntries, batchLimit)) {
+            for (const group of planPasses(gl, eraseEntries, batchLimit, unitReserve)) {
                 drawPass(group, compilePass(group, { role: 'erase' }), targets.texE, null, true)
             }
             eraseTex = targets.texE
         }
 
+        if (foldViable) {
+            // ── Fold path ──────────────────────────────────────────────────
+            // Two cached artefacts: the state BELOW the edited layer, and the
+            // maps for everything ABOVE it. Both survive while the user drags.
+            const prefixEntries = fullChain.slice(0, hotLayer)
+            const suffixEntries = fullChain.slice(hotLayer + 1)
+            const prefixSig = prefixEntries.map(layerSignature).join('~')
+            const suffixSig = suffixEntries.map(layerSignature).join('~')
+            const sameShape = foldCache
+                && foldCache.sourceVersion === options.sourceVersion
+                && foldCache.width === w
+                && foldCache.height === h
+                && gl.isTexture(foldCache.colorTex)
+
+            if (!sameShape) {
+                disposeFoldCache(gl)
+                gl.activeTexture(gl.TEXTURE0 + maxTextureUnits(gl) - 1)
+                foldCache = {
+                    sourceVersion: options.sourceVersion,
+                    width: w,
+                    height: h,
+                    prefixSig: null,
+                    suffixSig: null,
+                    prefixTex: makeMapTexture(gl, w, h, false),
+                    // The colour map's coefficients are all in 0..1, so RGBA8
+                    // holds them; the alpha map's offset is signed and can
+                    // exceed 1, so that one has to be float.
+                    colorTex: makeMapTexture(gl, w, h, false),
+                    alphaTex: makeMapTexture(gl, w, h, true),
+                }
+                gl.activeTexture(gl.TEXTURE0)
+                gl.bindTexture(gl.TEXTURE_2D, texture)
+            }
+
+            const cache = foldCache
+            if (!cache || !cache.prefixTex || !cache.colorTex || !cache.alphaTex) {
+                // Out of texture memory: stop offering the fold for this
+                // session and let the batched path serve the frame.
+                foldDisabled = true
+                disposeFoldCache(gl)
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+                return renderMegashader(sourceCanvas, stack, options)
+            }
+
+            // Prefix: replay the layers below the edited one, once.
+            if (cache.prefixSig !== prefixSig) {
+                if (prefixEntries.length) {
+                    let target = targets.texA
+                    let previous = null
+                    const prefixBatches = planPasses(gl, prefixEntries, batchLimit, unitReserve)
+                    for (let b = 0; b < prefixBatches.length; b += 1) {
+                        const last = b === prefixBatches.length - 1
+                        const dest = last ? cache.prefixTex : target
+                        const passCompiled = compilePass(prefixBatches[b], { role: 'state', readsPrevState: b > 0 })
+                        if (!drawPass(prefixBatches[b], passCompiled, dest, previous, false)) {
+                            gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+                            return renderCpuFallback(sourceCanvas, stack)
+                        }
+                        previous = dest
+                        if (!last) target = target === targets.texA ? targets.texB : targets.texA
+                    }
+                }
+                cache.prefixSig = prefixSig
+                renderMetrics.foldPrefixBuilds += 1
+            }
+
+            // Suffix maps: compose the layers above the edited one, once.
+            if (cache.suffixSig !== suffixSig) {
+                const seed = (tex, r, g, b, a) => {
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, targets.fbo)
+                    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+                    gl.viewport(0, 0, w, h)
+                    gl.clearColor(r, g, b, a)
+                    gl.clear(gl.COLOR_BUFFER_BIT)
+                }
+                // Identity maps: colour C → C (P = 1, Q = 0), alpha A → A.
+                seed(cache.colorTex, 0, 0, 0, 1)
+                seed(cache.alphaTex, 1, 0, 0, 1)
+                const suffixBatches = suffixEntries.length ? planPasses(gl, suffixEntries, batchLimit, unitReserve) : []
+                for (const [role, texKey, float] of [
+                    ['suffixColor', 'colorTex', false],
+                    ['suffixAlpha', 'alphaTex', true],
+                ]) {
+                    if (!suffixBatches.length) continue
+                    // The ping-pong partner only exists for the rebuild, which
+                    // happens when the user moves to a different layer — not
+                    // on the frames this whole thing is here to make cheap.
+                    gl.activeTexture(gl.TEXTURE0 + maxTextureUnits(gl) - 1)
+                    let write = makeMapTexture(gl, w, h, float)
+                    gl.activeTexture(gl.TEXTURE0)
+                    gl.bindTexture(gl.TEXTURE_2D, texture)
+                    if (!write) {
+                        foldDisabled = true
+                        disposeFoldCache(gl)
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+                        return renderMegashader(sourceCanvas, stack, options)
+                    }
+                    let read = cache[texKey]
+                    for (const group of suffixBatches) {
+                        if (!drawPass(group, compilePass(group, { role }), write, read, false, PREV_MAP_UNIT)) {
+                            gl.deleteTexture(write)
+                            gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+                            return renderCpuFallback(sourceCanvas, stack)
+                        }
+                        const swap = read
+                        read = write
+                        write = swap
+                    }
+                    // `read` now holds the composed map; the other is scratch.
+                    cache[texKey] = read
+                    gl.deleteTexture(write)
+                }
+                cache.suffixSig = suffixSig
+                renderMetrics.foldSuffixBuilds += 1
+            }
+
+            prevStateTex = hotLayer > 0 ? cache.prefixTex : null
+            suffixColorTex = cache.colorTex
+            suffixAlphaTex = cache.alphaTex
+            renderMetrics.foldFrames += 1
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+            gl.viewport(0, 0, w, h)
+        } else {
         // State batches: every batch but the last, with the prefix cache
         // skipping the ones whose layers have not changed since last frame.
         const sigs = batches.map(batchSignature)
@@ -1375,6 +1610,7 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null)
         gl.viewport(0, 0, w, h)
         renderMetrics.statePasses += (batches.length - 1 - startBatch) + (eraseEntries.length ? 1 : 0)
+        }
     }
 
     gl.useProgram(program)
@@ -1392,6 +1628,18 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             gl.bindTexture(gl.TEXTURE_2D, eraseTex)
             const uErase = uloc(gl, program, 'uEraseMap')
             if (uErase) gl.uniform1i(uErase, ERASE_UNIT)
+        }
+        if (suffixColorTex) {
+            gl.activeTexture(gl.TEXTURE0 + SUFFIX_COLOR_UNIT)
+            gl.bindTexture(gl.TEXTURE_2D, suffixColorTex)
+            const uSC = uloc(gl, program, 'uSuffixColor')
+            if (uSC) gl.uniform1i(uSC, SUFFIX_COLOR_UNIT)
+        }
+        if (suffixAlphaTex) {
+            gl.activeTexture(gl.TEXTURE0 + SUFFIX_ALPHA_UNIT)
+            gl.bindTexture(gl.TEXTURE_2D, suffixAlphaTex)
+            const uSA = uloc(gl, program, 'uSuffixAlpha')
+            if (uSA) gl.uniform1i(uSA, SUFFIX_ALPHA_UNIT)
         }
     }
 

@@ -2224,9 +2224,13 @@ const CanvasEditor = ({ project }) => {
         const ns = (window.__phosmith = window.__phosmith || {})
         ns.megashaderBench = (opts) => import("@/lib/megashader/bench").then((m) => m.megashaderBench(opts))
         ns.megashaderParity = (opts) => import("@/lib/megashader/bench").then((m) => m.megashaderParity(opts))
+        ns.megashaderFoldParity = (opts) => import("@/lib/megashader/bench").then((m) => m.megashaderFoldParity(opts))
+        ns.megashaderEditBench = (opts) => import("@/lib/megashader/bench").then((m) => m.megashaderEditBench(opts))
         return () => {
             delete ns.megashaderBench
             delete ns.megashaderParity
+            delete ns.megashaderFoldParity
+            delete ns.megashaderEditBench
         }
     }, [])
 
