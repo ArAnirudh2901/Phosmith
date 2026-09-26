@@ -5,16 +5,24 @@
 // Everything here runs against the production modules — no mocks — with Fabric
 // on a detached canvas instead of the editor, so no Next, Clerk or network.
 
-import { StaticCanvas, FabricImage, Rect } from 'fabric'
+import { StaticCanvas, FabricImage, Rect, config as fabricConfig } from 'fabric'
 import {
     LAYOUTS, computeCollageCells, fitImageToCell, getCellFitScale, assessCellResolution,
     collageFrameFor, defaultWeightsFor, layoutBoundaries, applyBoundaryDrag,
 } from '@/lib/collage-layout'
+import { radialLayer } from '@/lib/megashader/mask-types'
+import { applyMegashaderFilter } from '@/lib/megashader/apply-megashader'
+import { getRenderMetrics } from '@/lib/megashader/megashader-renderer'
 import { buildCellMatte, isCollageMatte } from '@/lib/collage-styles'
 import { assignPhotosToCells, photoDescriptor, focusForCell } from '@/lib/collage-arrange'
 import { canvasLimits, maxRenderScale, clampToCanvasLimits, __setCanvasLimits } from '@/lib/canvas-limits'
-import { readImageMeta, flattenOrientation } from '@/lib/raw-preview'
+import { readImageMeta, flattenOrientation, isRawFile, resolveSourceFile, extractRawPreview } from '@/lib/raw-preview'
+import { workingEdgeForProject, imagekitResized } from '@/lib/canvas-images'
 import { renderLiveCanvasElement, snapshotCanvasToBlob, isTaintError } from '@/lib/canvas-snapshot'
+
+// Match canvas.jsx: the editor forces the Canvas2D filter backend, and the
+// megashader's own WebGL context does the work inside applyTo2d.
+if (fabricConfig) fabricConfig.enableGLFiltering = false
 
 const BACKDROP = '#ff00ff'      // a colour no test photo uses, so a seam is obvious
 
@@ -390,6 +398,124 @@ window.__collage = {
 
     /** Header facts for a real file the verifier hands over. */
     metaOf: (blob) => readImageMeta(blob),
+
+    /**
+     * The production intake path for a camera RAW: container → embedded preview →
+     * orientation baked → the dimensions the editor would actually work at.
+     * This is what a DSLR file meets, and it is not the same as decoding a JPEG.
+     */
+    rawIntake: async (blob, name) => {
+        const file = new File([blob], name, { type: '' })
+        const started = performance.now()
+        const out = { name, bytes: blob.size, isRaw: isRawFile(file) }
+        try {
+            const meta = await readImageMeta(blob)
+            out.containerMeta = meta ? { w: meta.w, h: meta.h, orientation: meta.orientation } : null
+            const preview = await extractRawPreview(file)
+            out.preview = preview ? { bytes: preview.blob?.size ?? null, orientation: preview.orientation ?? null } : null
+            const resolved = await resolveSourceFile(file)
+            out.resolvedBytes = resolved?.size ?? null
+            out.resolvedType = resolved?.type || 'unknown'
+            const bmp = await createImageBitmap(resolved)
+            out.decoded = { width: bmp.width, height: bmp.height, megapixels: +((bmp.width * bmp.height) / 1e6).toFixed(1) }
+            bmp.close?.()
+            out.ms = Math.round(performance.now() - started)
+        } catch (error) {
+            out.error = String(error?.message || error).slice(0, 160)
+            out.ms = Math.round(performance.now() - started)
+        }
+        return out
+    },
+
+    /**
+     * A full-resolution DSLR frame through the real effect pipeline: resolve the
+     * RAW, build the Fabric image at native size, apply a depth-of-field blur,
+     * and time the commit render. This is the case the matrix calls "50MP
+     * crashes the browser".
+     */
+    dslrEffects: async (blob, name, { blurPx = 60, scale = 1 } = {}) => {
+        const out = { name }
+        const warnings = []
+        const origWarn = console.warn.bind(console)
+        console.warn = (...a) => { warnings.push(a.map(String).join(' ').slice(0, 200)); origWarn(...a) }
+        try {
+            const resolved = await resolveSourceFile(new File([blob], name, { type: '' }))
+            const bmp = await createImageBitmap(resolved)
+            const full = document.createElement('canvas')
+            full.width = Math.round(bmp.width * scale)
+            full.height = Math.round(bmp.height * scale)
+            full.getContext('2d').drawImage(bmp, 0, 0, full.width, full.height)
+            bmp.close?.()
+            // Is anything actually in the source canvas?
+            const srcCtx = full.getContext('2d', { willReadFrequently: true })
+            out.sourcePixel = Array.from(srcCtx.getImageData(Math.round(full.width / 2), Math.round(full.height / 2), 1, 1).data)
+            out.size = `${full.width}x${full.height}`
+            out.megapixels = +((full.width * full.height) / 1e6).toFixed(1)
+
+            const el = document.createElement('canvas')
+            el.width = full.width
+            el.height = full.height
+            const fcanvas = new StaticCanvas(el, { width: el.width, height: el.height, renderOnAddRemove: false, enableRetinaScaling: false })
+            const img = new FabricImage(full, { left: 0, top: 0, objectCaching: false })
+            fcanvas.add(img)
+
+            const t0 = performance.now()
+            applyMegashaderFilter(img, {
+                chain: [{
+                    op: 'replace',
+                    layer: {
+                        ...radialLayer({
+                            imageSize: { width: full.width, height: full.height },
+                            center: { x: full.width / 2, y: full.height * 0.42 },
+                            radius: { x: full.width * 0.28, y: full.height * 0.3 },
+                            feather: 0.4,
+                        }),
+                        inverted: true,
+                        blurPx,
+                        blurKind: 'disc',
+                        highlightGain: 2,
+                    },
+                }],
+            }, { globalMaskAlpha: 1 })
+            fcanvas.renderAll()
+            out.commitMs = Math.round(performance.now() - t0)
+            out.filters = (img.filters || []).map((f) => f?.type || '?')
+            out.metrics = (() => { const m = getRenderMetrics(); return { uploads: m.sourceUploads, mips: m.sourceMipBuilds, cpuFallbacks: m.cpuFallbacks ?? null, cacheMisses: m.cacheMisses ?? null } })()
+            out.glLimits = (() => {
+                const gl = document.createElement('canvas').getContext('webgl2')
+                return gl ? { maxTexture: gl.getParameter(gl.MAX_TEXTURE_SIZE), maxRenderbuffer: gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) } : null
+            })()
+
+            const filtered = img._element || img.getElement()
+            out.filteredSize = `${filtered.width}x${filtered.height}`
+            const ctx = filtered.getContext('2d', { willReadFrequently: true })
+            const at = (fx, fy) => Array.from(ctx.getImageData(Math.round(fx * filtered.width), Math.round(fy * filtered.height), 1, 1).data).slice(0, 3)
+            out.centre = at(0.5, 0.42)
+            out.corner = at(0.05, 0.95)
+
+            // A small visual so the result can be judged by eye.
+            const view = document.createElement('canvas')
+            const viewScale = Math.min(1, 900 / Math.max(filtered.width, filtered.height))
+            view.width = Math.round(filtered.width * viewScale)
+            view.height = Math.round(filtered.height * viewScale)
+            const vctx = view.getContext('2d')
+            vctx.imageSmoothingQuality = 'high'
+            vctx.drawImage(filtered, 0, 0, view.width, view.height)
+            out.preview = view.toDataURL('image/jpeg', 0.85)
+        } catch (error) {
+            out.error = String(error?.message || error).slice(0, 200)
+        } finally {
+            console.warn = origWarn
+            out.warnings = warnings.slice(0, 4)
+        }
+        return out
+    },
+
+    /** What the working-resolution rule would fetch for a project of this size. */
+    workingEdge: (w, h) => ({
+        edge: workingEdgeForProject({ width: w, height: h }),
+        url: imagekitResized('https://ik.imagekit.io/demo/photo.jpg', workingEdgeForProject({ width: w, height: h })),
+    }),
 
     /** A CMYK JPEG must be recognisable from its header alone. */
     cmyk: async () => {

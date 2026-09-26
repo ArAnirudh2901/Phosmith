@@ -26,7 +26,8 @@ const OUT_DIR = path.join(ROOT, '.cache', 'collage-harness')
 const args = process.argv.slice(2)
 const DEVTOOLS_PORT = Number(args[args.indexOf('--port') + 1]) || 9222
 const PHOTO_DIR = process.env.PHOSMITH_PHOTO_DIR || ''
-const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff'])
+const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.tif', '.tiff', '.arw', '.nef', '.cr2', '.dng'])
+const RAW_EXTS = new Set(['.arw', '.nef', '.cr2', '.dng'])
 
 const log = (m) => console.log(`[verify-collage-render] ${m}`)
 const die = (m) => { console.error(`[verify-collage-render] ✗ ${m}`); process.exit(1) }
@@ -79,6 +80,8 @@ const MIME = {
     '.html': 'text/html', '.js': 'text/javascript', '.map': 'application/json',
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
     '.tif': 'image/tiff', '.tiff': 'image/tiff', '.heic': 'image/heic', '.json': 'application/json',
+    '.arw': 'application/octet-stream', '.nef': 'application/octet-stream',
+    '.cr2': 'application/octet-stream', '.dng': 'application/octet-stream',
 }
 const server = createServer(async (req, res) => {
     const rel = new URL(req.url, 'http://localhost').pathname
@@ -309,10 +312,39 @@ try {
 
     // 11. The user's own photos, when offered.
     if (photoFiles.length) {
+        // Camera RAW goes through the production container path, not a plain
+        // decode — a browser cannot decode an .arw or .nef at all.
+        const rawList = photoFiles.filter((p) => RAW_EXTS.has(path.extname(p.name).toLowerCase()))
+        if (rawList.length) {
+            const raws = await tab.evaluate(`(async () => {
+                const list = await fetch('/photos.json').then((res) => res.json())
+                const out = []
+                for (const item of list) {
+                    if (!/\.(arw|nef|cr2|dng)$/i.test(item.name)) continue
+                    const blob = await fetch(item.url).then((res) => res.blob())
+                    out.push(await window.__collage.rawIntake(blob, item.name))
+                }
+                return out
+            })()`)
+            for (const raw of raws) {
+                const mp = raw.decoded?.megapixels
+                log(`${raw.name}: ${(raw.bytes / 1e6).toFixed(1)} MB container → ${raw.decoded ? `${raw.decoded.width}×${raw.decoded.height} (${mp} MP)` : `FAILED: ${raw.error}`} in ${raw.ms} ms`)
+            }
+            check(raws.every((r) => r.isRaw), 'every camera RAW is recognised as one')
+            check(raws.every((r) => r.decoded && r.decoded.width > 0), 'every camera RAW yields a usable image through the intake path',
+                raws.filter((r) => !r.decoded).map((r) => `${r.name}: ${r.error}`).join('; ') || `${raws.length} files`)
+            const bigEnough = raws.filter((r) => (r.decoded?.megapixels || 0) >= 2)
+            check(bigEnough.length === raws.length, 'and the extracted preview is a full-size frame, not a thumbnail',
+                raws.map((r) => `${r.name}=${r.decoded?.megapixels}MP`).join(' '))
+            check(raws.every((r) => r.ms < 4000), 'each RAW is imported in under 4 s', raws.map((r) => `${r.ms}ms`).join(' '))
+        }
+
         const r = await tab.evaluate(`(async () => {
             const list = await fetch('/photos.json').then((res) => res.json())
             const out = []
+            if (/\.(arw|nef|cr2|dng)$/i.test('x')) return out
             for (const item of list) {
+                if (/\.(arw|nef|cr2|dng)$/i.test(item.name)) continue
                 const blob = await fetch(item.url).then((res) => res.blob())
                 const meta = await window.__collage.metaOf(blob)
                 let decoded = null
