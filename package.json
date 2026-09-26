@@ -33,6 +33,7 @@
     "verify:fold": "bun scripts/verify-fold.mjs",
     "verify:cv": "bun scripts/verify-cv.mjs",
     "verify:focus": "bun scripts/verify-focus.mjs",
+    "verify:blur-perf": "bun scripts/verify-blur-perf.mjs",
     "verify:chain-fold": "bun scripts/verify-chain-fold.mjs",
     "verify:crop-compose": "bun scripts/verify-crop-compose.mjs",
     "verify:extend": "bun scripts/verify-extend-frame.mjs",

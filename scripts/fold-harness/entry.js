@@ -2,7 +2,7 @@
 // window so the verifier can drive them over CDP (or Playwright) in a real
 // browser. Kept out of the app bundle.
 
-import { megashaderBench, megashaderEditBench, megashaderFoldParity, megashaderParity } from '../../src/lib/megashader/bench.js'
+import { megashaderBench, megashaderBlurBench, megashaderEditBench, megashaderFoldParity, megashaderParity } from '../../src/lib/megashader/bench.js'
 import { disposeRenderer, getRenderMetrics, resetRenderMetrics } from '../../src/lib/megashader/megashader-renderer.js'
 
 /**
@@ -81,6 +81,7 @@ window.__fold = {
     parity: megashaderParity,
     foldParity: megashaderFoldParity,
     editBench: megashaderEditBench,
+    blurBench: megashaderBlurBench,
     bench: megashaderBench,
     metrics: getRenderMetrics,
     resetMetrics: resetRenderMetrics,
