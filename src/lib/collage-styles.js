@@ -156,6 +156,48 @@ export const buildCellClipPath = (cell, style) => {
     })
 }
 
+/**
+ * A solid panel behind one cell, in the cell's own shape.
+ *
+ * Its job is transparency: a cut-out PNG or a WebP with alpha otherwise shows the
+ * canvas backdrop through the middle of the photo, which reads as a hole rather
+ * than a design. The matte gives that cell its own ground. Kept as a real
+ * object (not `excludeFromExport`) so what is exported is what was seen, and
+ * flagged so a re-layout can clear the old ones.
+ */
+export const buildCellMatte = (cell, style) => {
+    const fill = typeof style?.matte === 'string' ? style.matte : '#ffffff'
+    const matte = style?.shape === 'circle'
+        ? new Ellipse({
+            left: cell.x,
+            top: cell.y,
+            rx: Math.max(1, cell.w / 2),
+            ry: Math.max(1, cell.h / 2),
+        })
+        : new Rect({
+            left: cell.x,
+            top: cell.y,
+            width: Math.max(1, cell.w),
+            height: Math.max(1, cell.h),
+            rx: radiusForCell(cell, style?.radiusPct),
+            ry: radiusForCell(cell, style?.radiusPct),
+        })
+    matte.set({
+        fill,
+        originX: 'left',
+        originY: 'top',
+        selectable: false,
+        evented: false,
+        hoverCursor: 'default',
+    })
+    matte.phosmithCollageMatte = true
+    matte.__phosmithCollageMatte = true
+    return matte
+}
+
+/** True for a panel this module put behind a cell. */
+export const isCollageMatte = (obj) => Boolean(obj?.phosmithCollageMatte || obj?.__phosmithCollageMatte)
+
 /** Native drop shadow for a framed photo (null when the style has none). */
 export const buildCellShadow = (style) =>
     style?.shadow

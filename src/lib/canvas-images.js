@@ -1,7 +1,8 @@
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { stripImageMetadata } from '@/lib/strip-metadata'
-import { isRawFile, readImageMeta, resolveSourceFile } from '@/lib/raw-preview'
+import { flattenOrientation, isRawFile, readImageMeta, resolveSourceFile } from '@/lib/raw-preview'
+import { IMAGEKIT_MAX_EDGE, IMAGEKIT_MAX_MP } from '@/lib/canvas-limits'
 
 const CASCADE_OFFSET = 32
 
@@ -20,8 +21,37 @@ const readFileAsDataURL = (file) =>
 // ImageKit rejects images above 25 MP on serving ("ELIMIT"). We downscale
 // anything above 24 MP (safety margin) through an offscreen canvas so the
 // uploaded image is always servable.
-const IMAGEKIT_MAX_MP = 24_000_000
-const MAX_EDGE = 8192
+const MAX_EDGE = IMAGEKIT_MAX_EDGE
+
+// A 50 MP DSLR JPEG at camera quality runs 25-45 MB, and `downscaleIfNeeded`
+// already bounds the PIXELS, so the byte cap only needs to stop pathological
+// files. RAW keeps its own, larger ceiling.
+const MAX_IMAGE_BYTES = 64 * 1024 * 1024
+
+// Orientation from the file, colours converted to the display space: both are
+// implementation-defined defaults across engines, and a wrong guess shows up as
+// a sideways portrait or a washed-out AdobeRGB frame.
+const DECODE_OPTS = { imageOrientation: 'from-image', colorSpaceConversion: 'default' }
+
+/**
+ * Normalise a file the canvas is about to own. EXIF is stripped before upload, so
+ * an orientation tag has to become pixels first or every portrait shot from a
+ * camera is served sideways. CMYK/YCCK JPEGs are refused: browsers either fail
+ * the decode or render them inverted, and silently importing one is worse.
+ */
+const prepareForCanvas = async (file) => {
+  if (!file?.type?.startsWith('image/')) return file
+  const meta = await readImageMeta(file)
+  if (meta?.components === 4) {
+    const err = new Error('UNSUPPORTED_COLOR')
+    err.code = 'UNSUPPORTED_COLOR'
+    throw err
+  }
+  if (!meta?.orientation || meta.orientation === 1) return file
+  const rotated = await flattenOrientation(file, file.type)
+  if (!rotated || rotated === file) return file
+  return new File([rotated], file.name, { type: rotated.type || file.type, lastModified: Date.now() })
+}
 
 // Encode a resized bitmap to a Blob (OffscreenCanvas off the main thread where
 // available, else a DOM canvas). Returns null on failure.
@@ -50,7 +80,7 @@ const downscaleIfNeeded = async (file) => {
   let probe = null
   if (!w || !h) {
     // Unknown header — decode once off-thread to learn the size.
-    probe = await createImageBitmap(file).catch(() => null)
+    probe = await createImageBitmap(file, DECODE_OPTS).catch(() => null)
     if (!probe) return file
     w = probe.width
     h = probe.height
@@ -74,7 +104,7 @@ const downscaleIfNeeded = async (file) => {
 
   try {
     // Explicit dest dims keep it correct where resizeWidth is ignored (older Safari).
-    const bitmap = probe || await createImageBitmap(file, { resizeWidth: nw, resizeHeight: nh, resizeQuality: 'high' })
+    const bitmap = probe || await createImageBitmap(file, { ...DECODE_OPTS, resizeWidth: nw, resizeHeight: nh, resizeQuality: 'high' })
     const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
     const blob = await encodeResized(bitmap, nw, nh, type)
     bitmap.close?.()
@@ -84,6 +114,30 @@ const downscaleIfNeeded = async (file) => {
     probe?.close?.()
     return file // fall back to original — ImageKit may reject, but no freeze
   }
+}
+
+/**
+ * Ask ImageKit for a variant no larger than `maxEdge` on its long side.
+ *
+ * The point is memory, not bandwidth: a collage holding eight 6000×4000 frames
+ * decodes to ~770 MB of RGBA, which is how a tab dies mid-edit on a phone. A
+ * photo can never need more than the project's long edge times the largest export
+ * scale, so that is what gets fetched — and because the transform lives in the
+ * URL, the saved canvas reloads the same pixels.
+ */
+export const imagekitResized = (url, maxEdge) => {
+  if (!url || !maxEdge) return url
+  if (!/(^https?:)?\/\/[^/]*imagekit\.io\//.test(url)) return url   // not ours to transform
+  if (/[?&]tr=/.test(url)) return url
+  const edge = Math.max(512, Math.min(IMAGEKIT_MAX_EDGE, Math.round(maxEdge)))
+  return `${url}${url.includes('?') ? '&' : '?'}tr=w-${edge},h-${edge},c-at_max`
+}
+
+/** Long edge a photo can possibly need: the project's long edge at 3× export. */
+export const workingEdgeForProject = (project) => {
+  const long = Math.max(Number(project?.width) || 0, Number(project?.height) || 0)
+  if (!long) return 0
+  return Math.max(1024, Math.min(IMAGEKIT_MAX_EDGE, Math.ceil(long * 3)))
 }
 
 // Uploads to our /api/imagekit/upload endpoint (auth-gated) and returns the CDN URL.
@@ -149,15 +203,15 @@ export const fabricImageFromUrl = async (url) => {
   }
 }
 
-export const loadFabricImageFromFile = async (file, { silent = false } = {}) =>
-  loadFabricImage(file, { silent })
+export const loadFabricImageFromFile = async (file, { silent = false, maxEdge = 0 } = {}) =>
+  loadFabricImage(file, { silent, maxEdge })
 
-const loadFabricImage = async (file, { silent }) => {
-  const sourceFile = await resolveSourceFile(file)
+const loadFabricImage = async (file, { silent, maxEdge = 0 }) => {
+  const sourceFile = await prepareForCanvas(await resolveSourceFile(file))
   // Try ImageKit first — small URL, persistent, CDN-served.
   try {
     const url = await uploadFileToImageKit(sourceFile)
-    return await fabricImageFromUrl(url)
+    return await fabricImageFromUrl(imagekitResized(url, maxEdge))
   } catch (uploadError) {
     console.warn('[canvas-images] ImageKit upload failed, falling back to data URL:', uploadError)
     if (!silent) {
@@ -211,10 +265,10 @@ export async function addImageFileToCanvas(canvasEditor, file, project, options 
     return false
   }
   // A RAW container is large (20–60 MB), but only its small embedded preview is
-  // ever read/uploaded — so the 25 MB cap applies to standard images only. Guard
+  // ever read/uploaded — so the byte cap applies to standard images only. Guard
   // RAW with a generous ceiling against pathological files.
-  if (!raw && file.size > 25 * 1024 * 1024) {
-    toast.error('Image must be under 25 MB')
+  if (!raw && file.size > MAX_IMAGE_BYTES) {
+    toast.error('Image must be under 64 MB')
     return false
   }
   if (raw && file.size > 200 * 1024 * 1024) {
@@ -222,10 +276,16 @@ export async function addImageFileToCanvas(canvasEditor, file, project, options 
     return false
   }
 
+  // Fabric draws a GIF's first frame and nothing else; better to say so than to
+  // let the user wonder why their animation is still.
+  if (file.type === 'image/gif' && !options.silent) {
+    toast.info('GIF added as a still frame — animation is not preserved')
+  }
+
   const { silent = false, stackIndex } = options
   const toastId = silent ? null : toast.loading('Adding image...')
   try {
-    const img = await loadFabricImage(file, { silent })
+    const img = await loadFabricImage(file, { silent, maxEdge: workingEdgeForProject(project) })
     const resolvedStackIndex =
       typeof stackIndex === 'number' ? stackIndex : countExistingImages(canvasEditor)
     fitNewImageToProject(img, project, { stackIndex: resolvedStackIndex })
@@ -239,9 +299,11 @@ export async function addImageFileToCanvas(canvasEditor, file, project, options 
     }
     return img
   } catch (err) {
-    const msg = err?.message === 'RAW_NO_PREVIEW'
-      ? 'This RAW has no embedded preview to import'
-      : 'Failed to load image'
+    const msg = err?.code === 'UNSUPPORTED_COLOR'
+      ? 'This JPEG is CMYK (print colour). Convert it to sRGB and try again.'
+      : err?.message === 'RAW_NO_PREVIEW'
+        ? 'This RAW has no embedded preview to import'
+        : 'Failed to load image'
     if (toastId) toast.error(msg, { id: toastId })
     else toast.error(msg)
     console.error('[canvas-images] Load error:', err)

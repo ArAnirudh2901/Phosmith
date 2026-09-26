@@ -280,3 +280,49 @@ export const validateCollagePlan = (raw, { photoCount, maxRecipes = 6 } = {}) =>
         .slice(0, maxRecipes)
     return { analysis, recipes }
 }
+
+/* ── Plan cache ────────────────────────────────────────────────────────────────
+ * A vision pass over the same photos, with the same brief, returns the same
+ * templates — so it is paid for once and shared by the panel and the agent,
+ * which previously each re-uploaded thumbnails on every invocation.
+ */
+
+const PLAN_CACHE_LIMIT = 12
+const planCache = new Map()
+
+/** Bump when the prompt, schema, catalogs or validator change — old plans then
+ *  stop being served. */
+export const COLLAGE_PLAN_VERSION = 'v1'
+
+/**
+ * Key a plan by WHAT was planned, never by object identity: the photo set (any
+ * stable per-photo id — a perceptual hash, else a src URL), the creative brief,
+ * the canvas shape and how many recipes were asked for. Photo order does not
+ * change the answer, so ids are sorted.
+ */
+export const collagePlanCacheKey = ({ photoIds = [], directionHint = '', canvasAspect = 1, recipeCount = 6 } = {}) => {
+    const ids = photoIds.filter(Boolean).map(String).sort().join('|')
+    if (!ids) return null
+    const brief = String(directionHint || '').trim().toLowerCase()
+    const aspect = Number.isFinite(canvasAspect) ? canvasAspect.toFixed(4) : '1'
+    return `${COLLAGE_PLAN_VERSION}::${ids}::${brief}::${aspect}::${recipeCount}`
+}
+
+export const readCollagePlan = (key) => {
+    if (!key) return null
+    const hit = planCache.get(key)
+    if (!hit) return null
+    // Refresh recency so a set the user keeps coming back to survives eviction.
+    planCache.delete(key)
+    planCache.set(key, hit)
+    return hit
+}
+
+export const writeCollagePlan = (key, value) => {
+    if (!key || !value) return value
+    planCache.set(key, value)
+    while (planCache.size > PLAN_CACHE_LIMIT) planCache.delete(planCache.keys().next().value)
+    return value
+}
+
+export const clearCollagePlanCache = () => planCache.clear()

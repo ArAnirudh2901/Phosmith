@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useCanvas } from '../../../../../../../context/context'
+import { isTaintError } from '@/lib/canvas-snapshot'
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { adaptiveTextColor } from '@/lib/color-extraction'
@@ -1690,7 +1691,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       let blob
       try { blob = await encodeToPngBlob(out) }
       catch (encodeErr) {
-        if (encodeErr?.name === 'SecurityError') throw new Error('This image is cross-origin and can’t be exported. Re-import it into the project first.')
+        // Same taint test the export path uses, so both agree on what a tainted
+        // canvas looks like across engines.
+        if (isTaintError(encodeErr)) throw new Error('This image is cross-origin and can’t be exported. Re-import it into the project first.')
         throw encodeErr
       }
       const url = await uploadStretchBlob(blob, W, H)

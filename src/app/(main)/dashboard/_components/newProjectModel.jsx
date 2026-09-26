@@ -15,6 +15,7 @@ import { useRouter } from 'next/navigation'
 import UpgradeModel from '@/components/upgradeModel'
 import { stripImageMetadata } from '@/lib/strip-metadata'
 import { IMAGE_UPLOAD_ACCEPT, isRawFile, resolveSourceFile } from '@/lib/raw-preview'
+import { clampToCanvasLimits, IMAGEKIT_MAX_EDGE, IMAGEKIT_MAX_MP } from '@/lib/canvas-limits'
 
 const loadImageFromObjectUrl = (url) =>
     new Promise((resolve, reject) => {
@@ -53,9 +54,10 @@ const getSafeBaseName = (fileName) => {
  * 8 192 px edge cap. An 8K image (7680×4320 = 33 MP) is above 24 MP and will
  * be proportionally downscaled to ≈6400×3600, which is still very high quality.
  */
-const MAX_CANVAS_EDGE = 8192
-const IMAGEKIT_MAX_MP = 24_000_000              // 24 MP — stay safely below ImageKit's 25 MP cap
-const MAX_CANVAS_AREA = IMAGEKIT_MAX_MP         // use the tighter constraint
+// The serving limits live with the upload path that enforces them, so the two
+// places that clamp an image agree by construction.
+const MAX_CANVAS_EDGE = IMAGEKIT_MAX_EDGE
+const MAX_CANVAS_AREA = IMAGEKIT_MAX_MP         // the tighter of the two constraints
 const IMAGEKIT_MAX_BYTES = 25 * 1024 * 1024     // 25 MB — ImageKit upload hard limit
 // Container cap only. A RAW is a container whose embedded preview is a fraction
 // of its size, so the real ceiling is IMAGEKIT_MAX_BYTES on the produced blob.
@@ -88,8 +90,11 @@ const fitToCanvasLimits = (srcW, srcH) => {
         h = Math.round(h * areaScale)
     }
 
-    // Ensure at least 1×1
-    return { w: Math.max(1, w), h: Math.max(1, h) }
+    // Finally clamp to what THIS device's canvas can hold: the ImageKit limits
+    // say nothing about a phone whose canvas area tops out well below 24 MP, and
+    // an over-sized canvas comes back blank rather than throwing.
+    const device = clampToCanvasLimits(w, h)
+    return { w: Math.max(1, device.width), h: Math.max(1, device.height) }
 }
 
 const rasterizeSelectedImage = async (file, objectUrl) => {

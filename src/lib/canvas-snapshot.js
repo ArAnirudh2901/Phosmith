@@ -15,6 +15,7 @@
 // the React topbar.
 
 import { isPhosmithMaskOverlay } from "@/lib/canvas-mask"
+import { canvasLimits, maxRenderScale } from "@/lib/canvas-limits"
 
 // Transient objects that must never appear in a flattened render: the mask
 // tool's live overlay and anything explicitly flagged excludeFromExport.
@@ -87,6 +88,7 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
     let savedVpt = null
     let savedW = null
     let savedH = null
+    let limitedBy = null
     const hiddenForExport = []
     // Megashader images whose "show mask" overlay we switched off for the render.
     const overlaysForExport = []
@@ -184,9 +186,17 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
 
         // Cap the output's long edge when requested (analysis render). This only
         // ever reduces scale — export passes no maxEdge and keeps its 1×/2×/3×.
-        const effectiveScale = maxEdge
+        const requestedScale = maxEdge
             ? Math.min(scale, maxEdge / Math.max(cropW, cropH))
             : scale
+        // …and cap again against what the device's canvas can actually hold. Past
+        // the area limit iOS Safari returns a blank or half-drawn canvas instead
+        // of throwing, so an unchecked 3× export of a tall project saves nothing.
+        const effectiveScale = maxRenderScale(cropW, cropH, requestedScale)
+        if (effectiveScale <= 0) throw new Error("Export size exceeds this device's canvas limit")
+        limitedBy = effectiveScale < requestedScale - 1e-6
+            ? { requestedScale, effectiveScale, ...canvasLimits() }
+            : null
 
         // Pass scale through to fabric so high-res renders re-render at higher
         // resolution rather than upscaling the already-rasterized snapshot.
@@ -197,7 +207,7 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
             top: cropTop,
         })
 
-        return { canvasElement, cropW, cropH, scale: effectiveScale }
+        return { canvasElement, cropW, cropH, scale: effectiveScale, limitedBy }
     } finally {
         // Always restore viewport dimensions and transform, even if render failed.
         for (const obj of hiddenForExport) {
@@ -227,7 +237,7 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
 
 // Flatten the live canvas to an encoded blob (PNG/JPEG/WebP) — the export path.
 export const snapshotCanvasToBlob = async (canvasEditor, { project, scale = 1, format = "png", quality = 1 } = {}) => {
-    const { canvasElement } = renderLiveCanvasElement(canvasEditor, { project, scale })
+    const { canvasElement, limitedBy } = renderLiveCanvasElement(canvasEditor, { project, scale })
 
     let finalCanvas = canvasElement
     // Only JPEG lacks an alpha channel, so only it needs a flattened background.
@@ -256,7 +266,7 @@ export const snapshotCanvasToBlob = async (canvasEditor, { project, scale = 1, f
             quality,
         )
     })
-    return { blob, mimeType }
+    return { blob, mimeType, limitedBy }
 }
 
 // Export with one-shot tainted-canvas recovery: if encoding throws a SecurityError
