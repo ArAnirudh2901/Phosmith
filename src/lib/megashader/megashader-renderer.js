@@ -33,6 +33,9 @@ import { getKindSchema, normaliseUniformValue } from './glsl-mask-kinds'
 import { getMaskTexture, getMaskTextureVersion, stackHasNoVisibleEffect, fillModeToFloat } from './mask-types'
 import { isFoldableOp } from './chain-fold'
 
+/** Shader-side encoding of the blur shapes (mask-types' BLUR_KINDS order). */
+const BLUR_KIND_INDEX = { disc: 0, hex: 1, ring: 2, motion: 3, spin: 4 }
+
 const MAX_PROGRAM_CACHE = 64
 
 // Step 10.3: lightweight perf metrics. The renderer tracks compile
@@ -78,6 +81,10 @@ const renderMetrics = {
     foldPrefixBuilds: 0,
     /** Times the maps above the edited layer were rebuilt. */
     foldSuffixBuilds: 0,
+    /** Times the fold was retired for the session (refused target, no memory). */
+    foldRetired: 0,
+    /** Mip chains built for the source (once per version, only when blurring). */
+    sourceMipBuilds: 0,
 }
 
 /**
@@ -111,6 +118,8 @@ const resetRenderMetrics = () => {
     renderMetrics.foldFrames = 0
     renderMetrics.foldPrefixBuilds = 0
     renderMetrics.foldSuffixBuilds = 0
+    renderMetrics.foldRetired = 0
+    renderMetrics.sourceMipBuilds = 0
 }
 
 /**
@@ -216,6 +225,26 @@ const ensureGl = () => {
         preserveDrawingBuffer: false,
     })) || /** @type {any} */ (glCanvas.getContext('webgl'))
     if (!ctx) return null
+
+    // A lost context takes every texture and program with it, and its caps no
+    // longer describe whatever replaces it. Drop the references without calling
+    // delete* on objects the driver has already reclaimed.
+    glCanvas.addEventListener('webglcontextlost', () => {
+        glContext = null
+        stateTargets = null
+        prefixCache = null
+        foldCache = null
+        lastBatchSigs = null
+        lastLayerSigs = null
+        programCache.clear()
+        quadProgram = null
+        quadVbo = null
+        quadVao = null
+        maskGlTextureCache = new Map()
+        maskGlTextureBytes = 0
+        liveSourceTextures.clear()
+        resetGlCaps()
+    })
 
     glContext = ctx
     return glContext
@@ -610,6 +639,22 @@ const writeLayerAdjustUniforms = (gl, program, layer, slotIndex) => {
     // Detail — local-contrast ops (sample the source neighbourhood in GLSL).
     set('texture',     layer.texture,     -100, 100)
     set('dehaze',      layer.dehaze,      -100, 100)
+    // Optical blur. The radius is in SOURCE pixels, so it means the same thing
+    // whichever resolution the preview is running at.
+    set('blurPx',      layer.blurPx,      0,    256)
+    set('blurAngle',   layer.blurAngle,   -Math.PI * 2, Math.PI * 2)
+    set('blurLength',  layer.blurLength,  0,    1)
+    set('highlightGain', layer.highlightGain, 0, 8)
+    set('structure',   layer.structure,   -100, 100)
+    set('lux',         layer.lux,         -100, 100)
+    set('fade',        layer.fade,        0,    100)
+    const shapeLoc = uloc(gl, program, `${prefix}blurKind`)
+    if (shapeLoc) gl.uniform1f(shapeLoc, BLUR_KIND_INDEX[layer.blurKind] ?? 0)
+    const threshLoc = uloc(gl, program, `${prefix}highlightThreshold`)
+    if (threshLoc) {
+        const t = Number.isFinite(layer.highlightThreshold) ? Math.max(0, Math.min(1, layer.highlightThreshold)) : 0.75
+        gl.uniform1f(threshLoc, t)
+    }
 
     // Gamma — per-channel power (identity 1.0); different default from the 0.0
     // fields above, so written directly rather than via `set`.
@@ -889,11 +934,61 @@ let lastLayerSigs = null
 let floatTargetSupport = null
 let foldDisabled = false
 
+/** True when the framebuffer bound right now can actually be rendered into. */
+const fboComplete = (gl) => gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE
+
+/**
+ * The extension being present does not promise RGBA16F is a renderable
+ * attachment, and a silent no-op draw into a half-float target is how the fold
+ * ends up compositing through an undefined map. So probe for real: attach a 1×1
+ * RGBA16F texture and ask the driver.
+ */
 const supportsFloatTargets = (gl) => {
-    if (floatTargetSupport === null) {
-        floatTargetSupport = Boolean(gl.getExtension('EXT_color_buffer_float'))
+    if (floatTargetSupport !== null) return floatTargetSupport
+    if (!gl.getExtension('EXT_color_buffer_float')) {
+        floatTargetSupport = false
+        return false
     }
+    const fbo = gl.createFramebuffer()
+    const tex = gl.createTexture()
+    if (!fbo || !tex) {
+        if (fbo) gl.deleteFramebuffer(fbo)
+        if (tex) gl.deleteTexture(tex)
+        floatTargetSupport = false
+        return false
+    }
+    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING)
+    // Scratch unit: unit 0 holds the source image the passes are about to read.
+    gl.activeTexture(gl.TEXTURE0 + maxTextureUnits(gl) - 1)
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, null)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+    floatTargetSupport = fboComplete(gl)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo)
+    gl.bindTexture(gl.TEXTURE_2D, null)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.deleteFramebuffer(fbo)
+    gl.deleteTexture(tex)
     return floatTargetSupport
+}
+
+/**
+ * Take the fold out of service for the session: a map target the driver refuses
+ * or an allocation that fails is not worth retrying every frame. The batched
+ * path renders the same frame correctly, just without the single-draw win.
+ */
+const retireFold = (gl) => {
+    foldDisabled = true
+    renderMetrics.foldRetired += 1
+    disposeFoldCache(gl)
+}
+
+/** Caps belong to one context; a new context must re-probe them. */
+const resetGlCaps = () => {
+    floatTargetSupport = null
+    cachedMaxUnits = 0
+    foldDisabled = false
 }
 
 const makeMapTexture = (gl, w, h, float) => {
@@ -984,7 +1079,7 @@ const ensureStateTargets = (gl, w, h) => {
 /** Texture units a single layer needs: its kind mask, plus its curve LUT. */
 const layerUnitCost = (layer) => {
     const kindNeedsTexture = layer
-        && ['semantic', 'smartBrush', 'depth', 'lasso', 'brush', 'path'].includes(layer.kind)
+        && ['semantic', 'smartBrush', 'depth', 'gradient', 'lasso', 'brush', 'path'].includes(layer.kind)
     return (kindNeedsTexture ? 1 : 0) + (layer && layer.curveLutKey ? 1 : 0)
 }
 
@@ -1070,6 +1165,8 @@ const bindKindTextures = (gl, stack, firstUnit = 1) => {
             cacheKey = layer.brushTextureKey
         } else if (layer.kind === 'depth') {
             cacheKey = layer.depthMapKey
+        } else if (layer.kind === 'gradient') {
+            cacheKey = layer.gradientMapKey
         } else if (layer.kind === 'lasso') {
             cacheKey = layer.maskTextureKey
         } else if (layer.kind === 'brush') {
@@ -1328,20 +1425,36 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
         sourceTextureCache.set(sourceCanvas, sourceEntry)
         liveSourceTextures.add(texture)
     }
+    // A gather blur reads the source through mip levels so its tap count stops
+    // depending on the radius. Mips are built only when a layer asks for blur, and
+    // only on WebGL2 (WebGL1 refuses to mip a non-power-of-two texture).
+    const wantsMips = typeof WebGL2RenderingContext !== 'undefined'
+        && gl instanceof WebGL2RenderingContext
+        && fullChain.some((e) => (Number(e.layer?.blurPx) || 0) > 0)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, texture)
-    if (!reuseSource) {
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, /** @type {any} */ (sourceCanvas))
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-        sourceEntry.width = w
-        sourceEntry.height = h
-        sourceEntry.version = sourceVersion
-        renderMetrics.sourceUploads += 1
+    if (!reuseSource || (wantsMips && !sourceEntry.mipped)) {
+        if (!reuseSource) {
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+            gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, /** @type {any} */ (sourceCanvas))
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+            sourceEntry.width = w
+            sourceEntry.height = h
+            sourceEntry.version = sourceVersion
+            sourceEntry.mipped = false
+            renderMetrics.sourceUploads += 1
+        }
+        if (wantsMips) {
+            gl.generateMipmap(gl.TEXTURE_2D)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
+            sourceEntry.mipped = true
+            renderMetrics.sourceMipBuilds += 1
+        } else {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        }
     } else {
         renderMetrics.sourceUploadsSkipped += 1
     }
@@ -1375,6 +1488,9 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             if (!passProgram) return false
             gl.bindFramebuffer(gl.FRAMEBUFFER, targets.fbo)
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTex, 0)
+            // An unrenderable attachment makes clear() and drawArrays() no-ops,
+            // so the target would keep undefined content and get composited.
+            if (!fboComplete(gl)) return false
             gl.viewport(0, 0, w, h)
             gl.useProgram(passProgram)
             const uImageLoc = uloc(gl, passProgram, 'uImage')
@@ -1427,10 +1543,17 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             const suffixEntries = fullChain.slice(hotLayer + 1)
             const prefixSig = prefixEntries.map(layerSignature).join('~')
             const suffixSig = suffixEntries.map(layerSignature).join('~')
+            const suffixBatches = suffixEntries.length ? planPasses(gl, suffixEntries, batchLimit, unitReserve) : []
+            // One batch writes the colour map once, so 8-bit coefficients cost
+            // nothing. Several batches read it back and rewrite it per batch,
+            // and 1/255 of quantisation per round trip adds up past the parity
+            // gate's 2/255 — those chains get a float map instead.
+            const colorFloat = suffixBatches.length > 1
             const sameShape = foldCache
                 && foldCache.sourceVersion === options.sourceVersion
                 && foldCache.width === w
                 && foldCache.height === h
+                && foldCache.colorFloat === colorFloat
                 && gl.isTexture(foldCache.colorTex)
 
             if (!sameShape) {
@@ -1442,11 +1565,13 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
                     height: h,
                     prefixSig: null,
                     suffixSig: null,
+                    colorFloat,
                     prefixTex: makeMapTexture(gl, w, h, false),
                     // The colour map's coefficients are all in 0..1, so RGBA8
-                    // holds them; the alpha map's offset is signed and can
-                    // exceed 1, so that one has to be float.
-                    colorTex: makeMapTexture(gl, w, h, false),
+                    // holds them unless the map is rebuilt batch by batch; the
+                    // alpha map's offset is signed and can exceed 1, so that one
+                    // is always float.
+                    colorTex: makeMapTexture(gl, w, h, colorFloat),
                     alphaTex: makeMapTexture(gl, w, h, true),
                 }
                 gl.activeTexture(gl.TEXTURE0)
@@ -1457,8 +1582,7 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
             if (!cache || !cache.prefixTex || !cache.colorTex || !cache.alphaTex) {
                 // Out of texture memory: stop offering the fold for this
                 // session and let the batched path serve the frame.
-                foldDisabled = true
-                disposeFoldCache(gl)
+                retireFold(gl)
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null)
                 return renderMegashader(sourceCanvas, stack, options)
             }
@@ -1474,8 +1598,9 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
                         const dest = last ? cache.prefixTex : target
                         const passCompiled = compilePass(prefixBatches[b], { role: 'state', readsPrevState: b > 0 })
                         if (!drawPass(prefixBatches[b], passCompiled, dest, previous, false)) {
+                            retireFold(gl)
                             gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-                            return renderCpuFallback(sourceCanvas, stack)
+                            return renderMegashader(sourceCanvas, stack, options)
                         }
                         previous = dest
                         if (!last) target = target === targets.texA ? targets.texB : targets.texA
@@ -1490,16 +1615,22 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
                 const seed = (tex, r, g, b, a) => {
                     gl.bindFramebuffer(gl.FRAMEBUFFER, targets.fbo)
                     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+                    if (!fboComplete(gl)) return false
                     gl.viewport(0, 0, w, h)
                     gl.clearColor(r, g, b, a)
                     gl.clear(gl.COLOR_BUFFER_BIT)
+                    return true
                 }
                 // Identity maps: colour C → C (P = 1, Q = 0), alpha A → A.
-                seed(cache.colorTex, 0, 0, 0, 1)
-                seed(cache.alphaTex, 1, 0, 0, 1)
-                const suffixBatches = suffixEntries.length ? planPasses(gl, suffixEntries, batchLimit, unitReserve) : []
+                // A target the driver refuses takes the fold out of service for
+                // the session; the batched path still renders a correct frame.
+                if (!seed(cache.colorTex, 0, 0, 0, 1) || !seed(cache.alphaTex, 1, 0, 0, 1)) {
+                    retireFold(gl)
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+                    return renderMegashader(sourceCanvas, stack, options)
+                }
                 for (const [role, texKey, float] of [
-                    ['suffixColor', 'colorTex', false],
+                    ['suffixColor', 'colorTex', colorFloat],
                     ['suffixAlpha', 'alphaTex', true],
                 ]) {
                     if (!suffixBatches.length) continue
@@ -1511,17 +1642,19 @@ export const renderMegashader = (sourceCanvas, stack, options = {}) => {
                     gl.activeTexture(gl.TEXTURE0)
                     gl.bindTexture(gl.TEXTURE_2D, texture)
                     if (!write) {
-                        foldDisabled = true
-                        disposeFoldCache(gl)
+                        retireFold(gl)
                         gl.bindFramebuffer(gl.FRAMEBUFFER, null)
                         return renderMegashader(sourceCanvas, stack, options)
                     }
                     let read = cache[texKey]
                     for (const group of suffixBatches) {
                         if (!drawPass(group, compilePass(group, { role }), write, read, false, PREV_MAP_UNIT)) {
+                            // A refused map target is a fold problem, not a GPU
+                            // one: retire the fold and let the batched path draw.
                             gl.deleteTexture(write)
+                            retireFold(gl)
                             gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-                            return renderCpuFallback(sourceCanvas, stack)
+                            return renderMegashader(sourceCanvas, stack, options)
                         }
                         const swap = read
                         read = write
@@ -1823,6 +1956,8 @@ export const disposeRenderer = () => {
     quadVao = null
     glContext = null
     glCanvas = null
+    // The next context is a different device as far as caps go.
+    resetGlCaps()
 }
 
 // Step 10.3: re-export the metrics helpers so the test panel can

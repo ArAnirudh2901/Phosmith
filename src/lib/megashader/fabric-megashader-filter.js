@@ -62,7 +62,7 @@ const MEGASHADER_FILTER_TYPE = 'Megashader'
 // baseTextureKey: the Boundary slider's pristine base — without it a reload
 // grows from the already-grown mask (cumulative drift). The textures map is
 // keyed by texture key, so base === mask (the common case) dedupes to one entry.
-const TEXTURE_KEY_FIELDS = ['maskTextureKey', 'baseTextureKey', 'brushTextureKey', 'depthMapKey']
+const TEXTURE_KEY_FIELDS = ['maskTextureKey', 'baseTextureKey', 'brushTextureKey', 'depthMapKey', 'gradientMapKey']
 
 // toObject runs on every autosave and history push; PNG-encoding every mask
 // texture each time blocked the main thread for hundreds of ms. setMaskTexture

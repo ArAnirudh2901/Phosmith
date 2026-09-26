@@ -7,6 +7,8 @@ import { filters, Gradient, Rect } from "fabric"
 import { LineChart, RotateCcw, SlidersHorizontal, Sparkles, WandSparkles } from "lucide-react"
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider"
 import { PhosmithCurvesFilter, buildLut, buildCurveSvgPath, arePointsIdentity } from "@/lib/curves-filter"
+import { applyMegashaderFilter } from "@/lib/megashader/apply-megashader"
+import { luminanceLayer } from "@/lib/megashader/mask-types"
 import { useCanvas } from "../../../../../../../context/context"
 import {
     buildImageKitChainedTransformUrl,
@@ -115,6 +117,9 @@ const SLIDER_CONFIGS = [
     { group: "Tone", key: "blacks", label: "Blacks", min: -100, max: 100, step: 1, defaultValue: 0 },
     { group: "Tone", key: "gamma", label: "Gamma", min: 20, max: 220, step: 1, defaultValue: 100, suffix: "%" },
     { group: "Tone", key: "fade", label: "Fade", min: 0, max: 100, step: 1, defaultValue: 0 },
+    // Lux is local tone mapping in the shader, not a curve — see the megashader
+    // grade. Kept next to the tone sliders because that is what it reads as.
+    { group: "Tone", key: "lux", label: "Lux", min: 0, max: 100, step: 1, defaultValue: 0 },
 
     { group: "Color", key: "temperature", label: "Temperature", min: -100, max: 100, step: 1, defaultValue: 0 },
     { group: "Color", key: "tint", label: "Tint", min: -100, max: 100, step: 1, defaultValue: 0 },
@@ -126,6 +131,8 @@ const SLIDER_CONFIGS = [
     { group: "Color", key: "blue", label: "Blue", min: -100, max: 100, step: 1, defaultValue: 0 },
 
     { group: "Detail", key: "clarity", label: "Clarity", min: -100, max: 100, step: 1, defaultValue: 0 },
+    // Structure = edge-aware local contrast (halo-free), also shader-side.
+    { group: "Detail", key: "structure", label: "Structure", min: -100, max: 100, step: 1, defaultValue: 0 },
     { group: "Detail", key: "sharpness", label: "Sharpness", min: 0, max: 100, step: 1, defaultValue: 0 },
     { group: "Detail", key: "blur", label: "Blur", min: 0, max: 100, step: 1, defaultValue: 0 },
     { group: "Detail", key: "noise", label: "Noise", min: 0, max: 100, step: 1, defaultValue: 0 },
@@ -675,6 +682,40 @@ const applyVignetteLayer = (canvasEditor, imageObject, values) => {
     }
 }
 
+/** Id of the full-frame layer this panel owns inside the megashader stack. */
+const ADJUST_SHADER_LAYER_ID = 'adjust-tone'
+
+/**
+ * Lux and Structure need neighbouring pixels, which no Fabric filter can read, so
+ * they ride a full-frame megashader layer. It is merged into the existing stack by
+ * id — the Mask tool's layers on the same image must survive.
+ */
+const syncAdjustShaderLayer = (image, values) => {
+    const lux = Number(values.lux) || 0
+    const structure = Number(values.structure) || 0
+    const mega = image.filters?.find((f) => f && f.type === 'Megashader')
+    const existing = Array.isArray(mega?.stack?.chain) ? mega.stack.chain : []
+    const others = existing.filter((entry) => entry?.layer?.id !== ADJUST_SHADER_LAYER_ID)
+    if (lux === 0 && structure === 0) {
+        if (others.length === existing.length) return
+        applyMegashaderFilter(image, { chain: others, base: mega?.stack?.base }, {})
+        return
+    }
+    const layer = {
+        ...luminanceLayer({ min: 0, max: 1, softness: 0 }),
+        id: ADJUST_SHADER_LAYER_ID,
+        label: 'Lux / Structure',
+        lux,
+        structure,
+    }
+    // Slot 0 acts as `replace`, so a stack that starts with this layer keeps the
+    // rest of the chain composing on top of the graded result.
+    const chain = others.length
+        ? [{ op: others[0].op === 'replace' ? 'add' : 'add', layer }, ...others]
+        : [{ op: 'replace', layer }]
+    applyMegashaderFilter(image, { chain, base: mega?.stack?.base }, {})
+}
+
 const applyAdjustmentFilters = (canvasEditor, values, sigRef, { commit = false } = {}) => {
     if (!canvasEditor) return
     const selectedImage = getSelectedImage(canvasEditor)
@@ -700,6 +741,7 @@ const applyAdjustmentFilters = (canvasEditor, values, sigRef, { commit = false }
             }
             img.set("dirty", true)
             applyVignetteLayer(canvasEditor, img, normalized)
+            syncAdjustShaderLayer(img, normalized)
             if (commit) canvasEditor.fire("object:modified", { target: img })
         })
         if (selectedImage) canvasEditor.setActiveObject(selectedImage)

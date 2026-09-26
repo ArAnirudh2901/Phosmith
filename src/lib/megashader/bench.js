@@ -281,6 +281,7 @@ export const megashaderFoldParity = async ({
         overlayAbove,
         erase,
         engaged: metrics.foldFrames > 0,
+        retired: metrics.foldRetired,
         foldFrames: metrics.foldFrames,
         prefixBuilds: metrics.foldPrefixBuilds,
         suffixBuilds: metrics.foldSuffixBuilds,

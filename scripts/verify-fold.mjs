@@ -172,7 +172,28 @@ try {
         check(r.maxDiff <= 1, 'refusing to fold still renders the chain correctly', `maxDiff ${r.maxDiff}`)
     }
 
-    // 5. Throughput: editing deep in the chain must not cost more than the top.
+    // 5. Hostile GPUs: the fold must step aside, not render through a target the
+    //    driver refused. Both cases are what A1/A2 of the review were about.
+    {
+        await tab.evaluate("window.__fold.hostileGpu('noFloat')")
+        const r = await tab.evaluate('window.__fold.foldParity({ layers: 32, hot: 16 })')
+        check(r.engaged === false, 'no float render targets: the fold stays out')
+        check(r.maxDiff <= 2, 'no float render targets: the batched path still renders correctly',
+            `maxDiff ${r.maxDiff}`)
+
+        await tab.evaluate("window.__fold.hostileGpu('refuseFloatFbo')")
+        const q = await tab.evaluate('window.__fold.foldParity({ layers: 32, hot: 16 })')
+        check(q.engaged === false, 'a refused float attachment retires the fold instead of corrupting the frame')
+        check(q.retired >= 1, 'the refusal is recorded', `foldRetired ${q.retired}`)
+        check(q.maxDiff <= 2, 'a refused float attachment still renders the frame correctly', `maxDiff ${q.maxDiff}`)
+
+        await tab.evaluate('window.__fold.restoreGpu()')
+        const back = await tab.evaluate('window.__fold.foldParity({ layers: 32, hot: 16 })')
+        check(back.engaged === true, 'the fold works again once the GPU behaves')
+        check(back.maxDiff <= 2, 'and is still exact', `maxDiff ${back.maxDiff}`)
+    }
+
+    // 6. Throughput: editing deep in the chain must not cost more than the top.
     if (RUN_BENCH) {
         for (const layers of [8, 32, 64]) {
             const hots = [0, Math.floor(layers / 2), layers - 1]

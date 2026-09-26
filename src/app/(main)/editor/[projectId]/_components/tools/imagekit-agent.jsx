@@ -50,6 +50,7 @@ import { flattenLiveCanvasForAnalysis, renderFabricObjectElement } from "@/lib/c
 import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
 import { STYLE_LABELS } from "@/lib/style-profiles";
 import { isPhosmithMaskOverlay } from "@/lib/canvas-mask";
+import { parseFocusPrompt } from "@/lib/agent/focus-commands";
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
@@ -69,6 +70,28 @@ const COLLAGE_INTENT_RE =
   /\b(collage|montage|scrapbook|mosaic|photo[\s-]?grid)\b|\b(grid|template|layout|arrange)\b[^.]*\b(photo|photos|pic|pics|picture|pictures|image|images)\b|\b(photo|photos|pic|pics|picture|pictures|image|images)\b[^.]*\b(grid|template|collage)\b/i;
 
 const isCollageIntent = (prompt) => COLLAGE_INTENT_RE.test(String(prompt || ""));
+
+// Turn a focus.fromDescription result into a friendly assistant message.
+const summarizeFocusResult = (result) => {
+  const parsed = result?.parsed || {};
+  const what = parsed.why || "applied the effect";
+  if (result?.applied === "depthOfField") {
+    const how = result.source === "depth" ? "depth from the masking service"
+      : result.source === "matte" ? "the subject detected on your device"
+        : result.source === "defocus" ? "the photo's own focus falloff"
+          : "a centred focus band (no depth evidence in this frame)";
+    return `Done — ${what}, using ${how}.`;
+  }
+  if (result?.applied === "colorPop") {
+    const pct = Math.round((result.keptFraction || 0) * 100);
+    return `Done — ${what}. ${pct}% of the frame kept its colour.`;
+  }
+  if (result?.applied === "castShadow") {
+    return `Done — ${what}.`;
+  }
+  if (result?.cleared) return "Cleared the focus effects.";
+  return `Done — ${what}.`;
+};
 
 // Turn a collage.fromDescription result into a friendly assistant message.
 const summarizeCollageResult = (r) => {
@@ -1561,6 +1584,39 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   // Build a collage from a natural-language prompt via the `collage.*` agent
   // commands (parse → create template → insert the canvas photos → optionally
   // generate a fit-to-photos background). Lives outside the edit-plan flow.
+  // Focus / blur / colour-pop / shadow requests go to the `focus.*` commands.
+  // The parser is deterministic, so this costs no model call — and when it
+  // recognises nothing the request falls through to the edit planner below.
+  const runFocusPrompt = async (cleanPrompt) => {
+    if (!canvasEditor) return false;
+    const toastId = toast.loading("Applying", { description: truncate(cleanPrompt, 70) });
+    setMessages((current) => [...current, newMessage("user", cleanPrompt)]);
+    setInput("");
+    setPendingPrompt(cleanPrompt);
+    setIsThinking(true);
+    try {
+      const { runCommand } = await import("@/lib/agent/command-registry");
+      const result = await runCommand("focus.fromDescription", { prompt: cleanPrompt });
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", summarizeFocusResult(result))]);
+      }
+      toast.success("Applied", { id: toastId });
+    } catch (error) {
+      const msg = String(error?.message || "Could not apply that").replace(/^\[agent\.focus\]\s*/, "");
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", msg)]);
+      }
+      toast.error(msg, { id: toastId });
+    } finally {
+      if (isMountedRef.current) {
+        setIsThinking(false);
+        setPendingPrompt(null);
+        setImageRevision((value) => value + 1);
+      }
+    }
+    return true;
+  };
+
   const runCollagePrompt = async (cleanPrompt) => {
     if (!canvasEditor) return;
     if (collageImageCount < 2) {
@@ -1613,6 +1669,13 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     // ImageKit image.
     if (isCollageIntent(cleanPrompt)) {
       await runCollagePrompt(cleanPrompt);
+      return;
+    }
+
+    // Focus & Light: only when the deterministic parser recognises the request,
+    // so "give it a cinematic grade" still reaches the edit planner.
+    if (parseFocusPrompt(cleanPrompt)) {
+      await runFocusPrompt(cleanPrompt);
       return;
     }
 

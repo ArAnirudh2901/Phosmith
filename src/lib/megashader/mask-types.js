@@ -293,6 +293,7 @@ export const MASK_KINDS = /** @type {const} */ ([
     'smartBrush',
     'semantic',
     'depth',
+    'gradient',
     'lasso',
     'brush',
     'path',
@@ -384,6 +385,10 @@ export const ADJUST_FIELDS = /** @type {const} */ ([
     'exposure', 'contrast', 'saturation', 'vibrance', 'brightness',
     'highlights', 'shadows', 'whites', 'blacks', 'temperature', 'tint',
     'texture', 'dehaze',
+    // Optical: a real gather blur of the source, radius scaled by coverage.
+    'blurPx', 'highlightGain',
+    // Instagram parity: local contrast, local tone mapping, faded print.
+    'structure', 'lux', 'fade',
 ])
 
 /** True if a 3-way colour-wheel offset is non-neutral. */
@@ -558,6 +563,20 @@ export const sanitiseLayer = (layer) => {
         // Detail — local-contrast ops (sample the source neighbourhood).
         texture: clampFinite(layer.texture, -100, 100, 0),
         dehaze: clampFinite(layer.dehaze, -100, 100, 0),
+        // Optical blur. `blurPx` is the radius at FULL coverage, in source
+        // pixels, so a mask ramp doubles as the circle-of-confusion.
+        blurPx: clampFinite(layer.blurPx, 0, 256, 0),
+        blurKind: BLUR_KINDS.includes(layer.blurKind) ? layer.blurKind : 'disc',
+        blurAngle: clampFinite(layer.blurAngle, -Math.PI * 2, Math.PI * 2, 0),
+        blurLength: clampFinite(layer.blurLength, 0, 1, 0),
+        // Bright pixels weigh more in the gather, which is what turns a
+        // specular highlight into a bokeh ball instead of a grey smudge.
+        highlightGain: clampFinite(layer.highlightGain, 0, 8, 0),
+        highlightThreshold: clampFinite(layer.highlightThreshold, 0, 1, 0.75),
+        // Structure and Lux share one edge-aware base; Fade is a print model.
+        structure: clampFinite(layer.structure, -100, 100, 0),
+        lux: clampFinite(layer.lux, -100, 100, 0),
+        fade: clampFinite(layer.fade, 0, 100, 0),
         // Colour-grading extensions (per mask): gamma (1 = identity), 3-way
         // colour wheels (vec3 offsets -1..1 for shadows/midtones/highlights),
         // and a tone-curve LUT key (renderer uploads the packed 256×1 RGBA LUT
@@ -1009,6 +1028,39 @@ export const brushLayer = ({ maskTextureKey, label, fillMode = 'adjust', fillCol
  * @param {string} [opts.label]
  * @returns {DepthMaskLayer}
  */
+/** Gather shapes. `motion` and `spin` are lines, not discs. */
+export const BLUR_KINDS = /** @type {const} */ (['disc', 'hex', 'ring', 'motion', 'spin'])
+
+/**
+ * Gradient mask layer: coverage IS the texture's R channel, remapped.
+ * Anything the CV core produces — a circle-of-confusion map, a distance ramp, a
+ * defocus map — becomes a mask through this kind without being binarised.
+ */
+export const gradientLayer = ({
+    gradientMapKey,
+    low = 0,
+    high = 1,
+    gamma = 1,
+    label,
+} = {}) => {
+    if (typeof gradientMapKey !== 'string' || !gradientMapKey) {
+        throw new Error('[megashader] gradientLayer: `gradientMapKey` is required')
+    }
+    return /** @type {MaskLayer} */ ({
+        kind: 'gradient',
+        id: `grd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        label: label || 'Gradient map',
+        opacity: 1,
+        visible: true,
+        lock: false,
+        inverted: false,
+        gradientMapKey,
+        low: clampFinite(low, 0, 1),
+        high: clampFinite(high, 0, 1),
+        gamma: clampFinite(gamma, 0.05, 8, 1),
+    })
+}
+
 export const depthLayer = ({
     depthMapKey,
     min = 0,

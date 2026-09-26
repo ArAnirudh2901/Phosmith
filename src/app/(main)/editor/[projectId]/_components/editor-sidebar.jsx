@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from "react"
 import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
-import { Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid, AudioLines } from "lucide-react"
+import { Aperture, Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid, AudioLines } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
 // Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
 // they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
@@ -41,6 +41,7 @@ const ImageManager = lazyTool(() => import("./tools/images"))
 const DrawControls = lazyTool(() => import("./tools/draw"))
 const CollageControls = lazyTool(() => import("./tools/collage"))
 const PixelStretchControls = lazyTool(() => import("./tools/pixel-stretch"))
+const FocusControls = lazyTool(() => import("./tools/focus"))
 
 const TOOL_CONFIGS = {
     resize: { title: "Resize", icon: Expand },
@@ -57,6 +58,7 @@ const TOOL_CONFIGS = {
     ai_edit: { title: "AI Edit", icon: Eye },
     ai_agent: { title: "ImageKit Agent", icon: Bot },
     collage: { title: "Collage", icon: LayoutGrid },
+    focus: { title: "Focus & Light", icon: Aperture },
 }
 
 export default function EditorSidebar({ project: projectProp, width }) {
@@ -109,6 +111,7 @@ export default function EditorSidebar({ project: projectProp, width }) {
             case "mask": return <MaskControls {...colorProps} />
             case "text": return <TextControls {...colorProps} />
             case "pixel_stretch": return <PixelStretchControls {...colorProps} />
+            case "focus": return <FocusControls {...colorProps} />
             case "ai_background": return project ? <BackgroundControls project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_extender": return project ? <AIExtender project={project} {...colorProps} /> : <div>Loading...</div>
             case "ai_edit": return project ? <AIEdits project={project} {...colorProps} /> : <div>Loading...</div>
