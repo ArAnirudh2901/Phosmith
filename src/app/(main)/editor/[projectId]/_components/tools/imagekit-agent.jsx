@@ -51,6 +51,7 @@ import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
 import { STYLE_LABELS } from "@/lib/style-profiles";
 import { isPhosmithMaskOverlay } from "@/lib/canvas-mask";
 import { parseFocusPrompt } from "@/lib/agent/focus-commands";
+import { parseStretchPrompt } from "@/lib/agent/stretch-commands";
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
@@ -72,6 +73,18 @@ const COLLAGE_INTENT_RE =
 const isCollageIntent = (prompt) => COLLAGE_INTENT_RE.test(String(prompt || ""));
 
 // Turn a focus.fromDescription result into a friendly assistant message.
+const summarizeStretchResult = (result) => {
+  if (result?.cleared !== undefined) return `Removed ${result.cleared} stretch layer${result.cleared === 1 ? "" : "s"}.`;
+  if (result?.applied === "scanline") {
+    return `Done — smeared each ${result.axis === "vertical" ? "column" : "row"} from its ${result.mode === "light" ? "darkest" : "brightest"} surviving pixel.`;
+  }
+  if (result?.applied === "auto") return `Done — ${result.reasoning || "placed the stretch myself"}.`;
+  if (result?.applied === "warp") return `Done — ribbon bent through the ${result.preset} warp, pulled from the ${result.from}.`;
+  if (result?.applied === "flow") return `Done — ribbon routed along a ${result.anchors}-point ${result.preset} path.`;
+  if (result?.applied === "ribbon") return `Done — ribbon pulled from the ${result.from}, running ${result.axis === "vertical" ? "up/down" : "across"}.`;
+  return "Done.";
+};
+
 const summarizeFocusResult = (result) => {
   const parsed = result?.parsed || {};
   const what = parsed.why || "applied the effect";
@@ -1617,6 +1630,36 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     return true;
   };
 
+  const runStretchPrompt = async (cleanPrompt) => {
+    if (!canvasEditor) return false;
+    const toastId = toast.loading("Stretching", { description: truncate(cleanPrompt, 70) });
+    setMessages((current) => [...current, newMessage("user", cleanPrompt)]);
+    setInput("");
+    setPendingPrompt(cleanPrompt);
+    setIsThinking(true);
+    try {
+      const { runCommand } = await import("@/lib/agent/command-registry");
+      const result = await runCommand("stretch.fromDescription", { prompt: cleanPrompt });
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", summarizeStretchResult(result))]);
+      }
+      toast.success("Applied", { id: toastId });
+    } catch (error) {
+      const msg = String(error?.message || "Could not apply that").replace(/^\[agent\.stretch\]\s*/, "");
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", msg)]);
+      }
+      toast.error(msg, { id: toastId });
+    } finally {
+      if (isMountedRef.current) {
+        setIsThinking(false);
+        setPendingPrompt(null);
+        setImageRevision((value) => value + 1);
+      }
+    }
+    return true;
+  };
+
   const runCollagePrompt = async (cleanPrompt) => {
     if (!canvasEditor) return;
     if (collageImageCount < 2) {
@@ -1676,6 +1719,13 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     // so "give it a cinematic grade" still reaches the edit planner.
     if (parseFocusPrompt(cleanPrompt)) {
       await runFocusPrompt(cleanPrompt);
+      return;
+    }
+
+    // Pixel Stretch, on the same terms: a deterministic parser decides, so an
+    // ordinary edit request never gets turned into a ribbon.
+    if (parseStretchPrompt(cleanPrompt)) {
+      await runStretchPrompt(cleanPrompt);
       return;
     }
 

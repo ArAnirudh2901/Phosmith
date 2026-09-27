@@ -38,7 +38,9 @@
  * @property {number} length  Ribbon length multiple (>= 1).
  * @property {number} bend  -1..1 perpendicular bow.
  * @property {number} twist  -1..1 S-curve.
- * @property {number} fade  0..1 opacity taper.
+ * @property {number} fade  0..1 opacity taper toward the streak tips.
+ * @property {number} fadeIn  0..1 opacity taper at the seed end, so the ribbon
+ *   can dissolve into the photo instead of starting on a hard cut edge.
  * @property {number} taper 0..1 width taper.
  * @property {boolean} mirror  Symmetric ribbon.
  * @property {number} opacity  0..1 overall strength.
@@ -66,12 +68,14 @@ export const DEFAULT_STRETCH = {
   bend: 0,
   twist: 0,
   fade: 0,
+  fadeIn: 0,
   taper: 0,
   mirror: false,
   opacity: 1,
   warpGrid: null,
   warpRest: null,
   flowPath: null,
+  scan: null,
 }
 
 // Warp is a composite bicubic Bézier surface — exactly Photoshop's Warp. The
@@ -238,6 +242,7 @@ export function clampStretchParams(p = {}) {
     band,
     polygon: sanitizePolygon(base.polygon),
     seed: clamp01(num(base.seed, D.seed)),
+    fadeIn: clamp01(num(base.fadeIn, D.fadeIn)),
     length: clamp(num(base.length, D.length), 1, 8),
     bend: clamp(num(base.bend, D.bend), -1, 1),
     twist: clamp(num(base.twist, D.twist), -1, 1),
@@ -246,6 +251,7 @@ export function clampStretchParams(p = {}) {
     mirror: Boolean(base.mirror),
     opacity: clamp01(num(base.opacity, D.opacity)),
     warpGrid: sanitizeWarpGrid(base.warpGrid),
+    scan: clampScanline(base.scan),
     warpRest: sanitizeWarpRest(base.warpRest),
     flowPath: sanitizeFlowPath(base.flowPath),
   }
@@ -410,26 +416,36 @@ export function makeSampleCanvas(sourceEl, W, H) {
 let _stripBuf = null
 let _stripCtx = null
 
-/** Extract the seed line as a stripLen×1 strip of colours (reused buffer). */
+// The seed is ONE row of pixels, but the strip texture carries three identical
+// copies of it. A 1px-tall texture magnified hundreds of times by the ribbon mesh
+// is sampled bilinearly against the transparent space just outside it, which
+// drains the ribbon's alpha and leaves a woven cross-hatch of triangle seams; a
+// 3-row texture sampled across its MIDDLE row (v 1..2) never reaches the edge.
+export const SEED_ROWS = 3
+
+/** Extract the seed line as a stripLen×SEED_ROWS strip of colours (reused buffer). */
 function buildSeedStrip(sample, g) {
   const len = Math.max(1, Math.round(g.stripLen))
   if (!_stripBuf) {
-    _stripBuf = createStretchBuffer(len, 1)
+    _stripBuf = createStretchBuffer(len, SEED_ROWS)
     _stripCtx = _stripBuf.getContext('2d')
-  } else if (_stripBuf.width !== len) {
+  } else if (_stripBuf.width !== len || _stripBuf.height !== SEED_ROWS) {
     _stripBuf.width = len
-    _stripBuf.height = 1
+    _stripBuf.height = SEED_ROWS
   }
   const ctx = _stripCtx
   ctx.imageSmoothingEnabled = true
-  ctx.clearRect(0, 0, len, 1)
+  ctx.clearRect(0, 0, len, SEED_ROWS)
   if (g.vertical) {
     // one horizontal row → horizontal strip
-    ctx.drawImage(sample, g.seedLine.x0, g.seedLine.y0, g.bw, 1, 0, 0, len, 1)
+    ctx.drawImage(sample, g.seedLine.x0, g.seedLine.y0, g.bw, 1, 0, 0, len, SEED_ROWS)
   } else {
-    // one vertical column → rotate it into a horizontal strip
-    ctx.setTransform(0, 1, -1, 0, len, 0)
-    ctx.drawImage(sample, g.seedLine.x0, g.seedLine.y0, 1, g.bh, 0, 0, len, 1)
+    // One vertical column rotated into the horizontal strip. The destination rect
+    // is 1 WIDE and `len` TALL — it is the -90 degree transform that lays it across
+    // the strip. Passing (len, 1) here drew the column off the 1px-tall buffer, so
+    // horizontal stretches rendered nothing.
+    ctx.setTransform(0, -1, 1, 0, 0, SEED_ROWS)
+    ctx.drawImage(sample, g.seedLine.x0, g.seedLine.y0, 1, g.bh, 0, 0, SEED_ROWS, len)
     ctx.setTransform(1, 0, 0, 1, 0, 0)
   }
   return _stripBuf
@@ -479,8 +495,12 @@ function getRibbonBuf(W, H) {
 function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
   if (!sections || sections.length < 2) return
   const seedLen = strip.width
+  // Sample the strip's middle row band, never its outer edge (see SEED_ROWS).
+  const v0 = strip.height > 2 ? 1 : 0
+  const v1 = strip.height > 2 ? 2 : 1
   const opacity = opts.opacity == null ? 1 : clamp01(opts.opacity)
   const fade = opts.fade || 0
+  const fadeIn = opts.fadeIn || 0
   const seam = opts.quality === 'max' ? 0.7 : opts.quality === 'low' ? 0.5 : 0.6
 
   const rb = getRibbonBuf(W, H)
@@ -498,15 +518,37 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
     const r1x = s1.cx + s1.nx * s1.hw, r1y = s1.cy + s1.ny * s1.hw
     // Source quad is the whole strip [0..seedLen] × [0..1] (1-px tall ⇒ the colour
     // is constant along travel — that IS the stretch).
-    drawTexturedTriangle(b, strip, l0x, l0y, r0x, r0y, l1x, l1y, 0, 0, seedLen, 0, 0, 1, seam)
-    drawTexturedTriangle(b, strip, r0x, r0y, r1x, r1y, l1x, l1y, seedLen, 0, seedLen, 1, 0, 1, seam)
+    drawTexturedTriangle(b, strip, l0x, l0y, r0x, r0y, l1x, l1y, 0, v0, seedLen, v0, 0, v1, seam)
+    drawTexturedTriangle(b, strip, r0x, r0y, r1x, r1y, l1x, l1y, seedLen, v0, seedLen, v1, 0, v1, seam)
   }
 
-  if (fade > 0) {
+  if (fade > 0 || fadeIn > 0) {
+    // The taper runs along the ribbon's ARC, but a canvas gradient is a straight
+    // axis, so each section's alpha is placed at the section's projection onto the
+    // start→end chord. On a bend that keeps the fade where the pixels actually are
+    // instead of running it across the chord; a single gradient also means no
+    // per-quad seams in the alpha mask (which would rib the ribbon).
     const a = sections[0], z = sections[sections.length - 1]
+    const chx = z.cx - a.cx, chy = z.cy - a.cy
+    const chLen2 = chx * chx + chy * chy
+    const rampIn = Math.max(0.02, fadeIn * 0.6)
+    const alphaAt = (t) => clamp01((1 - fadeIn * (1 - Math.min(1, t / rampIn))) * (1 - fade * t))
     const grad = b.createLinearGradient(a.cx, a.cy, z.cx, z.cy)
-    grad.addColorStop(0, 'rgba(0,0,0,1)')
-    grad.addColorStop(1, `rgba(0,0,0,${clamp01(1 - fade)})`)
+    if (chLen2 < 1e-6) {
+      grad.addColorStop(0, `rgba(0,0,0,${alphaAt(0)})`)
+      grad.addColorStop(1, `rgba(0,0,0,${alphaAt(1)})`)
+    } else {
+      const last = sections.length - 1
+      let prevU = -1
+      for (let i = 0; i <= last; i++) {
+        const t = i / last
+        const u = clamp01(((sections[i].cx - a.cx) * chx + (sections[i].cy - a.cy) * chy) / chLen2)
+        if (u <= prevU) continue          // a hooked ribbon folds back on the chord
+        prevU = u
+        grad.addColorStop(u, `rgba(0,0,0,${alphaAt(t)})`)
+      }
+      if (prevU < 1) grad.addColorStop(1, `rgba(0,0,0,${alphaAt(1)})`)
+    }
     b.globalCompositeOperation = 'destination-in'
     b.fillStyle = grad
     b.fillRect(0, 0, W, H)
@@ -529,13 +571,14 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
 
   // Fast, perfectly-crisp path for an un-bent ribbon with no taper/fade — a single
   // rotated quad is already gap-free.
-  if (straight && p.fade <= 0 && Math.abs(p.taper) <= 0.002) {
+  if (straight && p.fade <= 0 && p.fadeIn <= 0 && Math.abs(p.taper) <= 0.002) {
     const a = Math.atan2(g.d.y, g.d.x) - Math.PI / 2
     const cos = Math.cos(a), sin = Math.sin(a)
     ctx.globalAlpha = p.opacity
     // rotate about the start point, then draw in local space (+y = travel)
     ctx.setTransform(cos, sin, -sin, cos, g.start.x, g.start.y)
-    ctx.drawImage(strip, 0, 0, stripLen, 1, -g.stripLen / 2, 0, g.stripLen, g.total)
+    const sv = strip.height > 2 ? 1 : 0
+    ctx.drawImage(strip, 0, sv, stripLen, 1, -g.stripLen / 2, 0, g.stripLen, g.total)
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.globalAlpha = 1
     return
@@ -552,7 +595,7 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
     const hw = Math.max(0.25, (g.stripLen * (1 - p.taper * t)) / 2)
     sections[i] = { cx: c.x, cy: c.y, nx: tan.y, ny: -tan.x, hw }
   }
-  sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, quality })
+  sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality })
 }
 
 /**
@@ -618,6 +661,7 @@ export function renderPixelStretch(ctx, sample, params, W, H, opts = {}) {
   const p = clampStretchParams(params)
   // Mode dispatch (most expressive first): a multi-anchor Flow Path smear, then
   // the Photoshop-style Warp mesh, otherwise the single-arch simple sweep.
+  if (p.scan) return renderScanlineStretch(ctx, sample, p.scan, W, H)
   if (p.flowPath) return renderFlowStretch(ctx, sample, p, W, H, opts)
   if (p.warpGrid) return renderWarpMesh(ctx, sample, p, W, H, opts)
   const maxSlices = opts.maxSlices || QUALITY_SLICES[opts.quality] || QUALITY_SLICES.high
@@ -1237,17 +1281,19 @@ function buildFlowSeedStrip(sample, lut, fp, W, H) {
   const seedLen = Math.max(2, Math.round(fp.width * Math.min(W, H)))
   const half = seedLen / 2
   const W0x = start.x - perpx * half, W0y = start.y - perpy * half  // strip x=0 world pt
-  const strip = createStretchBuffer(seedLen, 1)
+  const strip = createStretchBuffer(seedLen, SEED_ROWS)
   const sctx = strip.getContext('2d')
   sctx.imageSmoothingEnabled = true
-  sctx.clearRect(0, 0, seedLen, 1)
-  // image P → strip: strip_x = perp·(P-W0), strip_y = tHat·(P-W0) + 0.5
+  sctx.clearRect(0, 0, seedLen, SEED_ROWS)
+  // image P → strip: strip_x = perp·(P-W0), strip_y = tHat·(P-W0) + 0.5. The one
+  // sampled row is then copied across the strip's full height (see SEED_ROWS).
   const a = perpx, c = perpy, b = tHatx, d = tHaty
   const e = -(W0x * a + W0y * c)
   const f = -(W0x * b + W0y * d) + 0.5
   sctx.setTransform(a, b, c, d, e, f)
   sctx.drawImage(sample, 0, 0)
   sctx.setTransform(1, 0, 0, 1, 0, 0)
+  for (let r = 1; r < SEED_ROWS; r++) sctx.drawImage(strip, 0, 0, seedLen, 1, 0, r, seedLen, 1)
   return { strip, seedLen }
 }
 
@@ -1281,7 +1327,7 @@ export function renderFlowStretch(ctx, sample, params, W, H, opts = {}) {
     const hw = Math.max(0.25, (seedLen * at.w * (1 - p.taper * t)) / 2)
     sections[i] = { cx: at.x, cy: at.y, nx: ty, ny: -tx, hw }
   }
-  sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, quality: opts.quality })
+  sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality })
   return true
 }
 
@@ -1484,6 +1530,138 @@ export function applyFlowPreset(params, presetId) {
 // LUMINANCE matte (white = subject, fully opaque), so these helpers first turn it
 // into an ALPHA matte before compositing.
 
+// ─── Scanline threshold stretch (the datamosh-style smear) ───────────────────
+//
+// A second, unrelated family of "pixel stretch" exists alongside the marquee →
+// transform → warp ribbon: per SCANLINE, pick the pixels that survive a
+// luminance threshold and propagate the last survivor's colour across the
+// removed run. TD-Pixel-Stretch-TOP (lou-evoy) states the shape of it exactly —
+// a single segmented inclusive scan over the frame, with a stretch length and an
+// optional fade to black — and that is what this is, on the CPU: one linear pass
+// per row or column, no sorting, no allocation per run.
+//
+// It needs no selection at all, which is the point: it is the one mode that
+// turns a whole photo into the effect in a single click.
+
+export const DEFAULT_SCANLINE = {
+  axis: 'horizontal',   // scan along rows ('horizontal') or columns ('vertical')
+  direction: 1,         // +1 = left→right / top→bottom
+  mode: 'dark',         // which pixels are REMOVED: 'dark' below the threshold, 'light' above
+  threshold: 0.35,      // 0..1 luma cut
+  length: 0.35,         // longest run a colour may fill, as a fraction of the scanline
+  fade: 0,              // 0..1 fade to black along a run
+  opacity: 1,           // blend back over the original
+  region: null,         // optional {x,y,w,h} normalised limit
+}
+
+/** Sanitise a scanline config; returns null when the caller passed nothing. */
+export function clampScanline(scan) {
+  if (!scan) return null
+  const d = DEFAULT_SCANLINE
+  const r = scan.region
+  return {
+    axis: scan.axis === 'vertical' ? 'vertical' : 'horizontal',
+    direction: num(scan.direction, d.direction) < 0 ? -1 : 1,
+    mode: scan.mode === 'light' ? 'light' : 'dark',
+    threshold: clamp01(num(scan.threshold, d.threshold)),
+    length: clamp(num(scan.length, d.length), 0.01, 1),
+    fade: clamp01(num(scan.fade, d.fade)),
+    opacity: clamp01(num(scan.opacity, d.opacity)),
+    region: r && [r.x, r.y, r.w, r.h].every((v) => Number.isFinite(num(v, NaN)))
+      ? { x: clamp01(r.x), y: clamp01(r.y), w: clamp(num(r.w, 1), 0.01, 1), h: clamp(num(r.h, 1), 0.01, 1) }
+      : null,
+  }
+}
+
+const LUMA_R = 0.2126, LUMA_G = 0.7152, LUMA_B = 0.0722
+
+/**
+ * Segmented inclusive scan over RGBA pixels, in place.
+ *
+ * Walks each scanline once in `direction`. A pixel that passes the threshold is
+ * a SURVIVOR: its colour is remembered and the run resets. A pixel that fails is
+ * overwritten with the last survivor's colour — until the run exceeds `length`,
+ * after which the original pixels stand again (so a threshold that removes most
+ * of the frame smears in bands rather than flooding it).
+ *
+ * @param {Uint8ClampedArray} data  RGBA, W*H*4, mutated
+ * @returns {{ scanlines: number, filled: number }}  how much the pass actually changed
+ */
+export function scanlineStretchPixels(data, W, H, opts = {}) {
+  const o = clampScanline({ ...DEFAULT_SCANLINE, ...opts }) || clampScanline(DEFAULT_SCANLINE)
+  const horizontal = o.axis === 'horizontal'
+  const keepAbove = o.mode === 'dark'          // remove the dark pixels ⇒ survivors are bright
+  const thr = o.threshold * 255
+  const lines = horizontal ? H : W
+  const span = horizontal ? W : H
+  const maxRun = Math.max(1, Math.round(o.length * span))
+  const alpha = o.opacity
+
+  // A region limits the pass to part of the frame; outside it nothing is touched.
+  let l0 = 0, l1 = lines, s0 = 0, s1 = span
+  if (o.region) {
+    const rx = Math.round(o.region.x * W), ry = Math.round(o.region.y * H)
+    const rw = Math.round(o.region.w * W), rh = Math.round(o.region.h * H)
+    l0 = clamp(horizontal ? ry : rx, 0, lines)
+    l1 = clamp(horizontal ? ry + rh : rx + rw, l0, lines)
+    s0 = clamp(horizontal ? rx : ry, 0, span)
+    s1 = clamp(horizontal ? rx + rw : ry + rh, s0, span)
+  }
+
+  let scanlines = 0
+  let filled = 0
+  for (let l = l0; l < l1; l++) {
+    let have = false
+    let run = 0
+    let cr = 0, cg = 0, cb = 0
+    let touched = false
+    for (let k = 0; k < s1 - s0; k++) {
+      const s = o.direction > 0 ? s0 + k : s1 - 1 - k
+      const i = ((horizontal ? l * W + s : s * W + l)) << 2
+      const luma = data[i] * LUMA_R + data[i + 1] * LUMA_G + data[i + 2] * LUMA_B
+      const survives = keepAbove ? luma >= thr : luma <= thr
+      if (survives) {
+        cr = data[i]; cg = data[i + 1]; cb = data[i + 2]
+        have = true
+        run = 0
+        continue
+      }
+      if (!have || run >= maxRun) continue
+      run += 1
+      // Fade to black along the run — the far end of a long smear goes dark, which
+      // is what stops a bright survivor from painting a flat slab.
+      const k2 = o.fade > 0 ? 1 - o.fade * (run / maxRun) : 1
+      const a = alpha
+      data[i] = data[i] + (cr * k2 - data[i]) * a
+      data[i + 1] = data[i + 1] + (cg * k2 - data[i + 1]) * a
+      data[i + 2] = data[i + 2] + (cb * k2 - data[i + 2]) * a
+      filled += 1
+      touched = true
+    }
+    if (touched) scanlines += 1
+  }
+  return { scanlines, filled }
+}
+
+/**
+ * Canvas wrapper: read `sample`, run the scan, paint the result onto `ctx`.
+ * Returns false when the pass changed nothing (a threshold no pixel fails, say),
+ * so the UI can say so instead of committing an identical bitmap.
+ */
+export function renderScanlineStretch(ctx, sample, scan, W, H) {
+  const o = clampScanline(scan)
+  if (!o) return false
+  const src = sample.getContext('2d', { willReadFrequently: true })
+  const img = src.getImageData(0, 0, W, H)
+  const stats = scanlineStretchPixels(img.data, W, H, o)
+  if (!stats.filled) return false
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.putImageData(img, 0, 0)
+  ctx.restore()
+  return true
+}
+
 /**
  * Convert a luminance subject matte (white = subject, opaque) into an ALPHA matte
  * canvas (white fill, alpha = subject coverage) at W×H, with optional edge
@@ -1564,6 +1742,69 @@ export function buildSubjectCutout(sample, alphaMatte, W, H) {
  * @param {HTMLCanvasElement|OffscreenCanvas} canvas
  * @returns {{region:{x,y,w,h},axis,direction,seed,length,bend,twist,fade,taper,mirror,opacity,reasoning}|null}
  */
+/**
+ * Pick the seed line INSIDE a band — the one that will make a ribbon worth
+ * looking at.
+ *
+ * This is the single biggest difference between a good pixel stretch and a flat
+ * slab of colour. In the reference edits the marquee is always dropped across a
+ * line that crosses many different colours (a car's roof line, a tower's lit
+ * bands), because the ribbon is that ONE line repeated — a line through a plain
+ * red jumper can only ever produce plain red. So every line in the band is scored
+ * the way the planner scores the whole frame: mean saturation, tonal spread, and
+ * how often the colour actually CHANGES along it (the band count, which is what
+ * the eye reads as a ribbon rather than a smear).
+ *
+ * @param {HTMLCanvasElement|OffscreenCanvas} sample  W×H snapshot of the source
+ * @param {{x:number,y:number,w:number,h:number}} band  normalised source region
+ * @param {'vertical'|'horizontal'} axis  stretch direction (the seed is across it)
+ * @returns {{ seed:number, score:number, changes:number }|null}  seed is 0..1 WITHIN the band
+ */
+export function bestSeedInBand(sample, band, axis = 'vertical') {
+  const W = sample.width | 0, H = sample.height | 0
+  if (W < 2 || H < 2) return null
+  const ctx = sample.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  const bx = clamp(Math.round(band.x * W), 0, W - 1)
+  const by = clamp(Math.round(band.y * H), 0, H - 1)
+  const bw = clamp(Math.round(band.w * W), 1, W - bx)
+  const bh = clamp(Math.round(band.h * H), 1, H - by)
+  let img
+  try { img = ctx.getImageData(bx, by, bw, bh) } catch { return null } // tainted → caller keeps its seed
+  const d = img.data
+
+  const vertical = axis === 'vertical'
+  const lines = vertical ? bh : bw            // candidate seed lines
+  const span = vertical ? bw : bh             // pixels along one line
+  if (lines < 1 || span < 2) return null
+  const stepL = Math.max(1, Math.floor(lines / 160))
+  const stepS = Math.max(1, Math.floor(span / 220))
+
+  let best = null
+  for (let i = 0; i < lines; i += stepL) {
+    let sSum = 0, lSum = 0, lSq = 0, changes = 0, n = 0
+    let pr = 0, pg = 0, pb = 0, first = true
+    for (let j = 0; j < span; j += stepS) {
+      const o = ((vertical ? i * bw + j : j * bw + i)) << 2
+      const r = d[o], g = d[o + 1], b = d[o + 2]
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+      const L = 0.299 * r + 0.587 * g + 0.114 * b
+      sSum += mx > 4 ? (mx - mn) / mx : 0
+      lSum += L; lSq += L * L
+      // A "change" is a step big enough to read as a new band in the ribbon.
+      if (!first && Math.abs(r - pr) + Math.abs(g - pg) + Math.abs(b - pb) > 42) changes += 1
+      pr = r; pg = g; pb = b; first = false
+      n += 1
+    }
+    const mean = lSum / n
+    const spread = Math.sqrt(Math.max(0, lSq / n - mean * mean)) / 255
+    const variety = changes / n
+    const score = sSum / n + 1.3 * spread + 2.2 * variety
+    if (!best || score > best.score) best = { seed: lines > 1 ? i / (lines - 1) : 0, score, changes }
+  }
+  return best
+}
+
 export function analyzeStretchPlan(canvas) {
   const W = canvas.width | 0, H = canvas.height | 0
   if (W < 4 || H < 4) return null

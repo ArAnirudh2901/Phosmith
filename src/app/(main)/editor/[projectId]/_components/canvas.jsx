@@ -1769,6 +1769,7 @@ const CanvasEditor = ({ project }) => {
         let unregisterCrop = () => {}
         let unregisterCollage = () => {}
         let unregisterFocus = () => {}
+        let unregisterStretch = () => {}
         let cancelled = false
         Promise.all([
             import('@/lib/agent/command-registry'),
@@ -1776,7 +1777,8 @@ const CanvasEditor = ({ project }) => {
             import('@/lib/agent/crop-commands'),
             import('@/lib/agent/collage-commands'),
             import('@/lib/agent/focus-commands'),
-        ]).then(([reg, mask, crop, collage, focus]) => {
+            import('@/lib/agent/stretch-commands'),
+        ]).then(([reg, mask, crop, collage, focus, stretch]) => {
             if (cancelled) return
             const getPrimaryImage = () => {
                 const canvas = canvasInstanceRef.current
@@ -1792,8 +1794,9 @@ const CanvasEditor = ({ project }) => {
             unregisterCrop = reg.registerDomain('crop', crop.createCropCommands({ getPrimaryImage, getCanvas }))
             unregisterCollage = reg.registerDomain('collage', collage.createCollageCommands({ getCanvas, getProject }))
             unregisterFocus = reg.registerDomain('focus', focus.createFocusCommands({ getPrimaryImage, getCanvas }))
+            unregisterStretch = reg.registerDomain('stretch', stretch.createStretchCommands({ getPrimaryImage, getCanvas }))
         }).catch(() => { /* agent layer optional */ })
-        return () => { cancelled = true; unregisterMask(); unregisterCrop(); unregisterCollage(); unregisterFocus() }
+        return () => { cancelled = true; unregisterMask(); unregisterCrop(); unregisterCollage(); unregisterFocus(); unregisterStretch() }
     }, [])
 
     // Track the last-hydrated URL so we skip redundant re-hydrations when

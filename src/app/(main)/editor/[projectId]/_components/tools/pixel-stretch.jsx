@@ -28,6 +28,7 @@ import {
   addWarpSplit,
   applyWarpPreset,
   analyzeStretchPlan,
+  bestSeedInBand,
   createDefaultFlowPath,
   createFlowPathFromPoints,
   getFlowPathCurve,
@@ -44,7 +45,17 @@ import {
   WARP_PRESETS,
   WARP_MAX_DIM,
   PIXEL_STRETCH_PRESETS,
+  DEFAULT_SCANLINE,
 } from '@/lib/pixel-stretch'
+import {
+  MAX_BAKE_DIM,
+  getSourceElement,
+  isSourceReady,
+  snapshotSource,
+  encodeToPngBlob,
+  uploadStretchBlob,
+  placeStretchLayer,
+} from '@/lib/pixel-stretch-apply'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
 
@@ -106,56 +117,7 @@ const getActiveImage = (canvas) => {
   return images.at(-1) || null
 }
 
-const getSourceElement = (img) => img?._originalElement || img?.getElement?.() || img?._element || null
-
-const isSourceReady = (el) => {
-  if (!el) return false
-  if (el instanceof HTMLImageElement) return el.complete && el.naturalWidth > 0
-  return (el.naturalWidth || el.videoWidth || el.width || 0) > 0
-}
-
-/** Snapshot a source element into a W×H buffer, baking in the object's flip. */
-const snapshotSource = (srcEl, W, H, flipX, flipY) => {
-  const c = createStretchBuffer(W, H)
-  const ctx = c.getContext('2d')
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.save()
-  ctx.translate(flipX ? c.width : 0, flipY ? c.height : 0)
-  ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1)
-  ctx.drawImage(srcEl, 0, 0, c.width, c.height)
-  ctx.restore()
-  return c
-}
-
-const encodeToPngBlob = async (canvas) => {
-  if (typeof canvas.convertToBlob === 'function') {
-    // OffscreenCanvas — the PNG encode runs off the main thread.
-    return canvas.convertToBlob({ type: 'image/png' })
-  }
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('Could not encode image'))), 'image/png')
-  })
-}
-
-const uploadStretchBlob = async (blob, w, h) => {
-  const fileName = `stretch-${Date.now()}.png`
-  const formData = new FormData()
-  formData.append('fileName', fileName)
-  formData.append('rasterFile', blob, fileName)
-  formData.append('rasterFileName', fileName)
-  formData.append('rasterWidth', String(w))
-  formData.append('rasterHeight', String(h))
-  const response = await fetch('/api/imagekit/upload', { method: 'POST', body: formData })
-  const data = await response.json().catch(() => null)
-  if (!response.ok || !data?.success || !data?.url) {
-    throw new Error(data?.error || 'Could not upload stretched image')
-  }
-  return data.url
-}
-
 const MAX_PREVIEW_DIM = 1500
-const MAX_BAKE_DIM = 4096
 const HANDLE = 14
 const MIN_BAND = 0.02
 const SETTLE_MS = 150
@@ -210,6 +172,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
   // ── Warp mesh state (Advanced mode — Photoshop-style control grid) ──────────
   const [warpMode, setWarpMode] = useState(false)  // false = Simple sliders, true = Warp grid
+  const [scanMode, setScanMode] = useState(false)  // whole-frame scanline smear (no selection)
   const [warpPresetId, setWarpPresetId] = useState(null) // last applied warp preset
   const [warpStrength, setWarpStrength] = useState(1)     // preset intensity (0..1.5)
 
@@ -767,10 +730,12 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     // intercepting pointer events.
     const warpOn = !!p.warpGrid
     const flowOn = !!p.flowPath
-    const showMarquee = mode === 'rect' && phaseNow === 'stretch' && !warpOn && !flowOn
-    const showFlow = phaseNow === 'stretch' && !warpOn && !flowOn
-    const showWarp = phaseNow === 'stretch' && warpOn
-    const showFlowPath = phaseNow === 'stretch' && flowOn
+    // The scanline smear has no band and no path, so none of the chrome applies.
+    const scanOn = !!p.scan
+    const showMarquee = mode === 'rect' && phaseNow === 'stretch' && !warpOn && !flowOn && !scanOn
+    const showFlow = phaseNow === 'stretch' && !warpOn && !flowOn && !scanOn
+    const showWarp = phaseNow === 'stretch' && warpOn && !scanOn
+    const showFlowPath = phaseNow === 'stretch' && flowOn && !scanOn
     const showDraw = phaseNow === 'select' || subjectPickRef.current
     const toggle = (el, on) => { if (el) el.style.display = on ? 'block' : 'none' }
     const toS = (nx, ny) => canvasToScreen(editor, bounds.left + nx * bounds.width, bounds.top + ny * bounds.height)
@@ -940,6 +905,14 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     // handles over an identity mesh. The buffer shows the ORIGINAL pixels at rest
     // (length 1), so streaks only appear as the user DRAGS a handle — the reference
     // "pixel stretch" technique. Reset any prior simple/flow shape first.
+    // Seed the slice on its most colourful line rather than its first row. The
+    // ribbon IS that one line repeated, so a line through a plain area can only
+    // ever make a plain slab — the difference between the reference look and a
+    // flat smear.
+    const sampled = getSample()
+    const bandNow = regionPatch.band || paramsRef.current.band
+    const best = sampled?.canvas ? bestSeedInBand(sampled.canvas, bandNow, paramsRef.current.axis) : null
+    if (best) regionPatch = { ...regionPatch, seed: best.seed }
     const base = clampStretchParams({ ...paramsRef.current, ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null })
     setWarpMode(true)
     setFlowMode(false)
@@ -949,7 +922,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setActivePresetId(null)
     commit({ ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null, warpGrid: createDefaultWarpGrid(base), warpRest: getWarpRest(base) })
     setPhase('stretch')
-  }, [commit])
+  }, [commit, getSample])
 
   const reselect = useCallback(() => {
     if (selModeRef.current === 'lasso') lassoPtsRef.current = []
@@ -1051,18 +1024,30 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const setStretchMode = useCallback((mode) => {
     setWarpPresetId(null); setWarpStrength(1); setFlowPresetId(null); setActivePresetId(null)
     if (mode === 'mesh') {
-      setWarpMode(true); setFlowMode(false)
-      commit({ warpGrid: createDefaultWarpGrid(paramsRef.current), warpRest: getWarpRest(paramsRef.current), flowPath: null })
+      setWarpMode(true); setFlowMode(false); setScanMode(false)
+      commit({ scan: null, warpGrid: createDefaultWarpGrid(paramsRef.current), warpRest: getWarpRest(paramsRef.current), flowPath: null })
     } else if (mode === 'flow') {
-      setFlowMode(true); setWarpMode(false)
+      setFlowMode(true); setWarpMode(false); setScanMode(false)
       const fp = createDefaultFlowPath(paramsRef.current)
       setFlowAnchorCount(fp?.anchors.length || 0)
-      commit({ flowPath: fp, warpGrid: null, warpRest: null })
+      commit({ scan: null, flowPath: fp, warpGrid: null, warpRest: null })
+    } else if (mode === 'scan') {
+      // The scanline smear reads the WHOLE frame, so it drops the selection modes
+      // rather than sitting on top of them.
+      setScanMode(true); setWarpMode(false); setFlowMode(false)
+      commit({ scan: { ...DEFAULT_SCANLINE }, warpGrid: null, warpRest: null, flowPath: null })
     } else {
-      setWarpMode(false); setFlowMode(false)
-      commit({ warpGrid: null, warpRest: null, flowPath: null })
+      setWarpMode(false); setFlowMode(false); setScanMode(false)
+      commit({ scan: null, warpGrid: null, warpRest: null, flowPath: null })
     }
   }, [commit])
+
+  /** Patch one field of the scanline config, keeping the rest. */
+  const patchScan = useCallback((patch, live) => {
+    const next = { ...(paramsRef.current.scan || DEFAULT_SCANLINE), ...patch }
+    if (live) livePatch({ scan: next })
+    else commit({ scan: next })
+  }, [commit, livePatch])
 
   // ── Flow Path controls ───────────────────────────────────────────────────────
   const resetFlow = useCallback(() => {
@@ -1722,40 +1707,12 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       // Cache the durable URL so re-applies this session don't re-upload it.
       sourceMetaRef.current = { src: durableSrc, w: natW, h: natH, flipX, flipY }
 
-      if (editingLayerRef.current) {
-        // Re-edit: swap the layer's pixels, keep its transforms / filters / crop.
-        const layer = editingLayerRef.current
-        const prevScaledW = (layer.width || W) * Math.abs(layer.scaleX || 1)
-        const prevScaledH = (layer.height || H) * Math.abs(layer.scaleY || 1)
-        await layer.setSrc(url, { crossOrigin: 'anonymous' })
-        const newW = layer.width || W, newH = layer.height || H
-        layer.set({ scaleX: prevScaledW / newW, scaleY: prevScaledH / newH, flipX: false, flipY: false })
-        layer.data = { ...(layer.data || {}), pixelStretch: meta }
-        if (layer.filters?.length) layer.applyFilters()
-        layer.setCoords()
-      } else {
-        // New: add the stretch as its own layer, just above the source photo.
-        const newImg = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
-        const srcScaledW = (frameObj.width || W) * Math.abs(frameObj.scaleX || 1)
-        const srcScaledH = (frameObj.height || H) * Math.abs(frameObj.scaleY || 1)
-        newImg.set({
-          left: frameObj.left, top: frameObj.top,
-          originX: frameObj.originX, originY: frameObj.originY,
-          angle: frameObj.angle || 0,
-          flipX: false, flipY: false,
-          scaleX: srcScaledW / W, scaleY: srcScaledH / H,
-          opacity: frameObj.opacity ?? 1,
-          selectable: true, evented: true, hasControls: true, hasBorders: true,
-          name: 'Pixel Stretch',
-          data: { pixelStretch: meta },
-        })
-        newImg.__stretchUid = ++uidCounter
-        const idx = editor.getObjects().indexOf(frameObj)
-        if (idx >= 0) editor.insertAt(idx + 1, newImg)
-        else editor.add(newImg)
-        newImg.setCoords()
-        editingLayerRef.current = newImg
-      }
+      const placed = await placeStretchLayer({
+        editor, frameObj, url, W, H, meta,
+        existingLayer: editingLayerRef.current || null,
+      })
+      if (!editingLayerRef.current) placed.__stretchUid = ++uidCounter
+      editingLayerRef.current = placed
 
       setIsEditingLayer(true)
       interactingRef.current = false
@@ -1983,6 +1940,18 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
               </button>
             </div>
 
+            {/* The scanline smear reads the whole frame, so it must not be locked
+                behind a selection the user does not need to make. */}
+            <button
+              type="button"
+              onClick={() => { setPhase('stretch'); setStretchMode('scan') }}
+              className={`mt-2 flex h-9 w-full items-center justify-center gap-2 rounded-xl text-[11px] font-medium editor-interactive ${tapClass}`}
+              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
+            >
+              <AudioLines className="h-3.5 w-3.5" />
+              Skip — smear the whole photo (Scanline)
+            </button>
+
             {/* ── Use the subject's shape as the SOURCE region (on-device SAM) ── */}
             <div style={{
               marginTop: 12, padding: '10px 12px', borderRadius: 12,
@@ -2204,13 +2173,14 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       {/* ── Mode (Simple sliders · Flow Path spline · Warp mesh) ─────────── */}
       <div className="panel-card" style={cardStyle}>
         <label className="panel-label">Mode</label>
-        <div className="mt-2 grid grid-cols-3 gap-2">
+        <div className="mt-2 grid grid-cols-4 gap-2">
           {[
             { id: 'mesh', label: 'Warp', Icon: Grid3X3 },
             { id: 'flow', label: 'Flow Path', Icon: Waypoints },
             { id: 'simple', label: 'Simple', Icon: Wand2 },
+            { id: 'scan', label: 'Scanline', Icon: AudioLines },
           ].map(({ id, label, Icon }) => {
-            const curMode = warpMode ? 'mesh' : flowMode ? 'flow' : 'simple'
+            const curMode = scanMode ? 'scan' : warpMode ? 'mesh' : flowMode ? 'flow' : 'simple'
             const on = curMode === id
             return (
               <button
@@ -2226,6 +2196,88 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
             )
           })}
         </div>
+        {scanMode && (
+          <div className="mt-3 space-y-3">
+            <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              No selection: every row (or column) keeps the pixels that pass the threshold and drags the last one across the rest. Raise <strong>Threshold</strong> until only the shapes you want to smear survive.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'horizontal', label: 'Rows', Icon: Rows3 },
+                { id: 'vertical', label: 'Columns', Icon: Columns3 },
+              ].map(({ id, label, Icon }) => {
+                const on = (params.scan?.axis || 'horizontal') === id
+                return (
+                  <button
+                    key={id} type="button"
+                    onClick={() => patchScan({ axis: id })}
+                    className={`flex h-10 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
+                    style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
+                  >
+                    <Icon className="h-3.5 w-3.5" />{label}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'dark', label: 'Smear over dark' },
+                { id: 'light', label: 'Smear over light' },
+              ].map(({ id, label }) => {
+                const on = (params.scan?.mode || 'dark') === id
+                return (
+                  <button
+                    key={id} type="button"
+                    onClick={() => patchScan({ mode: id })}
+                    className={`flex h-9 items-center justify-center rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
+                    style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => patchScan({ direction: (params.scan?.direction ?? 1) > 0 ? -1 : 1 })}
+              className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
+              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
+            >
+              <FlipHorizontal2 className="h-3.5 w-3.5" />
+              {(params.scan?.direction ?? 1) > 0
+                ? ((params.scan?.axis || 'horizontal') === 'vertical' ? 'Smearing downward' : 'Smearing right')
+                : ((params.scan?.axis || 'horizontal') === 'vertical' ? 'Smearing upward' : 'Smearing left')}
+            </button>
+            <ProRulerSlider
+              variant="instrument" label="Threshold" suffix="%"
+              value={Math.round((params.scan?.threshold ?? DEFAULT_SCANLINE.threshold) * 100)} min={0} max={100} step={1}
+              onPreview={(v) => patchScan({ threshold: v / 100 }, true)}
+              onCommit={(v) => patchScan({ threshold: v / 100 })}
+              visual={sliderVisual}
+            />
+            <ProRulerSlider
+              variant="instrument" label="Smear length" suffix="%"
+              value={Math.round((params.scan?.length ?? DEFAULT_SCANLINE.length) * 100)} min={1} max={100} step={1}
+              onPreview={(v) => patchScan({ length: v / 100 }, true)}
+              onCommit={(v) => patchScan({ length: v / 100 })}
+              visual={sliderVisual}
+            />
+            <ProRulerSlider
+              variant="instrument" label="Fade to black" suffix="%"
+              value={Math.round((params.scan?.fade ?? 0) * 100)} min={0} max={100} step={1}
+              onPreview={(v) => patchScan({ fade: v / 100 }, true)}
+              onCommit={(v) => patchScan({ fade: v / 100 })}
+              visual={sliderVisual}
+            />
+            <ProRulerSlider
+              variant="instrument" label="Strength" suffix="%"
+              value={Math.round((params.scan?.opacity ?? 1) * 100)} min={0} max={100} step={1}
+              onPreview={(v) => patchScan({ opacity: v / 100 }, true)}
+              onCommit={(v) => patchScan({ opacity: v / 100 })}
+              visual={sliderVisual}
+            />
+          </div>
+        )}
         {warpMode && params.warpGrid && (
           <div className="mt-3 space-y-3">
             <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
@@ -2428,6 +2480,22 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           onCommit={(v) => sliderCommit('seed', v)}
           visual={sliderVisual}
         />
+        <button
+          type="button"
+          onClick={() => {
+            const smp = getSample()
+            const best = smp?.canvas ? bestSeedInBand(smp.canvas, paramsRef.current.band, paramsRef.current.axis) : null
+            if (!best) { toast.error('Could not read this region'); return }
+            setActivePresetId(null)
+            commit({ seed: best.seed })
+            toast.success('Seeded on the most colourful line in the region')
+          }}
+          className={`mt-1 flex h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[10.5px] font-medium editor-interactive ${tapClass}`}
+          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
+        >
+          <Sparkles className="h-3 w-3" />
+          Find the most colourful line
+        </button>
       </div>
       </>)}
 
@@ -2454,10 +2522,17 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
             />
           )}
           <ProRulerSlider
-            variant="instrument" label="Fade" suffix="%"
+            variant="instrument" label="Fade (tips)" suffix="%"
             value={pct(params.fade)} min={0} max={100} step={1}
             onPreview={(v) => livePatch({ fade: v / 100 })}
             onCommit={(v) => sliderCommit('fade', v)}
+            visual={sliderVisual}
+          />
+          <ProRulerSlider
+            variant="instrument" label="Fade in (root)" suffix="%"
+            value={pct(params.fadeIn)} min={0} max={100} step={1}
+            onPreview={(v) => livePatch({ fadeIn: v / 100 })}
+            onCommit={(v) => sliderCommit('fadeIn', v)}
             visual={sliderVisual}
           />
           <ProRulerSlider
