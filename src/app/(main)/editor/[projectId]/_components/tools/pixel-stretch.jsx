@@ -118,6 +118,9 @@ const getActiveImage = (canvas) => {
   return images.at(-1) || null
 }
 
+// Subject detection never needs more than this on its long edge.
+const SUBJECT_DETECT_MAX_DIM = 1024
+
 const MAX_PREVIEW_DIM = 1500
 const HANDLE = 14
 const MIN_BAND = 0.02
@@ -192,7 +195,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const [isEditingLayer, setIsEditingLayer] = useState(false) // re-editing an existing stretch layer
   // What stays IN FRONT of the streaks: 'auto' (on-device subject detect) or
   // 'manual' (a region the user traces). `subjectPicking` = currently tracing it.
-  const [subjectMaskKind, setSubjectMaskKind] = useState('none') // 'none'|'auto'|'manual'
+  const [subjectMaskKind, setSubjectMaskKind] = useState('selection') // 'selection'|'auto'|'manual'
   const [subjectPicking, setSubjectPicking] = useState(false)
   useEffect(() => { coverageRef.current = coverage }, [coverage])
 
@@ -232,6 +235,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   // effect would discard the active object and lose the re-edit target).
   const scheduleFrameRef = useRef(null)
   const ensureMatteRef = useRef(null)
+  const subjectMaskKindRef = useRef('selection')
+  const rasterizeSelectionMatteRef = useRef(null)
 
   // Overlay DOM refs (positioned imperatively, never via React on drag/zoom).
   const drawSurfaceRef = useRef(null)
@@ -244,6 +249,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const labelRef = useRef(null)
 
   useEffect(() => { editorRef.current = canvasEditor }, [canvasEditor])
+  useEffect(() => { subjectMaskKindRef.current = subjectMaskKind }, [subjectMaskKind])
 
   // ── Canvas container element ─────────────────────────────────────────────────
   useEffect(() => {
@@ -332,15 +338,41 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const ensureSubjectMatte = useCallback(async () => {
     // A user-traced (manual) matte is authoritative — never replace it with auto-detect.
     if (matteIsManualRef.current && subjectRawMatteRef.current) return subjectRawMatteRef.current
+    // Selection mode is the default and is recomputed every time, because the
+    // band or lasso may have moved since the last bake.
+    if (subjectMaskKindRef.current === 'selection') {
+      const sel = rasterizeSelectionMatteRef.current?.()
+      if (sel) {
+        subjectRawMatteRef.current = sel
+        subjectCutoutRef.current = null
+        setMatteStatus('ready')
+        return sel
+      }
+    }
     const srcEl = sampleElRef.current || getSourceElement(selectedImageRef.current)
     if (!isSourceReady(srcEl)) return null
     const sig = sourceMetaRef.current?.src || String(selectedImageRef.current?.__stretchUid ?? '')
     if (subjectRawMatteRef.current && subjectMatteSigRef.current === sig) return subjectRawMatteRef.current
     setMatteStatus('loading')
     try {
+      // SlimSAM works from a small image, and the matte is scaled back up when it
+      // is composited, so detection runs on a bounded copy. At native size a
+      // 45MP frame would have the model allocating one full RGBA mask per seed.
       const natW = srcEl.naturalWidth || srcEl.videoWidth || srcEl.width || 512
       const natH = srcEl.naturalHeight || srcEl.videoHeight || srcEl.height || 512
-      const matte = await clientSubjectMask(srcEl, { width: natW, height: natH })
+      const scale = Math.min(1, SUBJECT_DETECT_MAX_DIM / Math.max(natW, natH))
+      const dw = Math.max(64, Math.round(natW * scale))
+      const dh = Math.max(64, Math.round(natH * scale))
+      const small = scale < 1 ? snapshotSource(srcEl, dw, dh, false, false) : srcEl
+      let matte
+      try {
+        matte = await clientSubjectMask(small, { width: dw, height: dh })
+      } finally {
+        if (small !== srcEl) { small.width = 1; small.height = 1 }
+        // Give the ~40MB model and its runtime back rather than holding them for
+        // the session — this tool needs it once, not continuously.
+        import('@/lib/client-ai').then((m) => m.releaseClientModels?.()).catch(() => {})
+      }
       if (!matte) throw new Error('No subject matte returned')
       subjectRawMatteRef.current = matte
       subjectMatteSigRef.current = sig
@@ -356,6 +388,39 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       return null
     }
   }, [])
+
+  /**
+   * The front mask built from the CURRENT SELECTION — the lasso polygon if there
+   * is one, otherwise the band rectangle.
+   *
+   * This is what "Behind" means by default: the streaks pass behind the area you
+   * selected. It needs no model, no download and no extra memory, which matters
+   * because subject detection loads SlimSAM and can cost hundreds of MB on a
+   * large photo. Auto-detect stays available for the cases it genuinely suits.
+   */
+  const rasterizeSelectionMatte = useCallback(() => {
+    const p = paramsRef.current
+    const img = selectedImageRef.current
+    const natW = Math.min(1600, Math.max(64, img?.width || 1024))
+    const natH = Math.min(1600, Math.max(64, img?.height || 1024))
+    const c = createStretchBuffer(natW, natH)
+    const ctx = c.getContext('2d')
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, natW, natH)
+    ctx.fillStyle = '#fff'
+    if (Array.isArray(p.polygon) && p.polygon.length >= 3) {
+      ctx.beginPath()
+      p.polygon.forEach((pt, i) => { const x = pt.x * natW, y = pt.y * natH; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) })
+      ctx.closePath()
+      ctx.fill()
+    } else {
+      const b = p.band
+      ctx.fillRect(b.x * natW, b.y * natH, b.w * natW, b.h * natH)
+    }
+    return c
+  }, [])
+
+  useEffect(() => { rasterizeSelectionMatteRef.current = rasterizeSelectionMatte }, [rasterizeSelectionMatte])
 
   // ── Manual front-subject mask (the user traces the region that stays in front) ─
   const rasterizeSubjectMatte = useCallback((poly) => {
@@ -414,6 +479,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     subjectPickRef.current = false
     setSubjectPicking(false)
     matteIsManualRef.current = false
+    subjectMaskKindRef.current = 'auto'
+    setSubjectMaskKind('auto')
     subjectRawMatteRef.current = null
     subjectMatteSigRef.current = ''
     subjectCutoutRef.current = null
@@ -1116,8 +1183,17 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setCoverage(next)
     coverageRef.current = next
     scheduleFrame()
-    // Only auto-detect when there's no matte yet (a manual trace is authoritative).
-    if (next > 0 && !subjectRawMatteRef.current && matteStatus !== 'loading') {
+    if (next <= 0) return
+    // The default front mask is the SELECTION — instant, no model, no download.
+    // Subject detection only runs when the user explicitly asks for it.
+    if (subjectMaskKindRef.current === 'selection') {
+      subjectRawMatteRef.current = null
+      subjectCutoutRef.current = null
+      await ensureSubjectMatte()
+      scheduleFrame()
+      return
+    }
+    if (!subjectRawMatteRef.current && matteStatus !== 'loading') {
       const toastId = toast.loading('Detecting subject on-device…')
       const m = await ensureSubjectMatte()
       subjectCutoutRef.current = null
@@ -2080,10 +2156,28 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         </div>
         {coverage > 0 && (
           <div className="mt-3 space-y-3">
-            {/* What stays in front — auto-detect OR a region the user traces */}
+            {/* What stays in front — the selection by default, or a detected /
+                traced subject when the user asks for one */}
             <div>
               <span className="panel-label">What stays in front?</span>
-              <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  subjectMaskKindRef.current = 'selection'
+                  setSubjectMaskKind('selection')
+                  matteIsManualRef.current = false
+                  subjectRawMatteRef.current = null
+                  subjectCutoutRef.current = null
+                  ensureMatteRef.current?.()
+                  scheduleFrameRef.current?.()
+                }}
+                className={`mt-1.5 flex h-9 w-full items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
+                style={{ background: subjectMaskKind === 'selection' ? accent : 'var(--bg-elevated)', color: subjectMaskKind === 'selection' ? onAccent : 'var(--text-secondary)', border: subjectMaskKind === 'selection' ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
+              >
+                <Square className="h-3.5 w-3.5" />
+                My selection
+              </button>
+              <div className="mt-2 grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={forceAutoDetect}
@@ -2107,6 +2201,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
               <div className="mt-2 text-[10px] leading-relaxed">
                 {subjectPicking && <span style={{ color: '#f59e0b' }}>✏️ Trace around the subject on the photo, then release to set it.</span>}
                 {!subjectPicking && matteStatus === 'loading' && <span className="inline-flex items-center gap-1" style={{ color: 'var(--text-muted)' }}><Loader2 className="h-3 w-3 animate-spin" /> Detecting subject on-device…</span>}
+                {!subjectPicking && subjectMaskKind === 'selection' && <span style={{ color: '#34d399' }}>✓ Streaks sit behind the area you selected — no AI, no extra memory.</span>}
                 {!subjectPicking && subjectMaskKind === 'auto' && <span style={{ color: '#34d399' }}>✓ Subject auto-detected — streaks sit behind it.</span>}
                 {!subjectPicking && subjectMaskKind === 'manual' && <span style={{ color: '#34d399' }}>✓ Using your traced region as the subject.</span>}
                 {!subjectPicking && matteStatus === 'none' && subjectMaskKind === 'none' && <span style={{ color: '#f59e0b' }}>No subject auto-detected — tap “Draw subject” to mark it by hand.</span>}

@@ -262,10 +262,33 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
      * pass BEHIND the person instead of painting over them — the layering the
      * reference edits use on every portrait.
      */
-    const placementFor = async (el, behind, blend) => {
+    /** White-on-black mask of the slice itself — no model, no download. */
+    const selectionMatte = (resolved) => {
+        const size = 1024
+        const c = typeof document === 'undefined' ? null : document.createElement('canvas')
+        if (!c) return null
+        c.width = size
+        c.height = size
+        const ctx = c.getContext('2d')
+        ctx.fillStyle = '#000'
+        ctx.fillRect(0, 0, size, size)
+        ctx.fillStyle = '#fff'
+        const b = resolved.band
+        ctx.fillRect(b.x * size, b.y * size, b.w * size, b.h * size)
+        return c
+    }
+
+    const placementFor = async (el, behind, blend, resolved, useSubject) => {
         const out = isStretchBlend(blend) ? { blend } : {}
         const cov = clamp(behind, 0, 100, 0) / 100
         if (cov <= 0) return out
+        // Default: the ribbon passes behind the SLICE the user chose. Subject
+        // detection is opt-in because it downloads and runs SlimSAM, which is
+        // expensive on a small machine and is not what "behind" usually means.
+        if (!useSubject) {
+            const matte = selectionMatte(resolved)
+            return matte ? { ...out, matte, coverage: cov, feather: 0.004 } : out
+        }
         const box = await subjectBox(el)
         if (!box?.mask) return out
         return { ...out, matte: box.mask, coverage: cov, feather: 0.004 }
@@ -317,10 +340,11 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 fadeIn: '0..100 — fade at the slice end, so it dissolves into the photo',
                 mirror: 'true for a symmetric double ribbon',
                 opacity: '0..100 (default 100)',
-                behind: '0..100 — how much of the subject the ribbon passes BEHIND (default 0)',
+                behind: '0..100 — how much of the SELECTED SLICE the ribbon passes behind (default 0)',
+                behindSubject: 'true to detect the subject and pass behind that instead — downloads and runs SlimSAM',
                 blend: `layer blend mode: ${STRETCH_BLEND_MODES.map((b) => b.id).join(', ')}`,
             },
-            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend } = {}) => {
+            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const fromPreset = preset && PIXEL_STRETCH_PRESETS.find((p) => p.id === preset)?.params
@@ -341,7 +365,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                     mirror: mirror === undefined ? !!fromPreset?.mirror : !!mirror,
                     opacity: clamp(opacity, 0, 100, 100) / 100,
                 })
-                const placement = await placementFor(el, behind, blend)
+                const placement = await placementFor(el, behind, blend, resolved, behindSubject)
                 await commit(image, params, 'Pixel stretch', placement)
                 return { applied: 'ribbon', from: resolved.from, axis: params.axis, direction: params.direction, band: params.band, seed: Math.round(params.seed * 100), behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
             },
@@ -355,16 +379,17 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 from: 'same slice words as `ribbon`',
                 band: 'exact source slice { x, y, w, h }',
                 length: '1..6 — ribbon length before warping (default 2.2)',
-                behind: '0..100 — how much of the subject the ribbon passes behind',
+                behind: '0..100 — how much of the selected slice the ribbon passes behind',
+                behindSubject: 'true to use subject detection instead (see `ribbon`)',
                 blend: 'layer blend mode (see `ribbon`)',
             },
-            run: async ({ preset = 'arch', amount = 100, from, band, axis, direction, seed, length, behind, blend } = {}) => {
+            run: async ({ preset = 'arch', amount = 100, from, band, axis, direction, seed, length, behind, blend, behindSubject } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const id = WARP_IDS.includes(preset) ? preset : 'arch'
                 const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: clamp(length, 1, 6, 2.6), taper: 0.05 })
                 const { grid, rest } = applyWarpPreset(flat, id, clamp(amount, -200, 200, 100) / 100)
-                const placement = await placementFor(el, behind, blend)
+                const placement = await placementFor(el, behind, blend, resolved, behindSubject)
                 await commit(image, { ...flat, warpGrid: grid, warpRest: rest }, `Pixel stretch warp (${id})`, placement)
                 return { applied: 'warp', preset: id, from: resolved.from, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
             },
@@ -377,10 +402,11 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 points: 'optional [{x,y}, …] in 0..1 image coords — an explicit path (2..24 points)',
                 width: '0.05..0.6 — ribbon thickness as a fraction of the short side',
                 from: 'same slice words as `ribbon`',
-                behind: '0..100 — how much of the subject the ribbon passes behind',
+                behind: '0..100 — how much of the selected slice the ribbon passes behind',
+                behindSubject: 'true to use subject detection instead (see `ribbon`)',
                 blend: 'layer blend mode (see `ribbon`)',
             },
-            run: async ({ preset = 'ribbon', points, width, from, band, axis, direction, seed, behind, blend } = {}) => {
+            run: async ({ preset = 'ribbon', points, width, from, band, axis, direction, seed, behind, blend, behindSubject } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: 2.8, taper: 0.05 })
@@ -389,7 +415,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 const flowPath = usable
                     ? createFlowPathFromPoints(points, width ? { width: clamp(width, 0.05, 0.6, 0.18) } : {})
                     : applyFlowPreset(flat, FLOW_IDS.includes(preset) ? preset : 'ribbon')
-                const placement = await placementFor(el, behind, blend)
+                const placement = await placementFor(el, behind, blend, resolved, behindSubject)
                 await commit(image, { ...flat, flowPath }, 'Pixel stretch flow', placement)
                 return { applied: 'flow', preset: usable ? 'custom' : preset, anchors: flowPath?.anchors?.length || 0, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
             },
