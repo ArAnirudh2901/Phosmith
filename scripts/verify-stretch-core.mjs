@@ -180,6 +180,24 @@ section('ribbon fold guard')
     check(radiusOf({ ...wide, bend: 0 }).s < 1, 'a wide ribbon with no bend is straight')
 }
 
+section('flare range')
+{
+    // The reference fans open from a near-point to most of the frame. A tip only
+    // twice the seed width cannot make one, so the flare side of `taper` has to
+    // reach far past -1.
+    const flared = clampStretchParams({ ...DEFAULT_STRETCH, taper: -7 })
+    check(flared.taper === -7, 'a wide flare survives clamping', String(flared.taper))
+    check(clampStretchParams({ ...DEFAULT_STRETCH, taper: -50 }).taper === -12, 'and is still bounded', '-12')
+    check(clampStretchParams({ ...DEFAULT_STRETCH, taper: 1 }).taper === 1, 'the narrowing side still reaches a point')
+    check(clampStretchParams({ ...DEFAULT_STRETCH, taper: 5 }).taper === 1, 'and cannot invert past it')
+    check(clampStretchParams({ ...DEFAULT_STRETCH, taper: NaN }).taper === 0, 'NaN taper falls back to parallel')
+
+    // A thin slice must be able to cross the frame (see the length clamp).
+    check(clampStretchParams({ ...DEFAULT_STRETCH, length: 40 }).length === 40, 'a thin slice can travel 40x its own height')
+    check(clampStretchParams({ ...DEFAULT_STRETCH, length: 9999 }).length === 200, 'length is still bounded', '200')
+    check(clampStretchParams({ ...DEFAULT_STRETCH, length: 0.2 }).length === 1, 'and never shrinks below the slice')
+}
+
 section('natural language parser')
 const routes = [
     ['pixel stretch this photo', 'ribbon'],

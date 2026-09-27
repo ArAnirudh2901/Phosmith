@@ -253,7 +253,11 @@ export function clampStretchParams(p = {}) {
     bend: clamp(num(base.bend, D.bend), -1, 1),
     twist: clamp(num(base.twist, D.twist), -1, 1),
     fade: clamp01(num(base.fade, D.fade)),
-    taper: clamp(num(base.taper, D.taper), -1, 1),   // <0 flares the tip wider, >0 narrows it
+    // <0 flares the tip wider, >0 narrows it (1 = to a point). The flare side
+    // reaches -12 because the reference fans open from a near-point to most of
+    // the frame — at the old floor of -1 the tip was only twice the seed width,
+    // which cannot make a fan at all.
+    taper: clamp(num(base.taper, D.taper), -12, 1),
     mirror: Boolean(base.mirror),
     opacity: clamp01(num(base.opacity, D.opacity)),
     warpGrid: sanitizeWarpGrid(base.warpGrid),
@@ -274,6 +278,8 @@ export const PIXEL_STRETCH_PRESETS = [
   { id: 'sweep', label: 'Ribbon Sweep', hint: 'Long flowing ribbon', params: { length: 4, bend: 0.85, twist: 0.15, fade: 0.25, taper: 0.25, mirror: false } },
   { id: 'scurve', label: 'S-Curve', hint: 'Serpentine flow', params: { length: 3, bend: 0.7, twist: 1, fade: 0.2, taper: 0.15, mirror: false } },
   { id: 'mirror', label: 'Mirror Arc', hint: 'Symmetric double arch', params: { length: 2.2, bend: 0.7, twist: 0, fade: 0.15, taper: 0.1, mirror: true } },
+  { id: 'fan', label: 'Fan', hint: 'Splays from a point into a wide fan', params: { length: 3, bend: 0.1, twist: 0, fade: 0.3, taper: -7, mirror: false } },
+  { id: 'spear', label: 'Spear', hint: 'Narrows to a point', params: { length: 3, bend: 0.25, twist: 0, fade: 0.2, taper: 1, mirror: false } },
 ]
 
 // ─── Geometry ────────────────────────────────────────────────────────────────
@@ -363,7 +369,8 @@ function resolveGeometry(p, W, H, dir = p.direction) {
   // solve for the largest s whose R still clears the half-width. A ribbon longer
   // than it is wide never reaches this limit; a short, wide, hard-bent one bends
   // as far as it geometrically can and no further.
-  const halfW = stripLen / 2
+  // A flared ribbon is widest at its tip, and that is the part that folds first.
+  const halfW = (stripLen * Math.max(1, 1 - p.taper)) / 2
   const rMin = halfW / FOLD_LIMIT
   let bow = p.bend * total * 0.6
   if (rMin > total / 2) {

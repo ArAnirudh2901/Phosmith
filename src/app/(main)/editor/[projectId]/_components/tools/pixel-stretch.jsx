@@ -2601,6 +2601,17 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           onCommit={(v) => sliderCommit('bend', v)}
           visual={sliderVisual}
         />
+        {/* Next to Bend rather than buried under Refine: with Length this is what
+            turns a slice into the reference fan. 0% narrows to a point, 100% is
+            parallel, and past that it splays — the old control stopped at 200%,
+            which could not open a fan at all. */}
+        <ProRulerSlider
+          variant="instrument" label="Tip width" suffix="%"
+          value={Math.round((1 - params.taper) * 100)} min={0} max={1300} step={5}
+          onPreview={(v) => livePatch({ taper: 1 - v / 100 })}
+          onCommit={(v) => { setActivePresetId(null); commit({ taper: 1 - v / 100 }) }}
+          visual={sliderVisual}
+        />
         <ProRulerSlider
           variant="instrument" label="Seed Line" suffix="%"
           value={pct(params.seed)} min={0} max={100} step={1}
@@ -2661,13 +2672,6 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
             value={pct(params.fadeIn)} min={0} max={100} step={1}
             onPreview={(v) => livePatch({ fadeIn: v / 100 })}
             onCommit={(v) => sliderCommit('fadeIn', v)}
-            visual={sliderVisual}
-          />
-          <ProRulerSlider
-            variant="instrument" label="Taper / Flare" suffix="%"
-            value={pct(params.taper)} min={-100} max={100} step={1}
-            onPreview={(v) => livePatch({ taper: v / 100 })}
-            onCommit={(v) => sliderCommit('taper', v)}
             visual={sliderVisual}
           />
           <ProRulerSlider
