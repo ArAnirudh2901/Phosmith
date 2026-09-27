@@ -34,6 +34,7 @@ const LIMITERS = {
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute
     "canvas-snapshot":   { count: 240, windowSec: 60 },  // 240/ minute — write-behind cache
     "canvas-presence":   { count: 60,  windowSec: 60 },  // 60 / minute — concurrent-device heartbeat (~6/min/tab steady state)
+    "diagnostics":       { count: 12,  windowSec: 60 },  // 12 / minute — batched client error reports; the client caps itself at 25/session, this is the backstop against a forged flood
 }
 
 export const enforceRateLimit = async (kind, identifier) => {

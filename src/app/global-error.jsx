@@ -2,10 +2,16 @@
 
 import { useEffect } from "react"
 import { logger } from "@/lib/logger"
+import { report, flush } from "@/lib/client-diagnostics"
 
 export default function GlobalError({ error, reset }) {
   useEffect(() => {
     logger.error("[global] root boundary caught:", error)
+    // A crash that reaches the root boundary is the one worth knowing about on
+    // someone else's device; flush immediately rather than waiting for a batch
+    // the user may never trigger.
+    report("error", { name: error?.name, message: error?.message, stack: error?.stack, context: "root-boundary" })
+    flush()
   }, [error])
 
   return (
