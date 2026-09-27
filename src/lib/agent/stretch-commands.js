@@ -334,7 +334,9 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 preset: `one of ${PRESET_IDS.join(', ')} — applied before the individual numbers`,
                 length: '1..200 — how far the ribbon runs, as a multiple of the slice. Omitted, it is sized to cross the frame.',
                 bend: '-100..100 — how far it bows sideways (default 55)',
-                twist: '-100..100 — 0 is an arch, 100 an S-curve, -100 a hook',
+                twist: '-100..100 — the PATH shape: 0 is an arch, 100 an S-curve, -100 a hook',
+                twistTurns: '0..3 — half-turns of PHYSICAL twist; the ribbon pinches and turns over',
+                twistDepth: '0..100 — how far a twist closes; under 50 it pinches to a waist without flipping (default 100)',
                 taper: '-100..100 — positive narrows the tip, negative flares it',
                 fade: '0..100 — fade at the streak tips',
                 fadeIn: '0..100 — fade at the slice end, so it dissolves into the photo',
@@ -344,7 +346,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 behindSubject: 'true to detect the subject and pass behind that instead — downloads and runs SlimSAM',
                 blend: `layer blend mode: ${STRETCH_BLEND_MODES.map((b) => b.id).join(', ')}`,
             },
-            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject } = {}) => {
+            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject, twistTurns, twistDepth } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const fromPreset = preset && PIXEL_STRETCH_PRESETS.find((p) => p.id === preset)?.params
@@ -366,6 +368,8 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                     taper: clamp(taper, -100, 100, (fromPreset?.taper ?? 0.08) * 100) / 100,
                     fade: clamp(fade, 0, 100, (fromPreset?.fade ?? 0.18) * 100) / 100,
                     fadeIn: clamp(fadeIn, 0, 100, 22) / 100,
+                    twistTurns: clamp(twistTurns, 0, 3, fromPreset?.twistTurns ?? 0),
+                    twistDepth: clamp(twistDepth, 0, 100, (fromPreset?.twistDepth ?? 1) * 100) / 100,
                     mirror: mirror === undefined ? !!fromPreset?.mirror : !!mirror,
                     opacity: clamp(opacity, 0, 100, 100) / 100,
                 })

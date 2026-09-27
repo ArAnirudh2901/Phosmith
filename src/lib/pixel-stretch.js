@@ -42,6 +42,11 @@
  * @property {number} fadeIn  0..1 opacity taper at the seed end, so the ribbon
  *   can dissolve into the photo instead of starting on a hard cut edge.
  * @property {number} taper 0..1 width taper.
+ * @property {number} twistTurns  Half-turns of PHYSICAL twist along the ribbon.
+ *   The half-width is modulated by cos(pi * turns * t) and is left SIGNED, so at
+ *   each zero crossing the ribbon pinches to an edge and its two sides swap —
+ *   which is exactly what a real ribbon does, and what the reference clips show
+ *   when the colour order flips across a narrow waist.
  * @property {boolean} mirror  Symmetric ribbon.
  * @property {number} opacity  0..1 overall strength.
  * @property {Array<Array<{x:number,y:number}>>|null} warpGrid  R×C control points
@@ -70,6 +75,8 @@ export const DEFAULT_STRETCH = {
   fade: 0,
   fadeIn: 0,
   taper: 0,
+  twistTurns: 0,
+  twistDepth: 1,
   mirror: false,
   opacity: 1,
   warpGrid: null,
@@ -258,6 +265,11 @@ export function clampStretchParams(p = {}) {
     // the frame — at the old floor of -1 the tip was only twice the seed width,
     // which cannot make a fan at all.
     taper: clamp(num(base.taper, D.taper), -12, 1),
+    twistTurns: clamp(num(base.twistTurns, D.twistTurns), 0, 3),
+    // How far the twist closes the ribbon. Below 0.5 the width never reaches
+    // zero, so the ribbon PINCHES to a waist without turning over (the trumpet
+    // in the reference); at or above 0.5 it crosses and the two sides swap.
+    twistDepth: clamp(num(base.twistDepth, D.twistDepth), 0, 1),
     mirror: Boolean(base.mirror),
     opacity: clamp01(num(base.opacity, D.opacity)),
     warpGrid: sanitizeWarpGrid(base.warpGrid),
@@ -280,6 +292,8 @@ export const PIXEL_STRETCH_PRESETS = [
   { id: 'mirror', label: 'Mirror Arc', hint: 'Symmetric double arch', params: { length: 2.2, bend: 0.7, twist: 0, fade: 0.15, taper: 0.1, mirror: true } },
   { id: 'fan', label: 'Fan', hint: 'Splays from a point into a wide fan', params: { length: 3, bend: 0.1, twist: 0, fade: 0.3, taper: -7, mirror: false } },
   { id: 'spear', label: 'Spear', hint: 'Narrows to a point', params: { length: 3, bend: 0.25, twist: 0, fade: 0.2, taper: 1, mirror: false } },
+  { id: 'twisted', label: 'Twisted', hint: 'Pinches to an edge and turns over', params: { length: 3, bend: 0.45, twist: 0.3, fade: 0.2, taper: 0, twistTurns: 1, mirror: false } },
+  { id: 'trumpet', label: 'Trumpet', hint: 'Pinched waist, flared bell', params: { length: 3.5, bend: 0.3, twist: 0, fade: 0.25, taper: -6, twistTurns: 0.8, twistDepth: 0.42, mirror: false } },
 ]
 
 // ─── Geometry ────────────────────────────────────────────────────────────────
@@ -328,6 +342,12 @@ const cubicRadius = (p0, c1, c2, p1, t) => {
 // How close a swept half-width may come to the local radius of curvature. At 1.0
 // the inner edge lands exactly on the centre of curvature (a cusp); a little
 // under keeps the sheet continuous with no visible narrowing on normal bends.
+/** Signed width multiplier at t — see `twistTurns` / `twistDepth`. */
+const twistFactor = (p, t) => {
+  const d = p.twistDepth == null ? 1 : p.twistDepth
+  return (1 - d) + d * Math.cos(Math.PI * p.twistTurns * t)
+}
+
 const FOLD_LIMIT = 0.92
 // …and how far a flow-path corner may narrow the ribbon before the cure is worse
 // than the fold.
@@ -627,7 +647,7 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
 
   // Fast, perfectly-crisp path for an un-bent ribbon with no taper/fade — a single
   // rotated quad is already gap-free.
-  if (straight && p.fade <= 0 && p.fadeIn <= 0 && Math.abs(p.taper) <= 0.002) {
+  if (straight && p.fade <= 0 && p.fadeIn <= 0 && Math.abs(p.taper) <= 0.002 && !p.twistTurns) {
     const a = Math.atan2(g.d.y, g.d.x) - Math.PI / 2
     const cos = Math.cos(a), sin = Math.sin(a)
     ctx.globalAlpha = p.opacity
@@ -648,7 +668,11 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
     const t = i / slices
     const c = cubic(g.start, g.c1, g.c2, g.end, t)
     const tan = cubicTangent(g.start, g.c1, g.c2, g.end, t)
-    const hw = Math.max(0.25, (g.stripLen * (1 - p.taper * t)) / 2)
+    let hw = Math.max(0.25, (g.stripLen * (1 - p.taper * t)) / 2)
+    // A twist is just a SIGNED half-width: the mesh builds its two edges as
+    // centre -/+ n*hw, so as the cosine passes through zero the ribbon narrows to
+    // an edge and the two sides trade places — a real half-turn, not a redraw.
+    if (p.twistTurns) hw *= twistFactor(p, t)
     sections[i] = { cx: c.x, cy: c.y, nx: tan.y, ny: -tan.x, hw }
   }
   sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality })
@@ -1393,7 +1417,8 @@ export function renderFlowStretch(ctx, sample, params, W, H, opts = {}) {
     if (!at) { sections[i] = sections[i - 1]; continue }
     const al = Math.hypot(at.tx, at.ty) || 1
     const tx = at.tx / al, ty = at.ty / al
-    const hw = Math.max(0.25, (seedLen * at.w * (1 - p.taper * t)) / 2)
+    let hw = Math.max(0.25, (seedLen * at.w * (1 - p.taper * t)) / 2)
+    if (p.twistTurns) hw *= twistFactor(p, t)
     sections[i] = { cx: at.x, cy: at.y, nx: ty, ny: -tx, hw, tx, ty }
   }
 
@@ -1414,10 +1439,10 @@ export function renderFlowStretch(ctx, sample, params, W, H, opts = {}) {
     if (r < minRadius) minRadius = r
   }
   let maxHw = 0
-  for (const sec of sections) if (sec && sec.hw > maxHw) maxHw = sec.hw
+  for (const sec of sections) if (sec && Math.abs(sec.hw) > maxHw) maxHw = Math.abs(sec.hw)
   if (Number.isFinite(minRadius) && maxHw > minRadius * FOLD_LIMIT) {
     const scale = Math.max(FOLD_FLOOR, (minRadius * FOLD_LIMIT) / maxHw)
-    for (const sec of sections) if (sec) sec.hw = Math.max(0.25, sec.hw * scale)
+    for (const sec of sections) if (sec) sec.hw *= scale
   }
   sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality })
   return true

@@ -198,6 +198,31 @@ section('flare range')
     check(clampStretchParams({ ...DEFAULT_STRETCH, length: 0.2 }).length === 1, 'and never shrinks below the slice')
 }
 
+section('ribbon twist')
+{
+    const t = (v) => clampStretchParams({ ...DEFAULT_STRETCH, ...v })
+    check(t({}).twistTurns === 0 && t({}).twistDepth === 1, 'no twist by default, at full depth')
+    check(t({ twistTurns: 1.5 }).twistTurns === 1.5, 'fractional half-turns are kept')
+    check(t({ twistTurns: 99 }).twistTurns === 3, 'turns are bounded', '3')
+    check(t({ twistTurns: -2 }).twistTurns === 0, 'and never negative')
+    check(t({ twistDepth: 0.42 }).twistDepth === 0.42, 'a partial depth is kept — that is the pinch-without-flip case')
+    check(t({ twistDepth: 9 }).twistDepth === 1 && t({ twistDepth: -1 }).twistDepth === 0, 'depth clamps to 0..1')
+    check(t({ twistTurns: NaN }).twistTurns === 0 && t({ twistDepth: NaN }).twistDepth === 1, 'NaN falls back rather than poisoning the sweep')
+
+    // Below half depth the width multiplier (1-d) + d*cos never reaches zero, so
+    // the ribbon pinches but does not turn over. At or above it, it crosses.
+    const minFactor = (turns, d) => {
+        let lo = Infinity
+        for (let i = 0; i <= 200; i += 1) {
+            const v = (1 - d) + d * Math.cos(Math.PI * turns * (i / 200))
+            if (v < lo) lo = v
+        }
+        return lo
+    }
+    check(minFactor(1, 0.42) > 0, 'depth 0.42 pinches without flipping', minFactor(1, 0.42).toFixed(3))
+    check(minFactor(1, 1) < 0, 'depth 1 turns the ribbon over', minFactor(1, 1).toFixed(3))
+}
+
 section('natural language parser')
 const routes = [
     ['pixel stretch this photo', 'ribbon'],

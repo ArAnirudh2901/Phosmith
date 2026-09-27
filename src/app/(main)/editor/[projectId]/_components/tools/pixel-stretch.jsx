@@ -2612,6 +2612,25 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           onCommit={(v) => { setActivePresetId(null); commit({ taper: 1 - v / 100 }) }}
           visual={sliderVisual}
         />
+
+        {/* The physical twist: the ribbon pinches and, past half depth, turns
+            over so its two sides swap — the flip seen in the reference clips. */}
+        <ProRulerSlider
+          variant="instrument" label="Ribbon twist" suffix=" half-turns"
+          value={Math.round(params.twistTurns * 10) / 10} min={0} max={3} step={0.1}
+          onPreview={(v) => livePatch({ twistTurns: v })}
+          onCommit={(v) => { setActivePresetId(null); commit({ twistTurns: v }) }}
+          visual={sliderVisual}
+        />
+        {params.twistTurns > 0 && (
+          <ProRulerSlider
+            variant="instrument" label="Twist depth" suffix="%"
+            value={Math.round((params.twistDepth ?? 1) * 100)} min={0} max={100} step={1}
+            onPreview={(v) => livePatch({ twistDepth: v / 100 })}
+            onCommit={(v) => { setActivePresetId(null); commit({ twistDepth: v / 100 }) }}
+            visual={sliderVisual}
+          />
+        )}
         <ProRulerSlider
           variant="instrument" label="Seed Line" suffix="%"
           value={pct(params.seed)} min={0} max={100} step={1}
