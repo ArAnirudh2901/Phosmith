@@ -259,23 +259,35 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setContainerEl(el || null)
   }, [canvasEditor])
 
-  // ── Image lock helpers (track current image via a ref → re-apply safe) ───────
+  // ── Image lock helpers ───────────────────────────────────────────────────────
+  //
+  // EVERY image on the canvas is frozen while the tool is open, not just the one
+  // being edited. The selection is drawn by dragging on the canvas, and any drag
+  // the tool's own surface does not catch falls through to Fabric — which moved
+  // the photo out from under the stretch. Re-editing a committed layer made that
+  // certain: the layer was locked and the photo underneath was left live.
   const lockImage = useCallback((img) => {
-    if (!img) return
-    lockRef.current = {
-      img,
+    const canvas = editorRef.current
+    const targets = canvas?.getObjects?.().filter((o) => o?.type?.toLowerCase?.() === 'image') || []
+    if (img && !targets.includes(img)) targets.push(img)
+    if (!targets.length) return
+    lockRef.current = targets.map((o) => ({
+      img: o,
       props: {
-        selectable: img.selectable, evented: img.evented,
-        lockMovementX: img.lockMovementX, lockMovementY: img.lockMovementY,
-        hasControls: img.hasControls, hasBorders: img.hasBorders,
+        selectable: o.selectable, evented: o.evented,
+        lockMovementX: o.lockMovementX, lockMovementY: o.lockMovementY,
+        hasControls: o.hasControls, hasBorders: o.hasBorders,
       },
+    }))
+    for (const o of targets) {
+      o.set({ selectable: false, evented: false, lockMovementX: true, lockMovementY: true, hasControls: false, hasBorders: false })
     }
-    img.set({ selectable: false, evented: false, lockMovementX: true, lockMovementY: true, hasControls: false, hasBorders: false })
   }, [])
 
   const unlockImage = useCallback(() => {
-    const l = lockRef.current
-    if (l?.img) l.img.set(l.props)
+    const entries = lockRef.current
+    if (Array.isArray(entries)) for (const l of entries) l.img?.set?.(l.props)
+    else if (entries?.img) entries.img.set(entries.props)   // pre-existing single-image shape
     lockRef.current = null
   }, [])
 
@@ -1786,6 +1798,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       })
       if (!editingLayerRef.current) placed.__stretchUid = ++uidCounter
       editingLayerRef.current = placed
+      // The new layer joins the frozen set; without this the very next drag on
+      // the canvas picks it up and slides it off the photo.
+      lockImage(placed)
 
       setIsEditingLayer(true)
       interactingRef.current = false
