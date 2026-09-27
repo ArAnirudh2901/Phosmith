@@ -54,6 +54,25 @@ const ensureDb = async () => {
   return await requirePrisma();
 };
 
+// Everything the project list renders — deliberately without `canvasState`.
+// How stale `lastActiveAt` may get before a page load refreshes it.
+const ACTIVITY_REFRESH_MS = 10 * 60 * 1000;
+
+const PROJECT_LIST_FIELDS = {
+  id: true,
+  title: true,
+  userId: true,
+  width: true,
+  height: true,
+  thumbnailUrl: true,
+  currentImageUrl: true,
+  originalImageUrl: true,
+  folderId: true,
+  revision: true,
+  createdAt: true,
+  updatedAt: true,
+};
+
 const withDocFields = (row) => {
   if (!row) return row;
   const out = { ...row, _id: row.id };
@@ -100,6 +119,8 @@ const findUserForAuth = async (db, auth) => {
 
 const upsertAuthenticatedUser = async (db, auth) => {
   requireAuth({ auth });
+  // A write is the one place the Clerk profile is worth a network call.
+  await auth.loadProfile?.();
   const existing = await findUserForAuth(db, auth);
   const now = new Date();
   const data = clean({
@@ -132,7 +153,14 @@ const upsertAuthenticatedUser = async (db, auth) => {
 
 const getAuthUser = async (db, ctx) => {
   const auth = requireAuth(ctx);
-  const existing = await findUserForAuth(db, auth);
+  let existing = await findUserForAuth(db, auth);
+  // A row predating clerkUserId can only be matched by email. If the session
+  // claims carry none, pay for the Clerk profile once rather than create a
+  // duplicate account for someone who already has one.
+  if (!existing && !auth.email && auth.loadProfile) {
+    await auth.loadProfile();
+    existing = await findUserForAuth(db, auth);
+  }
   if (existing) return existing;
   return await upsertAuthenticatedUser(db, auth);
 };
@@ -214,9 +242,19 @@ const attachSnapshots = (editSet) => {
 };
 
 const functions = {
+  // Called on EVERY page load. The write it used to do unconditionally cost a
+  // Clerk profile round trip plus a row update before the app could render, to
+  // refresh a `lastActiveAt` nobody reads at minute resolution. A known user
+  // whose row is already fresh now returns straight from the lookup.
   "users.store": async (ctx) => {
     const db = await ensureDb();
-    const user = await upsertAuthenticatedUser(db, requireAuth(ctx));
+    const auth = requireAuth(ctx);
+    const existing = await findUserForAuth(db, auth);
+    if (existing?.lastActiveAt) {
+      const age = Date.now() - new Date(existing.lastActiveAt).getTime();
+      if (age >= 0 && age < ACTIVITY_REFRESH_MS) return existing.id;
+    }
+    const user = await upsertAuthenticatedUser(db, auth);
     return user.id;
   },
 
@@ -298,12 +336,18 @@ const functions = {
     return project.id;
   },
 
+  // The dashboard list must NEVER select canvasState. It is the whole serialised
+  // Fabric document per project — megabytes each once a project has real edits —
+  // and the list only renders a title, a thumbnail and a date. Sending it made
+  // the dashboard's first query ~20 MB and ~14 s. The editor reads the canvas
+  // through projects.getProject, one project at a time.
   "projects.getUserProjects": async (ctx) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
     const rows = await db.project.findMany({
       where: { userId: user.id },
       orderBy: { updatedAt: "desc" },
+      select: PROJECT_LIST_FIELDS,
     });
     return rows.map(withDocFields);
   },

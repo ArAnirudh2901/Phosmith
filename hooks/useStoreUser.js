@@ -35,17 +35,16 @@ export function useStoreUser() {
                 const id = await storeUser();
                 setDatabaseSetupMissing(false);
 
-                try {
-                    const response = await fetch("/api/billing/sync", {
-                        method: "POST",
+                // The app is usable the moment the user row is known. Billing is
+                // reconciled in the background — awaiting it here put a second
+                // serial round trip in front of every page render.
+                fetch("/api/billing/sync", { method: "POST" })
+                    .then((response) => {
+                        if (!response.ok) throw new Error("Billing plan sync failed.");
+                    })
+                    .catch((syncError) => {
+                        console.error("Failed to sync billing plan to Neon.", syncError);
                     });
-
-                    if (!response.ok) {
-                        throw new Error("Billing plan sync failed.");
-                    }
-                } catch (syncError) {
-                    console.error("Failed to sync billing plan to Neon.", syncError);
-                }
 
                 if (!isCancelled) {
                     setUserId(id);
