@@ -16,6 +16,7 @@
 
 import { isPhosmithMaskOverlay } from "@/lib/canvas-mask"
 import { canvasLimits, maxRenderScale } from "@/lib/canvas-limits"
+import { runHeavy, PRIORITY } from '@/lib/heavy-job-queue'
 
 // Transient objects that must never appear in a flattened render: the mask
 // tool's live overlay and anything explicitly flagged excludeFromExport.
@@ -236,7 +237,13 @@ export const renderLiveCanvasElement = (canvasEditor, { project, scale = 1, maxE
 }
 
 // Flatten the live canvas to an encoded blob (PNG/JPEG/WebP) — the export path.
-export const snapshotCanvasToBlob = async (canvasEditor, { project, scale = 1, format = "png", quality = 1 } = {}) => {
+export const snapshotCanvasToBlob = async (canvasEditor, { project, scale = 1, format = "png", quality = 1 } = {}) =>
+    // A full-scale export re-renders the whole document into a fresh canvas —
+    // one of the largest single allocations the app makes, so it takes its turn
+    // rather than landing on top of a commit or a model load.
+    runHeavy('export snapshot', () => snapshotCanvasToBlobInner(canvasEditor, { project, scale, format, quality }))
+
+const snapshotCanvasToBlobInner = async (canvasEditor, { project, scale = 1, format = "png", quality = 1 } = {}) => {
     const { canvasElement, limitedBy } = renderLiveCanvasElement(canvasEditor, { project, scale })
 
     let finalCanvas = canvasElement
@@ -288,7 +295,13 @@ export const snapshotCanvasToBlobSafe = async (canvasEditor, opts) => {
 // AND a capped JPEG base64 to send to the vision model. Recovers from a tainted
 // canvas once; returns null if it still can't be read (caller falls back to the
 // raw FabricImage).
-export const flattenLiveCanvasForAnalysis = async (canvasEditor, { project, maxEdge = 1024, quality = 0.85 } = {}) => {
+export const flattenLiveCanvasForAnalysis = async (canvasEditor, { project, maxEdge = 1024, quality = 0.85 } = {}) =>
+    // The agent asks for this on every turn; it is smaller than an export but
+    // still a full re-render, and it must not collide with one.
+    runHeavy('analysis snapshot', () => flattenLiveCanvasInner(canvasEditor, { project, maxEdge, quality }),
+        { priority: PRIORITY.background, key: 'analysis-snapshot' })
+
+const flattenLiveCanvasInner = async (canvasEditor, { project, maxEdge = 1024, quality = 0.85 } = {}) => {
     if (!canvasEditor) return null
     const renderOnce = () => {
         const { canvasElement } = renderLiveCanvasElement(canvasEditor, { project, scale: 1, maxEdge })

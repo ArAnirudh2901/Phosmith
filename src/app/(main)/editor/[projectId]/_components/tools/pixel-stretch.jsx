@@ -57,6 +57,7 @@ import {
   placeStretchLayer,
   bakeStretchBuffer,
 } from '@/lib/pixel-stretch-apply'
+import { runHeavy, isSuperseded } from '@/lib/heavy-job-queue'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
 import { toUserMessage } from '@/lib/user-error'
@@ -1761,24 +1762,28 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       // Bake ONLY the ribbons onto a transparent buffer — the base photo remains its
       // own layer below. For partial/below placement, knock the subject out so the
       // photo's subject reads in front of the streaks.
+      // The matte is fetched BEFORE taking the heavy slot: subject detection is
+      // queued itself, so asking for it from inside a queued job would deadlock.
       const matte = cov > 0 ? await ensureSubjectMatte() : null
-      // Same bake the agent runs, including handing the full-size scratch
-      // canvases back afterwards.
-      const out = bakeStretchBuffer({
-        srcEl, params: p, W, H, flipX, flipY,
-        matte, coverage: cov, feather: featherRef.current,
-      })
-      if (!out) throw new Error('Nothing to stretch yet — set a region or shape first')
+      const url = await runHeavy('pixel stretch commit', async () => {
+        // Same bake the agent runs, including handing the full-size scratch
+        // canvases back afterwards.
+        const out = bakeStretchBuffer({
+          srcEl, params: p, W, H, flipX, flipY,
+          matte, coverage: cov, feather: featherRef.current,
+        })
+        if (!out) throw new Error('Nothing to stretch yet — set a region or shape first')
 
-      let blob
-      try { blob = await encodeToPngBlob(out) }
-      catch (encodeErr) {
-        // Same taint test the export path uses, so both agree on what a tainted
-        // canvas looks like across engines.
-        if (isTaintError(encodeErr)) throw new Error('This image is cross-origin and can’t be exported. Re-import it into the project first.')
-        throw encodeErr
-      }
-      const url = await uploadStretchBlob(blob, W, H)
+        let blob
+        try { blob = await encodeToPngBlob(out) }
+        catch (encodeErr) {
+          // Same taint test the export path uses, so both agree on what a tainted
+          // canvas looks like across engines.
+          if (isTaintError(encodeErr)) throw new Error('This image is cross-origin and can’t be exported. Re-import it into the project first.')
+          throw encodeErr
+        }
+        return await uploadStretchBlob(blob, W, H)
+      }, { key: 'stretch-commit-button' })
 
       // Keep the stretch a fully INDEPENDENT entity from the photo: persist a
       // DURABLE copy of the source so the layer stays re-editable even after the
@@ -1822,6 +1827,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       scheduleFrame()
       toast.success(wasEditing ? 'Stretch layer updated' : 'Pixel stretch added as a layer', { id: toastId })
     } catch (error) {
+      // A second click replaced this run — that is the button working, not a
+      // failure, so it must not surface as one.
+      if (isSuperseded(error)) { toast.dismiss(toastId); return }
       console.error('[PixelStretch] apply failed:', error)
       toast.error(toUserMessage(error, 'Failed to apply pixel stretch'), { id: toastId })
     } finally {

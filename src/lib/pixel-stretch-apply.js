@@ -9,6 +9,7 @@
  */
 
 import { FabricImage } from 'fabric'
+import { runHeavy } from './heavy-job-queue'
 import {
     clampStretchParams,
     createStretchBuffer,
@@ -103,6 +104,10 @@ export const bakeSizeOf = (srcEl) => {
  * subject back out of the ribbon, which is how the streaks pass BEHIND a person.
  */
 export const bakeStretchBuffer = ({ srcEl, params, W, H, flipX = false, flipY = false, matte = null, coverage = 0, feather = 0 }) => {
+    // NOTE: intentionally NOT queued here. It is synchronous, and its caller
+    // `applyStretchToCanvas` takes the slot around the whole bake-encode-upload
+    // sequence — queueing both would deadlock the queue against itself.
+
     const sample = snapshotSource(srcEl, W, H, flipX, flipY)
     const out = createStretchBuffer(W, H)
     const octx = out.getContext('2d')
@@ -173,7 +178,14 @@ export const placeStretchLayer = async ({ editor, frameObj, url, W, H, meta, exi
  *
  * @returns {Promise<{ layer: object, url: string, meta: object, W: number, H: number }>}
  */
-export const applyStretchToCanvas = async ({
+export const applyStretchToCanvas = async (args) =>
+    // Bake + PNG encode + upload holds three image-sized buffers at once, so the
+    // whole sequence takes the slot rather than each step racing something else.
+    // No supersede key here: the agent may legitimately queue several distinct
+    // ribbons. Double-click protection belongs to the button, not the engine.
+    runHeavy('pixel stretch commit', () => applyStretchInner(args))
+
+const applyStretchInner = async ({
     editor,
     frameObj,
     params,
