@@ -55,6 +55,7 @@ import { parseStretchPrompt } from "@/lib/agent/stretch-commands";
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
+import { toUserMessage } from '@/lib/user-error'
 
 const QUICK_PROMPTS = [
   { label: "Editorial", prompt: "Give it a premium editorial polish", hint: "Retouch, contrast, detail" },
@@ -2041,7 +2042,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       if (!isMountedRef.current || error?.name === "AbortError") {
         toast.dismiss(toastId);
       } else {
-        toast.error(error?.message || "Agent edit failed", { id: toastId });
+        toast.error(toUserMessage(error, "Agent edit failed"), { id: toastId });
         setMessages((current) => [
           ...current,
           newMessage("assistant", error?.message || "I could not complete that edit. Try a simpler request."),
@@ -2130,7 +2131,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       setEnabledChanges({});
       setActiveEditSetId(null);
     } catch (error) {
-      toast.error(error?.message || "Failed to save edit", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to save edit"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
@@ -2202,7 +2203,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       toast.success("Edit set applied", { id: toastId });
       setMessages((current) => [...current, newMessage("assistant", "Applied. This edit set is saved and can be removed later.")]);
     } catch (error) {
-      toast.error(error?.message || "Failed to apply edit set", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to apply edit set"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
@@ -2271,7 +2272,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       try {
         await previewPlanOnCanvas(activePlan, nextChanges, effectValues);
       } catch (error) {
-        toast.error(error?.message || "Could not update preview");
+        toast.error(toUserMessage(error, "Could not update preview"));
       }
     }
   };
@@ -2287,7 +2288,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       try {
         await previewPlanOnCanvas(activePlan, enabledChanges, nextValues);
       } catch (error) {
-        if (commit) toast.error(error?.message || "Could not update preview");
+        if (commit) toast.error(toUserMessage(error, "Could not update preview"));
       }
     }
   };
@@ -2318,7 +2319,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       setImageRevision((value) => value + 1);
       toast.success("Version restored", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Failed to restore version", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to restore version"), { id: toastId });
     } finally {
       setRestoringRevisionId(null);
     }
@@ -2432,7 +2433,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       await canvasEditor.__saveCanvasState?.({ immediate: true });
       toast.success("Edit set applied", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Failed to apply edit set", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to apply edit set"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
@@ -2512,7 +2513,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       await canvasEditor.__saveCanvasState?.({ immediate: true });
       toast.success("Edit set removed", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Failed to remove edit set", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to remove edit set"), { id: toastId });
     } finally {
       setIsApplying(false);
     }

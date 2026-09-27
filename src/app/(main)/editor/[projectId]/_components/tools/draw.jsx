@@ -424,6 +424,8 @@ const DrawControls = ({ dominantColor }) => {
                     <button
                         type="button"
                         onClick={() => setBrushSize(Math.max(1, brushSize - 1))}
+                        aria-label="Smaller brush"
+                        title="Smaller brush"
                         className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                         style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                     >
@@ -447,6 +449,8 @@ const DrawControls = ({ dominantColor }) => {
                     <button
                         type="button"
                         onClick={() => setBrushSize(Math.min(100, brushSize + 1))}
+                        aria-label="Larger brush"
+                        title="Larger brush"
                         className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                         style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                     >
@@ -520,6 +524,9 @@ const DrawControls = ({ dominantColor }) => {
                                 key={color}
                                 type="button"
                                 onClick={() => setBrushColor(color)}
+                                aria-label={`Brush colour ${color}`}
+                                title={color}
+                                aria-pressed={brushColor.toLowerCase() === color}
                                 className="h-6 rounded-md editor-interactive"
                                 style={{
                                     backgroundColor: color,

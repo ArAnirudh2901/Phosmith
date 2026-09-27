@@ -8,6 +8,7 @@ import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
 import { useDatabaseMutation } from '../../../../../../../hooks/useDatabaseQuery'
 import { api } from "@/lib/neon-api";
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
+import { toUserMessage } from '@/lib/user-error'
 
 const isImageObject = (obj) => obj?.type?.toLowerCase() === 'image'
 
@@ -218,7 +219,7 @@ const ResizeControls = ({ project, dominantColor, contrastingColor }) => {
             toast.success('Canvas size updated', { id: toastId })
         } catch (error) {
             console.error('[Resize] Failed to update canvas size:', error)
-            toast.error(error?.message || 'Failed to update canvas size', { id: toastId })
+            toast.error(toUserMessage(error, 'Failed to update canvas size'), { id: toastId })
         }
     }
 

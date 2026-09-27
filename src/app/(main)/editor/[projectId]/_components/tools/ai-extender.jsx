@@ -31,6 +31,7 @@ import {
     hasPendingExtend,
     startExtendPoll,
 } from '../../../../../../lib/extend-poller'
+import { toUserMessage } from '@/lib/user-error'
 
 const isRemoteImageUrl = (url) =>
     typeof url === 'string' &&
@@ -663,7 +664,7 @@ const AIExtender = ({ project }) => {
         } catch (error) {
             if (error?.name !== 'AbortError') {
                 console.warn('AI extender failed:', error)
-                toast.error(error?.message || 'Failed to extend image')
+                toast.error(toUserMessage(error, 'Failed to extend image'))
             }
         } finally {
             // No-op after success (the frame was removed); restores

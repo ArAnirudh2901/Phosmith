@@ -16,6 +16,7 @@ import {
     isImageKitUrl,
     normalizeImageKitUrl,
 } from "../../../../../../lib/imagekit-ai"
+import { toUserMessage } from '@/lib/user-error'
 
 const TEMP_WARM = "#ffb45f"
 const TEMP_COOL = "#72b7ff"
@@ -1654,7 +1655,7 @@ const AdjustControls = () => {
                 })
             } catch (reuploadErr) {
                 console.warn('[Adjust ImageKit] Re-upload failed:', reuploadErr)
-                toast.error('Failed to re-upload image to current account: ' + (reuploadErr?.message || ''))
+                toast.error('Failed to re-upload image to current account: ' + (toUserMessage(reuploadErr, '')))
                 return
             }
         }

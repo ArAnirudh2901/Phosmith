@@ -648,6 +648,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                     {/* Font Size */}
                     <div className="flex items-center gap-2">
                         <button type="button" onClick={() => applyFontSize(fontSize - 1)}
+                            aria-label="Smaller text" title="Smaller text"
                             className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
                             <Minus className="h-3.5 w-3.5" />
@@ -658,6 +659,7 @@ const TextControls = ({ dominantColor, contrastingColor, lighterColor }) => {
                             visual={{ fill: 'rgba(47,143,203,0.45)', accent: dominantColor || '#5eb8ff', trackBg: 'rgba(18,22,30,0.96)' }}
                         />
                         <button type="button" onClick={() => applyFontSize(fontSize + 1)}
+                            aria-label="Larger text" title="Larger text"
                             className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
                             <Plus className="h-3.5 w-3.5" />

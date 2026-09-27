@@ -88,6 +88,7 @@ import {
     ToolEmptyState,
 } from './_pixel-tool-ui'
 import LayerGradeEditor from './_layer-grade-editor'
+import { toUserMessage } from '@/lib/user-error'
 
 /* ─── collapsible section ─── */
 const Section = ({ title, icon: Icon, defaultOpen = false, children, badge }) => {
@@ -543,7 +544,7 @@ const MaskControls = ({ dominantColor }) => {
                 progress: null,
                 report: { ok: false, device: 'unknown', totalMs: 0, checks: [{ label: 'Self-test crashed', ok: false, detail: String(err?.message || err) }] },
             })
-            toast.error(err?.message || 'Device AI self-test failed')
+            toast.error(toUserMessage(err, 'Device AI self-test failed'))
         }
     }, [])
 
@@ -1180,7 +1181,7 @@ const MaskControls = ({ dominantColor }) => {
         } catch (err) {
             if (err?.name === 'AbortError') return
             console.error('[mask] SAM selection failed:', err)
-            toast.error(err?.message || 'AI selection failed')
+            toast.error(toUserMessage(err, 'AI selection failed'))
         } finally {
             if (semanticAbortRef.current === abortController) {
                 isSemanticRunningRef.current = false
@@ -1329,7 +1330,7 @@ const MaskControls = ({ dominantColor }) => {
         } catch (err) {
             if (err?.name === 'AbortError') return
             console.error('[mask] Depth generation failed:', err)
-            toast.error(err?.message || 'Depth generation failed')
+            toast.error(toUserMessage(err, 'Depth generation failed'))
         } finally {
             if (depthAbortRef.current === abortController) {
                 isDepthRunningRef.current = false
@@ -1829,7 +1830,7 @@ const MaskControls = ({ dominantColor }) => {
                     applyRefineStroke(tool.mainImage, session, brushCanvas, { erase: strokeEraseRef.current })
                 } catch (err) {
                     console.error('[mask] refine stroke failed:', err)
-                    toast.error(err?.message || 'Could not apply the stroke')
+                    toast.error(toUserMessage(err, 'Could not apply the stroke'))
                 }
                 // Clear IN PLACE (the overlay uses this canvas as its element)
                 // so the next stroke starts from an empty stencil.
@@ -2084,7 +2085,7 @@ const MaskControls = ({ dominantColor }) => {
             })
         } catch (err) {
             console.error('[mask] could not start refine:', err)
-            toast.error(err?.message || 'Could not start refining this layer')
+            toast.error(toUserMessage(err, 'Could not start refining this layer'))
             setBrushActive(false)
             return
         }
@@ -3502,7 +3503,7 @@ const MaskControls = ({ dominantColor }) => {
                 await runSubjectSelection({ invert: false })
             } catch (fallbackErr) {
                 console.error('[mask] subject fallback failed:', fallbackErr)
-                toast.error(err?.message || 'Subject detection failed')
+                toast.error(toUserMessage(err, 'Subject detection failed'))
             }
         } finally {
             if (instancesAbortRef.current === abortController) {
@@ -3998,7 +3999,7 @@ const MaskControls = ({ dominantColor }) => {
                                     try {
                                         expandLayerBoundary(tool.mainImage, layerId, px, edge)
                                     } catch (err) {
-                                        toast.error(err?.message || 'Could not adjust the mask boundary')
+                                        toast.error(toUserMessage(err, 'Could not adjust the mask boundary'))
                                     }
                                 }}
                                 onRefineRegion={handleStartRefine}

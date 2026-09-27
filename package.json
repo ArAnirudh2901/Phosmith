@@ -24,6 +24,7 @@
     "verify:collage-render": "bun scripts/verify-collage-render.mjs",
     "verify:stretch": "node scripts/verify-flow-stretch.mjs",
     "verify:stretch-core": "bun scripts/verify-stretch-core.mjs",
+    "verify:user-error": "bun scripts/verify-user-error.mjs",
     "verify:mask": "bun scripts/verify-mask-edge-snap.mjs",
     "verify:segment": "bun scripts/verify-segment.mjs",
     "verify:semantic": "bun scripts/verify-semantic.mjs",

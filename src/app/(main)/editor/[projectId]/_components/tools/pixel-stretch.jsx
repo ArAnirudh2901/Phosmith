@@ -59,6 +59,7 @@ import {
 } from '@/lib/pixel-stretch-apply'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
+import { toUserMessage } from '@/lib/user-error'
 
 // ─── Geometry helpers (shared conventions with the Crop tool) ─────────────────
 
@@ -1082,7 +1083,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       toast.success(`Subject detected (${result.polygon.length} boundary points)`, { id: toastId, duration: 3000 })
     } catch (error) {
       console.error('[PixelStretch] SAM auto-detect failed:', error)
-      toast.error(error?.message || 'Subject detection failed', { id: toastId })
+      toast.error(toUserMessage(error, 'Subject detection failed'), { id: toastId })
     } finally {
       setSamLoading(false)
     }
@@ -1313,7 +1314,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       toast.success(`${offline ? 'On-device · ' : ''}${plan.reasoning || 'AI stretch plan applied'}`, { id: toastId, duration: 4500 })
     } catch (error) {
       console.error('[PixelStretch] AI auto-stretch failed:', error)
-      toast.error(error?.message || 'AI analysis failed', { id: toastId })
+      toast.error(toUserMessage(error, 'AI analysis failed'), { id: toastId })
     } finally {
       setAiLoading(false)
     }
@@ -1822,7 +1823,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       toast.success(wasEditing ? 'Stretch layer updated' : 'Pixel stretch added as a layer', { id: toastId })
     } catch (error) {
       console.error('[PixelStretch] apply failed:', error)
-      toast.error(error?.message || 'Failed to apply pixel stretch', { id: toastId })
+      toast.error(toUserMessage(error, 'Failed to apply pixel stretch'), { id: toastId })
     } finally {
       setApplying(false)
     }

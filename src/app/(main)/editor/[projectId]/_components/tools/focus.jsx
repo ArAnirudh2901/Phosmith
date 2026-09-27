@@ -14,6 +14,7 @@ import { castShadowAlpha, castShadowCanvas, frameShadowParams, GLOBAL_LIGHT_ANGL
 import { canvasToPlane, imageToLumaPlane, matchPlane, planeToCoverageCanvas } from '@/lib/cv/plane-image'
 import { gradientLayer, setMaskTexture as setShadowTexture } from '@/lib/megashader/mask-types'
 import { refineMatte } from '@/lib/cv/guided-filter'
+import { toUserMessage } from '@/lib/user-error'
 
 const sourceElementOf = (img) => img?._originalElement || img?._element || img?.getElement?.() || null
 
@@ -305,7 +306,7 @@ export default function FocusControls() {
             toast.success('Focus applied')
         } catch (error) {
             console.error('[focus] apply failed', error)
-            toast.error(error?.message || 'Could not apply focus')
+            toast.error(toUserMessage(error, 'Could not apply focus'))
         } finally {
             setBusy(null)
         }
@@ -346,7 +347,7 @@ export default function FocusControls() {
             toast.success('Colour pop applied')
         } catch (error) {
             console.error('[focus] colour pop failed', error)
-            toast.error(error?.message || 'Could not apply colour pop')
+            toast.error(toUserMessage(error, 'Could not apply colour pop'))
         } finally {
             setBusy(null)
         }
@@ -442,7 +443,7 @@ export default function FocusControls() {
             toast.success('Shadow applied')
         } catch (error) {
             console.error('[focus] shadow failed', error)
-            toast.error(error?.message || 'Could not apply the shadow')
+            toast.error(toUserMessage(error, 'Could not apply the shadow'))
         } finally {
             setBusy(null)
         }

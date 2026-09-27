@@ -73,6 +73,8 @@ export function BrushSizeControl({ value, setValue, min, max, dominantColor }) {
                 <button
                     type="button"
                     onClick={() => setValue(Math.max(min, value - 5))}
+                    aria-label="Smaller brush"
+                    title="Smaller brush ( [ )"
                     className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                     style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                 >
@@ -96,6 +98,8 @@ export function BrushSizeControl({ value, setValue, min, max, dominantColor }) {
                 <button
                     type="button"
                     onClick={() => setValue(Math.min(max, value + 5))}
+                    aria-label="Larger brush"
+                    title="Larger brush ( ] )"
                     className="flex items-center justify-center w-8 h-11 rounded-lg editor-interactive shrink-0"
                     style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
                 >

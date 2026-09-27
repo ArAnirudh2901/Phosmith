@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 import { createPortal } from 'react-dom'
 import { adaptiveTextColor } from '@/lib/color-extraction'
 import { runAutoCropEngine } from '@/lib/auto-crop-client'
+import { toUserMessage } from '@/lib/user-error'
 
 const AUTO_CROP_STAGE_TEXT = {
     reading: 'Reading the photo…',
@@ -832,7 +833,7 @@ const CropContent = ({ dominantColor }) => {
                 return
             }
             console.warn('[crop.auto]', err?.message || err)
-            toast.error(err?.message || "Auto-crop failed", { id: toastId })
+            toast.error(toUserMessage(err, "Auto-crop failed"), { id: toastId })
         } finally {
             // Only the latest request owns the busy state. A request that was
             // aborted because the user picked another mode must NOT clear the
@@ -1011,7 +1012,7 @@ const CropContent = ({ dominantColor }) => {
             toast.success("Crop applied", { id: toastId })
         } catch (error) {
             console.error("Error applying crop: ", error)
-            toast.error(error?.message || "Failed to apply crop, please try again", { id: toastId })
+            toast.error(toUserMessage(error, "Failed to apply crop, please try again"), { id: toastId })
             exitCropMode()
         }
     }, [canvasEditor, selectedImage, cropBox, originalProps, resetCropState, exitCropMode])
