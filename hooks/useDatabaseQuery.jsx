@@ -45,10 +45,17 @@ export const useDatabaseQuery = (query, ...args) => {
 
     useEffect(() => {
         if (isSkipped || typeof window === "undefined") return undefined
-        const onMutation = () => setRefreshToken((value) => value + 1)
+        const onMutation = (event) => {
+            // A mutation may declare what it invalidates. When it does, a query
+            // it did not name has no reason to re-run — the default (undefined)
+            // stays a broadcast so existing call sites are unchanged.
+            const scope = event?.detail?.invalidates
+            if (Array.isArray(scope) && !scope.includes(queryName)) return
+            setRefreshToken((value) => value + 1)
+        }
         window.addEventListener(MUTATION_EVENT, onMutation)
         return () => window.removeEventListener(MUTATION_EVENT, onMutation)
-    }, [isSkipped])
+    }, [isSkipped, queryName])
 
     useEffect(() => {
         let cancelled = false
@@ -67,15 +74,35 @@ export const useDatabaseQuery = (query, ...args) => {
             setError(null)
 
             try {
-                const response = await fetch(QUERY_ENDPOINT, {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({
-                        name: queryName,
-                        args: JSON.parse(serializedQueryArgs),
-                    }),
+                const payload = JSON.stringify({
+                    name: queryName,
+                    args: JSON.parse(serializedQueryArgs),
                 })
-                const body = await response.json().catch(() => ({}))
+
+                // A server-rendered script may already have this request in
+                // flight (see the editor layout). Adopt it once, then fall back
+                // to fetching normally — refreshes after a mutation must always
+                // hit the network rather than replay a stale preload.
+                let result = null
+                const preloaded = typeof window !== "undefined" ? window.__phosmithPreload?.[payload] : null
+                if (preloaded) {
+                    delete window.__phosmithPreload[payload]
+                    result = await preloaded.catch(() => null)
+                }
+
+                let response
+                let body
+                if (result && typeof result.ok === "boolean") {
+                    response = { ok: result.ok, status: result.status }
+                    body = result.body || {}
+                } else {
+                    response = await fetch(QUERY_ENDPOINT, {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: payload,
+                    })
+                    body = await response.json().catch(() => ({}))
+                }
                 if (!response.ok) {
                     throw createDatabaseRequestError(body, response.status, "Database query failed")
                 }
@@ -106,8 +133,17 @@ export const useDatabaseQuery = (query, ...args) => {
     return { data, isLoading, error }
 }
 
-export const useDatabaseMutation = (mutation, ...args) => {
+/**
+ * @param {object} [options]
+ * @param {string[]} [options.invalidates]  Query names this mutation makes
+ *   stale. Omit for the old behaviour (every query refetches). An empty array
+ *   means "this changed nothing anyone is showing" — `users.store` is exactly
+ *   that, and broadcasting from it made every page load refetch every query,
+ *   including the ~840 KB project row.
+ */
+export const useDatabaseMutation = (mutation, options = {}) => {
     const mutationName = useMemo(() => getNeonFunctionName(mutation), [mutation])
+    const invalidates = options.invalidates
 
     const [data, setData] = useState(undefined)
     const [isLoading, setIsLoading] = useState(false)
@@ -132,7 +168,7 @@ export const useDatabaseMutation = (mutation, ...args) => {
             }
             setData(body.data)
             if (typeof window !== "undefined") {
-                window.dispatchEvent(new CustomEvent(MUTATION_EVENT, { detail: { name: mutationName } }))
+                window.dispatchEvent(new CustomEvent(MUTATION_EVENT, { detail: { name: mutationName, invalidates } }))
             }
             return body.data
         } catch (err) {
@@ -144,7 +180,7 @@ export const useDatabaseMutation = (mutation, ...args) => {
         } finally {
             setIsLoading(false)
         }
-    }, [mutationName])
+    }, [mutationName, invalidates])
 
     return { mutate, data, isLoading, error }
 }

@@ -13,7 +13,10 @@ export function useStoreUser() {
     // has stored the user.
     const [userId, setUserId] = useState(null);
     const [databaseSetupMissing, setDatabaseSetupMissing] = useState(false);
-    const { mutate: storeUser } = useDatabaseMutation(api.users.store);
+    // Storing the user touches lastActiveAt and nothing any query renders, so it
+    // must not invalidate them. Broadcasting from here made every page load
+    // fetch the project row twice.
+    const { mutate: storeUser } = useDatabaseMutation(api.users.store, { invalidates: [] });
     // Call the `storeUser` mutation function to store
     // the current user in the `users` table and return the `Id` value.
     useEffect(() => {
