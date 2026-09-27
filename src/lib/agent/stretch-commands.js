@@ -337,7 +337,8 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 twist: '-100..100 — the PATH shape: 0 is an arch, 100 an S-curve, -100 a hook',
                 twistTurns: '0..3 — half-turns of PHYSICAL twist; the ribbon pinches and turns over',
                 twistDepth: '0..100 — how far a twist closes; under 50 it pinches to a waist without flipping (default 100)',
-                taper: '-100..100 — positive narrows the tip, negative flares it',
+                tipWidth: '0..1300 — how wide the far end is against the slice: 0 narrows to a point, 100 parallel, 1300 a wide fan',
+                taper: '-1200..100 — the same thing inverted, if you prefer it (positive narrows)',
                 fade: '0..100 — fade at the streak tips',
                 fadeIn: '0..100 — fade at the slice end, so it dissolves into the photo',
                 mirror: 'true for a symmetric double ribbon',
@@ -346,7 +347,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 behindSubject: 'true to detect the subject and pass behind that instead — downloads and runs SlimSAM',
                 blend: `layer blend mode: ${STRETCH_BLEND_MODES.map((b) => b.id).join(', ')}`,
             },
-            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject, twistTurns, twistDepth } = {}) => {
+            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject, twistTurns, twistDepth, tipWidth } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const fromPreset = preset && PIXEL_STRETCH_PRESETS.find((p) => p.id === preset)?.params
@@ -365,7 +366,13 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                         ?? Math.min(200, Math.max(1, ((resolved.room ?? 0.5) + 0.35) / Math.max(0.02, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w)))),
                     bend: clamp(bend, -100, 100, (fromPreset?.bend ?? 0.55) * 100) / 100,
                     twist: clamp(twist, -100, 100, (fromPreset?.twist ?? 0) * 100) / 100,
-                    taper: clamp(taper, -100, 100, (fromPreset?.taper ?? 0.08) * 100) / 100,
+                    // `tipWidth` is the panel's vocabulary and the one that can
+                    // actually reach a fan: 0 narrows to a point, 100 is parallel,
+                    // 1300 splays. `taper` stays accepted for direct control and
+                    // now spans the engine's full range rather than -1..1.
+                    taper: Number.isFinite(Number(tipWidth))
+                        ? 1 - clamp(tipWidth, 0, 1300, 100) / 100
+                        : clamp(taper, -1200, 100, (fromPreset?.taper ?? 0.08) * 100) / 100,
                     fade: clamp(fade, 0, 100, (fromPreset?.fade ?? 0.18) * 100) / 100,
                     fadeIn: clamp(fadeIn, 0, 100, 22) / 100,
                     twistTurns: clamp(twistTurns, 0, 3, fromPreset?.twistTurns ?? 0),
@@ -375,7 +382,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 })
                 const placement = await placementFor(el, behind, blend, resolved, behindSubject)
                 await commit(image, params, 'Pixel stretch', placement)
-                return { applied: 'ribbon', from: resolved.from, axis: params.axis, direction: params.direction, band: params.band, seed: Math.round(params.seed * 100), behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
+                return { applied: 'ribbon', from: resolved.from, axis: params.axis, direction: params.direction, band: params.band, seed: Math.round(params.seed * 100), tipWidth: Math.round((1 - params.taper) * 100), twistTurns: params.twistTurns, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
             },
         },
 
