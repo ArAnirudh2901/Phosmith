@@ -27,6 +27,7 @@
     "verify:user-error": "bun scripts/verify-user-error.mjs",
     "verify:heavy-queue": "bun scripts/verify-heavy-queue.mjs",
     "verify:diagnostics": "bun scripts/verify-diagnostics.mjs",
+    "verify:docs": "bun scripts/verify-docs.mjs",
     "verify:mask": "bun scripts/verify-mask-edge-snap.mjs",
     "verify:segment": "bun scripts/verify-segment.mjs",
     "verify:semantic": "bun scripts/verify-semantic.mjs",
