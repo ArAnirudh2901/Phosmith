@@ -90,6 +90,12 @@ export function useStoreUser() {
     return {
         isLoading: !isLoaded || (isSignedIn && userId === null && !databaseSetupMissing),
         isAuthenticated: isSignedIn && userId !== null,
+        // READS can start as soon as Clerk has a session: every Neon function
+        // authenticates from that session itself and creates the user row if it
+        // is missing. Gating them on `isAuthenticated` made them wait for the
+        // users.store write first, which put a whole round trip in front of the
+        // first query on every page load.
+        isSessionReady: isLoaded && Boolean(isSignedIn),
         databaseSetupMissing,
     };
 }

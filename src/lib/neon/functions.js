@@ -140,15 +140,26 @@ const upsertAuthenticatedUser = async (db, auth) => {
     return updated;
   }
 
-  return await db.user.create({
-    data: {
-      ...data,
-      plan: "free",
-      projectsUsed: 0,
-      exportsThisMonth: 0,
-      createdAt: now,
-    },
-  });
+  try {
+    return await db.user.create({
+      data: {
+        ...data,
+        plan: "free",
+        projectsUsed: 0,
+        exportsThisMonth: 0,
+        createdAt: now,
+      },
+    });
+  } catch (error) {
+    // A brand-new account's first page load fires several authenticated calls at
+    // once and each will try to create the row. Whoever loses the unique
+    // constraint reads the winner's row instead of failing the request.
+    if (error?.code === "P2002") {
+      const raced = await findUserForAuth(db, auth);
+      if (raced) return raced;
+    }
+    throw error;
+  }
 };
 
 const getAuthUser = async (db, ctx) => {
