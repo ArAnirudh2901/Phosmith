@@ -15,6 +15,7 @@ import {
     renderPixelStretch,
     matteToAlphaCanvas,
     applySubjectKnockout,
+    releaseStretchScratch,
 } from './pixel-stretch'
 
 export const MAX_BAKE_DIM = 4096
@@ -105,13 +106,22 @@ export const bakeStretchBuffer = ({ srcEl, params, W, H, flipX = false, flipY = 
     const sample = snapshotSource(srcEl, W, H, flipX, flipY)
     const out = createStretchBuffer(W, H)
     const octx = out.getContext('2d')
-    const drew = renderPixelStretch(octx, sample, clampStretchParams(params), W, H, { quality: 'max' })
-    if (!drew) return null
-    if (coverage > 0 && matte) {
-        const alpha = matteToAlphaCanvas(matte, W, H, feather * Math.min(W, H))
-        if (alpha) applySubjectKnockout(octx, alpha, W, H, coverage)
+    let drew = false
+    try {
+        drew = renderPixelStretch(octx, sample, clampStretchParams(params), W, H, { quality: 'max' })
+        if (drew && coverage > 0 && matte) {
+            const alpha = matteToAlphaCanvas(matte, W, H, feather * Math.min(W, H))
+            if (alpha) applySubjectKnockout(octx, alpha, W, H, coverage)
+        }
+    } finally {
+        // A bake sizes the shared scratch canvases to the FULL image and they are
+        // kept between frames by design; at 4096px that is tens of MB each, so the
+        // commit hands them back rather than holding them for the session.
+        sample.width = 1
+        sample.height = 1
+        releaseStretchScratch()
     }
-    return out
+    return drew ? out : null
 }
 
 /**

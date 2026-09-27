@@ -16,6 +16,8 @@ import {
     createFlowPathFromPoints,
 } from '../../src/lib/pixel-stretch.js'
 
+import { isRawFile, resolveSourceFile } from '../../src/lib/raw-preview.js'
+
 const loadImage = (src) => new Promise((resolve, reject) => {
     const el = new Image()
     el.crossOrigin = 'anonymous'
@@ -26,9 +28,19 @@ const loadImage = (src) => new Promise((resolve, reject) => {
 
 let lastPlan = null
 const cache = new Map()
+// RAW containers go through the production intake, so the harness sees exactly
+// the pixels the editor would: container → embedded preview → orientation baked.
 const getPhoto = async (name) => {
-    if (!cache.has(name)) cache.set(name, await loadImage(`/photos/${name}`))
-    return cache.get(name)
+    if (cache.has(name)) return cache.get(name)
+    let url = `/photos/${name}`
+    if (isRawFile({ name })) {
+        const blob = await fetch(url).then((r) => r.blob())
+        const resolved = await resolveSourceFile(new File([blob], name, { type: '' }))
+        url = URL.createObjectURL(resolved.file || resolved.blob || resolved)
+    }
+    const el = await loadImage(url)
+    cache.set(name, el)
+    return el
 }
 
 const buildParams = (spec, sample) => {
@@ -74,14 +86,28 @@ const shot = async (spec) => {
     c.height = H
     const ctx = c.getContext('2d')
     const sample = makeSampleCanvas(img, W, H)
-    ctx.drawImage(sample, 0, 0)
+    // `bg` paints a known colour under the ribbon instead of the photo: any of it
+    // still visible inside the ribbon body is opacity the ribbon lost.
+    if (spec.bg) { ctx.fillStyle = spec.bg; ctx.fillRect(0, 0, W, H) }
+    else ctx.drawImage(sample, 0, 0)
     lastPlan = null
     const p = buildParams(spec, sample)
     const t0 = performance.now()
     const ok = renderPixelStretch(ctx, sample, p, W, H, { quality: spec.quality || 'max' })
     if (spec.subjectOverlay) renderSubjectOverlay(ctx, sample, p, W, H)
     const ms = performance.now() - t0
-    return { ok, ms: Math.round(ms), W, H, plan: lastPlan, canvas: c, png: spec.noPng ? null : c.toDataURL('image/png') }
+    // Count how much of the probe colour survives where the ribbon drew.
+    let bleed = null
+    if (spec.bg === '#ff00ff') {
+        const d = ctx.getImageData(0, 0, W, H).data
+        let exact = 0, total = 0
+        for (let i = 0; i < d.length; i += 4) {
+            total += 1
+            if (d[i] > 240 && d[i + 1] < 16 && d[i + 2] > 240) exact += 1
+        }
+        bleed = { magentaFraction: +(exact / total).toFixed(4) }
+    }
+    return { ok, ms: Math.round(ms), bleed, W, H, plan: lastPlan, canvas: c, png: spec.noPng ? null : c.toDataURL('image/png') }
 }
 
 

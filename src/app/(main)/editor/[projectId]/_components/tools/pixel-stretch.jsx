@@ -55,6 +55,7 @@ import {
   encodeToPngBlob,
   uploadStretchBlob,
   placeStretchLayer,
+  bakeStretchBuffer,
 } from '@/lib/pixel-stretch-apply'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
@@ -1660,18 +1661,14 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       // Bake ONLY the ribbons onto a transparent buffer — the base photo remains its
       // own layer below. For partial/below placement, knock the subject out so the
       // photo's subject reads in front of the streaks.
-      const sample = snapshotSource(srcEl, W, H, flipX, flipY)
-      const out = createStretchBuffer(W, H)
-      const octx = out.getContext('2d')
-      const drew = renderPixelStretch(octx, sample, p, W, H, { quality: 'max' })
-      if (!drew) throw new Error('Nothing to stretch yet — set a region or shape first')
-      if (cov > 0) {
-        const matte = await ensureSubjectMatte()
-        if (matte) {
-          const alpha = matteToAlphaCanvas(matte, W, H, featherRef.current * Math.min(W, H))
-          applySubjectKnockout(octx, alpha, W, H, cov)
-        }
-      }
+      const matte = cov > 0 ? await ensureSubjectMatte() : null
+      // Same bake the agent runs, including handing the full-size scratch
+      // canvases back afterwards.
+      const out = bakeStretchBuffer({
+        srcEl, params: p, W, H, flipX, flipY,
+        matte, coverage: cov, feather: featherRef.current,
+      })
+      if (!out) throw new Error('Nothing to stretch yet — set a region or shape first')
 
       let blob
       try { blob = await encodeToPngBlob(out) }

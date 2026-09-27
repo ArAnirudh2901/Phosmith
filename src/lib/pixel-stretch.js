@@ -293,6 +293,35 @@ const cubicTangent = (p0, c1, c2, p1, t) => {
 }
 
 /**
+ * Radius of curvature at t, in pixels (Infinity on a straight run).
+ *
+ * A ribbon of half-width h swept along a curve folds through itself wherever
+ * h exceeds this radius — the inner edge travels backwards — and that fold is
+ * what turns a hard bend into a bow-tie with a hole in it. Clamping the
+ * half-width just under the radius keeps the strip a single continuous sheet,
+ * which is what a real ribbon does on a tight bend.
+ */
+const cubicRadius = (p0, c1, c2, p1, t) => {
+  const u = 1 - t
+  const dx = 3 * u * u * (c1.x - p0.x) + 6 * u * t * (c2.x - c1.x) + 3 * t * t * (p1.x - c2.x)
+  const dy = 3 * u * u * (c1.y - p0.y) + 6 * u * t * (c2.y - c1.y) + 3 * t * t * (p1.y - c2.y)
+  const ddx = 6 * u * (c2.x - 2 * c1.x + p0.x) + 6 * t * (p1.x - 2 * c2.x + c1.x)
+  const ddy = 6 * u * (c2.y - 2 * c1.y + p0.y) + 6 * t * (p1.y - 2 * c2.y + c1.y)
+  const speed = Math.hypot(dx, dy)
+  const cross = Math.abs(dx * ddy - dy * ddx)
+  if (cross < 1e-9 || speed < 1e-9) return Infinity
+  return (speed * speed * speed) / cross
+}
+
+// How close a swept half-width may come to the local radius of curvature. At 1.0
+// the inner edge lands exactly on the centre of curvature (a cusp); a little
+// under keeps the sheet continuous with no visible narrowing on normal bends.
+const FOLD_LIMIT = 0.92
+// …and how far a flow-path corner may narrow the ribbon before the cure is worse
+// than the fold.
+const FOLD_FLOOR = 0.35
+
+/**
  * Resolve normalised params into concrete pixel-space geometry for a W×H frame.
  * `dir` lets the caller flip the whole thing for the mirror pass.
  */
@@ -321,7 +350,21 @@ function resolveGeometry(p, W, H, dir = p.direction) {
   // controls the SECOND control point's offset: twist 0 → both controls bow the
   // same way (a clean arch); twist 1 → the second bows the opposite way
   // (S-curve); twist -1 → it bows further the same way (loop / hook).
-  const bow = p.bend * total * 0.6
+  // A swept ribbon folds through itself — the bow-tie with a hole in it — wherever
+  // its half-width exceeds the path's radius of curvature. That is a property of
+  // the BEND, not of the strip, so the bend is what gets limited: treat the arc as
+  // a circular one of chord `total` and sagitta s, R = (total² + 4s²) / 8s, and
+  // solve for the largest s whose R still clears the half-width. A ribbon longer
+  // than it is wide never reaches this limit; a short, wide, hard-bent one bends
+  // as far as it geometrically can and no further.
+  const halfW = stripLen / 2
+  const rMin = halfW / FOLD_LIMIT
+  let bow = p.bend * total * 0.6
+  if (rMin > total / 2) {
+    const maxSag = rMin - Math.sqrt(Math.max(0, rMin * rMin - (total * total) / 4))
+    const maxBow = maxSag / 0.75
+    if (Math.abs(bow) > maxBow) bow = Math.sign(bow) * maxBow
+  }
   const c1Off = bow
   const c2Off = bow * (1 - 2 * p.twist) // twist∈[-1,1] → multiplier∈[3,-1]
   const c1 = {
@@ -970,7 +1013,20 @@ function drawTexturedTriangle(ctx, img,
   const f = (dy0 * (sx1 * sy2 - sx2 * sy1) + dy1 * (sx2 * sy0 - sx0 * sy2) + dy2 * (sx0 * sy1 - sx1 * sy0)) * inv
 
   ctx.setTransform(a, d, b, e, c, f)
-  ctx.drawImage(img, 0, 0)
+  // Blit only the SOURCE triangle's bounding box, not the whole image. Drawing
+  // the full buffer per triangle and letting the clip discard it is what made a
+  // warp drag hang: a 4x4 mesh tessellates to thousands of triangles, and each
+  // one was asking the rasteriser for a full-canvas transformed blit — the cost
+  // was (triangles x image), not (image). One pixel of padding keeps the
+  // bilinear filter reading real texels at the patch edge, so the seams are
+  // identical to the full-image blit; nothing about the output changes.
+  const iw = img.width, ih = img.height
+  const bx0 = Math.max(0, Math.floor(Math.min(sx0, sx1, sx2)) - 1)
+  const by0 = Math.max(0, Math.floor(Math.min(sy0, sy1, sy2)) - 1)
+  const bx1 = Math.min(iw, Math.ceil(Math.max(sx0, sx1, sx2)) + 1)
+  const by1 = Math.min(ih, Math.ceil(Math.max(sy0, sy1, sy2)) + 1)
+  const bw = bx1 - bx0, bh = by1 - by0
+  if (bw > 0 && bh > 0) ctx.drawImage(img, bx0, by0, bw, bh, bx0, by0, bw, bh)
   ctx.restore()
 }
 
@@ -1325,7 +1381,30 @@ export function renderFlowStretch(ctx, sample, params, W, H, opts = {}) {
     const al = Math.hypot(at.tx, at.ty) || 1
     const tx = at.tx / al, ty = at.ty / al
     const hw = Math.max(0.25, (seedLen * at.w * (1 - p.taper * t)) / 2)
-    sections[i] = { cx: at.x, cy: at.y, nx: ty, ny: -tx, hw }
+    sections[i] = { cx: at.x, cy: at.y, nx: ty, ny: -tx, hw, tx, ty }
+  }
+
+  // A ribbon wider than the path's tightest corner folds through itself there —
+  // the bow-tie. The path belongs to the user, so the WIDTH gives way, and it
+  // gives way uniformly: a ribbon that is evenly narrower reads as a ribbon, one
+  // that pinches at a single corner reads as a fault. One O(n) pass over the
+  // sections finds the tightest turn; everything then scales by the one factor.
+  let minRadius = Infinity
+  for (let i = 1; i <= slices; i++) {
+    const a = sections[i - 1], b = sections[i]
+    if (!a || !b) continue
+    const dTheta = Math.acos(clamp(a.tx * b.tx + a.ty * b.ty, -1, 1))
+    if (dTheta < 1e-6) continue
+    const ds = Math.hypot(b.cx - a.cx, b.cy - a.cy)
+    if (ds < 1e-6) continue
+    const r = ds / dTheta
+    if (r < minRadius) minRadius = r
+  }
+  let maxHw = 0
+  for (const sec of sections) if (sec && sec.hw > maxHw) maxHw = sec.hw
+  if (Number.isFinite(minRadius) && maxHw > minRadius * FOLD_LIMIT) {
+    const scale = Math.max(FOLD_FLOOR, (minRadius * FOLD_LIMIT) / maxHw)
+    for (const sec of sections) if (sec) sec.hw = Math.max(0.25, sec.hw * scale)
   }
   sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality })
   return true
@@ -1742,6 +1821,28 @@ export function buildSubjectCutout(sample, alphaMatte, W, H) {
  * @param {HTMLCanvasElement|OffscreenCanvas} canvas
  * @returns {{region:{x,y,w,h},axis,direction,seed,length,bend,twist,fade,taper,mirror,opacity,reasoning}|null}
  */
+/**
+ * Drop the module-level scratch canvases.
+ *
+ * Three of them (the seed strip, the ribbon compositing buffer and the warp's
+ * stretched buffer) are kept between frames on purpose: re-allocating a
+ * full-frame canvas per pointermove churns the GC and stutters a drag. But a
+ * COMMIT runs at bake resolution, so after one 4096px apply those buffers are
+ * ~45 MB each and stay resident for the rest of the session. On an 8 GB machine
+ * that is the difference between a smooth editor and a swapping one, so the
+ * commit path lets them go and the next interaction re-allocates at preview size.
+ */
+export function releaseStretchScratch() {
+  const drop = (c) => { if (c) { c.width = 1; c.height = 1 } }
+  drop(_stripBuf)
+  _stripBuf = null
+  _stripCtx = null
+  drop(_ribbonBuf.canvas)
+  _ribbonBuf = { canvas: null, ctx: null }
+  drop(_warpBuf.canvas)
+  _warpBuf = { canvas: null, ctx: null, sig: '' }
+}
+
 /**
  * Pick the seed line INSIDE a band — the one that will make a ribbon worth
  * looking at.

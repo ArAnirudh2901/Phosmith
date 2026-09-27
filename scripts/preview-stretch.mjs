@@ -30,7 +30,7 @@ if (build.exitCode !== 0) die(`bundle failed:\n${build.stderr?.toString().slice(
 await writeFile(path.join(OUT_DIR, 'index.html'),
     '<!doctype html><meta charset="utf-8"><title>stretch preview</title><body style="background:#06080b"><script type="module" src="./entry.js"></script>')
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.jpg': 'image/jpeg', '.png': 'image/png', '.map': 'application/json' }
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.jpg': 'image/jpeg', '.png': 'image/png', '.map': 'application/json', '.arw': 'application/octet-stream', '.nef': 'application/octet-stream', '.cr2': 'application/octet-stream', '.dng': 'application/octet-stream' }
 const server = createServer(async (req, res) => {
     const rel = new URL(req.url, 'http://localhost').pathname
     const file = rel.startsWith('/photos/') ? path.join(PHOTOS, path.basename(rel))

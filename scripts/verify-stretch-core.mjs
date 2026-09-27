@@ -11,6 +11,7 @@
  * Usage: bun scripts/verify-stretch-core.mjs
  */
 import {
+    getStretchPath,
     DEFAULT_SCANLINE,
     clampScanline,
     scanlineStretchPixels,
@@ -135,6 +136,48 @@ section('hostile config')
     const tiny = frame(1, 1, () => [255, 255, 255])
     const st = scanlineStretchPixels(tiny, 1, 1, { threshold: 0.1 })
     check(st.filled === 0, 'a 1x1 frame is a no-op rather than a crash')
+}
+
+section('ribbon fold guard')
+{
+    // A swept ribbon folds through itself — the bow-tie with a hole — wherever its
+    // half-width exceeds the path's radius of curvature, so the bend is limited by
+    // geometry. Read the limit off the rendered centreline: sagitta s against
+    // chord L gives R = (L^2 + 4s^2) / 8s.
+    const W = 1000, H = 1000
+    const radiusOf = (params) => {
+        const pts = getStretchPath(params, W, H, 96)
+        const a = pts[0], z = pts[pts.length - 1]
+        const L = Math.hypot((z.x - a.x) * W, (z.y - a.y) * H)
+        if (L < 1e-6) return { R: Infinity, L: 0, s: 0 }
+        const ux = ((z.x - a.x) * W) / L, uy = ((z.y - a.y) * H) / L
+        let s = 0
+        for (const p of pts) {
+            const vx = (p.x - a.x) * W, vy = (p.y - a.y) * H
+            const d = Math.abs(vx * uy - vy * ux)
+            if (d > s) s = d
+        }
+        return { R: s < 1e-6 ? Infinity : (L * L + 4 * s * s) / (8 * s), L, s }
+    }
+
+    // Short and WIDE and hard-bent: the case that used to fold.
+    const wide = { ...DEFAULT_STRETCH, axis: 'vertical', direction: -1, band: { x: 0.2, y: 0.5, w: 0.6, h: 0.2 }, length: 2, bend: 1 }
+    const halfWidth = (wide.band.w * W) / 2
+    const w = radiusOf(wide)
+    check(w.R >= halfWidth * 0.85, 'a short wide ribbon cannot bend tighter than its own half-width',
+        `R ${w.R.toFixed(0)} vs half-width ${halfWidth.toFixed(0)}`)
+
+    // Long and thin: the limit must not touch it — the bend has to still work.
+    const thin = { ...DEFAULT_STRETCH, axis: 'vertical', direction: -1, band: { x: 0.45, y: 0.55, w: 0.10, h: 0.10 }, length: 5, bend: 1 }
+    const t = radiusOf(thin)
+    const straightRun = radiusOf({ ...thin, bend: 0 })
+    check(t.s > 20, 'a long thin ribbon still bends hard', `sagitta ${t.s.toFixed(1)}px`)
+    check(straightRun.s < 1, 'and bend 0 is still dead straight', `sagitta ${straightRun.s.toFixed(2)}px`)
+
+    // The clamp is symmetric and does not flip the bow.
+    const neg = radiusOf({ ...wide, bend: -1 })
+    check(Math.abs(neg.s - w.s) < 1, 'the limit is symmetric in bend', `${w.s.toFixed(1)} vs ${neg.s.toFixed(1)}`)
+    check(radiusOf({ ...wide, bend: 0 }).s < 1, 'a wide ribbon with no bend is straight')
 }
 
 section('natural language parser')
