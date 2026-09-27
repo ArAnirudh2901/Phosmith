@@ -332,7 +332,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 seed: '0..100 — which line of the slice is smeared. Omitted, the most colourful line in the slice is chosen.',
                 direction: '1 or -1 — which way the streaks travel from the slice',
                 preset: `one of ${PRESET_IDS.join(', ')} — applied before the individual numbers`,
-                length: '1..6 — how far the ribbon runs, as a multiple of the slice (default 2.4)',
+                length: '1..200 — how far the ribbon runs, as a multiple of the slice. Omitted, it is sized to cross the frame.',
                 bend: '-100..100 — how far it bows sideways (default 55)',
                 twist: '-100..100 — 0 is an arch, 100 an S-curve, -100 a hook',
                 taper: '-100..100 — positive narrows the tip, negative flares it',
@@ -355,8 +355,12 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                     // reference edits the ribbon keeps its width and exits the
                     // picture rather than ending in a wedge.
                     // Long enough to cross the room it found and leave the frame.
-                    length: clamp(length, 1, 6, fromPreset?.length
-                        ?? (resolved.room ? Math.min(6, 1 + resolved.room / Math.max(0.04, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w)) : 3.4)),
+                    // Default: cross the room it found and leave the frame. A
+                    // thin slice needs a big multiple to travel any distance, so
+                    // the target is expressed in FRAME terms and divided by the
+                    // slice's own extent.
+                    length: clamp(length, 1, 200, fromPreset?.length
+                        ?? Math.min(200, Math.max(1, ((resolved.room ?? 0.5) + 0.35) / Math.max(0.02, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w)))),
                     bend: clamp(bend, -100, 100, (fromPreset?.bend ?? 0.55) * 100) / 100,
                     twist: clamp(twist, -100, 100, (fromPreset?.twist ?? 0) * 100) / 100,
                     taper: clamp(taper, -100, 100, (fromPreset?.taper ?? 0.08) * 100) / 100,
@@ -378,7 +382,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 amount: '-200..200 — how hard the mesh is pulled (default 100)',
                 from: 'same slice words as `ribbon`',
                 band: 'exact source slice { x, y, w, h }',
-                length: '1..6 — ribbon length before warping (default 2.2)',
+                length: '1..200 — ribbon length before warping. Omitted, it is sized to cross the frame.',
                 behind: '0..100 — how much of the selected slice the ribbon passes behind',
                 behindSubject: 'true to use subject detection instead (see `ribbon`)',
                 blend: 'layer blend mode (see `ribbon`)',
@@ -387,7 +391,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const id = WARP_IDS.includes(preset) ? preset : 'arch'
-                const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: clamp(length, 1, 6, 2.6), taper: 0.05 })
+                const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: clamp(length, 1, 200, Math.min(200, Math.max(1, 0.85 / Math.max(0.02, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w)))), taper: 0.05 })
                 const { grid, rest } = applyWarpPreset(flat, id, clamp(amount, -200, 200, 100) / 100)
                 const placement = await placementFor(el, behind, blend, resolved, behindSubject)
                 await commit(image, { ...flat, warpGrid: grid, warpRest: rest }, `Pixel stretch warp (${id})`, placement)
@@ -409,7 +413,7 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
             run: async ({ preset = 'ribbon', points, width, from, band, axis, direction, seed, behind, blend, behindSubject } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
-                const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: 2.8, taper: 0.05 })
+                const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: Math.min(200, Math.max(1, 0.9 / Math.max(0.02, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w))), taper: 0.05 })
                 const usable = Array.isArray(points) && points.length >= 2
                     && points.every((p) => Number.isFinite(Number(p?.x)) && Number.isFinite(Number(p?.y)))
                 const flowPath = usable

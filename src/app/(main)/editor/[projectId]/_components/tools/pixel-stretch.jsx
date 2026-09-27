@@ -949,7 +949,18 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
   const applyPreset = useCallback((preset) => {
     setActivePresetId(preset.id)
-    commit(preset.params)
+    // Preset lengths are multiples of the SLICE, which means "Tall Smear" on a
+    // 2%-tall slice would not even clear the slice. Re-express each preset's
+    // length as the fraction of the frame it was written for (it assumed a
+    // roughly quarter-height band) and convert back through the real slice.
+    const p = paramsRef.current
+    const extent = Math.max(0.005, p.axis === 'vertical' ? (p.band?.h || 0.25) : (p.band?.w || 0.25))
+    const next = { ...preset.params }
+    if (typeof next.length === 'number') {
+      const frameTravel = Math.min(2.5, next.length * 0.25)
+      next.length = Math.max(1, Math.min(200, frameTravel / extent))
+    }
+    commit(next)
   }, [commit])
 
   const resetParams = useCallback(() => {
@@ -1961,6 +1972,11 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   }
 
   const pct = (v) => Math.round(v * 100)
+
+  // How much of the frame the slice already covers along the stretch axis — the
+  // Length slider converts between "travel across the frame" and the stored
+  // multiple-of-the-slice through this.
+  const bandExtent = Math.max(0.005, params.axis === 'vertical' ? (params.band?.h || 0.1) : (params.band?.w || 0.1))
   const sliderVisual = { fill: `${accent}55`, accent, trackBg: 'rgba(18, 22, 30, 0.96)' }
   const sliderCommit = (key, raw, scale = 100) => { setActivePresetId(null); commit({ [key]: raw / scale }) }
   const cardStyle = { boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)' }
@@ -2566,11 +2582,16 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
       {/* Primary sliders */}
       <div className="space-y-3">
+        {/* Shown as travel across the FRAME, not as a multiple of the slice: a
+            multiple is meaningless to the eye when the slice is 2% tall, and it
+            is exactly the control the reference workflow needs (drag the streaks
+            past the top of the picture). Stored as the multiple. */}
         <ProRulerSlider
-          variant="instrument" label="Length" suffix="%"
-          value={pct(params.length)} min={100} max={800} step={5}
-          onPreview={(v) => livePatch({ length: v / 100 })}
-          onCommit={(v) => sliderCommit('length', v)}
+          variant="instrument" label="Length" suffix="% of frame"
+          value={Math.round(params.length * bandExtent * 100)}
+          min={Math.max(1, Math.round(bandExtent * 100))} max={250} step={1}
+          onPreview={(v) => livePatch({ length: Math.max(1, v / 100 / bandExtent) })}
+          onCommit={(v) => sliderCommit('length', Math.max(100, (v / bandExtent)))}
           visual={sliderVisual}
         />
         <ProRulerSlider

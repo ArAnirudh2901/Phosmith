@@ -243,7 +243,13 @@ export function clampStretchParams(p = {}) {
     polygon: sanitizePolygon(base.polygon),
     seed: clamp01(num(base.seed, D.seed)),
     fadeIn: clamp01(num(base.fadeIn, D.fadeIn)),
-    length: clamp(num(base.length, D.length), 1, 8),
+    // `length` is a multiple of the BAND's own extent, so the useful range
+    // depends entirely on how thin the slice is. The reference workflow selects a
+    // slice a few percent tall and stretches it past the top of the frame — with
+    // the old cap of 8 a 2%-tall slice could only ever cover 16% of the picture,
+    // which made the trend look impossible to reproduce. MIN_BAND is 2%, so 200
+    // is what "four frame-heights from the thinnest legal slice" costs.
+    length: clamp(num(base.length, D.length), 1, 200),
     bend: clamp(num(base.bend, D.bend), -1, 1),
     twist: clamp(num(base.twist, D.twist), -1, 1),
     fade: clamp01(num(base.fade, D.fade)),
