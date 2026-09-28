@@ -79,3 +79,6 @@ public/ort/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# graphify generated output
+graphify-out/
