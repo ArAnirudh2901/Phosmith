@@ -58,8 +58,10 @@ export async function POST(request) {
         route: cap(env.route, 80),
         ua: cap(env.ua, 180),
         viewport: cap(env.viewport, 24),
-        memoryGb: Number.isFinite(Number(env.deviceMemoryGb)) ? Number(env.deviceMemoryGb) : null,
-        cores: Number.isFinite(Number(env.cores)) ? Number(env.cores) : null,
+        // Number(null) is 0, which reads as "this machine has 0 GB" — Safari simply
+        // does not expose deviceMemory, and "unknown" is the honest answer.
+        memoryGb: env.deviceMemoryGb == null ? null : (Number.isFinite(Number(env.deviceMemoryGb)) ? Number(env.deviceMemoryGb) : null),
+        cores: env.cores == null ? null : (Number.isFinite(Number(env.cores)) ? Number(env.cores) : null),
         online: env.online === false ? false : true,
     }
 

@@ -6,7 +6,7 @@
  *
  * Usage: bun scripts/verify-diagnostics.mjs
  */
-import { redact, trimStack, signatureOf, report, __pending, __resetDiagnostics } from '../src/lib/client-diagnostics.js'
+import { redact, trimStack, signatureOf, report, describeReason, __pending, __resetDiagnostics } from '../src/lib/client-diagnostics.js'
 
 let checks = 0
 let failures = 0
@@ -87,6 +87,26 @@ console.log('\n[verify-diagnostics] signatures')
     check(signatureOf(a) !== signatureOf(c), 'a rejection is not the same event as a throw')
 }
 
+
+console.log('\n[verify-diagnostics] non-Error rejections')
+{
+    // A real Safari session reported `message: "[object Object]"` — a rejection
+    // carrying a plain object. That is as useless in a diagnostic as it is in a
+    // toast, and it is what this module exists to avoid.
+    check(!describeReason({}).includes('[object Object]'), 'a plain object never reports as [object Object]', describeReason({}))
+    check(describeReason({ code: 42, detail: 'x' }).includes('code'), 'its keys or JSON make it findable', describeReason({ code: 42, detail: 'x' }))
+    check(describeReason(new Error('real message')) === 'real message', 'a real Error still reports its message')
+    check(describeReason('a string reason') === 'a string reason', 'a thrown string is kept')
+    check(describeReason(null).includes('null'), 'null says so', describeReason(null))
+    check(describeReason(undefined).includes('undefined'), 'undefined says so', describeReason(undefined))
+    const circular = {}
+    circular.self = circular
+    check(typeof describeReason(circular) === 'string', 'a circular object does not throw', describeReason(circular).slice(0, 40))
+    // Redaction is report()'s job, not describeReason's — check it where it lives.
+    __resetDiagnostics()
+    report('rejection', { message: describeReason({ token: 'x'.repeat(40) }) })
+    check(!JSON.stringify(__pending()).includes('x'.repeat(40)), 'and its contents are redacted by the time they are queued')
+}
 
 console.log('\n[verify-diagnostics] no credential-shaped literals in our own source')
 {

@@ -146,6 +146,29 @@ export const reportCapability = (name, available) => {
     report('capability', { name: 'CapabilityMissing', message: name, context: name })
 }
 
+
+/**
+ * A rejection is not always an Error. `String({})` gives "[object Object]",
+ * which is exactly as useless in a diagnostic as it is in a toast — this was
+ * caught by reading this module's own output from a real Safari session.
+ */
+export const describeReason = (reason) => {
+    if (reason == null) return `non-Error rejection (${reason === null ? 'null' : 'undefined'})`
+    if (typeof reason === 'string') return reason
+    if (typeof reason?.message === 'string' && reason.message) return reason.message
+    // Describe the shape instead: its keys are usually enough to find the source.
+    try {
+        const json = JSON.stringify(reason)
+        if (json && json !== '{}' && json !== 'null') return `non-Error rejection: ${json.slice(0, 200)}`
+        const keys = Object.keys(reason)
+        if (keys.length) return `non-Error rejection with keys: ${keys.slice(0, 8).join(', ')}`
+    } catch { /* circular or exotic — fall through to the type */ }
+    // `Object.prototype.toString` yields "[object Object]" for a bare object —
+    // the very token this function exists to keep out of a report.
+    const tag = Object.prototype.toString.call(reason).replace(/^\[object |\]$/g, '')
+    return `non-Error rejection (${tag === 'Object' ? 'empty object' : tag})`
+}
+
 /** Install the global listeners. Safe to call more than once. */
 export const installDiagnostics = () => {
     if (installed || typeof window === 'undefined') return () => {}
@@ -154,7 +177,7 @@ export const installDiagnostics = () => {
     const onError = (e) => report('error', { name: e?.error?.name, message: e?.message || e?.error?.message, stack: e?.error?.stack })
     const onRejection = (e) => {
         const r = e?.reason
-        report('rejection', { name: r?.name, message: r?.message || String(r), stack: r?.stack })
+        report('rejection', { name: r?.name, message: describeReason(r), stack: r?.stack })
     }
     const onHide = () => { if (document.visibilityState === 'hidden') flush() }
 
