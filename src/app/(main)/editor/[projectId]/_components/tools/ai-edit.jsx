@@ -11,6 +11,7 @@ import { buildAiEditPresetUrl, ensureCurrentImageKitEndpoint, getCanvasActiveIma
 import { serializeCanvasState } from '../../../../../../lib/canvas-state'
 import BeforeAfterCompare from '@/components/neo/BeforeAfterCompare'
 import { ArrowLeftRight } from 'lucide-react'
+import { toUserMessage } from '@/lib/user-error'
 
 const PRESETS = [
     {
@@ -210,7 +211,7 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                 url,
                 error,
             })
-            toast.error(error?.message || 'Failed to prepare AI preview')
+            toast.error(toUserMessage(error, 'Failed to prepare AI preview'))
             return null
         } finally {
             setIsPreviewing(false)
@@ -268,7 +269,7 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
                     }
                 } catch (reuploadErr) {
                     console.warn('[AI Edit] Re-upload failed:', reuploadErr)
-                    toast.error('Failed to re-upload image: ' + (reuploadErr?.message || ''))
+                    toast.error('Failed to re-upload image: ' + (toUserMessage(reuploadErr, '')))
                     return
                 }
 
@@ -327,7 +328,7 @@ const AIEdits = ({ project, dominantColor, contrastingColor, lighterColor }) => 
             }
         } catch (error) {
             console.warn('AI edit failed:', error)
-            toast.error(error?.message || 'Failed to apply AI edit')
+            toast.error(toUserMessage(error, 'Failed to apply AI edit'))
         } finally {
             setIsApplying(false)
             setProcessingMessage(null)

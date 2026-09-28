@@ -13,7 +13,10 @@ export function useStoreUser() {
     // has stored the user.
     const [userId, setUserId] = useState(null);
     const [databaseSetupMissing, setDatabaseSetupMissing] = useState(false);
-    const { mutate: storeUser } = useDatabaseMutation(api.users.store);
+    // Storing the user touches lastActiveAt and nothing any query renders, so it
+    // must not invalidate them. Broadcasting from here made every page load
+    // fetch the project row twice.
+    const { mutate: storeUser } = useDatabaseMutation(api.users.store, { invalidates: [] });
     // Call the `storeUser` mutation function to store
     // the current user in the `users` table and return the `Id` value.
     useEffect(() => {
@@ -35,17 +38,16 @@ export function useStoreUser() {
                 const id = await storeUser();
                 setDatabaseSetupMissing(false);
 
-                try {
-                    const response = await fetch("/api/billing/sync", {
-                        method: "POST",
+                // The app is usable the moment the user row is known. Billing is
+                // reconciled in the background — awaiting it here put a second
+                // serial round trip in front of every page render.
+                fetch("/api/billing/sync", { method: "POST" })
+                    .then((response) => {
+                        if (!response.ok) throw new Error("Billing plan sync failed.");
+                    })
+                    .catch((syncError) => {
+                        console.error("Failed to sync billing plan to Neon.", syncError);
                     });
-
-                    if (!response.ok) {
-                        throw new Error("Billing plan sync failed.");
-                    }
-                } catch (syncError) {
-                    console.error("Failed to sync billing plan to Neon.", syncError);
-                }
 
                 if (!isCancelled) {
                     setUserId(id);
@@ -91,6 +93,12 @@ export function useStoreUser() {
     return {
         isLoading: !isLoaded || (isSignedIn && userId === null && !databaseSetupMissing),
         isAuthenticated: isSignedIn && userId !== null,
+        // READS can start as soon as Clerk has a session: every Neon function
+        // authenticates from that session itself and creates the user row if it
+        // is missing. Gating them on `isAuthenticated` made them wait for the
+        // users.store write first, which put a whole round trip in front of the
+        // first query on every page load.
+        isSessionReady: isLoaded && Boolean(isSignedIn),
         databaseSetupMissing,
     };
 }

@@ -32,6 +32,7 @@ import {
     validateGroundOutput,
     withTimeout,
 } from './client-ai-core'
+import { runHeavy } from '@/lib/heavy-job-queue'
 
 const ENABLED_KEY = 'phosmith:client-ai'
 const CHANGED_EVENT = 'phosmith:client-ai-changed'
@@ -703,7 +704,14 @@ const scoreSubjectMask = (canvas, box, width, height) => {
  * @param {{ width: number, height: number }} naturalDims
  * @returns {Promise<HTMLCanvasElement>}
  */
-export const clientSubjectMask = async (el, dims) => {
+export const clientSubjectMask = async (el, dims) =>
+    // Loading SlimSAM and running a mask per seed candidate is the other big
+    // allocator in the app. Queued so it cannot land on top of a bake or export.
+    // No supersede key: two callers wanting mattes for DIFFERENT images are two
+    // intents, and dropping the queued one would silently lose a result.
+    runHeavy('subject detection', () => clientSubjectMaskInner(el, dims))
+
+const clientSubjectMaskInner = async (el, dims) => {
     const startedAt = Date.now()
     try {
         const width = Number(dims?.width) || el?.naturalWidth || el?.width || 0

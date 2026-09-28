@@ -11,6 +11,7 @@ import Header from "@/components/header";
 import { DatabaseClientProvider } from "./DatabaseClientProvider";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
+import DiagnosticsBoot from "@/components/diagnostics-boot"
 
 // Clerk renders {{applicationName}} from the dashboard instance name; override it
 // here so the auth screens stay on-brand no matter which instance is wired up.
@@ -133,6 +134,7 @@ export default function RootLayout({ children }) {
     >
       <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
         <body className={`${jetbrainsMono.variable} phosmith-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
+          <DiagnosticsBoot />
           <ThemeProvider
             attribute="class"
             defaultTheme="dark"

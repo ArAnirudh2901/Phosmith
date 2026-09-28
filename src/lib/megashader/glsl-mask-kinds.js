@@ -160,6 +160,26 @@ export const DEPTH_SCHEMA = {
 }
 
 /**
+ * Gradient mask — a continuous ramp read straight out of a texture.
+ *
+ * `semantic` binarises through `smoothstep(0.5)` because a subject either is or
+ * is not selected. A circle-of-confusion map, a distance ramp or a defocus map is
+ * the opposite: the VALUE is the answer, and rounding it to 0/1 throws the effect
+ * away. `low`/`high` remap the useful part of the range and `gamma` bends it.
+ */
+export const GRADIENT_SCHEMA = {
+    kind: 'gradient',
+    uniforms: [
+        { name: 'low',   glsl: 'uLayer_<S>_kind_gradient_low',   type: 'float', min: 0, max: 1, default: 0 },
+        { name: 'high',  glsl: 'uLayer_<S>_kind_gradient_high',  type: 'float', min: 0, max: 1, default: 1 },
+        { name: 'gamma', glsl: 'uLayer_<S>_kind_gradient_gamma', type: 'float', min: 0.05, max: 8, default: 1 },
+    ],
+    samplers: [
+        { name: 'map', glsl: 'uLayer_<S>_kind_gradient_map' },
+    ],
+}
+
+/**
  * Step 7 — Manual precision Smart Brush (edge-preserving filter).
  *
  * The user's painted alpha texture is uploaded by the renderer as a
@@ -270,6 +290,7 @@ export const KIND_SCHEMAS = {
     smartBrush: SMART_BRUSH_SCHEMA,
     semantic:   SEMANTIC_SCHEMA,
     depth:      DEPTH_SCHEMA,
+    gradient:   GRADIENT_SCHEMA,
     lasso:      LASSO_SCHEMA,
     brush:      BRUSH_SCHEMA,
     path:       PATH_SCHEMA,
@@ -700,6 +721,25 @@ export const buildStub = (slot, kind) => /* glsl */ `
  * map; unknown kinds throw a descriptive error so the failure surfaces
  * at compile-time rather than as a silent broken shader.
  */
+export const buildGradient = (slot) => /* glsl */ `
+        uniform sampler2D uLayer_${slot}_kind_gradient_map;
+        uniform float uLayer_${slot}_kind_gradient_low;
+        uniform float uLayer_${slot}_kind_gradient_high;
+        uniform float uLayer_${slot}_kind_gradient_gamma;
+
+        float evalLayer_${slot}_body() {
+            float v = texture2D(uLayer_${slot}_kind_gradient_map, vTextureCoord).r;
+            float lo = uLayer_${slot}_kind_gradient_low;
+            float hi = uLayer_${slot}_kind_gradient_high;
+            // An inverted range is a legitimate request (ramp the other way), so
+            // the span is signed and only its magnitude is floored.
+            float span = hi - lo;
+            float denom = abs(span) < 0.0005 ? (span < 0.0 ? -0.0005 : 0.0005) : span;
+            float t = clamp((v - lo) / denom, 0.0, 1.0);
+            return clamp(pow(t, max(uLayer_${slot}_kind_gradient_gamma, 0.05)), 0.0, 1.0);
+        }
+    `
+
 export const KIND_BUILDERS = {
     luminance:  buildLuminance,
     color:      buildColor,
@@ -707,6 +747,7 @@ export const KIND_BUILDERS = {
     radial:     buildRadial,
     semantic:   buildSemantic,
     depth:      buildDepth,
+    gradient:   buildGradient,
     smartBrush: buildSmartBrush,
     lasso:      buildLasso,
     brush:      buildBrush,

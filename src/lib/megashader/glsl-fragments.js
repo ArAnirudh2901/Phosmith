@@ -80,14 +80,15 @@ export const buildVertexShader = () => /* glsl */ `
  * @returns {string}
  */
 /**
- * @typedef {'single'|'state'|'final'|'erase'} PassRole
+ * @typedef {'single'|'state'|'final'|'erase'|'suffixColor'|'suffixAlpha'} PassRole
  *   single — whole chain in one pass (the classic path, ≤ MAX_LAYERS_PER_PASS)
  *   state  — a batch that writes the running (colour, alpha) state to a texture
  *   final  — the last batch: reads the state, composites and writes pixels
  *   erase  — accumulates eraseAlpha over the chain's erase layers (order-free)
- *   suffixColor / suffixAlpha / suffixErase — fold the layers ABOVE the edited
- *     one into per-pixel maps (see chain-fold.js) so a drag re-renders a single
- *     layer whatever the chain depth
+ *   suffixColor / suffixAlpha — fold the layers ABOVE the edited one into
+ *     per-pixel maps (see chain-fold.js) so a drag re-renders a single layer
+ *     whatever the chain depth. Erase needs no map: it is an order-free max,
+ *     so the `erase` pass above already carries every erase layer.
  *
  * @param {{ role?: PassRole, readsPrevState?: boolean, readsErase?: boolean }} [opts]
  */
@@ -340,6 +341,19 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
     // exactly like the smartBrush. uImage/uImageSize are always in the header.
     const tx = `uLayer_${slotIndex}_adjust_texture`
     const dh = `uLayer_${slotIndex}_adjust_dehaze`
+    // Optical blur: a gather over the source, radius = blurPx × this layer's
+    // coverage, so the mask doubles as the circle-of-confusion map.
+    const bl = `uLayer_${slotIndex}_adjust_blurPx`
+    const bk2 = `uLayer_${slotIndex}_adjust_blurKind`
+    const ba = `uLayer_${slotIndex}_adjust_blurAngle`
+    const bln = `uLayer_${slotIndex}_adjust_blurLength`
+    const hg = `uLayer_${slotIndex}_adjust_highlightGain`
+    const ht = `uLayer_${slotIndex}_adjust_highlightThreshold`
+    // Instagram parity: local contrast (Structure), local tone mapping (Lux) and
+    // the faded-print look (Fade). The first two share one edge-aware base.
+    const st = `uLayer_${slotIndex}_adjust_structure`
+    const lx = `uLayer_${slotIndex}_adjust_lux`
+    const fd = `uLayer_${slotIndex}_adjust_fade`
     // Pro colour-grading extensions (per mask, adjust.jsx parity): gamma
     // (per-channel power, identity 1.0), 3-way colour wheels (shadows/midtones/
     // highlights tonal colour balance, vec3 offsets), and a tone-curve LUT
@@ -377,6 +391,15 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
         uniform float ${vb};
         uniform float ${tx};
         uniform float ${dh};
+        uniform float ${bl};
+        uniform float ${bk2};
+        uniform float ${ba};
+        uniform float ${bln};
+        uniform float ${hg};
+        uniform float ${ht};
+        uniform float ${st};
+        uniform float ${lx};
+        uniform float ${fd};
         uniform float ${gm};
         uniform vec3  ${wlS};
         uniform vec3  ${wlM};
@@ -387,14 +410,142 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
         uniform vec3  ${fc};
         uniform float ${fs};
 
-        vec3 applyLayerAdjust_${slotIndex}(vec3 rgb) {
+        /**
+         * Optical gather blur for slot ${slotIndex}.
+         *
+         * Golden-angle spiral (2.39996323 rad per step): the samples land on an
+         * even disc for any count, with no axis bias a rectangular grid would
+         * leave. The mip bias keeps the tap count constant as the radius grows: a
+         * 200px radius costs what a 10px one does, which is the whole reason a
+         * 24MP frame can be blurred interactively.
+         *
+         * Highlight weighting is what separates bokeh from a smudge: a sample
+         * brighter than the threshold counts for more, so a specular point spreads
+         * into an aperture-shaped disc (GEGL's lens-blur exposes the same two
+         * controls: highlight factor and highlight threshold).
+         */
+        vec3 gatherBlur_${slotIndex}(float radiusPx) {
+            vec2 texel = 1.0 / max(uImageSize, vec2(1.0, 1.0));
+            // Taps grow with the radius: a 24-tap spiral over a large disc leaves
+            // whether a tap lands on a specular highlight up to chance, which reads
+            // as salt-and-pepper speckle once highlight weighting amplifies it.
+            float taps = clamp(radiusPx * 1.6, 16.0, 64.0);
+            float shapeId = ${bk2};
+            // Sample spacing decides the mip level: a disc of N taps spaces them
+            // radius/sqrt(N) apart, a line spaces them 2·radius/N. Capped at 4
+            // levels — past that a small specular highlight is averaged out of
+            // existence and the bokeh ball with it.
+            float spacing = shapeId > 2.5 ? (2.0 * radiusPx / taps) : (radiusPx / sqrt(taps));
+            // Each tap reads a mip level whose footprint is about the tap spacing,
+            // so the LEVEL does the averaging and the taps only have to cover the
+            // disc — that is what keeps a high-contrast frame smooth rather than
+            // speckled at any practical tap count.
+            float bias = clamp(log2(max(spacing, 1.0)), 0.0, 3.5);
+            vec3 acc = vec3(0.0);
+            float wsum = 0.0;
+            float shape = shapeId;
+            // Nudge each pixel's spiral by up to HALF a tap. A full random rotation
+            // decorrelates neighbours and turns the blur into per-pixel noise on a
+            // high-contrast night frame; half a step is enough to break the regular
+            // hatch while neighbouring pixels still average nearly the same texels.
+            float jitter = fract(sin(dot(vTextureCoord * uImageSize, vec2(12.9898, 78.233))) * 43758.5453);
+            float ang0 = ${ba} + (jitter - 0.5) * (6.2831853 / taps);
+            for (float i = 0.0; i < 64.0; i += 1.0) {
+                if (i >= taps) break;
+                float t = (i + 0.5) / taps;
+                float theta = i * 2.39996323 + ang0;
+                // sqrt keeps the samples area-uniform over the disc.
+                float rr = sqrt(t);
+                vec2 dir = vec2(cos(theta), sin(theta));
+                if (shape > 3.5) {
+                    // spin: samples ride the tangent of a circle about the frame
+                    // centre, so the blur rotates rather than spreading outward.
+                    vec2 fromCentre = vTextureCoord - vec2(0.5);
+                    vec2 tangent = normalize(vec2(-fromCentre.y, fromCentre.x) + vec2(1e-5));
+                    dir = tangent;
+                    rr = (t * 2.0 - 1.0) * length(fromCentre) * 2.0;
+                } else if (shape > 2.5) {
+                    // motion: a line, not a disc
+                    dir = vec2(cos(ang0), sin(ang0));
+                    rr = (t * 2.0 - 1.0);
+                } else if (shape > 1.5) {
+                    // ring: push the samples out to the rim (catadioptric look)
+                    rr = mix(0.85, 1.0, t);
+                } else if (shape > 0.5) {
+                    // hex: a hexagonal aperture — radius modulated by angle
+                    float a6 = mod(theta, 1.0471976) - 0.5235988;
+                    rr *= 0.9330127 / max(cos(a6), 0.5);
+                }
+                vec2 offset = dir * rr * radiusPx * texel;
+                vec2 uv = vTextureCoord + offset;
+                vec3 c = texture2D(uImage, uv, bias).rgb;
+                // The highlight weight reads the UNREDUCED pixel: a mip level has
+                // already averaged a specular point down below any threshold, so
+                // weighting the mip sample would never bloom anything. Only paid
+                // for when highlight weighting is actually on.
+                float lum = ${hg} > 0.0
+                    ? dot(texture2D(uImage, uv).rgb, vec3(0.2126, 0.7152, 0.0722))
+                    : dot(c, vec3(0.2126, 0.7152, 0.0722));
+                float w = 1.0 + max(0.0, lum - ${ht}) * ${hg};
+                acc += c * w;
+                wsum += w;
+            }
+            return wsum > 0.0 ? acc / wsum : texture2D(uImage, vTextureCoord).rgb;
+        }
+
+        /**
+         * Edge-aware local luma base for slot ${slotIndex}.
+         *
+         * Structure and Lux both need "the luma without its fine detail". A
+         * Gaussian base gives that and a halo with it — the bright ring along every
+         * high-contrast edge that makes Instagram's Structure slider notorious.
+         * Weighting each tap by how close its luma is to the centre's (a bilateral
+         * weight, the same trick the smartBrush mask kind already uses here) keeps
+         * the base from crossing edges, so the detail it leaves behind is halo-free.
+         *
+         * 16 taps on two rings at a radius scaled to the image's short side, so the
+         * effect covers the same fraction of the frame at any resolution.
+         */
+        float localBase_${slotIndex}(float centreLum) {
+            vec2 texel = 1.0 / max(uImageSize, vec2(1.0, 1.0));
+            float r = max(2.0, min(uImageSize.x, uImageSize.y) * 0.012);
+            vec3 LW = vec3(0.2126, 0.7152, 0.0722);
+            float sum = centreLum;
+            float wsum = 1.0;
+            for (float i = 0.0; i < 8.0; i += 1.0) {
+                float a = i * 0.7853982;
+                vec2 dir = vec2(cos(a), sin(a));
+                for (float ring = 1.0; ring <= 2.0; ring += 1.0) {
+                    vec2 off = dir * r * (ring * 0.5) * texel;
+                    float l = dot(texture2D(uImage, vTextureCoord + off).rgb, LW);
+                    float d = l - centreLum;
+                    // σ = 0.12 in luma: inside a texture, taps count; across an
+                    // edge they do not.
+                    float w = exp(-(d * d) / 0.0288);
+                    sum += l * w;
+                    wsum += w;
+                }
+            }
+            return sum / max(wsum, 1e-4);
+        }
+
+        vec3 applyLayerAdjust_${slotIndex}(vec3 rgb, float coverage) {
+            // The blur replaces the colour every later grade works on, and its
+            // radius is the layer's own coverage — a feathered mask IS the circle
+            // of confusion, so tilt-shift and depth-of-field need no extra map.
+            if (${bl} > 0.0) {
+                float radius = ${bl} * clamp(coverage, 0.0, 1.0)
+                    * (${bk2} > 2.5 ? max(${bln}, 0.05) : 1.0);
+                if (radius > 0.4) rgb = gatherBlur_${slotIndex}(radius);
+            }
             // Early-out: identity adjustments. Saves the per-pixel cost for
             // the common "no-op adjust" case (a freshly created layer before
             // the user touches any slider). All thirteen fields must be 0.
             if (${e} == 0.0 && ${c} == 0.0 && ${s} == 0.0 && ${b} == 0.0
                 && ${hi} == 0.0 && ${sh} == 0.0 && ${wh} == 0.0 && ${bk} == 0.0
                 && ${tp} == 0.0 && ${tn} == 0.0 && ${vb} == 0.0
-                && ${tx} == 0.0 && ${dh} == 0.0
+                && ${tx} == 0.0 && ${dh} == 0.0 && ${bl} <= 0.0
+                && ${st} == 0.0 && ${lx} == 0.0 && ${fd} == 0.0
                 && ${gm} == 1.0 && ${cvOn} < 0.5
                 && ${wlS} == vec3(0.0) && ${wlM} == vec3(0.0) && ${wlH} == vec3(0.0)) {
                 return rgb;
@@ -508,6 +659,54 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
                 rgb = clamp(rgb, 0.0, 1.0);
             }
 
+            // Structure + Lux: one edge-aware base serves both, so a photo with
+            // both sliders up pays for the taps once.
+            if (${st} != 0.0 || ${lx} != 0.0) {
+                vec3 LW2 = vec3(0.2126, 0.7152, 0.0722);
+                float lum = dot(clamp(rgb, 0.0, 1.0), LW2);
+                float base = localBase_${slotIndex}(lum);
+                float detail = lum - base;
+
+                if (${st} != 0.0) {
+                    // Local contrast, weighted toward the midtones the way Clarity
+                    // is: the slider must not crush blacks or blow highlights.
+                    float mid = 1.0 - abs(base - 0.5) * 1.6;
+                    rgb += (${st} * 0.02) * detail * max(mid, 0.25) * (rgb / max(lum, 0.02));
+                }
+
+                if (${lx} != 0.0) {
+                    // Lux = local tone mapping: lift shadows, pull highlights, add
+                    // midtone contrast, nudge saturation. Driven by the LOCAL base,
+                    // which is what makes it read as HDR rather than as a curve.
+                    float k = ${lx} * 0.01;
+                    float shadowLift = (1.0 - base) * (1.0 - base) * k * 0.55;
+                    float highlightPull = base * base * k * 0.35;
+                    vec3 toned = rgb + vec3(shadowLift) - vec3(highlightPull);
+                    // Midtone S-curve about the local base, so contrast comes back
+                    // after the compression.
+                    float sMix = clamp(k * 0.5, 0.0, 0.5);
+                    toned = mix(toned, clamp((toned - vec3(base)) * (1.0 + sMix) + vec3(base), 0.0, 1.0), 0.9);
+                    float gL = dot(clamp(toned, 0.0, 1.0), LW2);
+                    toned = mix(vec3(gL), toned, 1.0 + k * 0.25);
+                    rgb = toned;
+                }
+                rgb = clamp(rgb, 0.0, 1.0);
+            }
+
+            // Fade: a faded print — the black point lifts, the highlights roll off
+            // and the colour drops. A single offset (what the old ColorMatrix did)
+            // washes the whole frame instead of lifting only its floor.
+            if (${fd} != 0.0) {
+                float f = clamp(${fd} * 0.01, 0.0, 1.0);
+                vec3 LW3 = vec3(0.2126, 0.7152, 0.0722);
+                float lift = f * 0.18;
+                float ceilPull = f * 0.10;
+                rgb = rgb * (1.0 - lift - ceilPull) + vec3(lift);
+                float gF = dot(clamp(rgb, 0.0, 1.0), LW3);
+                rgb = mix(rgb, vec3(gF), f * 0.28);
+                rgb = clamp(rgb, 0.0, 1.0);
+            }
+
             // Tone curves — per-channel then master LUT (256×1 RGBA: R/G/B in
             // the colour channels, master in alpha). Identical lookup to
             // curves-filter.js FRAGMENT_SOURCE; the renderer uploads the packed
@@ -532,8 +731,8 @@ export const buildLayerAdjustFunction = (slotIndex, params = {}) => {
         // source by fillStrength; otherwise it's just the adjusted source.
         // 'erase' (fillMode == 2) leaves the colour as the adjusted source —
         // the cut happens on the alpha side, not the colour side.
-        vec3 layerColor_${slotIndex}(vec3 rgb) {
-            vec3 adjusted = applyLayerAdjust_${slotIndex}(rgb);
+        vec3 layerColor_${slotIndex}(vec3 rgb, float coverage) {
+            vec3 adjusted = applyLayerAdjust_${slotIndex}(rgb, coverage);
             if (${fm} > 0.5 && ${fm} < 1.5) {
                 return mix(adjusted, ${fc}, clamp(${fs}, 0.0, 1.0));
             }
@@ -612,10 +811,10 @@ export const buildBooleanChain = (chainEntries, opts = {}) => {
         lines.push(`float isErase_${i} = step(1.5, uLayer_${i}_fillMode);`)
         lines.push(`float a_${i} = aFull_${i} * (1.0 - isErase_${i});`)
         if (alwaysColor) {
-            lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb);`)
+            lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb, a_${i});`)
         } else {
             lines.push(`vec3 c_${i} = srcRgb;`)
-            lines.push(`if (a_${i} > 0.0) { c_${i} = layerColor_${i}(srcRgb); }`)
+            lines.push(`if (a_${i} > 0.0) { c_${i} = layerColor_${i}(srcRgb, a_${i}); }`)
         }
         lines.push(`eraseAlpha = max(eraseAlpha, aFull_${i} * isErase_${i});`)
     }
@@ -632,27 +831,21 @@ export const buildBooleanChain = (chainEntries, opts = {}) => {
         if (kind === 'color') {
             lines.push(`vec3 mapQ = prevMap.rgb;`)
             lines.push(`float mapP = prevMap.a;`)
-        } else if (kind === 'alpha') {
+        } else {
             lines.push(`float mapA = prevMap.x;`)
             lines.push(`float mapB = prevMap.y;`)
             lines.push(`float mapLo = prevMap.z;`)
             lines.push(`float mapHi = prevMap.w;`)
-        } else {
-            lines.push(`float mapM = prevMap.r;`)
         }
         chainEntries.forEach((entry, i) => {
             lines.push(`float aFull_${i} = evalLayer(${i});`)
             lines.push(`float isErase_${i} = step(1.5, uLayer_${i}_fillMode);`)
             lines.push(`float a_${i} = aFull_${i} * (1.0 - isErase_${i});`)
             const op = entry.op
-            if (kind === 'erase') {
-                lines.push(`mapM = max(mapM, aFull_${i} * isErase_${i});`)
-                return
-            }
             if (kind === 'color') {
                 // C → p·C + q, composed as outer ∘ inner.
                 if (op === 'subtract') return           // colour untouched
-                lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb);`)
+                lines.push(`vec3 c_${i} = layerColor_${i}(srcRgb, a_${i});`)
                 if (op === 'replace') {
                     lines.push(`mapQ = c_${i};`)
                     lines.push(`mapP = 0.0;`)
@@ -689,8 +882,7 @@ export const buildBooleanChain = (chainEntries, opts = {}) => {
             lines.push(`}`)
         })
         if (kind === 'color') lines.push(`vec4 mapOut = vec4(mapQ, mapP);`)
-        else if (kind === 'alpha') lines.push(`vec4 mapOut = vec4(mapA, mapB, mapLo, mapHi);`)
-        else lines.push(`vec4 mapOut = vec4(vec3(mapM), 1.0);`)
+        else lines.push(`vec4 mapOut = vec4(mapA, mapB, mapLo, mapHi);`)
         lines.push(`vec3 runningColor = srcRgb;`)
         lines.push(`float runningAlpha = 0.0;`)
         return lines.join('\n        ')

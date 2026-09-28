@@ -17,6 +17,7 @@ import {
 } from './_pixel-tool-ui'
 import { buildImageKitBackgroundRemovalUrls } from '@/lib/imagekit-ai'
 import { getRoutingMode, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
+import { toUserMessage } from '@/lib/user-error'
 
 
 const MAX_BG_DIMENSION = 1600
@@ -262,7 +263,7 @@ const EraseControls = ({ project, dominantColor }) => {
         } catch (error) {
             if (error.name !== 'AbortError') {
                 console.warn('[erase] auto-erase failed:', error)
-                toast.error(error?.message || 'Auto-erase failed')
+                toast.error(toUserMessage(error, 'Auto-erase failed'))
             }
         } finally {
             if (objectUrl) URL.revokeObjectURL(objectUrl)

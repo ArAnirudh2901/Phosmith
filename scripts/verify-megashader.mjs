@@ -633,7 +633,7 @@ const log = (ok, name, detail) => {
     log(c.frag.includes('uniform float uLayer_0_adjust_contrast'), 'layer 0 declares contrast uniform')
     log(c.frag.includes('uniform float uLayer_0_adjust_saturation'), 'layer 0 declares saturation uniform')
     log(c.frag.includes('uniform float uLayer_0_adjust_brightness'), 'layer 0 declares brightness uniform')
-    log(c.frag.includes('vec3 applyLayerAdjust_0(vec3 rgb)'), 'layer 0 emits applyLayerAdjust_0 function')
+    log(c.frag.includes('vec3 applyLayerAdjust_0(vec3 rgb, float coverage)'), 'layer 0 emits applyLayerAdjust_0 function')
 }
 
 // 45. The early-out identity branch is emitted (returns rgb unchanged when
@@ -661,7 +661,7 @@ const log = (ok, name, detail) => {
     }
     const c = compileMegashader(stack)
     for (let i = 0; i < stack.chain.length; i += 1) {
-        log(c.frag.includes(`vec3 applyLayerAdjust_${i}(vec3 rgb)`), `applyLayerAdjust_${i} emitted for chain slot ${i}`)
+        log(c.frag.includes(`vec3 applyLayerAdjust_${i}(vec3 rgb, float coverage)`), `applyLayerAdjust_${i} emitted for chain slot ${i}`)
     }
 }
 
@@ -1241,13 +1241,16 @@ const log = (ok, name, detail) => {
             // Extra GPU passes for chains split across batches, and frames that
             // reused the cached composite below the edited layer.
             'statePasses', 'prefixHits',
-            // Suffix fold: frames served by the fold, and how often each of its
-            // two cached artefacts had to be rebuilt.
-            'foldFrames', 'foldPrefixBuilds', 'foldSuffixBuilds',
+            // Suffix fold: frames served by the fold, how often each of its two
+            // cached artefacts had to be rebuilt, and whether it was retired
+            // (a refused map target or an allocation failure).
+            'foldFrames', 'foldPrefixBuilds', 'foldSuffixBuilds', 'foldRetired',
+            // Mip chains built for the gather blur (once per source version).
+            'sourceMipBuilds',
         ].sort()
         const actualKeys = Object.keys(shape).sort()
         log(JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
-            'getRenderMetrics returns the expected shape (15 documented keys)')
+            'getRenderMetrics returns the expected shape (17 documented keys)')
     } else {
         log(true, 'getRenderMetrics shape (skipped — module not loadable in Node)')
     }
@@ -1488,7 +1491,7 @@ const log = (ok, name, detail) => {
     log(c.frag.includes('uniform float uLayer_0_fillMode;'), 'layer emits fillMode uniform')
     log(c.frag.includes('uniform vec3  uLayer_0_fillColor;'), 'layer emits fillColor uniform')
     log(c.frag.includes('uniform float uLayer_0_fillStrength;'), 'layer emits fillStrength uniform')
-    log(c.frag.includes('vec3 layerColor_0(vec3 rgb)'), 'layer emits layerColor helper')
+    log(c.frag.includes('vec3 layerColor_0(vec3 rgb, float coverage)'), 'layer emits layerColor helper')
     log(c.frag.includes('step(1.5, uLayer_0_fillMode)'), 'chain routes erase mode (fillMode==2) to eraseAlpha')
     log(c.frag.includes('float outA = src.a * (1.0 - eraseFactor);'), 'main applies erase knockout to output alpha')
     // stackHasNoVisibleEffect: empty + all-adjust-zero are no-ops; a fill
@@ -1620,9 +1623,54 @@ const log = (ok, name, detail) => {
     log(keys.size === 6, 'each pass role and flag combination gets its own cache key', `${keys.size}/6`)
 }
 
+/* ── Gradient mask kind + optical gather blur ─────────────────────────────── */
+{
+    const gradientStack = {
+        chain: [{
+            op: 'replace',
+            layer: { kind: 'gradient', id: 'g0', gradientMapKey: 'coc-1', low: 0.1, high: 0.9, gamma: 1.4 },
+        }],
+    }
+    const g = compileMegashader(gradientStack)
+    log(g.frag.includes('uniform sampler2D uLayer_0_kind_gradient_map'), 'gradient kind declares its map sampler')
+    log(g.frag.includes('uLayer_0_kind_gradient_low') && g.frag.includes('uLayer_0_kind_gradient_high'),
+        'gradient kind exposes its range remap')
+    log(!/gradient_map[\s\S]{0,400}smoothstep\(0\.5/.test(g.frag),
+        'gradient coverage is read linearly, NOT binarised like semantic')
+    log(g.frag.includes('pow(t, max(uLayer_0_kind_gradient_gamma'), 'gradient applies its gamma bend')
+
+    const blurStack = {
+        chain: [{
+            op: 'add',
+            layer: { kind: 'radial', id: 'b0', center: { x: 0.5, y: 0.5 }, radius: 0.3, blurPx: 40, highlightGain: 2 },
+        }],
+    }
+    const b = compileMegashader(blurStack)
+    log(b.frag.includes('vec3 gatherBlur_0(float radiusPx)'), 'a layer emits its gather-blur helper')
+    log(b.frag.includes('2.39996323'), 'the gather uses the golden angle, so samples spread evenly')
+    log(b.frag.includes('texture2D(uImage, uv, bias)') && b.frag.includes('clamp(log2(max(spacing, 1.0)), 0.0, 3.5)'),
+        'the gather samples through a mip level chosen from the tap spacing, so cost is radius-independent')
+    log(b.frag.includes('clamp(radiusPx * 1.6, 16.0, 64.0)'),
+        'tap count grows with the radius, so a big disc is not left undersampled')
+    log(b.frag.includes('(6.2831853 / taps)'),
+        'the spiral is nudged by at most half a tap — enough to break the hatch, not enough to decorrelate neighbours')
+    log(b.frag.includes('uLayer_0_adjust_highlightGain') && b.frag.includes('uLayer_0_adjust_highlightThreshold'),
+        'highlight weighting is wired, which is what makes bokeh balls instead of a smudge')
+    log(b.frag.includes('uLayer_0_adjust_blurPx <= 0.0'),
+        'the identity early-out accounts for blur, so a blur-only layer is not skipped')
+    log(/shape > 3\.5[\s\S]{0,600}shape > 2\.5[\s\S]{0,400}shape > 1\.5[\s\S]{0,400}shape > 0\.5/.test(b.frag),
+        'all five aperture shapes are emitted (disc, hex, ring, motion, spin)')
+    log(b.frag.includes('vec3 layerColor_0(vec3 rgb, float coverage)'),
+        'coverage reaches the grade, so a feathered mask IS the circle of confusion')
+
+    const plain = compileMegashader({ chain: [{ op: 'add', layer: { kind: 'luminance', id: 'l0', min: 0, max: 0.5 } }] })
+    log(plain.frag.includes('vec3 gatherBlur_0'), 'the helper is emitted uniformly (cost is gated by the uniform, not by recompiling)')
+}
+
 // ─── Summary ────────────────────────────────────────────────────────────────
 const total = checks
 const passed = total - failures
+
 console.log(`\n${passed}/${total} verifications passed.`)
 if (failures > 0) {
     console.error(`\x1b[31m${failures} verification(s) failed.\x1b[0m`)

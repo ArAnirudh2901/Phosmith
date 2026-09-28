@@ -7,7 +7,7 @@ import { FabricImage, Rect } from 'fabric'
 import { FastAverageColor } from 'fast-average-color'
 import { useCanvas } from '../../../../../../../context/context'
 import { applyCanvasSizedBackground } from '@/lib/canvas-background'
-import { loadFabricImageFromFile } from '@/lib/canvas-images'
+import { loadFabricImageFromFile, workingEdgeForProject } from '@/lib/canvas-images'
 import {
     COLLAGE_STYLES,
     COLLAGE_BACKDROPS,
@@ -16,14 +16,22 @@ import {
     backdropPreviewCss,
     buildAiBackgroundPrompt,
 } from '@/lib/collage-styles'
-import { wrapCollageBgPrompt } from '@/lib/collage-ai'
+import { collagePlanCacheKey, readCollagePlan, writeCollagePlan, wrapCollageBgPrompt } from '@/lib/collage-ai'
+import { computePerceptualHash } from '@/lib/image-fingerprint'
+import { assignPhotosToCells, focusForCell, photoDescriptor } from '@/lib/collage-arrange'
 import {
     LAYOUTS,
     buildLayoutCells,
+    collageFrameFor,
     computeCollageCells,
+    defaultWeightsFor,
+    layoutBoundaries,
+    applyBoundaryDrag,
     generateTemplateRecipes,
     isVisibleImage,
     getCellCoverScale,
+    assessCellResolution,
+    setCellFitMode,
     fitImageToCell,
     restyleImage,
     clampToCell,
@@ -34,6 +42,7 @@ import CollageComposer, { sourceElement } from './collage-composer'
 import { analyzeElement } from '@/lib/collage/analyze'
 import { cellFromImage, placeImageInCell, swapFramedPhotos } from '@/lib/collage/render'
 import { cellFromSlot, createSlot, isCollageSlot } from '@/lib/collage/slot'
+import { buildCellMatte, isCollageMatte } from '@/lib/collage-styles'
 
 const fac = new FastAverageColor()
 
@@ -170,6 +179,37 @@ export default function CollageControls({ project, dominantColor }) {
     const [shape, setShape] = useState('rect')
     const [radiusPct, setRadiusPct] = useState(0)
     const [shadow, setShadow] = useState(false)
+    // How a photo meets its cell: fill it and crop (cover), or show all of it and
+    // let the backdrop frame it (contain — the sane choice for a panorama).
+    const [fitMode, setFitMode] = useState('cover')
+    // Content-aware placement: the strongest photo takes the biggest frame and
+    // each photo goes to the cell whose shape suits it, instead of filling cells
+    // in upload order and centre-cropping whatever lands there.
+    const [smartArrange, setSmartArrange] = useState(true)
+    // Mat: a border of backdrop inside each frame, or one grown outward into the
+    // gutter. Outward needs a gap to grow into, hence the two are separate.
+    const [framePct, setFramePct] = useState(0)
+    const [frameMode, setFrameMode] = useState('inner')
+    // A solid panel behind each cell, so a cut-out PNG does not read as a hole.
+    const [matte, setMatte] = useState(null)
+    // Per-layout divider positions. Dragging a divider moves only the two frames
+    // either side of it, and never past the minimum cell size.
+    const [weights, setWeights] = useState(() => defaultWeightsFor(selectedLayout))
+    const weightsRef = useRef(weights)
+    useEffect(() => { weightsRef.current = weights }, [weights])
+    // A layout change starts from that layout's own uniform dividers.
+    useEffect(() => { setWeights(defaultWeightsFor(selectedLayout)) }, [selectedLayout])
+    const layoutRef = useRef(selectedLayout)
+    useEffect(() => { layoutRef.current = selectedLayout }, [selectedLayout])
+    const spacingRef = useRef({ gap, padding })
+    useEffect(() => { spacingRef.current = { gap, padding } }, [gap, padding])
+    const styleRef = useRef(null)
+    styleRef.current = { shape, radiusPct, shadow, fitMode, framePct, frameMode, matte }
+    // cell index → photo index, as the last layout decided it. Without this a
+    // divider drag would re-fill the cells in canvas order and undo a
+    // content-aware arrangement.
+    const assignmentRef = useRef(null)
+
     const [activeBackdrop, setActiveBackdrop] = useState(null)
     const [generatingTheme, setGeneratingTheme] = useState(null)
     // Generated "stylish template" suggestions (gallery).
@@ -186,6 +226,57 @@ export default function CollageControls({ project, dominantColor }) {
     // Latest applyRecipe, so autoTemplate can call it without a definition-order
     // dependency cycle (applyRecipe is defined below autoTemplate).
     const applyRecipeRef = useRef(null)
+    // Plan requests race: cycling templates fires several, and without a
+    // generation counter the SLOWEST reply wins and lands a stale gallery.
+    const planRunRef = useRef(0)
+    const planAbortRef = useRef(null)
+
+    // Panel settings live per project, so reopening the editor finds the same
+    // layout, spacing, fit, mat, panel and divider positions the collage on the
+    // canvas was built with — otherwise the first divider drag would snap the
+    // frames back to even.
+    const settingsKey = project?._id ? `phosmith:collage:${project._id}` : null
+    const settingsLoaded = useRef(false)
+    useEffect(() => {
+        if (!settingsKey || settingsLoaded.current) return
+        settingsLoaded.current = true
+        try {
+            const saved = JSON.parse(window.localStorage.getItem(settingsKey) || 'null')
+            if (!saved) return
+            if (LAYOUTS.some((l) => l.id === saved.layout)) setSelectedLayout(saved.layout)
+            if (Number.isFinite(saved.gap)) setGap(saved.gap)
+            if (Number.isFinite(saved.padding)) setPadding(saved.padding)
+            if (Number.isFinite(saved.radiusPct)) setRadiusPct(saved.radiusPct)
+            if (Number.isFinite(saved.framePct)) setFramePct(saved.framePct)
+            if (saved.shape === 'rect' || saved.shape === 'circle') setShape(saved.shape)
+            if (typeof saved.shadow === 'boolean') setShadow(saved.shadow)
+            if (saved.fitMode === 'cover' || saved.fitMode === 'contain') setFitMode(saved.fitMode)
+            if (saved.frameMode === 'inner' || saved.frameMode === 'outer') setFrameMode(saved.frameMode)
+            if (typeof saved.matte === 'string' || saved.matte === null) setMatte(saved.matte)
+            if (typeof saved.smartArrange === 'boolean') setSmartArrange(saved.smartArrange)
+            // Weights are restored AFTER the layout, whose own effect resets them.
+            if (saved.weights && typeof saved.weights === 'object') {
+                setTimeout(() => {
+                    setWeights(saved.weights)
+                    weightsRef.current = saved.weights
+                }, 0)
+            }
+        } catch {
+            /* a corrupt entry is not worth failing the panel over */
+        }
+    }, [settingsKey])
+
+    useEffect(() => {
+        if (!settingsKey || !settingsLoaded.current) return
+        try {
+            window.localStorage.setItem(settingsKey, JSON.stringify({
+                layout: selectedLayout, gap, padding, shape, radiusPct, shadow,
+                fitMode, framePct, frameMode, matte, smartArrange, weights,
+            }))
+        } catch {
+            /* storage full or blocked — the panel still works */
+        }
+    }, [settingsKey, selectedLayout, gap, padding, shape, radiusPct, shadow, fitMode, framePct, frameMode, matte, smartArrange, weights])
 
     const syncImageCount = useCallback(() => {
         const images = canvasEditor?.getObjects?.().filter(isVisibleImage) || []
@@ -259,6 +350,9 @@ export default function CollageControls({ project, dominantColor }) {
     // or onto a slot to move it there.
     const slotInputRef = useRef(null)
     const pendingSlotRef = useRef(null)
+    // True while a frame divider is being dragged: the swap/pan gesture stands
+    // down so one pointer cannot do both things at once.
+    const dividerDragRef = useRef(false)
     const shortSide = Math.min(Number(project?.width) || 1000, Number(project?.height) || 1000)
 
     const fillSlots = useCallback(async (files, firstSlot) => {
@@ -270,9 +364,28 @@ export default function CollageControls({ project, dominantColor }) {
                 const slots = canvasEditor.getObjects().filter(isCollageSlot)
                 const slot = added === 0 && firstSlot && slots.includes(firstSlot) ? firstSlot : slots[0]
                 if (!slot) break
-                const image = await loadFabricImageFromFile(file, { silent: true })
-                const photo = analyzeElement(sourceElement(image))
-                placeImageInCell(image, cellFromSlot(slot), photo, { shadow: 0.45, S: shortSide })
+                const image = await loadFabricImageFromFile(file, { silent: true, maxEdge: workingEdgeForProject(project) })
+                const cell = cellFromSlot(slot)
+                const analysis = analyzeElement(sourceElement(image))
+                const polygonal = Array.isArray(slot.points) && slot.points.length >= 3
+                if (polygonal) {
+                    // Composer shapes (shards, silhouettes) keep their own placement.
+                    placeImageInCell(image, cell, analysis, { shadow: 0.45, S: shortSide })
+                } else {
+                    // A grid slot is filled the same way the layout fills a cell, so
+                    // fit mode, mat and panel apply to a photo added later too.
+                    const frameGap = collageFrameFor({ width: project?.width, height: project?.height }, layoutRef.current, spacingRef.current.gap, spacingRef.current.padding)?.gap || 0
+                    fitImageToCell(image, cell, {
+                        ...styleRef.current,
+                        gap: frameGap,
+                        focus: focusForCell(photoDescriptor(analysis, 0)),
+                    })
+                    if (styleRef.current?.matte) {
+                        const panel = buildCellMatte(cell, styleRef.current)
+                        canvasEditor.add(panel)
+                        canvasEditor.sendObjectToBack?.(panel)
+                    }
+                }
                 const index = canvasEditor.getObjects().indexOf(slot)
                 canvasEditor.remove(slot)
                 if (typeof canvasEditor.insertAt === 'function' && index >= 0) canvasEditor.insertAt(index, image)
@@ -288,7 +401,7 @@ export default function CollageControls({ project, dominantColor }) {
             console.warn('[collage] slot fill failed:', error)
             toast.error(added ? `Added ${added}, then an upload failed` : 'Could not add that photo', { id: toastId })
         }
-    }, [canvasEditor, shortSide])
+    }, [canvasEditor, shortSide, project])
 
     useEffect(() => {
         if (!canvasEditor) return undefined
@@ -324,16 +437,42 @@ export default function CollageControls({ project, dominantColor }) {
             if (highlight.visible) { highlight.set({ visible: false }); canvasEditor.requestRenderAll() }
         }
 
+        // A swap has to be deliberate: the pointer must travel, and it must leave
+        // the photo's own cell by a real margin. Otherwise panning a photo that
+        // happens to reach the cell edge would fling it into the neighbour.
+        const SWAP_TRAVEL = 12
+        const SWAP_MARGIN = Math.max(6, shortSide * 0.02)
+        // One pointer owns a gesture. A second finger (pinch-zoom, or a grab at
+        // the border) cancels the pending swap instead of fighting it.
+        const pointerCount = (e) => e?.touches?.length || 1
+        const pointerIdOf = (e) => (e?.pointerId ?? e?.changedTouches?.[0]?.identifier ?? 'mouse')
+        let owner = null
+
+        const cancelDrag = () => { drag = null; owner = null; hide() }
+
         const onDown = (opt) => {
+            if (dividerDragRef.current) { cancelDrag(); return }
+            if (owner !== null || pointerCount(opt.e) > 1) { cancelDrag(); return }
             const t = opt.target
+            owner = pointerIdOf(opt.e)
             down = { x: opt.e.clientX, y: opt.e.clientY, target: t }
             drag = t && isVisibleImage(t) && cellFromImage(t) ? { image: t, target: null } : null
         }
         const onMove = (opt) => {
+            if (dividerDragRef.current) { cancelDrag(); return }
+            if (pointerCount(opt.e) > 1) { cancelDrag(); return }
+            if (owner !== null && pointerIdOf(opt.e) !== owner) return
             if (!drag || !opt.e.buttons) return
+            const travelled = down ? Math.hypot(opt.e.clientX - down.x, opt.e.clientY - down.y) : 0
             const pt = canvasEditor.getScenePoint(opt.e)
             const own = boxOf(drag.image)
-            const t = inside(own, pt) ? null : targetAt(pt, drag.image)
+            const leftOwnCell = !inside({
+                left: own.left - SWAP_MARGIN,
+                top: own.top - SWAP_MARGIN,
+                width: own.width + SWAP_MARGIN * 2,
+                height: own.height + SWAP_MARGIN * 2,
+            }, pt)
+            const t = leftOwnCell && travelled >= SWAP_TRAVEL ? targetAt(pt, drag.image) : null
             drag.target = t
             if (!t) { hide(); return }
             const b = boxOf(t)
@@ -342,6 +481,8 @@ export default function CollageControls({ project, dominantColor }) {
             canvasEditor.requestRenderAll()
         }
         const onUp = (opt) => {
+            if (dividerDragRef.current) { cancelDrag(); return }
+            if (owner !== null && pointerIdOf(opt.e) !== owner) return
             const wasClick = down && Math.hypot(opt.e.clientX - down.x, opt.e.clientY - down.y) < 6
             if (wasClick && isCollageSlot(down.target)) {
                 pendingSlotRef.current = down.target
@@ -369,6 +510,7 @@ export default function CollageControls({ project, dominantColor }) {
             hide()
             down = null
             drag = null
+            owner = null
         }
         canvasEditor.on('mouse:down', onDown)
         canvasEditor.on('mouse:move', onMove)
@@ -381,6 +523,145 @@ export default function CollageControls({ project, dominantColor }) {
         }
     }, [canvasEditor, shortSide])
 
+    // Dragging the dividers between frames. The layout stays a layout — only the
+    // weights move — so nothing about persistence, swapping or export changes.
+
+    /** Re-fit the framed photos (and mattes) to a fresh set of cells. */
+    const applyCellsToPhotos = useCallback((cells) => {
+        if (!canvasEditor || !cells?.length) return
+        const images = canvasEditor.getObjects().filter(isVisibleImage)
+        const frameGap = collageFrameFor({ width: project?.width, height: project?.height }, layoutRef.current, spacingRef.current.gap, spacingRef.current.padding)?.gap || 0
+        const layoutStyle = { ...styleRef.current, gap: frameGap }
+        const filled = Math.min(images.length, cells.length)
+        const map = assignmentRef.current
+        for (let cellIndex = 0; cellIndex < cells.length; cellIndex += 1) {
+            const photoIndex = map ? map[cellIndex] : cellIndex
+            if (photoIndex === null || photoIndex === undefined || photoIndex >= images.length) continue
+            fitImageToCell(images[photoIndex], cells[cellIndex], layoutStyle)
+        }
+        canvasEditor.getObjects().filter(isCollageSlot).forEach((slot) => canvasEditor.remove(slot))
+        cells.slice(filled).forEach((cell) => canvasEditor.add(createSlot(cell)))
+        canvasEditor.getObjects().filter(isCollageMatte).forEach((panel) => canvasEditor.remove(panel))
+        if (layoutStyle.matte) {
+            cells.slice(0, filled).forEach((cell) => {
+                const panel = buildCellMatte(cell, layoutStyle)
+                canvasEditor.add(panel)
+                canvasEditor.sendObjectToBack?.(panel)
+            })
+        }
+        canvasEditor.requestRenderAll()
+    }, [canvasEditor, project?.width, project?.height])
+
+    useEffect(() => {
+        if (!canvasEditor) return undefined
+        const HIT = Math.max(6, shortSide * 0.012)
+        const guide = new Rect({
+            left: 0, top: 0, width: 1, height: 1, originX: 'left', originY: 'top',
+            fill: 'rgba(6, 184, 212, 0.9)', selectable: false, evented: false,
+            excludeFromExport: true, visible: false,
+        })
+        canvasEditor.add(guide)
+
+        const currentBoundaries = () => {
+            const info = collageFrameFor({ width: project?.width, height: project?.height }, layoutRef.current, spacingRef.current.gap, spacingRef.current.padding)
+            if (!info) return []
+            return layoutBoundaries(layoutRef.current, info.frame, info.gap, weightsRef.current)
+                .map((b) => ({ ...b, info }))
+        }
+        const near = (pt, reach = HIT) => {
+            let best = null
+            for (const b of currentBoundaries()) {
+                const along = b.orientation === 'v' ? pt.y : pt.x
+                if (along < b.from - reach || along > b.to + reach) continue
+                const distance = Math.abs((b.orientation === 'v' ? pt.x : pt.y) - b.position)
+                if (distance <= reach && (!best || distance < best.distance)) best = { boundary: b, distance }
+            }
+            return best?.boundary || null
+        }
+        const showGuide = (b) => {
+            if (b.orientation === 'v') guide.set({ left: b.position - 1, top: b.from, width: 2, height: b.to - b.from, visible: true })
+            else guide.set({ left: b.from, top: b.position - 1, width: b.to - b.from, height: 2, visible: true })
+            canvasEditor.bringObjectToFront(guide)
+        }
+
+        let dragging = null
+
+        const onDown = (opt) => {
+            const pt = canvasEditor.getScenePoint(opt.e)
+            // In the gutter, the whole hit band resizes. Over a photo — which is
+            // what happens at gap 0, where the divider IS the photo's edge — only a
+            // narrow band does, so panning the middle of a photo still pans it.
+            const overPhoto = Boolean(opt.target) && !isCollageSlot(opt.target)
+            const boundary = near(pt, overPhoto ? HIT / 2 : HIT)
+            if (!boundary) return
+            const held = overPhoto ? opt.target : null
+            dragging = {
+                boundary,
+                start: pt,
+                weights: weightsRef.current,
+                held,
+                heldLocks: held ? { x: held.lockMovementX, y: held.lockMovementY } : null,
+            }
+            // Fabric is already mid-transform on that photo; locking movement keeps
+            // the gesture a resize instead of a resize AND a pan.
+            if (held) held.set({ lockMovementX: true, lockMovementY: true })
+            dividerDragRef.current = true
+            showGuide(boundary)
+            canvasEditor.selection = false
+            canvasEditor.discardActiveObject()
+            canvasEditor.requestRenderAll()
+        }
+        const onMove = (opt) => {
+            const pt = canvasEditor.getScenePoint(opt.e)
+            if (!dragging) {
+                const hover = near(pt, opt.target && !isCollageSlot(opt.target) ? HIT / 2 : HIT)
+                canvasEditor.defaultCursor = hover ? (hover.orientation === 'v' ? 'col-resize' : 'row-resize') : 'default'
+                if (hover) showGuide(hover)
+                else if (guide.visible) { guide.set({ visible: false }); canvasEditor.requestRenderAll() }
+                return
+            }
+            const delta = dragging.boundary.orientation === 'v' ? pt.x - dragging.start.x : pt.y - dragging.start.y
+            const next = applyBoundaryDrag(layoutRef.current, dragging.weights, dragging.boundary, delta)
+            weightsRef.current = next
+            const cells = computeCollageCells(
+                { width: project?.width, height: project?.height },
+                layoutRef.current, spacingRef.current.gap, spacingRef.current.padding, next,
+            )
+            applyCellsToPhotos(cells)
+            const moved = layoutBoundaries(layoutRef.current, dragging.boundary.info.frame, dragging.boundary.info.gap, next)
+                .find((b) => b.axis === dragging.boundary.axis && b.index === dragging.boundary.index)
+            if (moved) showGuide(moved)
+            canvasEditor.requestRenderAll()
+        }
+        const onUp = () => {
+            if (!dragging) return
+            const next = weightsRef.current
+            if (dragging.held && dragging.heldLocks) {
+                dragging.held.set({ lockMovementX: dragging.heldLocks.x, lockMovementY: dragging.heldLocks.y })
+            }
+            dragging = null
+            dividerDragRef.current = false
+            canvasEditor.selection = true
+            guide.set({ visible: false })
+            canvasEditor.requestRenderAll()
+            setWeights(next)
+            canvasEditor.__pushHistoryState?.({ label: 'Resized collage frames', domain: 'collage' })
+            canvasEditor.__saveCanvasState?.()
+        }
+
+        canvasEditor.on('mouse:down', onDown)
+        canvasEditor.on('mouse:move', onMove)
+        canvasEditor.on('mouse:up', onUp)
+        return () => {
+            canvasEditor.off('mouse:down', onDown)
+            canvasEditor.off('mouse:move', onMove)
+            canvasEditor.off('mouse:up', onUp)
+            canvasEditor.defaultCursor = 'default'
+            canvasEditor.remove(guide)
+            canvasEditor.requestRenderAll()
+        }
+    }, [canvasEditor, project?.width, project?.height, shortSide, applyCellsToPhotos])
+
     const applyLayout = useCallback(() => {
         if (!canvasEditor) return
 
@@ -388,9 +669,8 @@ export default function CollageControls({ project, dominantColor }) {
         const layout = LAYOUTS.find(l => l.id === selectedLayout)
         if (!layout) return
 
-        if (images.length < layout.cellCount) {
-            const missing = layout.cellCount - images.length
-            toast.error(`Add ${missing} more image${missing === 1 ? '' : 's'} for this layout`)
+        if (!images.length) {
+            toast.error('Add at least one photo first')
             return
         }
 
@@ -399,25 +679,81 @@ export default function CollageControls({ project, dominantColor }) {
             selectedLayout,
             gap,
             padding,
+            weights,
         )
 
         canvasEditor.discardActiveObject()
-        const layoutStyle = { shape, radiusPct, shadow }
-        images.slice(0, cells.length).forEach((image, index) => {
-            fitImageToCell(image, cells[index], layoutStyle)
+        const frameGap = collageFrameFor({ width: project?.width, height: project?.height }, selectedLayout, gap, padding)?.gap || 0
+        const layoutStyle = { shape, radiusPct, shadow, fitMode, framePct, frameMode, gap: frameGap, matte }
+        const filled = Math.min(images.length, cells.length)
+        const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1
+        let lowRes = 0
+
+        // Which photo lands in which cell, and where inside its frame it sits.
+        const analyses = smartArrange ? images.map((img) => analyzeElement(sourceElement(img))) : null
+        const descriptors = analyses ? analyses.map((a, i) => photoDescriptor(a, i)) : null
+        const assignment = descriptors ? assignPhotosToCells(descriptors, cells) : null
+
+        assignmentRef.current = cells.map((_, cellIndex) => {
+            const photoIndex = assignment ? assignment[cellIndex] : cellIndex
+            return photoIndex !== null && photoIndex !== undefined && photoIndex < images.length ? photoIndex : null
+        })
+        cells.forEach((cell, cellIndex) => {
+            const photoIndex = assignment ? assignment[cellIndex] : cellIndex
+            if (photoIndex === null || photoIndex === undefined || photoIndex >= images.length) return
+            const image = images[photoIndex]
+            const focus = descriptors ? focusForCell(descriptors[photoIndex]) : null
+            fitImageToCell(image, cell, focus ? { ...layoutStyle, focus } : layoutStyle)
+            if (assessCellResolution(image, cell, dpr).low) lowRes += 1
             canvasEditor.fire('object:modified', { target: image })
         })
+
+        // Fewer photos than cells is a legitimate state, not an error: the rest of
+        // the template becomes empty slots the user can click to fill.
+        canvasEditor.getObjects().filter(isCollageSlot).forEach((slot) => canvasEditor.remove(slot))
+        const emptyCells = cells.slice(filled)
+        emptyCells.forEach((cell) => canvasEditor.add(createSlot(cell)))
+
+        // Mattes are rebuilt with the layout, never accumulated.
+        canvasEditor.getObjects().filter(isCollageMatte).forEach((panel) => canvasEditor.remove(panel))
+        if (matte) {
+            cells.slice(0, filled).forEach((cell) => {
+                const panel = buildCellMatte(cell, layoutStyle)
+                canvasEditor.add(panel)
+                canvasEditor.sendObjectToBack?.(panel)
+            })
+        }
 
         canvasEditor.requestRenderAll()
         canvasEditor.__pushHistoryState?.({ label: 'Applied collage layout', detail: layout.label, domain: 'collage' })
         canvasEditor.__saveCanvasState?.()
 
-        const extraCount = images.length - cells.length
-        toast.success(`${layout.label} applied to ${cells.length} images`)
+        const extraCount = images.length - filled
+        toast.success(emptyCells.length
+            ? `${layout.label} applied — ${filled} photo${filled === 1 ? '' : 's'}, ${emptyCells.length} slot${emptyCells.length === 1 ? '' : 's'} to fill`
+            : `${layout.label} applied to ${filled} images`)
         if (extraCount > 0) {
             toast.info(`${extraCount} extra layer${extraCount === 1 ? '' : 's'} left unchanged`)
         }
-    }, [canvasEditor, selectedLayout, gap, padding, project?.width, project?.height, shape, radiusPct, shadow])
+        if (lowRes > 0) {
+            toast.warning(`${lowRes} photo${lowRes === 1 ? ' is' : 's are'} smaller than its frame — switch that frame to "Fit whole photo" or use a larger file.`)
+        }
+    }, [canvasEditor, selectedLayout, gap, padding, project?.width, project?.height, shape, radiusPct, shadow, fitMode, smartArrange, framePct, frameMode, matte, weights])
+
+    // Switch fit mode on every framed photo in place — no re-layout, so the
+    // user's chosen arrangement survives the toggle.
+    const changeFitMode = useCallback((mode) => {
+        setFitMode(mode)
+        if (!canvasEditor) return
+        let changed = 0
+        canvasEditor.getObjects().filter(isVisibleImage).forEach((img) => {
+            if (setCellFitMode(img, mode)) changed += 1
+        })
+        if (!changed) return
+        canvasEditor.requestRenderAll()
+        canvasEditor.__pushHistoryState?.({ label: mode === 'contain' ? 'Fit whole photos' : 'Fill frames', domain: 'collage' })
+        canvasEditor.__saveCanvasState?.()
+    }, [canvasEditor])
 
     // Re-skin already-framed photos in place (no re-layout) so shape/radius/shadow
     // tweaks are instant. No-op when nothing is framed yet — the choice still sticks
@@ -580,15 +916,40 @@ export default function CollageControls({ project, dominantColor }) {
             return recipes
         }
 
+        // This run's ticket. Anything that resolves after a newer run started is
+        // dropped rather than painted over the newer gallery.
+        const run = planRunRef.current + 1
+        planRunRef.current = run
+        const isStale = () => planRunRef.current !== run
+        planAbortRef.current?.abort()
+        const controller = new AbortController()
+        planAbortRef.current = controller
+
+        const canvasAspect = (Number(project?.width) || 1) / (Number(project?.height) || 1)
+        const cacheKey = collagePlanCacheKey({
+            photoIds: images.map((img) => computePerceptualHash(img)?.hash || img.getSrc?.() || ''),
+            directionHint,
+            canvasAspect,
+            recipeCount: 6,
+        })
+        const cached = readCollagePlan(cacheKey)
+        if (cached) {
+            // Same photos, same brief: the model would return the same templates.
+            setTemplateRecipes(cached.recipes)
+            setAiAnalysis(cached.analysis)
+            return cached.recipes
+        }
+
         setIsPlanning(true)
         try {
             const [thumbs, colors] = await Promise.all([buildThumbnails(images), samplePhotoColors()])
             if (thumbs.length === 0) return heuristicFallback()
+            if (isStale()) return []
 
-            const canvasAspect = (Number(project?.width) || 1) / (Number(project?.height) || 1)
             const resp = await fetch('/api/ai/collage-plan', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
                 body: JSON.stringify({
                     photos: thumbs,
                     photoCount: images.length,
@@ -601,6 +962,7 @@ export default function CollageControls({ project, dominantColor }) {
             })
             if (!resp.ok) return heuristicFallback()
             const data = await resp.json()
+            if (isStale()) return []
             const planRecipes = Array.isArray(data?.recipes) ? data.recipes : []
             if (data?.source !== 'gemini' || planRecipes.length === 0) return heuristicFallback()
 
@@ -627,14 +989,17 @@ export default function CollageControls({ project, dominantColor }) {
                 isAi: Boolean(r.bgPrompt || r.theme),
                 previewBg: previewFor(r),
             }))
+            if (isStale()) return []
             setTemplateRecipes(mapped)
             setAiAnalysis(analysis)
+            writeCollagePlan(cacheKey, { recipes: mapped, analysis })
             return mapped
         } catch (error) {
+            if (error?.name === 'AbortError' || isStale()) return []
             console.warn('[collage] AI template plan failed:', error)
             return heuristicFallback()
         } finally {
-            setIsPlanning(false)
+            if (!isStale()) setIsPlanning(false)
         }
     }, [canvasEditor, project?.width, project?.height, buildThumbnails, samplePhotoColors])
 
@@ -739,7 +1104,7 @@ export default function CollageControls({ project, dominantColor }) {
         setIsReplacing(true)
         const toastId = toast.loading('Replacing photo...')
         try {
-            const newImage = await loadFabricImageFromFile(file)
+            const newImage = await loadFabricImageFromFile(file, { maxEdge: workingEdgeForProject(project) })
             const index = canvasEditor.getObjects().indexOf(selectedPhoto)
             // Composer cells (shards, words, seams, prints) keep their exact shape.
             const shaped = cellFromImage(selectedPhoto)
@@ -1188,17 +1553,142 @@ export default function CollageControls({ project, dominantColor }) {
                         max={100}
                         onChange={setPadding}
                     />
+                    <div className="space-y-1.5">
+                        <div className="flex justify-between items-center text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                            <span className="font-medium">Photo fit</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                            {[['cover', 'Fill frame'], ['contain', 'Fit whole photo']].map(([id, label]) => (
+                                <button
+                                    key={id}
+                                    type="button"
+                                    onClick={() => changeFitMode(id)}
+                                    className="rounded-lg px-2 py-2 text-[10px] font-semibold editor-interactive"
+                                    style={{
+                                        background: fitMode === id ? 'var(--accent-primary)' : 'var(--surface-raised)',
+                                        color: fitMode === id ? '#ffffff' : 'var(--text-secondary)',
+                                        border: '1px solid var(--border-subtle)',
+                                    }}
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                            {fitMode === 'cover'
+                                ? 'Fills each frame and crops the overflow — pan a photo to choose what stays.'
+                                : 'Shows every photo whole; panoramas and tall shots keep their shape, backdrop fills the rest.'}
+                        </p>
+                    </div>
+                    <LabeledSlider
+                        label="Mat"
+                        value={framePct}
+                        min={0}
+                        max={14}
+                        onChange={setFramePct}
+                        suffix="%"
+                    />
+                    <div className="grid grid-cols-2 gap-1.5">
+                        {[['inner', 'Mat inside'], ['outer', 'Mat outside']].map(([id, label]) => (
+                            <button
+                                key={id}
+                                type="button"
+                                onClick={() => setFrameMode(id)}
+                                className="rounded-lg px-2 py-2 text-[10px] font-semibold editor-interactive"
+                                style={{
+                                    background: frameMode === id ? 'var(--accent-primary)' : 'var(--surface-raised)',
+                                    color: frameMode === id ? '#ffffff' : 'var(--text-secondary)',
+                                    border: '1px solid var(--border-subtle)',
+                                }}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                    <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                        {frameMode === 'inner'
+                            ? 'The mat eats into the photo, leaving backdrop as a border.'
+                            : `The mat grows outward into the gutter, so the photo keeps its size. Needs a gap to grow into${gap > 0 ? '' : ' — raise Gap above 0'}.`}
+                    </p>
+                    <div className="space-y-1.5">
+                        <div className="flex justify-between items-center text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                            <span className="font-medium">Panel behind photo</span>
+                            {matte && (
+                                <button type="button" onClick={() => setMatte(null)} className="text-[9px] editor-interactive" style={{ color: 'var(--text-muted)' }}>
+                                    clear
+                                </button>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                            {['#ffffff', '#0b0d12', '#f4ede3', '#111827'].map((color) => (
+                                <button
+                                    key={color}
+                                    type="button"
+                                    onClick={() => setMatte(color)}
+                                    className="h-6 w-6 rounded editor-interactive"
+                                    style={{ background: color, border: matte === color ? '2px solid var(--accent-primary)' : '1px solid var(--border-subtle)' }}
+                                    aria-label={`Panel ${color}`}
+                                />
+                            ))}
+                            <input
+                                type="color"
+                                value={typeof matte === 'string' ? matte : '#ffffff'}
+                                onChange={(e) => setMatte(e.target.value)}
+                                className="h-6 w-8 rounded editor-interactive"
+                                style={{ background: 'transparent', border: '1px solid var(--border-subtle)' }}
+                                aria-label="Custom panel colour"
+                            />
+                        </div>
+                        <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                            Gives each frame its own ground, so a cut-out PNG reads as a photo instead of a hole.
+                        </p>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                        <span>
+                            <span className="font-medium">Frame sizes</span>
+                            <span className="block text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                                Drag the lines between frames on the canvas. Neighbours keep a minimum size.
+                            </span>
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const reset = defaultWeightsFor(selectedLayout)
+                                setWeights(reset)
+                                weightsRef.current = reset
+                                applyCellsToPhotos(computeCollageCells({ width: project?.width, height: project?.height }, selectedLayout, gap, padding, reset))
+                            }}
+                            className="rounded-lg px-2 py-1.5 text-[10px] font-semibold editor-interactive"
+                            style={{ background: 'var(--surface-raised)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}
+                        >
+                            Even
+                        </button>
+                    </div>
+                    <label className="flex items-start gap-2 text-[10px] editor-interactive" style={{ color: 'var(--text-secondary)' }}>
+                        <input
+                            type="checkbox"
+                            checked={smartArrange}
+                            onChange={(e) => setSmartArrange(e.target.checked)}
+                            className="mt-0.5 accent-[var(--accent-primary)]"
+                        />
+                        <span>
+                            <span className="font-medium">Arrange by content</span>
+                            <span className="block text-[9px]" style={{ color: 'var(--text-muted)' }}>
+                                Strongest photo takes the biggest frame, each photo goes where its shape fits, and faces stay in frame. Off = upload order, centred.
+                            </span>
+                        </span>
+                    </label>
                 </div>
             </Section>
 
             <div className="p-4 mt-auto" style={{ borderTop: '1px solid var(--border-subtle)' }}>
                 <p className="mb-2 text-[10px]" style={{ color: missingCount ? 'var(--text-muted)' : 'var(--text-secondary)' }}>
-                    {`${imageCount} visible image${imageCount === 1 ? '' : 's'}${missingCount > 0 ? ` · add ${missingCount} more for this layout` : ' · ready to arrange'}`}
+                    {`${imageCount} visible image${imageCount === 1 ? '' : 's'}${missingCount > 0 ? ` · ${missingCount} frame${missingCount === 1 ? '' : 's'} will stay empty` : ' · ready to arrange'}`}
                 </p>
                 <motion.button
                     type="button"
                     onClick={applyLayout}
-                    disabled={missingCount > 0}
+                    disabled={imageCount < 1}
                     whileTap={{ scale: 0.97 }}
                     className="flex w-full items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-xs font-semibold shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
                     style={{

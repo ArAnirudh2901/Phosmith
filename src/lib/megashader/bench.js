@@ -281,6 +281,7 @@ export const megashaderFoldParity = async ({
         overlayAbove,
         erase,
         engaged: metrics.foldFrames > 0,
+        retired: metrics.foldRetired,
         foldFrames: metrics.foldFrames,
         prefixBuilds: metrics.foldPrefixBuilds,
         suffixBuilds: metrics.foldSuffixBuilds,
@@ -301,6 +302,58 @@ export const megashaderFoldParity = async ({
  *           layers?: number, hots?: number[], frames?: number, warmup?: number,
  *           fold?: boolean }} [opts]
  */
+/**
+ * Cost of the optical gather blur, which is the one grade whose price is not
+ * per-pixel constant: taps scale with the radius (16-64) and every tap is a
+ * texture read. Measured per radius so the mip level's job is visible — if the
+ * level were not doing the work, frame time would climb with the radius.
+ *
+ * `interactive` mimics the editor's preview (display-sized source, reused
+ * output, a promise that the source has not changed); `commit` mimics the
+ * one-off full-resolution render, which never folds and re-uploads the source.
+ */
+export const megashaderBlurBench = async ({
+    size = '4k', radii = [8, 24, 60, 120], frames = 12, warmup = 3, kind = 'disc', mode = 'interactive',
+} = {}) => {
+    const { width, height } = typeof size === 'string' ? (PRESET_SIZES[size] || PRESET_SIZES['4k']) : size
+    const source = makeSource(width, height)
+    const rows = {}
+    for (const radius of radii) {
+        const stack = makeBenchStack(1, { width, height, kinds: ['radial'] })
+        const layer = stack.chain[0].layer
+        layer.blurPx = radius
+        layer.blurKind = kind
+        layer.highlightGain = 2
+        const opts = mode === 'commit'
+            ? { reuseOutput: false }
+            : { sourceVersion: `blur-${radius}-${kind}`, reuseOutput: true }
+        renderMegashader(source, stack, opts)
+        for (let i = 0; i < warmup; i += 1) {
+            layer.exposure = 0.1 + 0.05 * i
+            renderMegashader(source, stack, opts)
+        }
+        resetRenderMetrics()
+        let out = null
+        const t0 = performance.now()
+        for (let i = 0; i < frames; i += 1) {
+            layer.exposure = 0.1 + 0.05 * Math.sin(i)
+            out = renderMegashader(source, stack, opts)
+        }
+        // Force the GPU to finish before the clock is read.
+        out.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, 1, 1)
+        const totalMs = performance.now() - t0
+        const metrics = getRenderMetrics()
+        rows[radius] = {
+            radius,
+            meanMs: +(totalMs / frames).toFixed(2),
+            fps: +(1000 / (totalMs / frames)).toFixed(1),
+            mipBuilds: metrics.sourceMipBuilds,
+            sourceUploads: metrics.sourceUploads,
+        }
+    }
+    return { size: `${width}x${height}`, mode, kind, frames, rows, megapixels: +((width * height) / 1e6).toFixed(1) }
+}
+
 export const megashaderEditBench = async ({ size = '4k', layers = 32, hots = [0, 8, 16, 31], frames = 30, warmup = 5, fold = true } = {}) => {
     const { width, height } = typeof size === 'string' ? (PRESET_SIZES[size] || PRESET_SIZES['4k']) : size
     const source = makeSource(width, height)

@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useCanvas } from '../../../../../../../context/context'
+import { isTaintError } from '@/lib/canvas-snapshot'
 import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
 import { adaptiveTextColor } from '@/lib/color-extraction'
@@ -27,6 +28,7 @@ import {
   addWarpSplit,
   applyWarpPreset,
   analyzeStretchPlan,
+  bestSeedInBand,
   createDefaultFlowPath,
   createFlowPathFromPoints,
   getFlowPathCurve,
@@ -43,9 +45,22 @@ import {
   WARP_PRESETS,
   WARP_MAX_DIM,
   PIXEL_STRETCH_PRESETS,
+  DEFAULT_SCANLINE,
 } from '@/lib/pixel-stretch'
+import {
+  MAX_BAKE_DIM,
+  getSourceElement,
+  isSourceReady,
+  snapshotSource,
+  encodeToPngBlob,
+  uploadStretchBlob,
+  placeStretchLayer,
+  bakeStretchBuffer,
+} from '@/lib/pixel-stretch-apply'
+import { runHeavy, isSuperseded } from '@/lib/heavy-job-queue'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
+import { toUserMessage } from '@/lib/user-error'
 
 // ─── Geometry helpers (shared conventions with the Crop tool) ─────────────────
 
@@ -105,56 +120,10 @@ const getActiveImage = (canvas) => {
   return images.at(-1) || null
 }
 
-const getSourceElement = (img) => img?._originalElement || img?.getElement?.() || img?._element || null
-
-const isSourceReady = (el) => {
-  if (!el) return false
-  if (el instanceof HTMLImageElement) return el.complete && el.naturalWidth > 0
-  return (el.naturalWidth || el.videoWidth || el.width || 0) > 0
-}
-
-/** Snapshot a source element into a W×H buffer, baking in the object's flip. */
-const snapshotSource = (srcEl, W, H, flipX, flipY) => {
-  const c = createStretchBuffer(W, H)
-  const ctx = c.getContext('2d')
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.save()
-  ctx.translate(flipX ? c.width : 0, flipY ? c.height : 0)
-  ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1)
-  ctx.drawImage(srcEl, 0, 0, c.width, c.height)
-  ctx.restore()
-  return c
-}
-
-const encodeToPngBlob = async (canvas) => {
-  if (typeof canvas.convertToBlob === 'function') {
-    // OffscreenCanvas — the PNG encode runs off the main thread.
-    return canvas.convertToBlob({ type: 'image/png' })
-  }
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('Could not encode image'))), 'image/png')
-  })
-}
-
-const uploadStretchBlob = async (blob, w, h) => {
-  const fileName = `stretch-${Date.now()}.png`
-  const formData = new FormData()
-  formData.append('fileName', fileName)
-  formData.append('rasterFile', blob, fileName)
-  formData.append('rasterFileName', fileName)
-  formData.append('rasterWidth', String(w))
-  formData.append('rasterHeight', String(h))
-  const response = await fetch('/api/imagekit/upload', { method: 'POST', body: formData })
-  const data = await response.json().catch(() => null)
-  if (!response.ok || !data?.success || !data?.url) {
-    throw new Error(data?.error || 'Could not upload stretched image')
-  }
-  return data.url
-}
+// Subject detection never needs more than this on its long edge.
+const SUBJECT_DETECT_MAX_DIM = 1024
 
 const MAX_PREVIEW_DIM = 1500
-const MAX_BAKE_DIM = 4096
 const HANDLE = 14
 const MIN_BAND = 0.02
 const SETTLE_MS = 150
@@ -209,6 +178,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
   // ── Warp mesh state (Advanced mode — Photoshop-style control grid) ──────────
   const [warpMode, setWarpMode] = useState(false)  // false = Simple sliders, true = Warp grid
+  const [scanMode, setScanMode] = useState(false)  // whole-frame scanline smear (no selection)
   const [warpPresetId, setWarpPresetId] = useState(null) // last applied warp preset
   const [warpStrength, setWarpStrength] = useState(1)     // preset intensity (0..1.5)
 
@@ -227,7 +197,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const [isEditingLayer, setIsEditingLayer] = useState(false) // re-editing an existing stretch layer
   // What stays IN FRONT of the streaks: 'auto' (on-device subject detect) or
   // 'manual' (a region the user traces). `subjectPicking` = currently tracing it.
-  const [subjectMaskKind, setSubjectMaskKind] = useState('none') // 'none'|'auto'|'manual'
+  const [subjectMaskKind, setSubjectMaskKind] = useState('selection') // 'selection'|'auto'|'manual'
   const [subjectPicking, setSubjectPicking] = useState(false)
   useEffect(() => { coverageRef.current = coverage }, [coverage])
 
@@ -267,6 +237,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   // effect would discard the active object and lose the re-edit target).
   const scheduleFrameRef = useRef(null)
   const ensureMatteRef = useRef(null)
+  const subjectMaskKindRef = useRef('selection')
+  const rasterizeSelectionMatteRef = useRef(null)
 
   // Overlay DOM refs (positioned imperatively, never via React on drag/zoom).
   const drawSurfaceRef = useRef(null)
@@ -279,6 +251,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const labelRef = useRef(null)
 
   useEffect(() => { editorRef.current = canvasEditor }, [canvasEditor])
+  useEffect(() => { subjectMaskKindRef.current = subjectMaskKind }, [subjectMaskKind])
 
   // ── Canvas container element ─────────────────────────────────────────────────
   useEffect(() => {
@@ -288,23 +261,35 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setContainerEl(el || null)
   }, [canvasEditor])
 
-  // ── Image lock helpers (track current image via a ref → re-apply safe) ───────
+  // ── Image lock helpers ───────────────────────────────────────────────────────
+  //
+  // EVERY image on the canvas is frozen while the tool is open, not just the one
+  // being edited. The selection is drawn by dragging on the canvas, and any drag
+  // the tool's own surface does not catch falls through to Fabric — which moved
+  // the photo out from under the stretch. Re-editing a committed layer made that
+  // certain: the layer was locked and the photo underneath was left live.
   const lockImage = useCallback((img) => {
-    if (!img) return
-    lockRef.current = {
-      img,
+    const canvas = editorRef.current
+    const targets = canvas?.getObjects?.().filter((o) => o?.type?.toLowerCase?.() === 'image') || []
+    if (img && !targets.includes(img)) targets.push(img)
+    if (!targets.length) return
+    lockRef.current = targets.map((o) => ({
+      img: o,
       props: {
-        selectable: img.selectable, evented: img.evented,
-        lockMovementX: img.lockMovementX, lockMovementY: img.lockMovementY,
-        hasControls: img.hasControls, hasBorders: img.hasBorders,
+        selectable: o.selectable, evented: o.evented,
+        lockMovementX: o.lockMovementX, lockMovementY: o.lockMovementY,
+        hasControls: o.hasControls, hasBorders: o.hasBorders,
       },
+    }))
+    for (const o of targets) {
+      o.set({ selectable: false, evented: false, lockMovementX: true, lockMovementY: true, hasControls: false, hasBorders: false })
     }
-    img.set({ selectable: false, evented: false, lockMovementX: true, lockMovementY: true, hasControls: false, hasBorders: false })
   }, [])
 
   const unlockImage = useCallback(() => {
-    const l = lockRef.current
-    if (l?.img) l.img.set(l.props)
+    const entries = lockRef.current
+    if (Array.isArray(entries)) for (const l of entries) l.img?.set?.(l.props)
+    else if (entries?.img) entries.img.set(entries.props)   // pre-existing single-image shape
     lockRef.current = null
   }, [])
 
@@ -367,15 +352,41 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const ensureSubjectMatte = useCallback(async () => {
     // A user-traced (manual) matte is authoritative — never replace it with auto-detect.
     if (matteIsManualRef.current && subjectRawMatteRef.current) return subjectRawMatteRef.current
+    // Selection mode is the default and is recomputed every time, because the
+    // band or lasso may have moved since the last bake.
+    if (subjectMaskKindRef.current === 'selection') {
+      const sel = rasterizeSelectionMatteRef.current?.()
+      if (sel) {
+        subjectRawMatteRef.current = sel
+        subjectCutoutRef.current = null
+        setMatteStatus('ready')
+        return sel
+      }
+    }
     const srcEl = sampleElRef.current || getSourceElement(selectedImageRef.current)
     if (!isSourceReady(srcEl)) return null
     const sig = sourceMetaRef.current?.src || String(selectedImageRef.current?.__stretchUid ?? '')
     if (subjectRawMatteRef.current && subjectMatteSigRef.current === sig) return subjectRawMatteRef.current
     setMatteStatus('loading')
     try {
+      // SlimSAM works from a small image, and the matte is scaled back up when it
+      // is composited, so detection runs on a bounded copy. At native size a
+      // 45MP frame would have the model allocating one full RGBA mask per seed.
       const natW = srcEl.naturalWidth || srcEl.videoWidth || srcEl.width || 512
       const natH = srcEl.naturalHeight || srcEl.videoHeight || srcEl.height || 512
-      const matte = await clientSubjectMask(srcEl, { width: natW, height: natH })
+      const scale = Math.min(1, SUBJECT_DETECT_MAX_DIM / Math.max(natW, natH))
+      const dw = Math.max(64, Math.round(natW * scale))
+      const dh = Math.max(64, Math.round(natH * scale))
+      const small = scale < 1 ? snapshotSource(srcEl, dw, dh, false, false) : srcEl
+      let matte
+      try {
+        matte = await clientSubjectMask(small, { width: dw, height: dh })
+      } finally {
+        if (small !== srcEl) { small.width = 1; small.height = 1 }
+        // Give the ~40MB model and its runtime back rather than holding them for
+        // the session — this tool needs it once, not continuously.
+        import('@/lib/client-ai').then((m) => m.releaseClientModels?.()).catch(() => {})
+      }
       if (!matte) throw new Error('No subject matte returned')
       subjectRawMatteRef.current = matte
       subjectMatteSigRef.current = sig
@@ -391,6 +402,39 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       return null
     }
   }, [])
+
+  /**
+   * The front mask built from the CURRENT SELECTION — the lasso polygon if there
+   * is one, otherwise the band rectangle.
+   *
+   * This is what "Behind" means by default: the streaks pass behind the area you
+   * selected. It needs no model, no download and no extra memory, which matters
+   * because subject detection loads SlimSAM and can cost hundreds of MB on a
+   * large photo. Auto-detect stays available for the cases it genuinely suits.
+   */
+  const rasterizeSelectionMatte = useCallback(() => {
+    const p = paramsRef.current
+    const img = selectedImageRef.current
+    const natW = Math.min(1600, Math.max(64, img?.width || 1024))
+    const natH = Math.min(1600, Math.max(64, img?.height || 1024))
+    const c = createStretchBuffer(natW, natH)
+    const ctx = c.getContext('2d')
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, natW, natH)
+    ctx.fillStyle = '#fff'
+    if (Array.isArray(p.polygon) && p.polygon.length >= 3) {
+      ctx.beginPath()
+      p.polygon.forEach((pt, i) => { const x = pt.x * natW, y = pt.y * natH; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) })
+      ctx.closePath()
+      ctx.fill()
+    } else {
+      const b = p.band
+      ctx.fillRect(b.x * natW, b.y * natH, b.w * natW, b.h * natH)
+    }
+    return c
+  }, [])
+
+  useEffect(() => { rasterizeSelectionMatteRef.current = rasterizeSelectionMatte }, [rasterizeSelectionMatte])
 
   // ── Manual front-subject mask (the user traces the region that stays in front) ─
   const rasterizeSubjectMatte = useCallback((poly) => {
@@ -449,6 +493,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     subjectPickRef.current = false
     setSubjectPicking(false)
     matteIsManualRef.current = false
+    subjectMaskKindRef.current = 'auto'
+    setSubjectMaskKind('auto')
     subjectRawMatteRef.current = null
     subjectMatteSigRef.current = ''
     subjectCutoutRef.current = null
@@ -766,10 +812,12 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     // intercepting pointer events.
     const warpOn = !!p.warpGrid
     const flowOn = !!p.flowPath
-    const showMarquee = mode === 'rect' && phaseNow === 'stretch' && !warpOn && !flowOn
-    const showFlow = phaseNow === 'stretch' && !warpOn && !flowOn
-    const showWarp = phaseNow === 'stretch' && warpOn
-    const showFlowPath = phaseNow === 'stretch' && flowOn
+    // The scanline smear has no band and no path, so none of the chrome applies.
+    const scanOn = !!p.scan
+    const showMarquee = mode === 'rect' && phaseNow === 'stretch' && !warpOn && !flowOn && !scanOn
+    const showFlow = phaseNow === 'stretch' && !warpOn && !flowOn && !scanOn
+    const showWarp = phaseNow === 'stretch' && warpOn && !scanOn
+    const showFlowPath = phaseNow === 'stretch' && flowOn && !scanOn
     const showDraw = phaseNow === 'select' || subjectPickRef.current
     const toggle = (el, on) => { if (el) el.style.display = on ? 'block' : 'none' }
     const toS = (nx, ny) => canvasToScreen(editor, bounds.left + nx * bounds.width, bounds.top + ny * bounds.height)
@@ -903,7 +951,18 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
   const applyPreset = useCallback((preset) => {
     setActivePresetId(preset.id)
-    commit(preset.params)
+    // Preset lengths are multiples of the SLICE, which means "Tall Smear" on a
+    // 2%-tall slice would not even clear the slice. Re-express each preset's
+    // length as the fraction of the frame it was written for (it assumed a
+    // roughly quarter-height band) and convert back through the real slice.
+    const p = paramsRef.current
+    const extent = Math.max(0.005, p.axis === 'vertical' ? (p.band?.h || 0.25) : (p.band?.w || 0.25))
+    const next = { ...preset.params }
+    if (typeof next.length === 'number') {
+      const frameTravel = Math.min(2.5, next.length * 0.25)
+      next.length = Math.max(1, Math.min(200, frameTravel / extent))
+    }
+    commit(next)
   }, [commit])
 
   const resetParams = useCallback(() => {
@@ -939,6 +998,14 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     // handles over an identity mesh. The buffer shows the ORIGINAL pixels at rest
     // (length 1), so streaks only appear as the user DRAGS a handle — the reference
     // "pixel stretch" technique. Reset any prior simple/flow shape first.
+    // Seed the slice on its most colourful line rather than its first row. The
+    // ribbon IS that one line repeated, so a line through a plain area can only
+    // ever make a plain slab — the difference between the reference look and a
+    // flat smear.
+    const sampled = getSample()
+    const bandNow = regionPatch.band || paramsRef.current.band
+    const best = sampled?.canvas ? bestSeedInBand(sampled.canvas, bandNow, paramsRef.current.axis) : null
+    if (best) regionPatch = { ...regionPatch, seed: best.seed }
     const base = clampStretchParams({ ...paramsRef.current, ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null })
     setWarpMode(true)
     setFlowMode(false)
@@ -948,7 +1015,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setActivePresetId(null)
     commit({ ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null, warpGrid: createDefaultWarpGrid(base), warpRest: getWarpRest(base) })
     setPhase('stretch')
-  }, [commit])
+  }, [commit, getSample])
 
   const reselect = useCallback(() => {
     if (selModeRef.current === 'lasso') lassoPtsRef.current = []
@@ -1017,7 +1084,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       toast.success(`Subject detected (${result.polygon.length} boundary points)`, { id: toastId, duration: 3000 })
     } catch (error) {
       console.error('[PixelStretch] SAM auto-detect failed:', error)
-      toast.error(error?.message || 'Subject detection failed', { id: toastId })
+      toast.error(toUserMessage(error, 'Subject detection failed'), { id: toastId })
     } finally {
       setSamLoading(false)
     }
@@ -1050,18 +1117,30 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const setStretchMode = useCallback((mode) => {
     setWarpPresetId(null); setWarpStrength(1); setFlowPresetId(null); setActivePresetId(null)
     if (mode === 'mesh') {
-      setWarpMode(true); setFlowMode(false)
-      commit({ warpGrid: createDefaultWarpGrid(paramsRef.current), warpRest: getWarpRest(paramsRef.current), flowPath: null })
+      setWarpMode(true); setFlowMode(false); setScanMode(false)
+      commit({ scan: null, warpGrid: createDefaultWarpGrid(paramsRef.current), warpRest: getWarpRest(paramsRef.current), flowPath: null })
     } else if (mode === 'flow') {
-      setFlowMode(true); setWarpMode(false)
+      setFlowMode(true); setWarpMode(false); setScanMode(false)
       const fp = createDefaultFlowPath(paramsRef.current)
       setFlowAnchorCount(fp?.anchors.length || 0)
-      commit({ flowPath: fp, warpGrid: null, warpRest: null })
+      commit({ scan: null, flowPath: fp, warpGrid: null, warpRest: null })
+    } else if (mode === 'scan') {
+      // The scanline smear reads the WHOLE frame, so it drops the selection modes
+      // rather than sitting on top of them.
+      setScanMode(true); setWarpMode(false); setFlowMode(false)
+      commit({ scan: { ...DEFAULT_SCANLINE }, warpGrid: null, warpRest: null, flowPath: null })
     } else {
-      setWarpMode(false); setFlowMode(false)
-      commit({ warpGrid: null, warpRest: null, flowPath: null })
+      setWarpMode(false); setFlowMode(false); setScanMode(false)
+      commit({ scan: null, warpGrid: null, warpRest: null, flowPath: null })
     }
   }, [commit])
+
+  /** Patch one field of the scanline config, keeping the rest. */
+  const patchScan = useCallback((patch, live) => {
+    const next = { ...(paramsRef.current.scan || DEFAULT_SCANLINE), ...patch }
+    if (live) livePatch({ scan: next })
+    else commit({ scan: next })
+  }, [commit, livePatch])
 
   // ── Flow Path controls ───────────────────────────────────────────────────────
   const resetFlow = useCallback(() => {
@@ -1129,8 +1208,17 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setCoverage(next)
     coverageRef.current = next
     scheduleFrame()
-    // Only auto-detect when there's no matte yet (a manual trace is authoritative).
-    if (next > 0 && !subjectRawMatteRef.current && matteStatus !== 'loading') {
+    if (next <= 0) return
+    // The default front mask is the SELECTION — instant, no model, no download.
+    // Subject detection only runs when the user explicitly asks for it.
+    if (subjectMaskKindRef.current === 'selection') {
+      subjectRawMatteRef.current = null
+      subjectCutoutRef.current = null
+      await ensureSubjectMatte()
+      scheduleFrame()
+      return
+    }
+    if (!subjectRawMatteRef.current && matteStatus !== 'loading') {
       const toastId = toast.loading('Detecting subject on-device…')
       const m = await ensureSubjectMatte()
       subjectCutoutRef.current = null
@@ -1227,7 +1315,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       toast.success(`${offline ? 'On-device · ' : ''}${plan.reasoning || 'AI stretch plan applied'}`, { id: toastId, duration: 4500 })
     } catch (error) {
       console.error('[PixelStretch] AI auto-stretch failed:', error)
-      toast.error(error?.message || 'AI analysis failed', { id: toastId })
+      toast.error(toUserMessage(error, 'AI analysis failed'), { id: toastId })
     } finally {
       setAiLoading(false)
     }
@@ -1674,26 +1762,28 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       // Bake ONLY the ribbons onto a transparent buffer — the base photo remains its
       // own layer below. For partial/below placement, knock the subject out so the
       // photo's subject reads in front of the streaks.
-      const sample = snapshotSource(srcEl, W, H, flipX, flipY)
-      const out = createStretchBuffer(W, H)
-      const octx = out.getContext('2d')
-      const drew = renderPixelStretch(octx, sample, p, W, H, { quality: 'max' })
-      if (!drew) throw new Error('Nothing to stretch yet — set a region or shape first')
-      if (cov > 0) {
-        const matte = await ensureSubjectMatte()
-        if (matte) {
-          const alpha = matteToAlphaCanvas(matte, W, H, featherRef.current * Math.min(W, H))
-          applySubjectKnockout(octx, alpha, W, H, cov)
-        }
-      }
+      // The matte is fetched BEFORE taking the heavy slot: subject detection is
+      // queued itself, so asking for it from inside a queued job would deadlock.
+      const matte = cov > 0 ? await ensureSubjectMatte() : null
+      const url = await runHeavy('pixel stretch commit', async () => {
+        // Same bake the agent runs, including handing the full-size scratch
+        // canvases back afterwards.
+        const out = bakeStretchBuffer({
+          srcEl, params: p, W, H, flipX, flipY,
+          matte, coverage: cov, feather: featherRef.current,
+        })
+        if (!out) throw new Error('Nothing to stretch yet — set a region or shape first')
 
-      let blob
-      try { blob = await encodeToPngBlob(out) }
-      catch (encodeErr) {
-        if (encodeErr?.name === 'SecurityError') throw new Error('This image is cross-origin and can’t be exported. Re-import it into the project first.')
-        throw encodeErr
-      }
-      const url = await uploadStretchBlob(blob, W, H)
+        let blob
+        try { blob = await encodeToPngBlob(out) }
+        catch (encodeErr) {
+          // Same taint test the export path uses, so both agree on what a tainted
+          // canvas looks like across engines.
+          if (isTaintError(encodeErr)) throw new Error('This image is cross-origin and can’t be exported. Re-import it into the project first.')
+          throw encodeErr
+        }
+        return await uploadStretchBlob(blob, W, H)
+      }, { key: 'stretch-commit-button' })
 
       // Keep the stretch a fully INDEPENDENT entity from the photo: persist a
       // DURABLE copy of the source so the layer stays re-editable even after the
@@ -1719,40 +1809,15 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       // Cache the durable URL so re-applies this session don't re-upload it.
       sourceMetaRef.current = { src: durableSrc, w: natW, h: natH, flipX, flipY }
 
-      if (editingLayerRef.current) {
-        // Re-edit: swap the layer's pixels, keep its transforms / filters / crop.
-        const layer = editingLayerRef.current
-        const prevScaledW = (layer.width || W) * Math.abs(layer.scaleX || 1)
-        const prevScaledH = (layer.height || H) * Math.abs(layer.scaleY || 1)
-        await layer.setSrc(url, { crossOrigin: 'anonymous' })
-        const newW = layer.width || W, newH = layer.height || H
-        layer.set({ scaleX: prevScaledW / newW, scaleY: prevScaledH / newH, flipX: false, flipY: false })
-        layer.data = { ...(layer.data || {}), pixelStretch: meta }
-        if (layer.filters?.length) layer.applyFilters()
-        layer.setCoords()
-      } else {
-        // New: add the stretch as its own layer, just above the source photo.
-        const newImg = await FabricImage.fromURL(url, { crossOrigin: 'anonymous' })
-        const srcScaledW = (frameObj.width || W) * Math.abs(frameObj.scaleX || 1)
-        const srcScaledH = (frameObj.height || H) * Math.abs(frameObj.scaleY || 1)
-        newImg.set({
-          left: frameObj.left, top: frameObj.top,
-          originX: frameObj.originX, originY: frameObj.originY,
-          angle: frameObj.angle || 0,
-          flipX: false, flipY: false,
-          scaleX: srcScaledW / W, scaleY: srcScaledH / H,
-          opacity: frameObj.opacity ?? 1,
-          selectable: true, evented: true, hasControls: true, hasBorders: true,
-          name: 'Pixel Stretch',
-          data: { pixelStretch: meta },
-        })
-        newImg.__stretchUid = ++uidCounter
-        const idx = editor.getObjects().indexOf(frameObj)
-        if (idx >= 0) editor.insertAt(idx + 1, newImg)
-        else editor.add(newImg)
-        newImg.setCoords()
-        editingLayerRef.current = newImg
-      }
+      const placed = await placeStretchLayer({
+        editor, frameObj, url, W, H, meta,
+        existingLayer: editingLayerRef.current || null,
+      })
+      if (!editingLayerRef.current) placed.__stretchUid = ++uidCounter
+      editingLayerRef.current = placed
+      // The new layer joins the frozen set; without this the very next drag on
+      // the canvas picks it up and slides it off the photo.
+      lockImage(placed)
 
       setIsEditingLayer(true)
       interactingRef.current = false
@@ -1762,8 +1827,11 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       scheduleFrame()
       toast.success(wasEditing ? 'Stretch layer updated' : 'Pixel stretch added as a layer', { id: toastId })
     } catch (error) {
+      // A second click replaced this run — that is the button working, not a
+      // failure, so it must not surface as one.
+      if (isSuperseded(error)) { toast.dismiss(toastId); return }
       console.error('[PixelStretch] apply failed:', error)
-      toast.error(error?.message || 'Failed to apply pixel stretch', { id: toastId })
+      toast.error(toUserMessage(error, 'Failed to apply pixel stretch'), { id: toastId })
     } finally {
       setApplying(false)
     }
@@ -1913,6 +1981,11 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   }
 
   const pct = (v) => Math.round(v * 100)
+
+  // How much of the frame the slice already covers along the stretch axis — the
+  // Length slider converts between "travel across the frame" and the stored
+  // multiple-of-the-slice through this.
+  const bandExtent = Math.max(0.005, params.axis === 'vertical' ? (params.band?.h || 0.1) : (params.band?.w || 0.1))
   const sliderVisual = { fill: `${accent}55`, accent, trackBg: 'rgba(18, 22, 30, 0.96)' }
   const sliderCommit = (key, raw, scale = 100) => { setActivePresetId(null); commit({ [key]: raw / scale }) }
   const cardStyle = { boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)' }
@@ -1979,6 +2052,18 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
                 Confirm Region
               </button>
             </div>
+
+            {/* The scanline smear reads the whole frame, so it must not be locked
+                behind a selection the user does not need to make. */}
+            <button
+              type="button"
+              onClick={() => { setPhase('stretch'); setStretchMode('scan') }}
+              className={`mt-2 flex h-9 w-full items-center justify-center gap-2 rounded-xl text-[11px] font-medium editor-interactive ${tapClass}`}
+              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
+            >
+              <AudioLines className="h-3.5 w-3.5" />
+              Skip — smear the whole photo (Scanline)
+            </button>
 
             {/* ── Use the subject's shape as the SOURCE region (on-device SAM) ── */}
             <div style={{
@@ -2111,10 +2196,28 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         </div>
         {coverage > 0 && (
           <div className="mt-3 space-y-3">
-            {/* What stays in front — auto-detect OR a region the user traces */}
+            {/* What stays in front — the selection by default, or a detected /
+                traced subject when the user asks for one */}
             <div>
               <span className="panel-label">What stays in front?</span>
-              <div className="mt-1.5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  subjectMaskKindRef.current = 'selection'
+                  setSubjectMaskKind('selection')
+                  matteIsManualRef.current = false
+                  subjectRawMatteRef.current = null
+                  subjectCutoutRef.current = null
+                  ensureMatteRef.current?.()
+                  scheduleFrameRef.current?.()
+                }}
+                className={`mt-1.5 flex h-9 w-full items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
+                style={{ background: subjectMaskKind === 'selection' ? accent : 'var(--bg-elevated)', color: subjectMaskKind === 'selection' ? onAccent : 'var(--text-secondary)', border: subjectMaskKind === 'selection' ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
+              >
+                <Square className="h-3.5 w-3.5" />
+                My selection
+              </button>
+              <div className="mt-2 grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={forceAutoDetect}
@@ -2138,6 +2241,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
               <div className="mt-2 text-[10px] leading-relaxed">
                 {subjectPicking && <span style={{ color: '#f59e0b' }}>✏️ Trace around the subject on the photo, then release to set it.</span>}
                 {!subjectPicking && matteStatus === 'loading' && <span className="inline-flex items-center gap-1" style={{ color: 'var(--text-muted)' }}><Loader2 className="h-3 w-3 animate-spin" /> Detecting subject on-device…</span>}
+                {!subjectPicking && subjectMaskKind === 'selection' && <span style={{ color: '#34d399' }}>✓ Streaks sit behind the area you selected — no AI, no extra memory.</span>}
                 {!subjectPicking && subjectMaskKind === 'auto' && <span style={{ color: '#34d399' }}>✓ Subject auto-detected — streaks sit behind it.</span>}
                 {!subjectPicking && subjectMaskKind === 'manual' && <span style={{ color: '#34d399' }}>✓ Using your traced region as the subject.</span>}
                 {!subjectPicking && matteStatus === 'none' && subjectMaskKind === 'none' && <span style={{ color: '#f59e0b' }}>No subject auto-detected — tap “Draw subject” to mark it by hand.</span>}
@@ -2201,13 +2305,14 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       {/* ── Mode (Simple sliders · Flow Path spline · Warp mesh) ─────────── */}
       <div className="panel-card" style={cardStyle}>
         <label className="panel-label">Mode</label>
-        <div className="mt-2 grid grid-cols-3 gap-2">
+        <div className="mt-2 grid grid-cols-4 gap-2">
           {[
             { id: 'mesh', label: 'Warp', Icon: Grid3X3 },
             { id: 'flow', label: 'Flow Path', Icon: Waypoints },
             { id: 'simple', label: 'Simple', Icon: Wand2 },
+            { id: 'scan', label: 'Scanline', Icon: AudioLines },
           ].map(({ id, label, Icon }) => {
-            const curMode = warpMode ? 'mesh' : flowMode ? 'flow' : 'simple'
+            const curMode = scanMode ? 'scan' : warpMode ? 'mesh' : flowMode ? 'flow' : 'simple'
             const on = curMode === id
             return (
               <button
@@ -2223,6 +2328,88 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
             )
           })}
         </div>
+        {scanMode && (
+          <div className="mt-3 space-y-3">
+            <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              No selection: every row (or column) keeps the pixels that pass the threshold and drags the last one across the rest. Raise <strong>Threshold</strong> until only the shapes you want to smear survive.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'horizontal', label: 'Rows', Icon: Rows3 },
+                { id: 'vertical', label: 'Columns', Icon: Columns3 },
+              ].map(({ id, label, Icon }) => {
+                const on = (params.scan?.axis || 'horizontal') === id
+                return (
+                  <button
+                    key={id} type="button"
+                    onClick={() => patchScan({ axis: id })}
+                    className={`flex h-10 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
+                    style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
+                  >
+                    <Icon className="h-3.5 w-3.5" />{label}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'dark', label: 'Smear over dark' },
+                { id: 'light', label: 'Smear over light' },
+              ].map(({ id, label }) => {
+                const on = (params.scan?.mode || 'dark') === id
+                return (
+                  <button
+                    key={id} type="button"
+                    onClick={() => patchScan({ mode: id })}
+                    className={`flex h-9 items-center justify-center rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
+                    style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => patchScan({ direction: (params.scan?.direction ?? 1) > 0 ? -1 : 1 })}
+              className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
+              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
+            >
+              <FlipHorizontal2 className="h-3.5 w-3.5" />
+              {(params.scan?.direction ?? 1) > 0
+                ? ((params.scan?.axis || 'horizontal') === 'vertical' ? 'Smearing downward' : 'Smearing right')
+                : ((params.scan?.axis || 'horizontal') === 'vertical' ? 'Smearing upward' : 'Smearing left')}
+            </button>
+            <ProRulerSlider
+              variant="instrument" label="Threshold" suffix="%"
+              value={Math.round((params.scan?.threshold ?? DEFAULT_SCANLINE.threshold) * 100)} min={0} max={100} step={1}
+              onPreview={(v) => patchScan({ threshold: v / 100 }, true)}
+              onCommit={(v) => patchScan({ threshold: v / 100 })}
+              visual={sliderVisual}
+            />
+            <ProRulerSlider
+              variant="instrument" label="Smear length" suffix="%"
+              value={Math.round((params.scan?.length ?? DEFAULT_SCANLINE.length) * 100)} min={1} max={100} step={1}
+              onPreview={(v) => patchScan({ length: v / 100 }, true)}
+              onCommit={(v) => patchScan({ length: v / 100 })}
+              visual={sliderVisual}
+            />
+            <ProRulerSlider
+              variant="instrument" label="Fade to black" suffix="%"
+              value={Math.round((params.scan?.fade ?? 0) * 100)} min={0} max={100} step={1}
+              onPreview={(v) => patchScan({ fade: v / 100 }, true)}
+              onCommit={(v) => patchScan({ fade: v / 100 })}
+              visual={sliderVisual}
+            />
+            <ProRulerSlider
+              variant="instrument" label="Strength" suffix="%"
+              value={Math.round((params.scan?.opacity ?? 1) * 100)} min={0} max={100} step={1}
+              onPreview={(v) => patchScan({ opacity: v / 100 }, true)}
+              onCommit={(v) => patchScan({ opacity: v / 100 })}
+              visual={sliderVisual}
+            />
+          </div>
+        )}
         {warpMode && params.warpGrid && (
           <div className="mt-3 space-y-3">
             <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
@@ -2404,11 +2591,16 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
       {/* Primary sliders */}
       <div className="space-y-3">
+        {/* Shown as travel across the FRAME, not as a multiple of the slice: a
+            multiple is meaningless to the eye when the slice is 2% tall, and it
+            is exactly the control the reference workflow needs (drag the streaks
+            past the top of the picture). Stored as the multiple. */}
         <ProRulerSlider
-          variant="instrument" label="Length" suffix="%"
-          value={pct(params.length)} min={100} max={800} step={5}
-          onPreview={(v) => livePatch({ length: v / 100 })}
-          onCommit={(v) => sliderCommit('length', v)}
+          variant="instrument" label="Length" suffix="% of frame"
+          value={Math.round(params.length * bandExtent * 100)}
+          min={Math.max(1, Math.round(bandExtent * 100))} max={250} step={1}
+          onPreview={(v) => livePatch({ length: Math.max(1, v / 100 / bandExtent) })}
+          onCommit={(v) => sliderCommit('length', Math.max(100, (v / bandExtent)))}
           visual={sliderVisual}
         />
         <ProRulerSlider
@@ -2418,6 +2610,36 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           onCommit={(v) => sliderCommit('bend', v)}
           visual={sliderVisual}
         />
+        {/* Next to Bend rather than buried under Refine: with Length this is what
+            turns a slice into the reference fan. 0% narrows to a point, 100% is
+            parallel, and past that it splays — the old control stopped at 200%,
+            which could not open a fan at all. */}
+        <ProRulerSlider
+          variant="instrument" label="Tip width" suffix="%"
+          value={Math.round((1 - params.taper) * 100)} min={0} max={1300} step={5}
+          onPreview={(v) => livePatch({ taper: 1 - v / 100 })}
+          onCommit={(v) => { setActivePresetId(null); commit({ taper: 1 - v / 100 }) }}
+          visual={sliderVisual}
+        />
+
+        {/* The physical twist: the ribbon pinches and, past half depth, turns
+            over so its two sides swap — the flip seen in the reference clips. */}
+        <ProRulerSlider
+          variant="instrument" label="Ribbon twist" suffix=" half-turns"
+          value={Math.round(params.twistTurns * 10) / 10} min={0} max={3} step={0.1}
+          onPreview={(v) => livePatch({ twistTurns: v })}
+          onCommit={(v) => { setActivePresetId(null); commit({ twistTurns: v }) }}
+          visual={sliderVisual}
+        />
+        {params.twistTurns > 0 && (
+          <ProRulerSlider
+            variant="instrument" label="Twist depth" suffix="%"
+            value={Math.round((params.twistDepth ?? 1) * 100)} min={0} max={100} step={1}
+            onPreview={(v) => livePatch({ twistDepth: v / 100 })}
+            onCommit={(v) => { setActivePresetId(null); commit({ twistDepth: v / 100 }) }}
+            visual={sliderVisual}
+          />
+        )}
         <ProRulerSlider
           variant="instrument" label="Seed Line" suffix="%"
           value={pct(params.seed)} min={0} max={100} step={1}
@@ -2425,6 +2647,22 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           onCommit={(v) => sliderCommit('seed', v)}
           visual={sliderVisual}
         />
+        <button
+          type="button"
+          onClick={() => {
+            const smp = getSample()
+            const best = smp?.canvas ? bestSeedInBand(smp.canvas, paramsRef.current.band, paramsRef.current.axis) : null
+            if (!best) { toast.error('Could not read this region'); return }
+            setActivePresetId(null)
+            commit({ seed: best.seed })
+            toast.success('Seeded on the most colourful line in the region')
+          }}
+          className={`mt-1 flex h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[10.5px] font-medium editor-interactive ${tapClass}`}
+          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
+        >
+          <Sparkles className="h-3 w-3" />
+          Find the most colourful line
+        </button>
       </div>
       </>)}
 
@@ -2451,17 +2689,17 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
             />
           )}
           <ProRulerSlider
-            variant="instrument" label="Fade" suffix="%"
+            variant="instrument" label="Fade (tips)" suffix="%"
             value={pct(params.fade)} min={0} max={100} step={1}
             onPreview={(v) => livePatch({ fade: v / 100 })}
             onCommit={(v) => sliderCommit('fade', v)}
             visual={sliderVisual}
           />
           <ProRulerSlider
-            variant="instrument" label="Taper / Flare" suffix="%"
-            value={pct(params.taper)} min={-100} max={100} step={1}
-            onPreview={(v) => livePatch({ taper: v / 100 })}
-            onCommit={(v) => sliderCommit('taper', v)}
+            variant="instrument" label="Fade in (root)" suffix="%"
+            value={pct(params.fadeIn)} min={0} max={100} step={1}
+            onPreview={(v) => livePatch({ fadeIn: v / 100 })}
+            onCommit={(v) => sliderCommit('fadeIn', v)}
             visual={sliderVisual}
           />
           <ProRulerSlider

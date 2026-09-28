@@ -56,6 +56,7 @@ const jpegMeta = (dv) => {
     if (dv.getUint16(0) !== 0xffd8) return null // SOI
     let o = 2
     let orientation = 1
+    let adobe = false
     const len = dv.byteLength
     while (o + 4 < len) {
         if (dv.getUint8(o) !== 0xff) { o += 1; continue }
@@ -65,9 +66,15 @@ const jpegMeta = (dv) => {
         if (marker === 0xe1 && o + 10 < len && dv.getUint32(o + 4) === 0x45786966) { // "Exif"
             orientation = exifOrientation(dv, o + 10) || orientation
         }
+        // APP14 "Adobe" rides along with CMYK/YCCK scans written by print tools.
+        if (marker === 0xee) adobe = true
         const sof = (marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7)
             || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)
-        if (sof && o + 9 < len) return { w: dv.getUint16(o + 7), h: dv.getUint16(o + 5), orientation }
+        // Nf (component count) sits right after the frame's dimensions: 3 = YCbCr,
+        // 4 = CMYK/YCCK, which browsers decode wrongly or not at all.
+        if (sof && o + 9 < len) {
+            return { w: dv.getUint16(o + 7), h: dv.getUint16(o + 5), orientation, components: dv.getUint8(o + 9), adobe }
+        }
         o += 2 + seg
     }
     return null
@@ -282,8 +289,12 @@ export const extractRawPreview = async (file) => {
 // Bake an EXIF orientation into pixels. A RAW's rotation lives in the container
 // (IFD0), NOT in the extracted preview's own EXIF, and we strip metadata before
 // upload — so a portrait shot would arrive sideways unless we rotate it here.
-export const bakeOrientation = async (blob, orientation) => {
+export const bakeOrientation = async (blob, orientation, type = 'image/jpeg') => {
   if (!orientation || orientation === 1) return blob
+  // Plain decode on purpose: this path exists for pixels whose rotation is NOT
+  // described by their own EXIF (a RAW container's preview), so there is nothing
+  // for the decoder to have applied already. See flattenOrientation for the case
+  // where the tag does travel with the file.
   const bmp = await createImageBitmap(blob).catch(() => null)
   if (!bmp) return blob
   const w = bmp.width, h = bmp.height
@@ -310,9 +321,43 @@ export const bakeOrientation = async (blob, orientation) => {
   ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(bmp, 0, 0)
   bmp.close?.()
+  // PNG/WebP sources stay lossless; only a JPEG pays for the re-encode, and it
+  // pays once — the rotation has to land in pixels because the EXIF tag that
+  // described it is stripped before upload.
+  const outType = type === 'image/png' || type === 'image/webp' ? type : 'image/jpeg'
   const out = canvas.convertToBlob
-    ? await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.95 })
-    : await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.95))
+    ? await canvas.convertToBlob({ type: outType, quality: 0.95 })
+    : await new Promise((r) => canvas.toBlob(r, outType, 0.95))
+  return out || blob
+}
+
+/**
+ * Move an EXIF orientation out of the metadata and into the pixels.
+ *
+ * Browsers apply an image's own orientation tag when they decode it, and there is
+ * no way to ask for the unrotated pixels — `imageOrientation: "none"` was dropped
+ * from the spec and now reads as the default. So the flattening is just: decode
+ * (upright), draw, re-encode. The result needs no tag, which matters because the
+ * upload path strips metadata — without this, a portrait frame from a camera is
+ * served as a sideways one.
+ */
+export const flattenOrientation = async (blob, type = 'image/jpeg') => {
+  const bmp = await createImageBitmap(blob).catch(() => null)
+  if (!bmp) return blob
+  const canvas = typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(bmp.width, bmp.height)
+    : Object.assign(document.createElement('canvas'), { width: bmp.width, height: bmp.height })
+  canvas.width = bmp.width
+  canvas.height = bmp.height
+  const ctx = canvas.getContext('2d')
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bmp, 0, 0)
+  bmp.close?.()
+  const outType = type === 'image/png' || type === 'image/webp' ? type : 'image/jpeg'
+  const out = canvas.convertToBlob
+    ? await canvas.convertToBlob({ type: outType, quality: 0.95 })
+    : await new Promise((r) => canvas.toBlob(r, outType, 0.95))
   return out || blob
 }
 

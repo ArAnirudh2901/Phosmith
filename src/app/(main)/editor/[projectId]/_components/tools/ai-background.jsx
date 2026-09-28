@@ -20,6 +20,7 @@ import {
     syncBackgroundGrade,
 } from '../../../../../../lib/canvas-background'
 import { buildImageKitBackgroundRemovalUrls } from '@/lib/imagekit-ai'
+import { toUserMessage } from '@/lib/user-error'
 
 const UNSPLASH_ACCESS_KEY = process.env.NEXT_PUBLIC_UNSPLASH_ACCESS_KEY
 const UNSPLASH_API_URL = "https://api.unsplash.com"
@@ -500,7 +501,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
             setTotalSearchPages(data.total_pages || 0)
         } catch (error) {
             if (error.name === 'AbortError') return
-            toast.error(error.message || "Search failed")
+            toast.error(toUserMessage(error, "Search failed"))
         } finally {
             setIsSearching(false)
         }
@@ -523,7 +524,7 @@ const BackgroundControls = ({ project, dominantColor, contrastingColor, lighterC
             setSearchPage(nextPage)
             setTotalSearchPages(data.total_pages || totalSearchPages)
         } catch (error) {
-            toast.error(error.message || "Failed to load more images")
+            toast.error(toUserMessage(error, "Failed to load more images"))
         } finally {
             isLoadingMoreImagesRef.current = false
             setIsLoadingMoreImages(false)

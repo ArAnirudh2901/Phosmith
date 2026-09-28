@@ -34,11 +34,17 @@
 
 import { FabricImage } from 'fabric'
 import { FastAverageColor } from 'fast-average-color'
+import { analyzeElement } from '@/lib/collage/analyze'
+import { assignPhotosToCells, bestLayoutForPhotos, focusForCell, photoDescriptor } from '@/lib/collage-arrange'
+import { collagePlanCacheKey, readCollagePlan, writeCollagePlan } from '@/lib/collage-ai'
+import { computePerceptualHash } from '@/lib/image-fingerprint'
+import { createSlot, isCollageSlot } from '@/lib/collage/slot'
 import {
     LAYOUTS,
     isVisibleImage,
     fitImageToCell,
     computeCollageCells,
+    collageFrameFor,
     pickLayoutForCount,
 } from '@/lib/collage-layout'
 import {
@@ -47,6 +53,8 @@ import {
     AI_BG_THEMES,
     applyCollageBackground,
     buildAiBackgroundPrompt,
+    buildCellMatte,
+    isCollageMatte,
 } from '@/lib/collage-styles'
 import { wrapCollageBgPrompt } from '@/lib/collage-ai'
 import { applyCanvasSizedBackground } from '@/lib/canvas-background'
@@ -227,7 +235,11 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
         return (canvas?.getObjects?.() || []).filter(isVisibleImage)
     }
 
-    const doCreateTemplate = ({ layout, style, background, gap = 10, padding = 10 } = {}) => {
+    /** Photo descriptors from the on-device analysis (cached per element). */
+    const elementOf = (img) => img?._originalElement || img?._element || img?.getElement?.() || null
+    const describe = (images) => images.map((img, i) => photoDescriptor(analyzeElement(elementOf(img)), i))
+
+    const doCreateTemplate = ({ layout, style, background, gap = 10, padding = 10, fit = 'cover', arrange = true, mat = null, matte = null } = {}) => {
         const canvas = getCanvas?.()
         if (!canvas) throw new Error('[agent.collage] canvas unavailable')
         const images = getImages()
@@ -236,21 +248,62 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
         }
 
         const requested = layout && LAYOUTS.some((l) => l.id === layout) ? layout : null
-        const layoutId = requested || pickLayoutForCount(images.length)
-        const layoutDef = LAYOUTS.find((l) => l.id === layoutId)
-        if (images.length < layoutDef.cellCount) {
-            throw new Error(`[agent.collage] "${layoutId}" needs ${layoutDef.cellCount} photos, only ${images.length} available`)
-        }
+        const descriptors = arrange ? describe(images) : null
+        // No layout asked for: choose by the photos' shapes, not just their count.
+        const layoutId = requested
+            || (descriptors && bestLayoutForPhotos(descriptors, {
+                canvasWidth: sizeOf().width,
+                canvasHeight: sizeOf().height,
+                gap,
+                padding,
+            }))
+            || pickLayoutForCount(images.length)
 
         const st = resolveStyle(style)
         const backdrop = resolveBackdrop(background, getProject?.()) ?? st.backdrop ?? null
         if (backdrop) applyCollageBackground(canvas, backdrop, sizeOf())
 
         const cells = computeCollageCells(sizeOf(), layoutId, gap, padding)
-        const frameStyle = { shape: st.shape, radiusPct: st.radiusPct, shadow: st.shadow, framePct: st.framePct || 0 }
+        const fitMode = fit === 'contain' ? 'contain' : 'cover'
+        const frameInfo = collageFrameFor(sizeOf(), layoutId, gap, padding)
+        const frameStyle = {
+            shape: st.shape,
+            radiusPct: st.radiusPct,
+            shadow: st.shadow,
+            framePct: st.framePct || 0,
+            fitMode,
+            // An outward mat needs to know the gutter it may grow into.
+            frameMode: mat === 'outer' ? 'outer' : 'inner',
+            gap: frameInfo?.gap || 0,
+            matte: typeof matte === 'string' ? matte : null,
+        }
+        const assignment = descriptors ? assignPhotosToCells(descriptors, cells) : null
 
         canvas.discardActiveObject?.()
-        images.slice(0, cells.length).forEach((image, index) => fitImageToCell(image, cells[index], frameStyle))
+        let placed = 0
+        cells.forEach((cell, cellIndex) => {
+            const photoIndex = assignment ? assignment[cellIndex] : cellIndex
+            if (photoIndex === null || photoIndex === undefined || photoIndex >= images.length) return
+            const focus = descriptors ? focusForCell(descriptors[photoIndex]) : null
+            fitImageToCell(images[photoIndex], cell, focus ? { ...frameStyle, focus } : frameStyle)
+            placed += 1
+        })
+
+        // Fewer photos than cells is allowed: the rest become clickable slots
+        // rather than a refusal the user has to work around.
+        canvas.getObjects?.().filter(isCollageSlot).forEach((slot) => canvas.remove(slot))
+        const empties = cells.slice(placed)
+        empties.forEach((cell) => canvas.add(createSlot(cell)))
+
+        canvas.getObjects?.().filter(isCollageMatte).forEach((panel) => canvas.remove(panel))
+        if (frameStyle.matte) {
+            cells.slice(0, placed).forEach((cell) => {
+                const panel = buildCellMatte(cell, frameStyle)
+                canvas.add(panel)
+                canvas.sendObjectToBack?.(panel)
+            })
+        }
+
         canvas.requestRenderAll()
         canvas.__pushHistoryState?.({ label: 'Built collage template', detail: layoutId, domain: 'collage' })
         canvas.__saveCanvasState?.()
@@ -258,8 +311,10 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
         return {
             layout: layoutId,
             cells: cells.length,
-            placed: Math.min(cells.length, images.length),
-            extras: Math.max(0, images.length - cells.length),
+            placed,
+            emptySlots: empties.length,
+            extras: Math.max(0, images.length - placed),
+            arranged: Boolean(assignment),
             style: frameStyle,
             background: backdrop,
         }
@@ -273,13 +328,12 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
             throw new Error(`[agent.collage] need at least 2 photos to build a collage (found ${images.length})`)
         }
         const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
-        const usable = LAYOUTS.filter((l) => l.cellCount <= images.length)
-        const maxCells = Math.max(...usable.map((l) => l.cellCount))
-        const layoutDef = pick(usable.filter((l) => l.cellCount === maxCells))
         const preset = pick(COLLAGE_STYLES)
         const theme = pick(AI_BG_THEMES)
 
-        const template = doCreateTemplate({ layout: layoutDef.id, style: preset.id })
+        // Layout comes from the photos' shapes (deterministic); style and
+        // background stay random, which is where the variety is wanted.
+        const template = doCreateTemplate({ style: preset.id })
         let generatedBackground = null
         try {
             generatedBackground = await doGenerateBackground({ theme: theme.id })
@@ -305,6 +359,16 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
         }
         const project = getProject?.()
         const canvasAspect = (Number(project?.width) || 1) / (Number(project?.height) || 1)
+        const cacheKey = collagePlanCacheKey({
+            photoIds: images.map((img) => computePerceptualHash(img)?.hash || img.getSrc?.() || ''),
+            directionHint: typeof directionHint === 'string' ? directionHint : '',
+            canvasAspect,
+            recipeCount: 6,
+        })
+        // The Collage panel and the agent ask the same question; whoever asks
+        // first pays for it.
+        const cached = readCollagePlan(cacheKey)
+        if (cached?.plan) return cached.plan
         const resp = await fetch('/api/ai/collage-plan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -323,11 +387,13 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
             throw new Error(data.error || `[agent.collage] collage-plan HTTP ${resp.status}`)
         }
         const data = await resp.json()
-        return {
+        const plan = {
             source: data.source || 'none',
             analysis: data.analysis || null,
             recipes: Array.isArray(data.recipes) ? data.recipes : [],
         }
+        if (plan.source === 'gemini' && plan.recipes.length) writeCollagePlan(cacheKey, { plan, recipes: plan.recipes, analysis: plan.analysis })
+        return plan
     }
 
     // Vision-driven full build: suggest → apply the best-fit recipe (layout +
@@ -416,13 +482,17 @@ export const createCollageCommands = ({ getCanvas, getProject }) => {
         },
 
         createTemplate: {
-            description: 'Arrange the current canvas photos into a collage: pick/honor a layout, apply a style (shape/rounded/shadow) and a background, then cover-fit each photo into its cell.',
+            description: 'Arrange the current canvas photos into a collage: pick/honor a layout, apply a style (shape/rounded/shadow) and a background, then fit each photo into its cell. Fewer photos than cells leaves clickable empty slots.',
             params: {
-                layout: 'layout id from listLayouts (optional — auto-picked from photo count)',
+                layout: 'layout id from listLayouts (optional — chosen from the photos\' shapes when omitted)',
                 style: 'style preset id (e.g. "rounded","circles","cream") or { shape, radiusPct, shadow }',
                 background: 'named colour/swatch, hex, "gradient", or "none" (optional)',
                 gap: 'px between cells (default 10)',
                 padding: 'px around the collage (default 10)',
+                fit: '"cover" (default — fill the frame and crop) or "contain" (show the whole photo, e.g. for panoramas)',
+                mat: '"inner" (default — the mat eats into the photo) or "outer" (it grows into the gap, needs gap > 0)',
+                matte: 'hex colour for a solid panel behind each photo (for cut-out PNGs); omit for none',
+                arrange: 'true (default) places the strongest photo in the biggest frame, matches shapes to cells and keeps subjects in frame; false keeps canvas order and centres',
             },
             run: (args) => doCreateTemplate(args),
         },

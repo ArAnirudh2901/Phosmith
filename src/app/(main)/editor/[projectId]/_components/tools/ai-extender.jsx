@@ -21,6 +21,7 @@ import {
     MAX_OUTPUT_DIMENSION,
     removeExpansionFramesFromCanvas,
     showEdgeControlsOnly,
+    sizeEdgeControls,
     silenceImageForExpansion,
     unionFrameBounds,
     validateExpansion,
@@ -30,6 +31,7 @@ import {
     hasPendingExtend,
     startExtendPoll,
 } from '../../../../../../lib/extend-poller'
+import { toUserMessage } from '@/lib/user-error'
 
 const isRemoteImageUrl = (url) =>
     typeof url === 'string' &&
@@ -306,7 +308,7 @@ const AIExtender = ({ project }) => {
             _isExpansionFrame: true,
         })
 
-        showEdgeControlsOnly(frame)
+        showEdgeControlsOnly(frame, canvasEditor)
 
         const commitFrameSize = () => {
             const imgBounds = image.getBoundingRect()
@@ -321,7 +323,7 @@ const AIExtender = ({ project }) => {
                 originY: 'top',
             })
             frame.setCoords()
-            showEdgeControlsOnly(frame)
+            showEdgeControlsOnly(frame, canvasEditor)
             canvasEditor.setActiveObject(frame)
             canvasEditor.requestRenderAll()
             schedulePreviewSync()
@@ -339,7 +341,7 @@ const AIExtender = ({ project }) => {
         canvasEditor.bringObjectToFront(frame)
         canvasEditor.discardActiveObject()
         canvasEditor.setActiveObject(frame)
-        showEdgeControlsOnly(frame)
+        showEdgeControlsOnly(frame, canvasEditor)
         safelyLockImage(image)
 
         canvasEditor.skipTargetFind = false
@@ -364,6 +366,18 @@ const AIExtender = ({ project }) => {
 
         canvasEditor.on('mouse:down', guardPointer)
 
+        // The edge hit boxes are sized in SCREEN pixels, so a zoom leaves them
+        // stale. They are re-sized on the events that already exist — setup,
+        // 'modified' and re-selection — plus a zoom, but NEVER from mouse:move:
+        // calling setCoords inside Fabric's own pointer dispatch stalls the
+        // canvas, and a hit box that is briefly sized for the previous zoom is a
+        // far smaller problem than a frozen editor.
+        const refreshHitBoxes = () => {
+            if (!canvasEditor.__expansionMode || canvasEditor._currentTransform) return
+            sizeEdgeControls(frame, canvasEditor)
+        }
+        canvasEditor.on('after:transform', refreshHitBoxes)
+
         // Other code (poller swap, history) can clear selection; handles must stay live.
         const keepFrameActive = () => {
             requestAnimationFrame(() => {
@@ -371,7 +385,7 @@ const AIExtender = ({ project }) => {
                 if (!canvasEditor.__expansionMode || !frame.selectable) return
                 if (!canvasEditor.getObjects().includes(frame) || canvasEditor.getActiveObject()) return
                 canvasEditor.setActiveObject(frame)
-                showEdgeControlsOnly(frame)
+                showEdgeControlsOnly(frame, canvasEditor)
                 canvasEditor.requestRenderAll()
             })
         }
@@ -380,7 +394,7 @@ const AIExtender = ({ project }) => {
         const focusFrame = requestAnimationFrame(() => {
             if (setupGen !== setupGenerationRef.current || !isCanvasLive(canvasEditor)) return
             canvasEditor.setActiveObject(frame)
-            showEdgeControlsOnly(frame)
+            showEdgeControlsOnly(frame, canvasEditor)
             safelyLockImage(image)
             canvasEditor.requestRenderAll()
         })
@@ -388,6 +402,7 @@ const AIExtender = ({ project }) => {
         return () => {
             cancelAnimationFrame(focusFrame)
             canvasEditor.off('mouse:down', guardPointer)
+            canvasEditor.off('after:transform', refreshHitBoxes)
             canvasEditor.off('selection:cleared', keepFrameActive)
             frame.off('scaling', schedulePreviewSync)
             frame.off('modified', commitFrameSize)
@@ -649,7 +664,7 @@ const AIExtender = ({ project }) => {
         } catch (error) {
             if (error?.name !== 'AbortError') {
                 console.warn('AI extender failed:', error)
-                toast.error(error?.message || 'Failed to extend image')
+                toast.error(toUserMessage(error, 'Failed to extend image'))
             }
         } finally {
             // No-op after success (the frame was removed); restores

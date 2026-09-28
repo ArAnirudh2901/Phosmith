@@ -41,7 +41,7 @@ const getStoredPanelWidth = (key, fallback, min, max) => {
 const Editor = () => {
     const params = useParams()
     const projectId = params.projectId
-    const { isLoading: isAuthLoading, isAuthenticated, databaseSetupMissing } = useStoreUser()
+    const { isLoading: isAuthLoading, isAuthenticated, isSessionReady, databaseSetupMissing } = useStoreUser()
 
     const [canvasEditor, setCanvasEditor] = useState(null)
     const [processingMessage, setProcessingMessage] = useState(null)
@@ -291,7 +291,7 @@ const Editor = () => {
 
     const { data: project, isLoading: isProjectLoading, error } = useDatabaseQuery(
         api.projects.getProject,
-        isAuthenticated ? { projectId } : "skip"
+        isSessionReady ? { projectId } : "skip"
     )
 
     useEffect(() => {

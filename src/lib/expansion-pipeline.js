@@ -47,8 +47,40 @@ export function hideAllObjectControls(obj) {
   obj.hasBorders = false
 }
 
-/** Show edge midpoint + corner handles — used for the expansion frame. */
-export function showEdgeControlsOnly(obj) {
+const EDGE_CONTROL_KEYS = new Set(['mt', 'mb', 'ml', 'mr'])
+
+/**
+ * Draw an edge handle at its normal size regardless of the control's hit box.
+ *
+ * Fabric uses `sizeX`/`sizeY` for BOTH hit-testing and drawing, so widening a
+ * control so the whole edge can be grabbed would also paint a bar the length of
+ * the frame. The handle keeps its own small dot and only the hit area grows.
+ */
+function renderEdgeDot(ctx, left, top, _styleOverride, fabricObject) {
+  const size = fabricObject.cornerSize || 14
+  ctx.save()
+  ctx.fillStyle = fabricObject.cornerColor || '#F8FBFF'
+  ctx.strokeStyle = fabricObject.cornerStrokeColor || '#031014'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.arc(left, top, size / 2, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+}
+
+/**
+ * Show edge midpoint + corner handles — used for the expansion frame.
+ *
+ * The edge controls also get a hit box that spans their whole EDGE, because
+ * "drag the border outward" is what the panel asks for and what everyone tries
+ * to do: a 14px dot at the midpoint of a 500px edge means most attempts land on
+ * nothing and the tool reads as broken. Corners keep their own by leaving a
+ * gap at each end of the edge, so a corner drag still resizes both axes.
+ *
+ * `canvas` is optional; without it the hit box falls back to the plain dot.
+ */
+export function showEdgeControlsOnly(obj, canvas = null) {
   if (!obj?.controls) return
   for (const key of Object.keys(obj.controls)) {
     const control = obj.controls[key]
@@ -60,6 +92,44 @@ export function showEdgeControlsOnly(obj) {
     hasBorders: false,
     borderColor: 'transparent',
   })
+
+  sizeEdgeControls(obj, canvas)
+}
+
+/**
+ * Give each edge control a hit box spanning its whole EDGE.
+ *
+ * Separate from `showEdgeControlsOnly` because it runs whenever the view zooms:
+ * it must touch nothing but the control sizes and the cached corner coords, and
+ * in particular must not call `obj.set`, which dirties the object and drags a
+ * full re-render behind every pointer move.
+ *
+ * Returns the signature it applied, so a caller can skip a no-op refresh.
+ */
+export function sizeEdgeControls(obj, canvas = null) {
+  if (!obj?.controls) return ''
+  const corner = obj.cornerSize || 14
+  const zoom = canvas?.getZoom?.() ?? 1
+  // On-screen extent of the frame — the hit box is measured in screen pixels,
+  // the same units as cornerSize.
+  const screenW = Math.abs((obj.width || 0) * (obj.scaleX || 1) * zoom)
+  const screenH = Math.abs((obj.height || 0) * (obj.scaleY || 1) * zoom)
+  const gap = corner * 2.5   // leave the corners to the corner controls
+  for (const key of EDGE_CONTROL_KEYS) {
+    const control = obj.controls[key]
+    if (!control) continue
+    const vertical = key === 'ml' || key === 'mr'
+    const span = Math.max(corner, (vertical ? screenH : screenW) - gap * 2)
+    control.sizeX = vertical ? corner : span
+    control.sizeY = vertical ? span : corner
+    control.touchSizeX = control.sizeX
+    control.touchSizeY = control.sizeY
+    control.render = renderEdgeDot
+  }
+  // Hit rectangles are cached in oCoords and only rebuilt by setCoords, so a new
+  // sizeX/sizeY does nothing until the coords are recomputed.
+  obj.setCoords?.()
+  return `${Math.round(screenW)}x${Math.round(screenH)}`
 }
 
 /** Lock image so only the expansion frame is interactive. */

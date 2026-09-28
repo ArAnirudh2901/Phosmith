@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import { FabricImage } from 'fabric'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
-import { addImageFileToCanvas, loadFabricImageFromFile } from '@/lib/canvas-images'
+import { addImageFileToCanvas, loadFabricImageFromFile, workingEdgeForProject } from '@/lib/canvas-images'
 import { IMAGE_UPLOAD_ACCEPT } from '@/lib/raw-preview'
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -177,7 +177,7 @@ const ImageManager = ({ project, dominantColor }) => {
         try {
             // Uploads to ImageKit (auth-gated) for a persistent URL; falls back to
             // a data URL if the upload fails. Both keep the canvas state portable.
-            const newImg = await loadFabricImageFromFile(file)
+            const newImg = await loadFabricImageFromFile(file, { maxEdge: workingEdgeForProject(project) })
             newImg.set({
                 left: selectedImage.left,
                 top: selectedImage.top,

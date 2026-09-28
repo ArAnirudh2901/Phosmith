@@ -118,7 +118,7 @@ const normaliseStack = (stack) => {
  * shader, keyed by role and the structural signature of the slice.
  *
  * @param {Array<{layer: object, op: string}>} entries
- * @param {{ role?: 'state'|'final'|'erase'|'suffixColor'|'suffixAlpha'|'suffixErase',
+ * @param {{ role?: 'state'|'final'|'erase'|'suffixColor'|'suffixAlpha',
  *           readsPrevState?: boolean, readsErase?: boolean, readsSuffix?: boolean }} [opts]
  * @returns {import('./mask-types').CompiledShader}
  */

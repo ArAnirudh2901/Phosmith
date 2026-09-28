@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import GlassPanel from "@/components/ui/glass-panel"
 import NeoButton from "@/components/neo/NeoButton"
+import { toUserMessage } from '@/lib/user-error'
 
 const loadingCards = Array.from({ length: 6 })
 
@@ -201,7 +202,7 @@ const ProjectCard = ({
 }
 
 const Dashboard = () => {
-    const { isLoading: isAuthLoading, isAuthenticated, databaseSetupMissing } = useStoreUser()
+    const { isLoading: isAuthLoading, isAuthenticated, isSessionReady, databaseSetupMissing } = useStoreUser()
     const [showNewProjectModal, setShowNewProjectModal] = useState(false)
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedProjectIds, setSelectedProjectIds] = useState([])
@@ -216,7 +217,7 @@ const Dashboard = () => {
 
     const { data: projects = [], isLoading: isProjectsLoading } = useDatabaseQuery(
         api.projects.getUserProjects,
-        isAuthenticated ? {} : "skip"
+        isSessionReady ? {} : "skip"
     )
     const { mutate: deleteProjectMutate } = useDatabaseMutation(api.projects.deleteProject)
     const { mutate: bulkDeleteProjectsMutate } = useDatabaseMutation(api.projects.bulkDeleteProjects)
@@ -437,7 +438,7 @@ const Dashboard = () => {
                 finalized = true
                 performDelete(type, projectId, ids).catch((error) => {
                     setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
-                    toast.error(error?.message || "Failed to delete project")
+                    toast.error(toUserMessage(error, "Failed to delete project"))
                 })
             },
             onDismiss: () => {
@@ -445,7 +446,7 @@ const Dashboard = () => {
                 finalized = true
                 performDelete(type, projectId, ids).catch((error) => {
                     setOptimisticallyRemovedIds((current) => current.filter((id) => !ids.includes(id)))
-                    toast.error(error?.message || "Failed to delete project")
+                    toast.error(toUserMessage(error, "Failed to delete project"))
                 })
             },
         })

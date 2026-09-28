@@ -1,6 +1,6 @@
 "use client"
 
-import { Bot, Eraser, ImagePlus, Layers, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scaling, Sliders, SquareDashedMousePointer, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, Wand2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
+import { Aperture, Bot, Eraser, ImagePlus, Layers, Maximize2, Palette, PanelLeft, PanelRight, Pen, Scaling, Sliders, SquareDashedMousePointer, Text, Crop, ArrowLeft, ChevronDown, Check, Copy, Download, Loader2, Save, Undo2, Redo2, Wand2, ZoomIn, Keyboard, LayoutGrid, AudioLines } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -43,6 +43,7 @@ const TOOLS = [
     { id: "mask", label: "Mask", icon: SquareDashedMousePointer },
     { id: "text", label: "Text", icon: Text },
     { id: "pixel_stretch", label: "Stretch", icon: AudioLines },
+    { id: "focus", label: "Focus", icon: Aperture },
     { id: "ai_background", label: "AI BG", icon: Palette, proOnly: true },
     { id: "ai_extender", label: "Extender", icon: Maximize2, proOnly: true },
     { id: "ai_edit", label: "AI Edit", icon: Wand2, proOnly: true },
@@ -277,7 +278,21 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
         const toastId = toast.loading(`Exporting as ${format.toUpperCase()}${scaleLabel}…`)
 
         try {
-            const { blob } = await snapshotCanvasToBlobSafe(canvasEditor, { project, scale: exportScale, format, quality })
+            const { blob, limitedBy } = await snapshotCanvasToBlobSafe(canvasEditor, { project, scale: exportScale, format, quality })
+            // A download triggered while the tab is hidden is dropped by Safari
+            // and silently ignored by some Chrome versions, so hold the finished
+            // blob until the tab is visible again.
+            if (typeof document !== 'undefined' && document.hidden) {
+                toast.loading('Export ready — switch back to this tab to save it', { id: toastId })
+                await new Promise((resolve) => {
+                    const onVisible = () => {
+                        if (document.hidden) return
+                        document.removeEventListener('visibilitychange', onVisible)
+                        resolve()
+                    }
+                    document.addEventListener('visibilitychange', onVisible)
+                })
+            }
             const blobUrl = URL.createObjectURL(blob)
             const link = document.createElement('a')
             link.href = blobUrl
@@ -292,7 +307,16 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
             setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
 
             setShowExportMenu(false)
-            toast.success(`Exported as ${format.toUpperCase()}${scaleLabel}`, { id: toastId })
+            if (limitedBy) {
+                // Better a smaller file than the blank one iOS hands back past
+                // its canvas area limit.
+                toast.warning(
+                    `Exported at ${limitedBy.effectiveScale.toFixed(2)}× instead of ${exportScale}× — this device's canvas tops out at ${limitedBy.maxEdge}px per side.`,
+                    { id: toastId },
+                )
+            } else {
+                toast.success(`Exported as ${format.toUpperCase()}${scaleLabel}`, { id: toastId })
+            }
         } catch (error) {
             console.error('[Export] Failed:', error)
             const message = isTaintError(error)

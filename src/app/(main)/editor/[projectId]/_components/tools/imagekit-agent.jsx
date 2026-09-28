@@ -50,9 +50,12 @@ import { flattenLiveCanvasForAnalysis, renderFabricObjectElement } from "@/lib/c
 import { ADJUSTMENT_RANGES } from "@/lib/edit-planner";
 import { STYLE_LABELS } from "@/lib/style-profiles";
 import { isPhosmithMaskOverlay } from "@/lib/canvas-mask";
+import { parseFocusPrompt } from "@/lib/agent/focus-commands";
+import { parseStretchPrompt } from "@/lib/agent/stretch-commands";
 import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
+import { toUserMessage } from '@/lib/user-error'
 
 const QUICK_PROMPTS = [
   { label: "Editorial", prompt: "Give it a premium editorial polish", hint: "Retouch, contrast, detail" },
@@ -69,6 +72,40 @@ const COLLAGE_INTENT_RE =
   /\b(collage|montage|scrapbook|mosaic|photo[\s-]?grid)\b|\b(grid|template|layout|arrange)\b[^.]*\b(photo|photos|pic|pics|picture|pictures|image|images)\b|\b(photo|photos|pic|pics|picture|pictures|image|images)\b[^.]*\b(grid|template|collage)\b/i;
 
 const isCollageIntent = (prompt) => COLLAGE_INTENT_RE.test(String(prompt || ""));
+
+// Turn a focus.fromDescription result into a friendly assistant message.
+const summarizeStretchResult = (result) => {
+  if (result?.cleared !== undefined) return `Removed ${result.cleared} stretch layer${result.cleared === 1 ? "" : "s"}.`;
+  if (result?.applied === "scanline") {
+    return `Done — smeared each ${result.axis === "vertical" ? "column" : "row"} from its ${result.mode === "light" ? "darkest" : "brightest"} surviving pixel.`;
+  }
+  if (result?.applied === "auto") return `Done — ${result.reasoning || "placed the stretch myself"}.`;
+  if (result?.applied === "warp") return `Done — ribbon bent through the ${result.preset} warp, pulled from the ${result.from}.`;
+  if (result?.applied === "flow") return `Done — ribbon routed along a ${result.anchors}-point ${result.preset} path.`;
+  if (result?.applied === "ribbon") return `Done — ribbon pulled from the ${result.from}, running ${result.axis === "vertical" ? "up/down" : "across"}.`;
+  return "Done.";
+};
+
+const summarizeFocusResult = (result) => {
+  const parsed = result?.parsed || {};
+  const what = parsed.why || "applied the effect";
+  if (result?.applied === "depthOfField") {
+    const how = result.source === "depth" ? "depth from the masking service"
+      : result.source === "matte" ? "the subject detected on your device"
+        : result.source === "defocus" ? "the photo's own focus falloff"
+          : "a centred focus band (no depth evidence in this frame)";
+    return `Done — ${what}, using ${how}.`;
+  }
+  if (result?.applied === "colorPop") {
+    const pct = Math.round((result.keptFraction || 0) * 100);
+    return `Done — ${what}. ${pct}% of the frame kept its colour.`;
+  }
+  if (result?.applied === "castShadow") {
+    return `Done — ${what}.`;
+  }
+  if (result?.cleared) return "Cleared the focus effects.";
+  return `Done — ${what}.`;
+};
 
 // Turn a collage.fromDescription result into a friendly assistant message.
 const summarizeCollageResult = (r) => {
@@ -1561,6 +1598,69 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   // Build a collage from a natural-language prompt via the `collage.*` agent
   // commands (parse → create template → insert the canvas photos → optionally
   // generate a fit-to-photos background). Lives outside the edit-plan flow.
+  // Focus / blur / colour-pop / shadow requests go to the `focus.*` commands.
+  // The parser is deterministic, so this costs no model call — and when it
+  // recognises nothing the request falls through to the edit planner below.
+  const runFocusPrompt = async (cleanPrompt) => {
+    if (!canvasEditor) return false;
+    const toastId = toast.loading("Applying", { description: truncate(cleanPrompt, 70) });
+    setMessages((current) => [...current, newMessage("user", cleanPrompt)]);
+    setInput("");
+    setPendingPrompt(cleanPrompt);
+    setIsThinking(true);
+    try {
+      const { runCommand } = await import("@/lib/agent/command-registry");
+      const result = await runCommand("focus.fromDescription", { prompt: cleanPrompt });
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", summarizeFocusResult(result))]);
+      }
+      toast.success("Applied", { id: toastId });
+    } catch (error) {
+      const msg = String(error?.message || "Could not apply that").replace(/^\[agent\.focus\]\s*/, "");
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", msg)]);
+      }
+      toast.error(msg, { id: toastId });
+    } finally {
+      if (isMountedRef.current) {
+        setIsThinking(false);
+        setPendingPrompt(null);
+        setImageRevision((value) => value + 1);
+      }
+    }
+    return true;
+  };
+
+  const runStretchPrompt = async (cleanPrompt) => {
+    if (!canvasEditor) return false;
+    const toastId = toast.loading("Stretching", { description: truncate(cleanPrompt, 70) });
+    setMessages((current) => [...current, newMessage("user", cleanPrompt)]);
+    setInput("");
+    setPendingPrompt(cleanPrompt);
+    setIsThinking(true);
+    try {
+      const { runCommand } = await import("@/lib/agent/command-registry");
+      const result = await runCommand("stretch.fromDescription", { prompt: cleanPrompt });
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", summarizeStretchResult(result))]);
+      }
+      toast.success("Applied", { id: toastId });
+    } catch (error) {
+      const msg = String(error?.message || "Could not apply that").replace(/^\[agent\.stretch\]\s*/, "");
+      if (isMountedRef.current) {
+        setMessages((current) => [...current, newMessage("assistant", msg)]);
+      }
+      toast.error(msg, { id: toastId });
+    } finally {
+      if (isMountedRef.current) {
+        setIsThinking(false);
+        setPendingPrompt(null);
+        setImageRevision((value) => value + 1);
+      }
+    }
+    return true;
+  };
+
   const runCollagePrompt = async (cleanPrompt) => {
     if (!canvasEditor) return;
     if (collageImageCount < 2) {
@@ -1613,6 +1713,20 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     // ImageKit image.
     if (isCollageIntent(cleanPrompt)) {
       await runCollagePrompt(cleanPrompt);
+      return;
+    }
+
+    // Focus & Light: only when the deterministic parser recognises the request,
+    // so "give it a cinematic grade" still reaches the edit planner.
+    if (parseFocusPrompt(cleanPrompt)) {
+      await runFocusPrompt(cleanPrompt);
+      return;
+    }
+
+    // Pixel Stretch, on the same terms: a deterministic parser decides, so an
+    // ordinary edit request never gets turned into a ribbon.
+    if (parseStretchPrompt(cleanPrompt)) {
+      await runStretchPrompt(cleanPrompt);
       return;
     }
 
@@ -1928,7 +2042,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       if (!isMountedRef.current || error?.name === "AbortError") {
         toast.dismiss(toastId);
       } else {
-        toast.error(error?.message || "Agent edit failed", { id: toastId });
+        toast.error(toUserMessage(error, "Agent edit failed"), { id: toastId });
         setMessages((current) => [
           ...current,
           newMessage("assistant", error?.message || "I could not complete that edit. Try a simpler request."),
@@ -2017,7 +2131,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       setEnabledChanges({});
       setActiveEditSetId(null);
     } catch (error) {
-      toast.error(error?.message || "Failed to save edit", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to save edit"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
@@ -2089,7 +2203,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       toast.success("Edit set applied", { id: toastId });
       setMessages((current) => [...current, newMessage("assistant", "Applied. This edit set is saved and can be removed later.")]);
     } catch (error) {
-      toast.error(error?.message || "Failed to apply edit set", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to apply edit set"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
@@ -2158,7 +2272,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       try {
         await previewPlanOnCanvas(activePlan, nextChanges, effectValues);
       } catch (error) {
-        toast.error(error?.message || "Could not update preview");
+        toast.error(toUserMessage(error, "Could not update preview"));
       }
     }
   };
@@ -2174,7 +2288,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       try {
         await previewPlanOnCanvas(activePlan, enabledChanges, nextValues);
       } catch (error) {
-        if (commit) toast.error(error?.message || "Could not update preview");
+        if (commit) toast.error(toUserMessage(error, "Could not update preview"));
       }
     }
   };
@@ -2205,7 +2319,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       setImageRevision((value) => value + 1);
       toast.success("Version restored", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Failed to restore version", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to restore version"), { id: toastId });
     } finally {
       setRestoringRevisionId(null);
     }
@@ -2319,7 +2433,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       await canvasEditor.__saveCanvasState?.({ immediate: true });
       toast.success("Edit set applied", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Failed to apply edit set", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to apply edit set"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
@@ -2399,7 +2513,7 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
       await canvasEditor.__saveCanvasState?.({ immediate: true });
       toast.success("Edit set removed", { id: toastId });
     } catch (error) {
-      toast.error(error?.message || "Failed to remove edit set", { id: toastId });
+      toast.error(toUserMessage(error, "Failed to remove edit set"), { id: toastId });
     } finally {
       setIsApplying(false);
     }
