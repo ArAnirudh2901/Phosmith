@@ -78,18 +78,9 @@ const Editor = () => {
     const [isNarrowViewport, setIsNarrowViewport] = useState(false)
     const [isSidebarOpen, setIsSidebarOpen] = useState(false)
     const workspaceRef = useRef(null)
-    const [contextualBarPosition, setContextualBarPosition] = useState({ x: 0, y: 120 })
     const radialHoldRef = useRef(false)
     const hoveredRadialToolRef = useRef(null)
     const hoveredRadialSubRef = useRef(null)
-
-    useEffect(() => {
-        if (!canvasEditor?.getActiveObject?.()) return
-        const frame = requestAnimationFrame(() => {
-            setContextualBarPosition({ x: window.innerWidth / 2, y: 120 })
-        })
-        return () => cancelAnimationFrame(frame)
-    }, [canvasEditor])
 
     const handleActiveToolChange = useCallback((toolId, subId = null) => {
         setActiveTool(toolId)
@@ -451,7 +442,7 @@ const Editor = () => {
                     onHoverToolChange={handleRadialHoverChange}
                     onToolSelect={handleActiveToolChange}
                 />
-                <ContextualActionBar visible={!!canvasEditor?.getActiveObject?.()} position={contextualBarPosition} />
+                <ContextualActionBar />
                 <EditorTopbar
                     project={activeProject}
                     onToggleSidebar={isNarrowViewport ? handleSidebarToggle : undefined}

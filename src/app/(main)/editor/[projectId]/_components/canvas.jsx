@@ -94,6 +94,9 @@ const nextPreviewZoomStop = (percent, dir) => {
 }
 const VIEWPORT_PADDING = 32
 const MAX_PERSISTED_HISTORY = 30
+// How long after the last resize step the deferred chrome catches up. Long enough
+// that a drag never crosses it, short enough to read as instant on release.
+const RESIZE_SETTLE_MS = 150
 const MIN_PERSISTED_HISTORY_ENTRIES = 3
 const MAX_NEON_STATE_CHARS = 900_000
 // Tiered autosave: MAJOR changes (real edits) save on the fast debounce as
@@ -164,7 +167,18 @@ const CanvasEditor = ({ project }) => {
     const [isProjectFrameVisible, setIsProjectFrameVisible] = useState(false)
     const [previewZoomPercent, setPreviewZoomPercent] = useState(100)
     const projectFrameStyleRef = useRef({ left: 0, top: 0, width: 0, height: 0 })
-    const [projectFrameStyle, setProjectFrameStyle] = useState({ left: 0, top: 0, width: 0, height: 0 })
+    // The three overlays that track the project rect. Their geometry goes straight
+    // to the DOM rather than through state: it changes on every frame of a pan,
+    // zoom or resize drag, and a setState there re-renders this whole component
+    // (2500 lines of JSX) per frame.
+    const frameTextureRef = useRef(null)
+    const frameOutlineRef = useRef(null)
+    const compareOverlayRef = useRef(null)
+    const isProjectFrameVisibleRef = useRef(false)
+    // True for the duration of a resize gesture, so the chrome that only a human
+    // reads (the zoom HUD) catches up once, at the end, instead of every step.
+    const isResizingRef = useRef(false)
+    const resizeSettleRef = useRef(null)
     // Before/After compare: a per-tool "session baseline" — the flattened image
     // captured when the current tool was opened. Held-down Compare overlays it on
     // the live canvas so the user sees before (baseline) vs after (current edits).
@@ -242,7 +256,22 @@ const CanvasEditor = ({ project }) => {
         const nextPercent = readPreviewZoomPercent(canvas)
         if (previewZoomPercentRef.current === nextPercent) return
         previewZoomPercentRef.current = nextPercent
+        // A resize re-fits the project, so the percentage changes on nearly every
+        // step. The ref stays current; the render waits for the gesture to settle.
+        if (isResizingRef.current) return
         setPreviewZoomPercent(nextPercent)
+    }, [])
+
+    /** Write the project rect onto whichever overlays are mounted. */
+    const applyProjectFrameStyle = useCallback(() => {
+        const { left, top, width, height } = projectFrameStyleRef.current
+        for (const node of [frameTextureRef.current, frameOutlineRef.current, compareOverlayRef.current]) {
+            if (!node) continue
+            node.style.left = `${left}px`
+            node.style.top = `${top}px`
+            node.style.width = `${width}px`
+            node.style.height = `${height}px`
+        }
     }, [])
 
     const setCanvasPreviewZoom = useCallback((canvas, percent) => {
@@ -1248,7 +1277,8 @@ const CanvasEditor = ({ project }) => {
                 if (!proj?.width || !proj?.height) {
                     if (projectFrameStyleRef.current.width !== 0) {
                         projectFrameStyleRef.current = { left: 0, top: 0, width: 0, height: 0 }
-                        setProjectFrameStyle(projectFrameStyleRef.current)
+                        applyProjectFrameStyle()
+                        isProjectFrameVisibleRef.current = false
                         setIsProjectFrameVisible(false)
                     }
                     return
@@ -1267,8 +1297,11 @@ const CanvasEditor = ({ project }) => {
                     previous.height === height
                 ) return
                 projectFrameStyleRef.current = { left, top, width, height }
-                setProjectFrameStyle(projectFrameStyleRef.current)
-                setIsProjectFrameVisible(true)
+                applyProjectFrameStyle()
+                if (!isProjectFrameVisibleRef.current) {
+                    isProjectFrameVisibleRef.current = true
+                    setIsProjectFrameVisible(true)
+                }
             }
             canvas.__syncProjectFrame = syncProjectFrame
             const syncViewportChrome = () => {
@@ -1302,6 +1335,7 @@ const CanvasEditor = ({ project }) => {
         }
     }, [
         project?._id,
+        applyProjectFrameStyle,
         createInitialViewport,
         disposeCanvasInstance,
         fitProjectToViewport,
@@ -2079,10 +2113,24 @@ const CanvasEditor = ({ project }) => {
     }, [canvasEditor, project?._id, pushHistoryState, saveCanvasState])
 
     useEffect(() => {
+        // A resize gesture is a burst: a sidebar drag or a window drag fires tens
+        // of steps. Everything a human only reads at the end of it is deferred to
+        // here, so a step costs one canvas render and no React render at all.
+        const markResizing = () => {
+            isResizingRef.current = true
+            if (resizeSettleRef.current) clearTimeout(resizeSettleRef.current)
+            resizeSettleRef.current = setTimeout(() => {
+                resizeSettleRef.current = null
+                isResizingRef.current = false
+                setPreviewZoomPercent(previewZoomPercentRef.current)
+            }, RESIZE_SETTLE_MS)
+        }
+
         const handleResize = () => {
             if (resizeFrameRef.current) cancelAnimationFrame(resizeFrameRef.current)
             resizeFrameRef.current = requestAnimationFrame(() => {
                 resizeFrameRef.current = null
+                markResizing()
                 const canvas = canvasInstanceRef.current
                 const proj = projectRef.current
                 if (!canvas || !proj || !containerRef.current) return
@@ -2113,11 +2161,8 @@ const CanvasEditor = ({ project }) => {
                 // so the clear is never shown.
                 canvas.renderAll()
 
-                // Sync the project frame overlay and the zoom percentage HUD
-                if (typeof canvas.__syncProjectFrame === 'function') {
-                    canvas.__syncProjectFrame()
-                }
-                syncPreviewZoomState(canvas)
+                // No explicit chrome sync here: renderAll fires `after:render`,
+                // which already ran syncProjectFrame and syncPreviewZoomState.
             })
         }
 
@@ -2133,8 +2178,11 @@ const CanvasEditor = ({ project }) => {
             window.removeEventListener("resize", handleResize)
             if (resizeFrameRef.current) cancelAnimationFrame(resizeFrameRef.current)
             resizeFrameRef.current = null
+            if (resizeSettleRef.current) clearTimeout(resizeSettleRef.current)
+            resizeSettleRef.current = null
+            isResizingRef.current = false
         }
-    }, [fitProjectToViewport, project?._id, syncPreviewZoomState])
+    }, [fitProjectToViewport, project?._id])
 
     useEffect(() => {
         const canvas = canvasInstanceRef.current
@@ -2206,6 +2254,13 @@ const CanvasEditor = ({ project }) => {
         }
     }, [isComparing])
 
+    // The overlays mount and unmount with the frame's visibility and with Compare,
+    // so a node that has just appeared carries no geometry until the next canvas
+    // render — which may be seconds away on an idle canvas. Place it now.
+    useEffect(() => {
+        applyProjectFrameStyle()
+    }, [applyProjectFrameStyle, isProjectFrameVisible, isComparing, compareBaselineUrl, isBusy])
+
     const canCompare = Boolean(compareBaselineUrl) && !isBusy && isProjectFrameVisible
     const startCompare = useCallback((event) => {
         event.preventDefault()
@@ -2266,15 +2321,7 @@ const CanvasEditor = ({ project }) => {
             <div className='absolute inset-0 pointer-events-none editor-canvas-grid' />
 
             {isProjectFrameVisible && !isBusy && (
-                <div
-                    className="editor-canvas-project-texture pointer-events-none absolute"
-                    style={{
-                        left: `${projectFrameStyle.left}px`,
-                        top: `${projectFrameStyle.top}px`,
-                        width: `${projectFrameStyle.width}px`,
-                        height: `${projectFrameStyle.height}px`,
-                    }}
-                />
+                <div ref={frameTextureRef} className="editor-canvas-project-texture pointer-events-none absolute" />
             )}
 
             <div className='absolute inset-0 editor-canvas-fabric-layer'>
@@ -2286,16 +2333,11 @@ const CanvasEditor = ({ project }) => {
             {isComparing && compareBaselineUrl && isProjectFrameVisible && (
                 <>
                     <img
+                        ref={compareOverlayRef}
                         src={compareBaselineUrl}
                         alt=""
                         aria-hidden="true"
                         className="editor-canvas-compare-overlay pointer-events-none absolute"
-                        style={{
-                            left: `${projectFrameStyle.left}px`,
-                            top: `${projectFrameStyle.top}px`,
-                            width: `${projectFrameStyle.width}px`,
-                            height: `${projectFrameStyle.height}px`,
-                        }}
                     />
                     <div className="editor-canvas-compare-pill" role="status" aria-live="polite">Before</div>
                 </>
@@ -2323,15 +2365,7 @@ const CanvasEditor = ({ project }) => {
             )}
 
             {isProjectFrameVisible && !isBusy && (
-                <div
-                    className="editor-canvas-project-frame pointer-events-none absolute"
-                    style={{
-                        left: `${projectFrameStyle.left}px`,
-                        top: `${projectFrameStyle.top}px`,
-                        width: `${projectFrameStyle.width}px`,
-                        height: `${projectFrameStyle.height}px`,
-                    }}
-                />
+                <div ref={frameOutlineRef} className="editor-canvas-project-frame pointer-events-none absolute" />
             )}
 
             {!isBusy && (
