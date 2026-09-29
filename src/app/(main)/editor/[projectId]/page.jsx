@@ -12,12 +12,14 @@ import AuroraLoader from "./_components/AuroraLoader"
 import CanvasEditor from "./_components/canvas"
 import EditorTopbar from "./_components/editor-topbar"
 import EditorSidebar from "./_components/editor-sidebar"
-import CommandPalette from "./_components/CommandPalette"
-import RadialToolMenu from "./_components/RadialToolMenu"
+import dynamic from "next/dynamic"
+
+// Opened by a keystroke or pointer hold, never at load. The editor's only remaining
+// framer-motion importers, so on demand keeps it off the critical path.
+const CommandPalette = dynamic(() => import("./_components/CommandPalette"), { ssr: false })
+const RadialToolMenu = dynamic(() => import("./_components/RadialToolMenu"), { ssr: false })
 import ContextualActionBar from "./_components/ContextualActionBar"
 import useEditorShortcuts from "../../../../../hooks/useEditorShortcuts"
-import { motion, AnimatePresence } from "framer-motion"
-import { duration, easeOut } from "@/lib/motion"
 import { getClientPreferredCapabilities, subscribeRouting } from "@/lib/ai-routing"
 import { prefetchClientModels } from "@/lib/client-ai"
 
@@ -323,12 +325,7 @@ const Editor = () => {
 
     if (databaseSetupMissing) return (
         <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-void-darkest)" }}>
-            <motion.div
-                className="max-w-md px-6 text-center"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: duration.normal, ease: easeOut }}
-            >
+            <div className="fade-up-in max-w-md px-6 text-center">
                 <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-lg border border-cyan-300/35 bg-cyan-300/10">
                     <Database className="h-7 w-7 text-cyan-300" />
                 </div>
@@ -336,24 +333,19 @@ const Editor = () => {
                 <p style={{ color: "var(--text-muted)" }} className="text-sm leading-6">
                     Add `DATABASE_URL` and `DIRECT_URL`, then run `bun run db:push` before opening saved projects.
                 </p>
-            </motion.div>
+            </div>
         </div>
     )
 
     if (error || !activeProject) return (
         <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-void-darkest)" }}>
-            <motion.div
-                className="text-center"
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: duration.normal, ease: easeOut }}
-            >
+            <div className="fade-up-in text-center">
                 <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5" style={{ background: "rgba(244,63,94,0.1)", border: "1px solid rgba(244,63,94,0.2)" }}>
                     <span className="text-2xl">🔍</span>
                 </div>
                 <h1 className="text-xl font-bold mb-2" style={{ color: "var(--text-primary)" }}>Project not found</h1>
                 <p style={{ color: "var(--text-muted)" }} className="text-sm max-w-xs mx-auto">This project does not exist or you do not have permission to view it.</p>
-            </motion.div>
+            </div>
         </div>
     )
 
@@ -395,24 +387,15 @@ const Editor = () => {
                 style={{ ...accentCSS }}
             >
                 {/* Processing overlay */}
-                <AnimatePresence>
-                    {processingMessage && (
-                        <motion.div
-                            className="neo-loader-surface fixed inset-0 z-50 flex flex-col items-center justify-center gap-5"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            transition={{ duration: 0.2 }}
-                        >
+                {processingMessage && (
+                        <div className="neo-loader-surface fade-in-fast fixed inset-0 z-50 flex flex-col items-center justify-center gap-5">
                             <AuroraLoader message={processingMessage} phase={processingPhase} />
-                            <motion.button
+                            <button
                                 type="button"
                                 onClick={cancelProcessing}
-                                initial={{ opacity: 0, y: 8 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                transition={{ delay: 0.4, duration: 0.25 }}
-                                className="px-5 py-2 rounded-lg text-xs font-semibold tracking-wide uppercase"
+                                className="fade-up-in px-5 py-2 rounded-lg text-xs font-semibold tracking-wide uppercase"
                                 style={{
+                                    "--rise-delay": "400ms",
                                     background: 'rgba(244, 63, 94, 0.12)',
                                     border: '1px solid rgba(244, 63, 94, 0.3)',
                                     color: 'rgba(244, 63, 94, 0.9)',
@@ -423,14 +406,16 @@ const Editor = () => {
                                 onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(244, 63, 94, 0.12)'; e.currentTarget.style.borderColor = 'rgba(244, 63, 94, 0.3)' }}
                             >
                                 Cancel
-                            </motion.button>
-                        </motion.div>
+                            </button>
+                        </div>
                     )}
-                </AnimatePresence>
 
-                <CommandPalette isOpen={showCommandPalette} onClose={() => setShowCommandPalette(false)} />
+                {showCommandPalette && (
+                    <CommandPalette isOpen onClose={() => setShowCommandPalette(false)} />
+                )}
+                {showRadialMenu && (
                 <RadialToolMenu
-                    visible={showRadialMenu}
+                    visible
                     position={radialMenuPosition}
                     holdMode
                     onClose={() => {
@@ -442,6 +427,7 @@ const Editor = () => {
                     onHoverToolChange={handleRadialHoverChange}
                     onToolSelect={handleActiveToolChange}
                 />
+                )}
                 <ContextualActionBar />
                 <EditorTopbar
                     project={activeProject}
@@ -455,20 +441,13 @@ const Editor = () => {
                     matching the standard overlay-drawer pattern. The element is
                     always mounted but inert when closed so the fade-in transition
                     can play on open without remounting. */}
-                <AnimatePresence>
-                    {isNarrowViewport && isSidebarOpen && (
-                        <motion.div
-                            key="sidebar-backdrop"
-                            className="editor-sidebar-backdrop"
-                            onClick={() => setIsSidebarOpen(false)}
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            transition={{ duration: 0.18, ease: easeOut }}
-                            aria-hidden="true"
-                        />
-                    )}
-                </AnimatePresence>
+                {isNarrowViewport && isSidebarOpen && (
+                    <div
+                        className="editor-sidebar-backdrop fade-in-fast"
+                        onClick={() => setIsSidebarOpen(false)}
+                        aria-hidden="true"
+                    />
+                )}
 
                 {/* CanvasEditor MUST stay mounted across the AI-agent toggle so the
                     Fabric canvas (and its undo/mask state) isn't disposed and
@@ -485,7 +464,7 @@ const Editor = () => {
                 {(() => {
                     const isAgent = activeTool === "ai_agent"
                     return (
-                        <motion.div ref={workspaceRef} className={`editor-workspace flex min-h-0 flex-1 overflow-hidden ${isAgent ? "flex-row-reverse editor-workspace--agent" : ""}`}>
+                        <div ref={workspaceRef} className={`editor-workspace flex min-h-0 flex-1 overflow-hidden ${isAgent ? "flex-row-reverse editor-workspace--agent" : ""}`}>
                             <EditorSidebar project={activeProject} width={isAgent ? agentSidebarWidth : sidebarWidth} />
                             <div
                                 role="separator"
@@ -503,7 +482,7 @@ const Editor = () => {
                             <div className={`min-w-0 flex-1${isAgent ? " agent-live-image-pane" : ""}`}>
                                 <CanvasEditor project={activeProject} />
                             </div>
-                        </motion.div>
+                        </div>
                     )
                 })()}
             </div>}
@@ -512,13 +491,13 @@ const Editor = () => {
                 canvas + toolbar can't fit usefully even with overlays. iPad
                 portrait (768×1024) and larger now reach the full editor. */}
             <div className="md:hidden min-h-screen flex items-center justify-center p-6" style={{ background: "var(--bg-void-darkest)" }}>
-                <motion.div className="text-center max-w-md" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+                <div className="fade-in-fast text-center max-w-md">
                     <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6" style={{ background: "rgba(6,184,212,0.1)", border: "1px solid rgba(6,184,212,0.2)" }}>
                         <Monitor className="h-7 w-7" style={{ color: "var(--accent-ink)" }} />
                     </div>
                     <h1 className="text-xl font-bold mb-3" style={{ color: "var(--text-primary)" }}>Tablet or larger needed</h1>
                     <p style={{ color: "var(--text-muted)" }} className="text-sm">The editor works on tablets (768px+) and up. Rotate to landscape or open this on a larger screen.</p>
-                </motion.div>
+                </div>
             </div>
         </CanvasContext.Provider>
     )

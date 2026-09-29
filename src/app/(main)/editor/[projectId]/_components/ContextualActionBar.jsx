@@ -1,7 +1,6 @@
 "use client"
 
 import React, { useState, useEffect, useRef, useCallback } from "react"
-import { motion } from "framer-motion"
 import {
     Copy, Trash2, FlipHorizontal, FlipVertical, RotateCw,
     Lock, Unlock, Palette, Wand2,
@@ -185,16 +184,13 @@ const ContextualActionBar = () => {
             // and pointer-events on, so a deselected bar went on swallowing clicks.
             // The outer node owns position (glass-panel forces position: relative,
             // so it cannot be the positioned one) and the entrance animation.
-            <motion.div
+            <div
                 ref={barRef}
                 className="fixed z-40"
-                style={{ left: 0, top: 0, x: '-50%', pointerEvents: 'auto' }}
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                style={{ left: 0, top: 0, transform: 'translateX(-50%)', pointerEvents: 'auto' }}
             >
                 <div
-                    className="flex items-center gap-1 px-2 py-1.5 rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] glass-panel border-[var(--glass-border)]"
+                    className="selection-bar-pop flex items-center gap-1 px-2 py-1.5 rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] glass-panel border-[var(--glass-border)]"
                     style={{ backdropFilter: 'blur(28px) saturate(1.6)', WebkitBackdropFilter: 'blur(28px) saturate(1.6)' }}
                 >
                     <div className="px-2 py-0.5 rounded-lg text-[9px] font-semibold uppercase tracking-wider mr-1 pill-control"
@@ -221,7 +217,7 @@ const ContextualActionBar = () => {
                         </>
                     )}
                 </div>
-            </motion.div>
+            </div>
         )
     )
 }
@@ -229,8 +225,9 @@ const ContextualActionBar = () => {
 const ActionButton = ({ icon: Icon, title, onClick, isDestructive = false }) => {
     const [isHovered, setIsHovered] = useState(false)
     return (
-        <motion.button
-            className="flex items-center justify-center w-7 h-7 rounded-full"
+        <button
+            type="button"
+            className="tap-shrink flex items-center justify-center w-7 h-7 rounded-full"
             style={{
                 // Intentionally NOT using .pill-control — that class injects 16px
                 // horizontal padding which exceeds the 28px button width, clipping
@@ -250,12 +247,11 @@ const ActionButton = ({ icon: Icon, title, onClick, isDestructive = false }) => 
             onClick={onClick}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
-            whileTap={{ scale: 0.9 }}
             title={title}
             aria-label={title}
         >
             <Icon className="h-3.5 w-3.5" strokeWidth={2} />
-        </motion.button>
+        </button>
     )
 }
 

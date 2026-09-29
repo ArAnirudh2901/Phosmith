@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from 'react'
 import { usePathname } from 'next/navigation'
-import Lenis from 'lenis'
 import { useReducedMotion } from '@/lib/motion'
 
 const NATIVE_SCROLL_ROUTES = ['/dashboard', '/editor']
@@ -21,6 +20,8 @@ export function SmoothScrollProvider({ children }) {
   const frameRef = useRef(null)
 
   useEffect(() => {
+    let cancelled = false
+
     if (reduced || shouldUseNativeScroll(pathname)) {
       if (lenisRef.current) {
         lenisRef.current.destroy()
@@ -42,31 +43,39 @@ export function SmoothScrollProvider({ children }) {
     // stale offset and the smooth-scroll page appears blank.
     window.scrollTo(0, 0)
 
-    const lenis = new Lenis({
-      duration: 0.85,
-      easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
-      smoothWheel: true,
-      syncTouch: false,
+    // Dynamic import: root layout, so a static one ships Lenis to /dashboard and
+    // /editor, which scroll natively.
+    import('lenis').then(({ default: Lenis }) => {
+      if (cancelled) return
+
+      const lenis = new Lenis({
+        duration: 0.85,
+        easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
+        smoothWheel: true,
+        syncTouch: false,
+      })
+
+      // Sync Lenis to position 0 immediately so it doesn't
+      // interpolate from a stale scroll offset.
+      lenis.scrollTo(0, { immediate: true })
+
+      lenisRef.current = lenis
+
+      function raf(time) {
+        lenis.raf(time)
+        frameRef.current = requestAnimationFrame(raf)
+      }
+
+      frameRef.current = requestAnimationFrame(raf)
     })
 
-    // Sync Lenis to position 0 immediately so it doesn't
-    // interpolate from a stale scroll offset.
-    lenis.scrollTo(0, { immediate: true })
-
-    lenisRef.current = lenis
-
-    function raf(time) {
-      lenis.raf(time)
-      frameRef.current = requestAnimationFrame(raf)
-    }
-
-    frameRef.current = requestAnimationFrame(raf)
-
     return () => {
+      cancelled = true
       if (frameRef.current) cancelAnimationFrame(frameRef.current)
       frameRef.current = null
+      const lenis = lenisRef.current
       lenisRef.current = null
-      lenis.destroy()
+      if (lenis) lenis.destroy()
     }
   }, [pathname, reduced])
 

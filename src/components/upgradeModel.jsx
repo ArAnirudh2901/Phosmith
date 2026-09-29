@@ -1,6 +1,5 @@
 "use client"
 
-import { motion } from "framer-motion"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Crown, Zap } from "lucide-react"
 import { Alert, AlertDescription } from "./ui/alert"
@@ -33,12 +32,9 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason, isPro = false }
 
                 <DialogHeader>
                     <div className="flex items-center gap-4">
-                        <motion.div
-                            animate={{ rotate: [0, 15, -15, 0], scale: [1, 1.1, 1.1, 1] }}
-                            transition={{ duration: 2, repeat: Infinity }}
-                        >
+                        <div className="crown-wiggle">
                             <Crown className="h-7 w-7 text-[#D946EF]" />
-                        </motion.div>
+                        </div>
                         <div>
                             <DialogTitle className="text-2xl font-bold text-white tracking-tight">
                                 {isPro ? "You're on Pro" : "Upgrade to Pro"}
@@ -54,11 +50,7 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason, isPro = false }
 
                 <div className="space-y-6">
                     {restrictedTool && !isPro && (
-                        <motion.div
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.3 }}
-                        >
+                        <div className="drop-in">
                             <Alert className="bg-[#D946EF]/10 border-[#D946EF]/25">
                                 <Zap className="h-5 w-5 text-[#D946EF]" />
                                 <AlertDescription className="text-[#D946EF]/90">
@@ -73,15 +65,11 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason, isPro = false }
                                         : "Upgrade to Pro to access this feature")}
                                 </AlertDescription>
                             </Alert>
-                        </motion.div>
+                        </div>
                     )}
 
                     {isPro && (
-                        <motion.div
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.3 }}
-                        >
+                        <div className="drop-in">
                             <Alert className="bg-[#06B8D4]/10 border-[#06B8D4]/25">
                                 <Crown className="h-5 w-5 text-[#06B8D4]" />
                                 <AlertDescription className="text-[#06B8D4]/90">
@@ -89,16 +77,11 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason, isPro = false }
                                     You have full access to all Pro tools. Use the pricing table below to manage your subscription.
                                 </AlertDescription>
                             </Alert>
-                        </motion.div>
+                        </div>
                     )}
 
                     {!isPro && (
-                        <motion.div
-                            className="grid grid-cols-2 gap-3"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ delay: 0.2 }}
-                        >
+                        <div className="fade-in-late grid grid-cols-2 gap-3">
                             {[
                                 { icon: Zap, label: "AI Generative Fill", color: "#00E5FF" },
                                 { icon: Crown, label: "Priority Processing", color: "#FBBF24" },
@@ -114,7 +97,7 @@ const UpgradeModel = ({ isOpen, onClose, restrictedTool, reason, isPro = false }
                                     <span className="text-xs text-[var(--text-secondary)]">{feat.label}</span>
                                 </div>
                             ))}
-                        </motion.div>
+                        </div>
                     )}
 
                     <div className="pricing-table-shell w-full">

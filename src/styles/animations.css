@@ -255,3 +255,268 @@
     animation: none;
   }
 }
+
+/* Mobile nav drawer. CSS rather than framer-motion: the header is in the root
+   layout, so importing framer there puts it in the bundle every route loads.
+   The closed drawer is visibility:hidden as well as transparent, so it can never
+   sit over the page swallowing clicks. */
+.nav-drawer-scrim,
+.nav-drawer {
+    transition: opacity 200ms cubic-bezier(0.16, 1, 0.3, 1),
+        transform 350ms cubic-bezier(0.16, 1, 0.3, 1),
+        visibility 0s linear 350ms;
+    visibility: hidden;
+    opacity: 0;
+}
+
+.nav-drawer {
+    transform: translateX(100%);
+}
+
+.nav-drawer-scrim[data-open="true"],
+.nav-drawer[data-open="true"] {
+    visibility: visible;
+    opacity: 1;
+    transition-delay: 0s;
+}
+
+.nav-drawer[data-open="true"] {
+    transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nav-drawer-scrim,
+    .nav-drawer {
+        transition-duration: 0s;
+    }
+}
+
+/* Landing entrance animations. CSS rather than framer-motion: the hero is the
+   first thing a visitor downloads, and framer is 131 KB before it paints. Each
+   element carries its own --rise-delay, which is what the stagger was. */
+.rise-in {
+    opacity: 0;
+    animation: rise-in 520ms cubic-bezier(0.16, 1, 0.3, 1) var(--rise-delay, 0ms) both;
+}
+
+@keyframes rise-in {
+    from { opacity: 0; transform: translate3d(0, 18px, 0); }
+    to { opacity: 1; transform: none; }
+}
+
+.rise-in-word {
+    display: inline-block;
+    margin-right: 6px;
+    opacity: 0;
+    animation: rise-in-word 400ms cubic-bezier(0.16, 1, 0.3, 1) var(--rise-delay, 0ms) both;
+}
+
+@keyframes rise-in-word {
+    from { opacity: 0; transform: translate3d(0, 8px, 0); }
+    to { opacity: 1; transform: none; }
+}
+
+/* Hero tool chips: lift on hover. */
+.hero-chip {
+    transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+        box-shadow 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hero-chip:hover {
+    transform: translate3d(0, -3px, 0);
+    box-shadow: 5px 8px 0 0 #06B8D4, inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* No animation must ever mean no content: the reduced-motion case shows
+   everything outright rather than leaving an element at opacity 0. */
+@media (prefers-reduced-motion: reduce) {
+    .rise-in,
+    .rise-in-word {
+        animation: none;
+        opacity: 1;
+    }
+    .hero-chip { transition: none; }
+}
+
+/* Scroll reveal (see hooks/useReveal.js). The armed class is added by JS, so the
+   content is visible whenever the observer never runs. Both selectors in each
+   pair exist because the reveal root is sometimes the revealed element itself. */
+.reveal-armed .reveal,
+.reveal-armed.reveal {
+    opacity: 0;
+}
+
+.reveal-armed.reveal-in .reveal,
+.reveal-armed.reveal-in.reveal {
+    animation: rise-in 520ms cubic-bezier(0.16, 1, 0.3, 1) var(--rise-delay, 0ms) both;
+}
+
+/* Modal overlay. Stays mounted so it can animate both ways in CSS, and is
+   visibility:hidden when closed so it is never an invisible click target. */
+.overlay-scrim {
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 160ms ease, visibility 160ms step-end;
+}
+
+.overlay-scrim[data-open="true"] {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 160ms ease, visibility 0s;
+}
+
+.overlay-card {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.96);
+    transition: opacity 200ms cubic-bezier(0.16, 1, 0.3, 1), transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.overlay-scrim[data-open="true"] .overlay-card {
+    opacity: 1;
+    transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .overlay-scrim,
+    .overlay-card {
+        transition-duration: 0s;
+    }
+}
+
+/* Dashboard project cards. Fill mode is `backwards`, not `both`: an animation that
+   fills forwards keeps its end transform and would beat the hover lift for the
+   rest of the session. */
+.card-enter {
+    animation: card-enter 350ms cubic-bezier(0.16, 1, 0.3, 1) var(--rise-delay, 0ms) backwards;
+}
+
+@keyframes card-enter {
+    from { opacity: 0; transform: translate3d(0, 8px, 0); }
+    to { opacity: 1; transform: none; }
+}
+
+.card-lift:hover {
+    transform: translate3d(0, -4px, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .card-enter { animation: none; }
+    .card-lift:hover { transform: none; }
+}
+
+/* Upgrade dialog. */
+.crown-wiggle {
+    display: inline-flex;
+    animation: crown-wiggle 2s ease-in-out infinite;
+}
+
+@keyframes crown-wiggle {
+    0% { transform: none; }
+    25% { transform: rotate(15deg) scale(1.1); }
+    50% { transform: rotate(-15deg) scale(1.1); }
+    100% { transform: none; }
+}
+
+.drop-in {
+    animation: drop-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes drop-in {
+    from { opacity: 0; transform: translate3d(0, -10px, 0); }
+    to { opacity: 1; transform: none; }
+}
+
+.fade-in-late {
+    animation: fade-in-late 300ms ease 200ms both;
+}
+
+@keyframes fade-in-late {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .crown-wiggle { animation: none; }
+    .drop-in, .fade-in-late { animation: none; opacity: 1; }
+}
+
+/* Editor loader blocks. */
+.neo-loader-block {
+    animation: loader-block-pulse 1.4s ease-in-out var(--block-delay, 0ms) infinite;
+}
+
+@keyframes loader-block-pulse {
+    0%, 100% { opacity: 0.15; }
+    50% { opacity: 1; }
+}
+
+/* Selection toolbar. The pop lives on the inner node: the outer node carries the
+   imperative left/top and the -50% centring, and an animation on it would beat
+   that transform. */
+.selection-bar-pop {
+    transform-origin: center bottom;
+    animation: selection-bar-pop 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes selection-bar-pop {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: none; }
+}
+
+.tap-shrink:active {
+    transform: scale(0.9);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .neo-loader-block { animation: none; opacity: 0.8; }
+    .selection-bar-pop { animation: none; }
+    .tap-shrink:active { transform: none; }
+}
+
+/* Editor shells: the states that replace the canvas (loading, error, mobile) and
+   the processing overlay. */
+.fade-up-in {
+    animation: fade-up-in 350ms cubic-bezier(0.16, 1, 0.3, 1) var(--rise-delay, 0ms) both;
+}
+
+@keyframes fade-up-in {
+    from { opacity: 0; transform: translate3d(0, 12px, 0); }
+    to { opacity: 1; transform: none; }
+}
+
+.fade-in-fast {
+    animation: fade-in-fast 200ms ease both;
+}
+
+@keyframes fade-in-fast {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .fade-up-in, .fade-in-fast { animation: none; opacity: 1; }
+}
+
+/* Export menu: the panel drops from its button, its items slide in from the right. */
+.menu-drop-in {
+    animation: menu-drop-in 150ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes menu-drop-in {
+    from { opacity: 0; transform: translate3d(0, -8px, 0) scale(0.96); }
+    to { opacity: 1; transform: none; }
+}
+
+.menu-item-in {
+    animation: menu-item-in 150ms ease var(--rise-delay, 0ms) both;
+}
+
+@keyframes menu-item-in {
+    from { opacity: 0; transform: translate3d(6px, 0, 0); }
+    to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .menu-drop-in, .menu-item-in { animation: none; opacity: 1; }
+}

@@ -1,0 +1,41 @@
+/* NeoCard's pointer tilt and glare. CSS transitions rather than framer-motion
+   springs: this card is on the landing page, and framer costs 131 KB there. The
+   pointer handler writes the four custom properties; the transition eases them,
+   so tracking the cursor causes no React render. */
+.neo-card {
+    --tilt-x: 0deg;
+    --tilt-y: 0deg;
+    --glare-x: 50%;
+    --glare-y: 50%;
+    position: relative;
+    border-radius: 4px;
+    transform-style: preserve-3d;
+    perspective: 800px;
+    transform: rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+    transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.neo-card__glare,
+.neo-card__glow {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.neo-card__glare {
+    background: radial-gradient(circle at var(--glare-x) var(--glare-y), rgba(255, 255, 255, 0.1), transparent 55%);
+    mix-blend-mode: screen;
+}
+
+.neo-card__glow {
+    background: radial-gradient(220px circle at var(--glare-x) var(--glare-y), var(--neo-card-accent-wash), transparent 70%);
+}
+
+.neo-card__body {
+    position: relative;
+    z-index: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .neo-card { transition: none; }
+}

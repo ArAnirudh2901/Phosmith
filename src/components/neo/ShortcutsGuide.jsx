@@ -1,7 +1,6 @@
 "use client"
 
 import React, { useEffect } from "react"
-import { motion, AnimatePresence } from "framer-motion"
 import { X } from "lucide-react"
 
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
@@ -165,16 +164,15 @@ const ShortcutsGuide = ({ open, onClose, variant = "editor" }) => {
     }, [open, onClose])
 
     return (
-        <AnimatePresence>
-            {open && (
-                <motion.div
-                    key="shortcuts-backdrop"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.16 }}
-                    onClick={onClose}
-                    style={{
+        // Mounted always, opened in CSS (see animations.css): framer-motion is 131 KB
+        // and this overlay is on the first element of the landing page. It is
+        // visibility:hidden and inert when closed, so it is never a hidden click target.
+        <div
+            className="overlay-scrim"
+            data-open={open}
+            onClick={onClose}
+            {...(open ? {} : { inert: "" })}
+            style={{
                         position: "fixed",
                         inset: 0,
                         zIndex: 220,
@@ -187,14 +185,10 @@ const ShortcutsGuide = ({ open, onClose, variant = "editor" }) => {
                         padding: 24,
                     }}
                 >
-                    <motion.div
-                        key="shortcuts-card"
-                        initial={{ opacity: 0, scale: 0.96, y: 8 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-                        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                        onClick={(event) => event.stopPropagation()}
-                        style={{
+            <div
+                className="overlay-card"
+                onClick={(event) => event.stopPropagation()}
+                style={{
                             maxWidth: 720,
                             width: "100%",
                             maxHeight: "85vh",
@@ -324,10 +318,8 @@ const ShortcutsGuide = ({ open, onClose, variant = "editor" }) => {
                             <span>Press <Key>?</Key> anywhere to toggle</span>
                             <span>Esc to close</span>
                         </div>
-                    </motion.div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+            </div>
+        </div>
     )
 }
 

@@ -13,7 +13,6 @@ import { IMAGE_UPLOAD_ACCEPT } from '@/lib/raw-preview'
 import ProBadge from '@/components/pro-badge'
 import PhosmithWordmark from '@/components/phosmith-wordmark'
 import ShortcutsGuide from '@/components/neo/ShortcutsGuide'
-import { motion, AnimatePresence } from 'framer-motion'
 import { snapshotCanvasToBlobSafe, isTaintError } from '@/lib/canvas-snapshot'
 
 const EXPORT_PRESETS = [
@@ -400,7 +399,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         to PanelRight when the agent sidebar (right side) is active so the
                         affordance points at the side it affects. */}
                     {onToggleSidebar && (
-                        <motion.button
+                        <button
                             onClick={onToggleSidebar}
                             className="editor-icon-button flex lg:hidden items-center justify-center flex-none !min-h-11 !min-w-11"
                             title={isSidebarOpen ? 'Hide tools panel' : 'Show tools panel'}
@@ -411,7 +410,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                             {activeTool === 'ai_agent'
                                 ? <PanelRight className="h-4 w-4" />
                                 : <PanelLeft className="h-4 w-4" />}
-                        </motion.button>
+                        </button>
                     )}
 
                     <Link
@@ -425,14 +424,14 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
 
                     {/* Back arrow — redundant with the logo link (both go to /dashboard).
                         Hidden below xl to save ~40px of width on laptops/tablets. */}
-                    <motion.button
+                    <button
                         onClick={handleBackToDashboard}
                         className="editor-icon-button hidden xl:flex items-center justify-center flex-none"
                         title="Back to projects"
                         aria-label="Back to projects"
                     >
                         <ArrowLeft className="h-4 w-4" />
-                    </motion.button>
+                    </button>
 
                     <div className="hidden xl:block h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
@@ -497,7 +496,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     keyboard shortcuts (⌘0, ?). */}
                 <div className="flex items-center justify-end gap-1.5 lg:gap-2 xl:gap-2.5 min-[1700px]:gap-3 flex-none" style={{ overflow: 'visible' }}>
                     {/* Undo / Redo — always visible (core workflow) */}
-                    <motion.button
+                    <button
                         onClick={handleUndo}
                         disabled={!canUndo}
                         className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
@@ -505,9 +504,9 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         aria-label="Undo"
                     >
                         <Undo2 className="h-3.5 w-3.5" />
-                    </motion.button>
+                    </button>
 
-                    <motion.button
+                    <button
                         onClick={handleRedo}
                         disabled={!canRedo}
                         className="editor-icon-button flex items-center justify-center disabled:opacity-35 disabled:pointer-events-none flex-none"
@@ -515,7 +514,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         aria-label="Redo"
                     >
                         <Redo2 className="h-3.5 w-3.5" />
-                    </motion.button>
+                    </button>
 
                     <div className="hidden lg:block h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
@@ -536,7 +535,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                     {/* Add image — keyboard-accessible via Shift+I, hide at <lg
                         to keep the row tight. Tablet users get the same affordance
                         from inside the Images tool panel. */}
-                    <motion.button
+                    <button
                         onClick={() => addImageInputRef.current?.click()}
                         disabled={!canvasEditor}
                         className="editor-icon-button hidden lg:flex items-center justify-center disabled:opacity-35 flex-none"
@@ -544,22 +543,22 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         aria-label="Add image"
                     >
                         <ImagePlus className="h-3.5 w-3.5" />
-                    </motion.button>
+                    </button>
 
                     <div className="hidden xl:block h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Reset View — hide below xl (⌘0 keyboard shortcut still works) */}
-                    <motion.button
+                    <button
                         onClick={() => canvasEditor?.__resetCanvasView?.()}
                         className="editor-icon-button hidden xl:flex items-center justify-center flex-none"
                         title="Reset view"
                         aria-label="Reset view"
                     >
                         <ZoomIn className="h-3.5 w-3.5" />
-                    </motion.button>
+                    </button>
 
                     {/* Save — always visible (it's the core "don't lose your work" button) */}
-                    <motion.button
+                    <button
                         onClick={handleSave}
                         disabled={isSaving}
                         className="editor-icon-button flex items-center justify-center flex-none disabled:opacity-50 disabled:cursor-wait"
@@ -569,23 +568,23 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                         {isSaving
                             ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             : <Save className="h-3.5 w-3.5" />}
-                    </motion.button>
+                    </button>
 
                     {/* Keyboard shortcuts — always visible; also openable via the ? key */}
-                    <motion.button
+                    <button
                         onClick={() => setShowShortcuts(true)}
                         className="editor-icon-button flex items-center justify-center flex-none"
                         title="Keyboard shortcuts (?)"
                         aria-label="Show keyboard shortcuts"
                     >
                         <Keyboard className="h-3.5 w-3.5" />
-                    </motion.button>
+                    </button>
 
                     <div className="h-5 w-px flex-none" style={{ background: 'var(--border-default)' }} />
 
                     {/* Export dropdown */}
                     <div className="relative flex-none" ref={exportMenuRef}>
-                        <motion.button
+                        <button
                             onClick={() => setShowExportMenu(prev => !prev)}
                             disabled={isExporting}
                             aria-haspopup="menu"
@@ -615,15 +614,14 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                 : <Download className="h-3.5 w-3.5" strokeWidth={2.5} />}
                             Export
                             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showExportMenu ? 'rotate-180' : ''}`} />
-                        </motion.button>
+                        </button>
 
-                        <AnimatePresence>
-                            {showExportMenu && (
-                                <motion.div
+                        {showExportMenu && (
+                                <div
                                     id="export-menu"
                                     role="menu"
                                     aria-label="Export options"
-                                    className="absolute right-0 top-full mt-2 z-50 overflow-hidden"
+                                    className="menu-drop-in absolute right-0 top-full mt-2 z-50 overflow-hidden"
                                     style={{
                                         width: 'clamp(240px, 22vw, 280px)',
                                         background: '#000',
@@ -632,10 +630,6 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                         boxShadow: `5px 5px 0 0 rgba(${accentRgb}, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.08)`,
                                         transformOrigin: 'top right',
                                     }}
-                                    initial={{ opacity: 0, y: -8, scale: 0.96 }}
-                                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                                    exit={{ opacity: 0, y: -8, scale: 0.96 }}
-                                    transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
                                 >
                                     {/* Header strip */}
                                     <div
@@ -740,17 +734,14 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                     <div style={{ padding: '0.35rem' }}>
                                         {/* Copy to clipboard — sits at the top because it's
                                             the fastest "I just want this image" path. */}
-                                        <motion.button
+                                        <button
                                             key="copy-to-clipboard"
                                             type="button"
                                             role="menuitem"
-                                            initial={{ opacity: 0, x: 6 }}
-                                            animate={{ opacity: 1, x: 0 }}
-                                            transition={{ duration: 0.15 }}
                                             onClick={handleCopyToClipboard}
                                             disabled={isExporting}
                                             aria-label={copyState === 'copied' ? 'Copied to clipboard' : 'Copy image to clipboard'}
-                                            className="neo-export-item"
+                                            className="neo-export-item menu-item-in"
                                             style={{
                                                 display: 'flex',
                                                 width: '100%',
@@ -831,7 +822,7 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                     PNG · paste into Slack, Notion, anywhere
                                                 </div>
                                             </div>
-                                        </motion.button>
+                                        </button>
 
                                         {/* Divider between the clipboard shortcut and the download presets. */}
                                         <div
@@ -844,18 +835,16 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                         />
 
                                         {EXPORT_PRESETS.map((preset, idx) => (
-                                            <motion.button
+                                            <button
                                                 key={preset.id}
                                                 type="button"
                                                 role="menuitem"
-                                                initial={{ opacity: 0, x: 6 }}
-                                                animate={{ opacity: 1, x: 0 }}
-                                                transition={{ delay: (idx + 1) * 0.04, duration: 0.15 }}
                                                 onClick={() => handleExport(preset)}
                                                 disabled={isExporting}
                                                 aria-label={`Download as ${preset.label}${exportScale > 1 ? ` at ${exportScale}× resolution` : ''}`}
-                                                className="neo-export-item"
+                                                className="neo-export-item menu-item-in"
                                                 style={{
+                                                    "--rise-delay": `${(idx + 1) * 40}ms`,
                                                     display: 'flex',
                                                     width: '100%',
                                                     alignItems: 'center',
@@ -933,12 +922,11 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
                                                         {preset.description}
                                                     </div>
                                                 </div>
-                                            </motion.button>
+                                            </button>
                                         ))}
                                     </div>
-                                </motion.div>
+                                </div>
                             )}
-                        </AnimatePresence>
                     </div>
                 </div>
             </div>

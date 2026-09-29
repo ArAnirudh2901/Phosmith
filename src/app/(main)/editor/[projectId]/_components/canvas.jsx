@@ -13,15 +13,9 @@ import {
     config as fabricConfig,
 } from "fabric"
 import { bindDoodlesToImage, followDoodles } from "@/lib/canvas-doodle-bind"
-// Side-effect import: registers PhosmithCurves filter in Fabric's classRegistry so
-// loadFromJSON can rehydrate saved canvas state that contains it.
-import "../../../../../lib/curves-filter"
-// Eagerly register the MegashaderFilter class with Fabric's classRegistry at
-// module load. Without this, a project saved with a persisted megashader mask
-// chain would have its `type: "Megashader"` filter silently dropped by
-// loadFromJSON (the class wouldn't be registered yet — it was previously only
-// imported lazily when the mask tool fired its first change event).
-import "@/lib/megashader/fabric-megashader-filter"
+// PhosmithCurves/Megashader registered before loadFromJSON only when the saved state
+// names them, else warmed after paint — see lib/canvas-filter-registry.js.
+import { ensureCanvasFilters, stateNeedsCanvasFilters } from "@/lib/canvas-filter-registry"
 // Empty collage slots must rehydrate as their own class.
 import "@/lib/collage/slot"
 
@@ -77,6 +71,7 @@ import { createCanvasSync, loadLocalState, clearLocalState } from "../../../../.
 import { createPresenceChannel } from "../../../../../lib/canvas-presence"
 import { toast } from "sonner"
 import { isPhosmithMaskOverlay } from "../../../../../lib/canvas-mask"
+import { setDomainHost } from "@/lib/agent/domain-host"
 import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
 import AuroraLoader from "./AuroraLoader"
 
@@ -1010,6 +1005,9 @@ const CanvasEditor = ({ project }) => {
             if (canvasState) {
                 let loadedFromState = false
                 try {
+                    // A filter class Fabric cannot enliven is dropped silently, so the
+                    // lazy registration is awaited whenever the state names one.
+                    if (stateNeedsCanvasFilters(canvasState)) await ensureCanvasFilters()
                     await canvas.loadFromJSON(canvasState.canvas || canvasState)
                     // Restore the "grade background" intent so it keeps tracking after reload.
                     canvas.__phosmithGradeBackground = Boolean(canvasState.gradeBackground)
@@ -1794,43 +1792,34 @@ const CanvasEditor = ({ project }) => {
         }
     }, [canvasEditor])
 
-    // Register the UI-decoupled mask command surface so the in-app agent can
-    // drive masking headlessly (NOT wired to any agent yet — see
-    // src/lib/agent/). Resolves the active primary image from the live canvas
-    // on each call so commands always target the current image.
+    // Publish accessors; the agent panel loads the domains on first use
+    // (lib/agent/domain-host.js).
     useEffect(() => {
-        let unregisterMask = () => {}
-        let unregisterCrop = () => {}
-        let unregisterCollage = () => {}
-        let unregisterFocus = () => {}
-        let unregisterStretch = () => {}
-        let cancelled = false
-        Promise.all([
-            import('@/lib/agent/command-registry'),
-            import('@/lib/agent/mask-commands'),
-            import('@/lib/agent/crop-commands'),
-            import('@/lib/agent/collage-commands'),
-            import('@/lib/agent/focus-commands'),
-            import('@/lib/agent/stretch-commands'),
-        ]).then(([reg, mask, crop, collage, focus, stretch]) => {
-            if (cancelled) return
-            const getPrimaryImage = () => {
-                const canvas = canvasInstanceRef.current
-                if (!canvas) return null
-                const objects = canvas.getObjects?.() || []
-                return objects.find(
-                    (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPhosmithMaskOverlay(obj)
-                ) || null
-            }
-            const getCanvas = () => canvasInstanceRef.current
-            const getProject = () => projectRef.current
-            unregisterMask = reg.registerDomain('mask', mask.createMaskCommands({ getPrimaryImage }))
-            unregisterCrop = reg.registerDomain('crop', crop.createCropCommands({ getPrimaryImage, getCanvas }))
-            unregisterCollage = reg.registerDomain('collage', collage.createCollageCommands({ getCanvas, getProject }))
-            unregisterFocus = reg.registerDomain('focus', focus.createFocusCommands({ getPrimaryImage, getCanvas }))
-            unregisterStretch = reg.registerDomain('stretch', stretch.createStretchCommands({ getPrimaryImage, getCanvas }))
-        }).catch(() => { /* agent layer optional */ })
-        return () => { cancelled = true; unregisterMask(); unregisterCrop(); unregisterCollage(); unregisterFocus(); unregisterStretch() }
+        const getPrimaryImage = () => {
+            const canvas = canvasInstanceRef.current
+            if (!canvas) return null
+            const objects = canvas.getObjects?.() || []
+            return objects.find(
+                (obj) => obj?.type?.toLowerCase?.() === 'image' && !isPhosmithMaskOverlay(obj)
+            ) || null
+        }
+        return setDomainHost({
+            getPrimaryImage,
+            getCanvas: () => canvasInstanceRef.current,
+            getProject: () => projectRef.current,
+        })
+    }, [])
+
+    // Warm the filter classes when idle, so a project that loaded without them still
+    // has them before the first grade.
+    useEffect(() => {
+        const warm = () => { ensureCanvasFilters().catch(() => { /* retried on demand */ }) }
+        if (typeof window.requestIdleCallback === 'function') {
+            const id = window.requestIdleCallback(warm, { timeout: 4000 })
+            return () => window.cancelIdleCallback?.(id)
+        }
+        const id = window.setTimeout(warm, 1500)
+        return () => window.clearTimeout(id)
     }, [])
 
     // Track the last-hydrated URL so we skip redundant re-hydrations when

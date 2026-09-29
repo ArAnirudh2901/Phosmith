@@ -1,17 +1,8 @@
 "use client"
 
 import React from "react"
-import { motion } from "framer-motion"
 import { Check, X } from "lucide-react"
-import {
-    fadeUp,
-    staggerContainer,
-    staggerItem,
-    viewport,
-    useReducedMotion,
-    motionVariants,
-    whileInViewProps,
-} from "@/lib/motion"
+import { useReveal, revealDelay } from "@/hooks/useReveal"
 import NeoButton from "@/components/neo/NeoButton"
 
 const PLANS = [
@@ -57,11 +48,8 @@ const PLANS = [
 ]
 
 const Pricing = () => {
-    const reduced = useReducedMotion()
-    const headerMotion = whileInViewProps(reduced)
-    const container = motionVariants(staggerContainer, reduced)
-    const item = motionVariants(staggerItem, reduced)
-    const fade = motionVariants(fadeUp, reduced)
+    const headerRef = useReveal()
+    const plansRef = useReveal()
 
     return (
         <section
@@ -70,7 +58,7 @@ const Pricing = () => {
             style={{ background: "#07090E", borderTop: "2px solid #F4F4F5" }}
         >
             <div className="max-w-5xl mx-auto px-6">
-                <motion.div className="mb-16" variants={fade} {...headerMotion}>
+                <div ref={headerRef} className="reveal mb-16">
                     <div
                         style={{
                             background: "#0E1118",
@@ -102,17 +90,11 @@ const Pricing = () => {
                         Two tiers.<br />
                         <span className="liquid-reactive-text-stroke">No fluff.</span>
                     </h2>
-                </motion.div>
+                </div>
 
-                <motion.div
-                    className="grid md:grid-cols-2 gap-8"
-                    variants={container}
-                    initial="hidden"
-                    whileInView="visible"
-                    viewport={viewport}
-                >
-                    {PLANS.map((plan) => (
-                        <motion.div key={plan.id} variants={item} className="relative">
+                <div ref={plansRef} className="grid md:grid-cols-2 gap-8">
+                    {PLANS.map((plan, idx) => (
+                        <div key={plan.id} className="reveal relative" style={revealDelay(idx)}>
                             {plan.highlight && (
                                 <div
                                     style={{
@@ -248,9 +230,9 @@ const Pricing = () => {
                                     {plan.ctaLabel}
                                 </NeoButton>
                             </div>
-                        </motion.div>
+                        </div>
                     ))}
-                </motion.div>
+                </div>
             </div>
         </section>
     )

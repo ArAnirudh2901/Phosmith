@@ -1,7 +1,7 @@
 "use client"
 
 import React, { forwardRef, useCallback, useRef, useState } from "react"
-import { motion, useMotionValue, useSpring, useTransform } from "framer-motion"
+import "./neo-button.css"
 
 const VARIANTS = {
     primary: {
@@ -33,8 +33,13 @@ const SIZES = {
     xl: { padding: "19px 34px", fontSize: 14.5, offset: 5 },
 }
 
+const MAGNET_PX = 6
+
 let rippleId = 0
 
+// Magnet/press/ripple are CSS (neo-button.css), not framer springs: reached from the
+// root layout, so a framer import here lands in every route. Pointer writes
+// --neo-dx/--neo-dy onto the node, so cursor tracking costs no React render.
 const NeoButton = forwardRef(function NeoButton(
     {
         children,
@@ -47,6 +52,7 @@ const NeoButton = forwardRef(function NeoButton(
         as: Component,
         href,
         ariaLabel,
+        className,
         ...rest
     },
     ref
@@ -55,35 +61,27 @@ const NeoButton = forwardRef(function NeoButton(
     const v = VARIANTS[variant] || VARIANTS.primary
     const s = SIZES[size] || SIZES.lg
 
-    const x = useMotionValue(0)
-    const y = useMotionValue(0)
-    const sx = useSpring(x, { stiffness: 220, damping: 22, mass: 0.5 })
-    const sy = useSpring(y, { stiffness: 220, damping: 22, mass: 0.5 })
-
-    const shadowX = useTransform(sx, (v) => `${s.offset - v * 0.5}px`)
-    const shadowY = useTransform(sy, (v) => `${s.offset - v * 0.5}px`)
-    const boxShadow = useTransform([shadowX, shadowY], ([sx, sy]) => `${sx} ${sy} 0 0 ${v.shadowColor}`)
-
     const [ripples, setRipples] = useState([])
+
+    const setOffset = (dx, dy) => {
+        const node = innerRef.current
+        if (!node) return
+        node.style.setProperty("--neo-dx", `${dx}px`)
+        node.style.setProperty("--neo-dy", `${dy}px`)
+    }
 
     const handleMouseMove = (event) => {
         if (!magnetic || disabled) return
         const target = innerRef.current
         if (!target) return
         const rect = target.getBoundingClientRect()
-        const cx = rect.left + rect.width / 2
-        const cy = rect.top + rect.height / 2
-        const dx = (event.clientX - cx) / rect.width
-        const dy = (event.clientY - cy) / rect.height
-        const max = 6
-        x.set(Math.max(-max, Math.min(max, dx * max * 2)))
-        y.set(Math.max(-max, Math.min(max, dy * max * 2)))
+        const dx = (event.clientX - (rect.left + rect.width / 2)) / rect.width
+        const dy = (event.clientY - (rect.top + rect.height / 2)) / rect.height
+        const clamp = (value) => Math.max(-MAGNET_PX, Math.min(MAGNET_PX, value * MAGNET_PX * 2))
+        setOffset(clamp(dx), clamp(dy))
     }
 
-    const handleMouseLeave = () => {
-        x.set(0)
-        y.set(0)
-    }
+    const handleMouseLeave = () => setOffset(0, 0)
 
     const spawnRipple = useCallback((clientX, clientY) => {
         const node = innerRef.current
@@ -116,113 +114,74 @@ const NeoButton = forwardRef(function NeoButton(
         [disabled, onClick]
     )
 
-    const pressShadow = `0 0 0 0 ${v.shadowColor}`
-
-    const motionProps = {
+    const sharedProps = {
         ref: (node) => {
             innerRef.current = node
             if (typeof ref === "function") ref(node)
             else if (ref) ref.current = node
         },
-        onMouseMove: handleMouseMove,
-        onMouseLeave: handleMouseLeave,
+        className: className ? `neo-button ${className}` : "neo-button",
+        onMouseMove: magnetic && !disabled ? handleMouseMove : undefined,
+        onMouseLeave: magnetic && !disabled ? handleMouseLeave : undefined,
         onPointerDown: disabled ? undefined : handlePointerDown,
         onClick: disabled ? undefined : handleClick,
-        whileTap: disabled ? undefined : { x: s.offset, y: s.offset, boxShadow: pressShadow, transition: { duration: 0.05, ease: "easeOut" } },
         style: {
-            x: sx,
-            y: sy,
-            boxShadow,
+            "--neo-offset": `${s.offset}px`,
+            "--neo-shadow-color": v.shadowColor,
             background: v.background,
             color: v.color,
             border: v.border,
-            borderRadius: 4,
             padding: s.padding,
             fontSize: s.fontSize,
             cursor: disabled ? "not-allowed" : "pointer",
             opacity: disabled ? 0.55 : 1,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-            fontWeight: 700,
-            letterSpacing: "0.01em",
-            textTransform: "uppercase",
-            fontFamily: 'var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace)',
-            userSelect: "none",
-            position: "relative",
-            overflow: "hidden",
-            transition: "background 140ms ease",
         },
         "aria-label": ariaLabel,
         "aria-disabled": disabled || undefined,
         ...rest,
     }
 
-    const RippleLayer = (
-        <span
-            aria-hidden="true"
-            style={{
-                position: "absolute",
-                inset: 0,
-                pointerEvents: "none",
-                overflow: "hidden",
-                display: "block",
-                zIndex: 0,
-            }}
-        >
-            {ripples.map((r) => (
-                <motion.span
-                    key={r.id}
-                    initial={{ opacity: 0.95, scale: 0 }}
-                    animate={{ opacity: 0, scale: 1 }}
-                    transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
-                    style={{
-                        position: "absolute",
-                        left: r.x - r.size / 2,
-                        top: r.y - r.size / 2,
-                        width: r.size,
-                        height: r.size,
-                        borderRadius: "50%",
-                        background: `radial-gradient(circle, ${v.rippleColor} 0%, ${v.rippleColor} 35%, transparent 70%)`,
-                        display: "block",
-                        pointerEvents: "none",
-                    }}
-                />
-            ))}
-        </span>
-    )
-
     const childContent = (
         <>
-            {RippleLayer}
-            <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 8 }}>
-                {children}
+            <span className="neo-button__ripple-layer" aria-hidden="true">
+                {ripples.map((r) => (
+                    <span
+                        key={r.id}
+                        className="neo-button__ripple"
+                        style={{
+                            left: r.x - r.size / 2,
+                            top: r.y - r.size / 2,
+                            width: r.size,
+                            height: r.size,
+                            background: `radial-gradient(circle, ${v.rippleColor} 0%, ${v.rippleColor} 35%, transparent 70%)`,
+                        }}
+                    />
+                ))}
             </span>
+            <span className="neo-button__label">{children}</span>
         </>
     )
 
     if (Component) {
-        const Tag = motion(Component)
         return (
-            <Tag {...motionProps} href={href}>
+            <Component {...sharedProps} href={href}>
                 {childContent}
-            </Tag>
+            </Component>
         )
     }
 
     if (href) {
         return (
-            <motion.a {...motionProps} href={href}>
+            <a {...sharedProps} href={href}>
                 {childContent}
-            </motion.a>
+            </a>
         )
     }
 
     return (
-        <motion.button type={type} {...motionProps} disabled={disabled}>
+        <button type={type} {...sharedProps} disabled={disabled}>
             {childContent}
-        </motion.button>
+        </button>
     )
 })
 

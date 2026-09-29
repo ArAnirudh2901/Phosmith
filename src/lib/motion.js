@@ -1,6 +1,6 @@
 "use client"
 
-import { useReducedMotion as useFramerReducedMotion } from "framer-motion"
+import { useEffect, useState } from "react"
 
 export const easeOut = [0.16, 1, 0.3, 1]
 
@@ -63,8 +63,21 @@ export function staggerDelay(index, step = 0.04, max = 0.2) {
   return Math.min(index * step, max)
 }
 
+// Reads the media query directly rather than through framer-motion: this module
+// is imported by the root layout, so a framer import here puts the whole library
+// in the shared bundle every route pays for before first paint.
 export function useReducedMotion() {
-  return useFramerReducedMotion() ?? false
+  const [reduced, setReduced] = useState(false)
+
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)")
+    setReduced(query.matches)
+    const onChange = (event) => setReduced(event.matches)
+    query.addEventListener("change", onChange)
+    return () => query.removeEventListener("change", onChange)
+  }, [])
+
+  return reduced
 }
 
 export function motionVariants(variants, reduced) {

@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useCallback, useEffect, useRef, useState } from "react"
+import dynamic from "next/dynamic"
 import Link from "next/link"
 import { api } from "@/lib/neon-api";
 import { useDatabaseMutation, useDatabaseQuery } from "../../../../hooks/useDatabaseQuery"
@@ -9,11 +10,8 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { Calendar, Check, Database, ImageIcon, Loader2, Plus, Trash2, X } from "lucide-react"
-import NewProjectModel from "./_components/newProjectModel"
-import ShortcutsGuide from "@/components/neo/ShortcutsGuide"
 import useDashboardShortcuts from "../../../../hooks/useDashboardShortcuts"
-import { motion, AnimatePresence } from "framer-motion"
-import { duration, easeOut, staggerDelay } from "@/lib/motion"
+import { staggerDelay } from "@/lib/motion"
 import { createProjectPixelDissolver } from "@/lib/project-pixel-effect"
 import {
     AlertDialog,
@@ -28,6 +26,11 @@ import {
 import GlassPanel from "@/components/ui/glass-panel"
 import NeoButton from "@/components/neo/NeoButton"
 import { toUserMessage } from '@/lib/user-error'
+
+// Opened by a click or keystroke, never at load. Upload pulls react-dropzone, the
+// RAW decoder and the metadata stripper.
+const NewProjectModel = dynamic(() => import("./_components/newProjectModel"), { ssr: false })
+const ShortcutsGuide = dynamic(() => import("@/components/neo/ShortcutsGuide"), { ssr: false })
 
 const loadingCards = Array.from({ length: 6 })
 
@@ -87,15 +90,8 @@ const ProjectCard = ({
     const accentRgb = "83, 216, 255"
 
     return (
-        <motion.article
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{
-                duration: duration.normal,
-                delay: staggerDelay(index),
-                ease: easeOut,
-            }}
-            whileHover={!isSelectionMode ? { y: -4 } : {}}
+        <article
+            style={{ "--rise-delay": `${staggerDelay(index) * 1000}ms` }}
             onClick={isSelectionMode ? (event) => onSelect(event, project._id) : undefined}
             onKeyDown={isSelectionMode ? (event) => {
                 if (event.target !== event.currentTarget) return
@@ -108,7 +104,8 @@ const ProjectCard = ({
             data-project-card-id={project._id}
             data-pending-delete={isPendingDelete ? "true" : undefined}
             className={cn(
-                "group/card relative overflow-hidden glass-panel transition-all duration-500 will-change-transform",
+                "card-enter group/card relative overflow-hidden glass-panel transition-all duration-500 will-change-transform",
+                !isSelectionMode && "card-lift",
                 isSelectionMode && "cursor-pointer",
                 isPendingDelete && "project-card-pending-delete pointer-events-none",
             )}
@@ -197,13 +194,15 @@ const ProjectCard = ({
                     </div>
                 </div>
             </div>
-        </motion.article>
+        </article>
     )
 }
 
 const Dashboard = () => {
     const { isLoading: isAuthLoading, isAuthenticated, isSessionReady, databaseSetupMissing } = useStoreUser()
     const [showNewProjectModal, setShowNewProjectModal] = useState(false)
+    // Sticky: a lazy dialog unmounted on close would lose its own exit animation.
+    const [newProjectMounted, setNewProjectMounted] = useState(false)
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedProjectIds, setSelectedProjectIds] = useState([])
     const [deletingProjectId, setDeletingProjectId] = useState(null)
@@ -214,6 +213,15 @@ const Dashboard = () => {
     const [optimisticallyRemovedIds, setOptimisticallyRemovedIds] = useState([])
     const [deleteConfirm, setDeleteConfirm] = useState(emptyDeleteConfirm)
     const [showShortcuts, setShowShortcuts] = useState(false)
+    const [shortcutsMounted, setShortcutsMounted] = useState(false)
+
+    // Latch here, not per call site, so a new opener cannot forget to mount.
+    useEffect(() => {
+        if (showNewProjectModal) setNewProjectMounted(true)
+    }, [showNewProjectModal])
+    useEffect(() => {
+        if (showShortcuts) setShortcutsMounted(true)
+    }, [showShortcuts])
 
     const { data: projects = [], isLoading: isProjectsLoading } = useDatabaseQuery(
         api.projects.getUserProjects,
@@ -657,17 +665,21 @@ const Dashboard = () => {
                     )}
                 </section>
 
-                <NewProjectModel
-                    isOpen={showNewProjectModal}
-                    onClose={() => setShowNewProjectModal(false)}
-                    currentProjectCount={projectCount}
-                />
+                {(showNewProjectModal || newProjectMounted) && (
+                    <NewProjectModel
+                        isOpen={showNewProjectModal}
+                        onClose={() => setShowNewProjectModal(false)}
+                        currentProjectCount={projectCount}
+                    />
+                )}
 
-                <ShortcutsGuide
-                    open={showShortcuts}
-                    onClose={() => setShowShortcuts(false)}
-                    variant="dashboard"
-                />
+                {(showShortcuts || shortcutsMounted) && (
+                    <ShortcutsGuide
+                        open={showShortcuts}
+                        onClose={() => setShowShortcuts(false)}
+                        variant="dashboard"
+                    />
+                )}
 
                 <AlertDialog
                     open={deleteConfirm.open}

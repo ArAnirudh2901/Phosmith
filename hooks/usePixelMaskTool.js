@@ -27,6 +27,7 @@ import {
     stampMask,
     strokeMaskSegment,
 } from '@/lib/canvas-mask'
+import { lockPixelTool, unlockPixelTool } from '@/lib/pixel-tool-lock'
 import { getRoutingMode } from '@/lib/ai-routing'
 import { clientSamClick } from '@/lib/client-ai'
 
@@ -359,7 +360,6 @@ export default function usePixelMaskTool({
     const lastPointRef = useRef(null)
     const undoStackRef = useRef([])
     const redoStackRef = useRef([])
-    const interactionStateRef = useRef(null)
 
     const cursorElRef = useRef(null)
     const cursorInnerElRef = useRef(null)
@@ -1665,71 +1665,11 @@ export default function usePixelMaskTool({
     /* ─── canvas lock / unlock (disable selection while painting) ─── */
 
     const lockCanvas = useCallback((canvas, targetImage) => {
-        if (!canvas || interactionStateRef.current) return
-        const objects = canvas.getObjects?.() || []
-        interactionStateRef.current = {
-            activeObject: targetImage,
-            selection: canvas.selection,
-            skipTargetFind: canvas.skipTargetFind,
-            defaultCursor: canvas.defaultCursor,
-            hoverCursor: canvas.hoverCursor,
-            moveCursor: canvas.moveCursor,
-            isDrawingMode: canvas.isDrawingMode,
-            objectStates: objects.map((obj) => ({
-                obj,
-                selectable: obj.selectable,
-                evented: obj.evented,
-                hoverCursor: obj.hoverCursor,
-                moveCursor: obj.moveCursor,
-            })),
-        }
-
-        canvas.discardActiveObject?.()
-        canvas.__pixelToolActive = true
-        canvas.selection = false
-        canvas.skipTargetFind = true
-        canvas.isDrawingMode = false
-        canvas.defaultCursor = 'crosshair'
-        canvas.hoverCursor = 'crosshair'
-        canvas.moveCursor = 'crosshair'
-        if (canvas.upperCanvasEl) canvas.upperCanvasEl.style.cursor = 'crosshair'
-
-        for (const obj of objects) {
-            if (isMaskOverlay(obj)) continue
-            obj.set?.({ selectable: false, evented: false, hoverCursor: 'crosshair', moveCursor: 'crosshair' })
-        }
-        canvas.requestRenderAll()
+        lockPixelTool(canvas, targetImage)
     }, [])
 
     const unlockCanvas = useCallback((canvas) => {
-        const state = interactionStateRef.current
-        if (!canvas || !state) return
-
-        canvas.selection = state.selection
-        canvas.skipTargetFind = state.skipTargetFind
-        canvas.defaultCursor = state.defaultCursor
-        canvas.hoverCursor = state.hoverCursor
-        canvas.moveCursor = state.moveCursor
-        canvas.isDrawingMode = state.isDrawingMode
-
-        for (const item of state.objectStates) {
-            if (!canvas.getObjects?.().includes(item.obj)) continue
-            item.obj.set?.({
-                selectable: item.selectable,
-                evented: item.evented,
-                hoverCursor: item.hoverCursor,
-                moveCursor: item.moveCursor,
-            })
-        }
-
-        canvas.__pixelToolActive = false
-        if (canvas.upperCanvasEl) canvas.upperCanvasEl.style.cursor = state.defaultCursor || 'default'
-        canvas.discardActiveObject?.()
-        if (state.activeObject && canvas.getObjects?.().includes(state.activeObject)) {
-            try { canvas.setActiveObject(state.activeObject) } catch { /* no longer selectable */ }
-        }
-        canvas.requestRenderAll()
-        interactionStateRef.current = null
+        unlockPixelTool(canvas)
     }, [])
 
     /* ─── main wiring effect (binds once per canvas) ─── */

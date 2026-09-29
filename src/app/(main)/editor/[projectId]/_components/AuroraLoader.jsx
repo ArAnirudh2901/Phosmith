@@ -1,6 +1,5 @@
 "use client"
 
-import { motion } from "framer-motion"
 
 // Phase-specific subtitles. Adding a new phase only needs one line here.
 const PHASE_LABELS = {
@@ -40,16 +39,10 @@ const AuroraLoader = ({ message, phase }) => {
 
         <div className="neo-loader-progress" aria-hidden="true">
           {Array.from({ length: PROGRESS_BLOCK_COUNT }).map((_, index) => (
-            <motion.span
+            <span
               key={index}
               className="neo-loader-block"
-              animate={{ opacity: [0.15, 1, 0.15] }}
-              transition={{
-                duration: 1.4,
-                repeat: Infinity,
-                ease: "easeInOut",
-                delay: index * 0.12,
-              }}
+              style={{ "--block-delay": `${index * 120}ms` }}
             />
           ))}
         </div>

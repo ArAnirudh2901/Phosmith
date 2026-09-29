@@ -56,6 +56,7 @@ import { ProRulerSlider } from "@/components/editor/ProRulerSlider";
 import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
 import { ArrowLeftRight } from "lucide-react";
 import { toUserMessage } from '@/lib/user-error'
+import { ensureDomains } from "@/lib/agent/domain-host";
 
 const QUICK_PROMPTS = [
   { label: "Editorial", prompt: "Give it a premium editorial polish", hint: "Retouch, contrast, detail" },
@@ -1156,6 +1157,12 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
   // pollAbortRef cancels the active waitForImageKitUrl. Mirrors erase.jsx.
   const isMountedRef = useRef(true);
   const pollAbortRef = useRef(null);
+  // Opening this panel is the signal that the canvas command domains will be
+  // needed, so warm them here rather than making the first prompt wait.
+  useEffect(() => {
+    ensureDomains();
+  }, []);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -1609,7 +1616,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     setPendingPrompt(cleanPrompt);
     setIsThinking(true);
     try {
-      const { runCommand } = await import("@/lib/agent/command-registry");
+      const [{ runCommand }] = await Promise.all([
+        import("@/lib/agent/command-registry"),
+        ensureDomains(),
+      ]);
       const result = await runCommand("focus.fromDescription", { prompt: cleanPrompt });
       if (isMountedRef.current) {
         setMessages((current) => [...current, newMessage("assistant", summarizeFocusResult(result))]);
@@ -1639,7 +1649,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     setPendingPrompt(cleanPrompt);
     setIsThinking(true);
     try {
-      const { runCommand } = await import("@/lib/agent/command-registry");
+      const [{ runCommand }] = await Promise.all([
+        import("@/lib/agent/command-registry"),
+        ensureDomains(),
+      ]);
       const result = await runCommand("stretch.fromDescription", { prompt: cleanPrompt });
       if (isMountedRef.current) {
         setMessages((current) => [...current, newMessage("assistant", summarizeStretchResult(result))]);
@@ -1682,7 +1695,10 @@ const ImageKitAgent = ({ project, dominantColor, contrastingColor, lighterColor 
     setPendingPrompt(cleanPrompt);
     setIsThinking(true);
     try {
-      const { runCommand } = await import("@/lib/agent/command-registry");
+      const [{ runCommand }] = await Promise.all([
+        import("@/lib/agent/command-registry"),
+        ensureDomains(),
+      ]);
       const result = await runCommand("collage.fromDescription", { prompt: cleanPrompt });
       if (isMountedRef.current) {
         setMessages((current) => [...current, newMessage("assistant", summarizeCollageResult(result))]);

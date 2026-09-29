@@ -1,7 +1,6 @@
 "use client"
 
 import React from "react"
-import { motion } from "framer-motion"
 import {
     Bot,
     Crop,
@@ -16,15 +15,7 @@ import {
     Type,
     Wand2,
 } from "lucide-react"
-import {
-    fadeUp,
-    staggerContainer,
-    staggerItem,
-    viewport,
-    useReducedMotion,
-    motionVariants,
-    whileInViewProps,
-} from "@/lib/motion"
+import { useReveal, revealDelay } from "@/hooks/useReveal"
 import NeoCard from "@/components/neo/NeoCard"
 import CountUp from "@/components/neo/CountUp"
 import Marquee from "@/components/neo/Marquee"
@@ -112,11 +103,9 @@ const STATS = [
 ]
 
 const HeroFeatures = () => {
-    const reduced = useReducedMotion()
-    const headerMotion = whileInViewProps(reduced)
-    const container = motionVariants(staggerContainer, reduced)
-    const item = motionVariants(staggerItem, reduced)
-    const fade = motionVariants(fadeUp, reduced)
+    const headerRef = useReveal()
+    const gridRef = useReveal()
+    const statsRef = useReveal()
 
     return (
         <>
@@ -135,7 +124,7 @@ const HeroFeatures = () => {
 
             <section id="features" className="relative py-28 md:py-36" style={{ background: "#07090E" }}>
                 <div className="max-w-7xl mx-auto px-6">
-                    <motion.div className="mb-16 max-w-3xl" variants={fade} {...headerMotion}>
+                    <div ref={headerRef} className="reveal mb-16 max-w-3xl">
                         <div
                             style={{
                                 background: "#0E1118",
@@ -168,19 +157,13 @@ const HeroFeatures = () => {
                             One canvas.<br />
                             <span className="liquid-reactive-text-stroke">Zero round-trips.</span>
                         </h2>
-                    </motion.div>
+                    </div>
 
-                    <motion.div
-                        className="grid md:grid-cols-2 lg:grid-cols-3 gap-7"
-                        variants={container}
-                        initial="hidden"
-                        whileInView="visible"
-                        viewport={viewport}
-                    >
-                        {FEATURES.map((feature) => {
+                    <div ref={gridRef} className="grid md:grid-cols-2 lg:grid-cols-3 gap-7">
+                        {FEATURES.map((feature, idx) => {
                             const Icon = feature.icon
                             return (
-                                <motion.div key={feature.title} variants={item}>
+                                <div key={feature.title} className="reveal" style={revealDelay(idx)}>
                                     <NeoCard accent={feature.accent} material="glass" style={{ padding: 28, height: "100%" }}>
                                         <div
                                             style={{
@@ -228,17 +211,14 @@ const HeroFeatures = () => {
                                             {feature.description}
                                         </p>
                                     </NeoCard>
-                                </motion.div>
+                                </div>
                             )
                         })}
-                    </motion.div>
+                    </div>
 
-                    <motion.div
+                    <div
+                        ref={statsRef}
                         className="mt-24 grid grid-cols-2 md:grid-cols-4 gap-0"
-                        variants={container}
-                        initial="hidden"
-                        whileInView="visible"
-                        viewport={viewport}
                         style={{
                             border: "2px solid #F4F4F5",
                             background: "#0E1118",
@@ -246,16 +226,16 @@ const HeroFeatures = () => {
                         }}
                     >
                         {STATS.map((stat, idx) => (
-                            <motion.div
+                            <div
                                 key={stat.label}
-                                variants={item}
                                 style={{
+                                    ...revealDelay(idx),
                                     padding: "32px 24px",
                                     borderRight: idx < STATS.length - 1 ? "2px solid #F4F4F5" : "none",
                                     borderBottom: idx < 2 ? "2px solid #F4F4F5" : "none",
                                     textAlign: "left",
                                 }}
-                                className={`${idx < 2 ? "md:border-b-0" : ""} ${idx === 1 ? "border-r md:border-r-2" : ""}`}
+                                className={`reveal ${idx < 2 ? "md:border-b-0" : ""} ${idx === 1 ? "border-r md:border-r-2" : ""}`}
                             >
                                 <div
                                     style={{
@@ -281,9 +261,9 @@ const HeroFeatures = () => {
                                 >
                                     {stat.label}
                                 </div>
-                            </motion.div>
+                            </div>
                         ))}
-                    </motion.div>
+                    </div>
                 </div>
             </section>
         </>

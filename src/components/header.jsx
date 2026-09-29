@@ -7,9 +7,7 @@ import React, { useEffect, useState } from 'react'
 import { LayoutDashboard, Menu, X } from 'lucide-react'
 import ProBadge from '@/components/pro-badge'
 import PhosmithWordmark from '@/components/phosmith-wordmark'
-import { motion, AnimatePresence } from 'framer-motion'
 import { useDashboardNavigation } from '@/hooks/useDashboardNavigation'
-import { duration, easeOut } from '@/lib/motion'
 import NeoButton from '@/components/neo/NeoButton'
 
 const NEO_NAV_STYLE = {
@@ -190,29 +188,24 @@ const Header = () => {
         </nav>
       </header>
 
-      <AnimatePresence>
-        {mobileMenuOpen && (
-          <>
-            <motion.div
-              className="fixed inset-0 bg-black/35 backdrop-blur-sm z-[60]"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: duration.fast, ease: easeOut }}
-              onClick={() => setMobileMenuOpen(false)}
-            />
-            <motion.div
-              className="fixed top-0 right-0 w-72 h-full z-[70] flex flex-col"
-              style={{
-                background: '#07090E',
-                borderLeft: '2px solid #F4F4F5',
-                padding: 24,
-              }}
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ duration: duration.normal, ease: easeOut }}
-            >
+      <div
+        className="nav-drawer-scrim fixed inset-0 bg-black/35 backdrop-blur-sm z-[60]"
+        data-open={mobileMenuOpen}
+        onClick={() => setMobileMenuOpen(false)}
+        aria-hidden="true"
+      />
+      <div
+        className="nav-drawer fixed top-0 right-0 w-72 h-full z-[70] flex flex-col"
+        data-open={mobileMenuOpen}
+        // Stays mounted to animate both ways in CSS; visibility:hidden when closed,
+        // so it is never an invisible click target.
+        {...(mobileMenuOpen ? {} : { inert: '' })}
+        style={{
+          background: '#07090E',
+          borderLeft: '2px solid #F4F4F5',
+          padding: 24,
+        }}
+      >
               <div className="flex justify-between items-center mb-8">
                 <span
                   style={{
@@ -292,10 +285,7 @@ const Header = () => {
                   <NeoButton variant="primary" size="md" magnetic={false}>Get Started</NeoButton>
                 </SignUpButton>
               </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+      </div>
     </>
   )
 }

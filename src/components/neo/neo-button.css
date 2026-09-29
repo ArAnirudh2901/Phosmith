@@ -1,0 +1,67 @@
+/* NeoButton's magnetic hover, press and ripple. CSS rather than framer-motion
+   springs: this button is used by the header, which the root layout renders, so a
+   framer import here lands the whole library in the bundle every route loads.
+   The pointer handler writes --neo-dx/--neo-dy; the transition does the easing. */
+.neo-button {
+    --neo-dx: 0px;
+    --neo-dy: 0px;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+    user-select: none;
+    overflow: hidden;
+    transform: translate3d(var(--neo-dx), var(--neo-dy), 0);
+    box-shadow: calc(var(--neo-offset) - var(--neo-dx) * 0.5) calc(var(--neo-offset) - var(--neo-dy) * 0.5) 0 0
+        var(--neo-shadow-color);
+    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+        box-shadow 240ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms ease;
+}
+
+/* Pressed: sit into the shadow. :active rather than a React state so the feedback
+   lands on the same frame as the pointer down. */
+.neo-button:not([aria-disabled="true"]):active {
+    transform: translate3d(var(--neo-offset), var(--neo-offset), 0);
+    box-shadow: 0 0 0 0 var(--neo-shadow-color);
+    transition-duration: 50ms;
+}
+
+.neo-button__ripple-layer {
+    position: absolute;
+    inset: 0;
+    display: block;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.neo-button__ripple {
+    position: absolute;
+    display: block;
+    border-radius: 50%;
+    pointer-events: none;
+    animation: neo-button-ripple 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.neo-button__label {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+@keyframes neo-button-ripple {
+    from { opacity: 0.95; transform: scale(0); }
+    to { opacity: 0; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .neo-button { transition-duration: 0s; }
+    .neo-button__ripple { animation: none; opacity: 0; }
+}

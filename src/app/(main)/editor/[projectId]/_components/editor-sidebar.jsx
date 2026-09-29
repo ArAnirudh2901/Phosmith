@@ -1,17 +1,11 @@
 "use client"
 
-import React, { useEffect, useState } from "react"
+import React, { useEffect, useLayoutEffect, useState } from "react"
 import dynamic from "next/dynamic"
 import { CanvasContext } from "../../../../../../context/context"
 import { Aperture, Bot, Crop, Eraser, Expand, Eye, ImagePlus, Maximize2, Palette, Pen, Scissors, Sliders, Text, LayoutGrid, AudioLines } from "lucide-react"
 import { extractDominantColors, getContrastingColor, adjustColorBrightness } from "@/lib/color-extraction"
-// Mask + Erase lock canvas interaction synchronously on mount (via usePixelMaskTool):
-// they disable selection, swap to a crosshair, and attach the brush cursor. Lazy-loading
-// them would leave the canvas selectable during the chunk fetch, so an early drag could
-// move the image instead of painting. Keep these two eager (they're small); the heavy
-// panels below stay split out.
-import MaskControls from "./tools/mask"
-import EraseControls from "./tools/erase"
+import { lockPixelTool, unlockPixelTool } from "@/lib/pixel-tool-lock"
 import HistoryPanel from "./history-panel"
 
 // Lazy-load each tool panel so the editor's initial bundle stays small — only the
@@ -29,6 +23,12 @@ const PanelLoading = () => (
 )
 const lazyTool = (loader) => dynamic(loader, { ssr: false, loading: PanelLoading })
 
+// Mask/Erase need the paint lock before their chunk lands, else an early drag moves
+// the image. The sidebar takes it synchronously; the hook adopts it (pixel-tool-lock).
+const PIXEL_TOOLS = new Set(["mask", "erase"])
+
+const MaskControls = lazyTool(() => import("./tools/mask"))
+const EraseControls = lazyTool(() => import("./tools/erase"))
 const TextControls = lazyTool(() => import("./tools/text"))
 const ResizeControls = lazyTool(() => import("./tools/resize"))
 const CropContent = lazyTool(() => import("./tools/crop"))
@@ -62,11 +62,19 @@ const TOOL_CONFIGS = {
 }
 
 export default function EditorSidebar({ project: projectProp, width }) {
-    const { activeTool } = React.useContext(CanvasContext)
+    const { activeTool, canvasEditor } = React.useContext(CanvasContext)
     const project = projectProp
     const [dominantColor, setDominantColor] = useState('#53D8FF')
     const [contrastingColor, setContrastingColor] = useState('#000000')
     const [lighterColor, setLighterColor] = useState('#9BF95B')
+
+    // Layout effect, not an effect: the lock has to be in place before the browser
+    // can deliver a pointer event on the frame the tool became active.
+    useLayoutEffect(() => {
+        if (!canvasEditor || !PIXEL_TOOLS.has(activeTool)) return undefined
+        lockPixelTool(canvasEditor)
+        return () => unlockPixelTool(canvasEditor)
+    }, [activeTool, canvasEditor])
 
     useEffect(() => {
         if (!project?.currentImageUrl && !project?.originalImageUrl) return

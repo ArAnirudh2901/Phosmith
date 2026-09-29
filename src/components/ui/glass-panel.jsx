@@ -1,6 +1,5 @@
 "use client"
 
-import { motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
 
 const GlassPanel = ({
@@ -22,16 +21,9 @@ const GlassPanel = ({
 
     if (animated) {
         return (
-            <motion.div
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-                className={baseStyles}
-                {...props}
-            >
+            <div className={cn('fade-up-in', baseStyles)} {...props}>
                 {children}
-            </motion.div>
+            </div>
         )
     }
 
