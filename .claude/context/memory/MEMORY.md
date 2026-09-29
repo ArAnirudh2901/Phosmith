@@ -1,0 +1,10 @@
+- [Brief comments going forward](comment-style-brief.md) — short new comments; never trim existing ones
+- [Masking setup state](masking-setup-state.md) — mask-studio = testbed of phosmith src; both services must run; sam3 installed + needs einops/numpy<2 pins; SAM 3.1 checkpoint downloaded + VERIFIED (box IoU 1.00); 8 GB can't hold SAM3+birefnet together — pause services to load; birefnet-general stays
+- [Quality over memory](quality-over-memory.md) — never downgrade mask models for RAM; birefnet-general stays; "SAM 3" = Meta SAM 3.1
+- [pxpipe proxy](pxpipe-proxy.md) — installed at ~/.bun/bin/pxpipe, port 47821; ANTHROPIC_BASE_URL must be set by the user manually
+- [Engineering bar: next level](engineering-bar-next-level.md) — every project: reliable, thought-through work; own the outcome, propose improvements
+- [Collage generator bar](collage-generator-bar.md) — must produce keepable results via the agent; full user-written edge-case matrix (DSLR 50MP, EXIF, grid math, touch, export, device state)
+- [App tool-call efficiency](app-tool-call-efficiency.md) — in-app agent must not burn redundant AI/command round-trips; cache and batch
+- [Verify by looking](verify-by-looking.md) — green tests are not evidence; render it, drive it, look at it
+- [Keep docs current](keep-docs-current.md) — CLAUDE.md + memory update in the same commit as the code, with the measured numbers
+- [No git hooks for the context mirror](context-sync-no-git-hooks.md) — auto mode denies creating them; user installs or nobody does

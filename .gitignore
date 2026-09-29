@@ -47,9 +47,14 @@ next-env.d.ts
 # AI Agents
 .agent/
 .agents/
-AGENTS.md
-CLAUDE.md
 skills-lock.json
+
+# AGENTS.md and CLAUDE.md are deliberately TRACKED: they are the context a
+# session on another device loads instead of re-deriving the codebase.
+# Machine-local Claude state stays out.
+.claude/*
+!.claude/context/
+.claude/context/memory/*.remote
 
 # clerk configuration (can include secrets)
 /.clerk/

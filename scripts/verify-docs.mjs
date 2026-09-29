@@ -65,7 +65,7 @@ const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
     const COUNTED = {
         'verify': 303, 'verify:cv': null, 'verify:focus': null, 'verify:collage-grid': null,
         'verify:stretch-core': null, 'verify:user-error': null, 'verify:heavy-queue': null,
-        'verify:diagnostics': null,
+        'verify:diagnostics': null, 'verify:context': null,
     }
     const stale = []
     const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

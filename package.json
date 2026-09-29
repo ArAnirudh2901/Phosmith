@@ -6,7 +6,8 @@
   "packageManager": "bun@1.3.11",
   "scripts": {
     "postinstall": "prisma generate",
-    "dev": "node scripts/setup-ort.mjs && next dev",
+    "dev": "node scripts/setup-ort.mjs && node scripts/claude-context.mjs sync && next dev",
+    "claude:context": "node scripts/claude-context.mjs",
     "build": "node scripts/setup-ort.mjs && next build",
     "setup:ort": "node scripts/setup-ort.mjs",
     "start": "next start",
@@ -28,6 +29,7 @@
     "verify:heavy-queue": "bun scripts/verify-heavy-queue.mjs",
     "verify:diagnostics": "bun scripts/verify-diagnostics.mjs",
     "verify:docs": "bun scripts/verify-docs.mjs",
+    "verify:context": "bun scripts/verify-context.mjs",
     "verify:mask": "bun scripts/verify-mask-edge-snap.mjs",
     "verify:segment": "bun scripts/verify-segment.mjs",
     "verify:semantic": "bun scripts/verify-semantic.mjs",
