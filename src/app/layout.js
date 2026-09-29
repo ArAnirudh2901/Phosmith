@@ -1,5 +1,4 @@
 import { JetBrains_Mono } from "next/font/google";
-import { Suspense } from "react";
 import "@/lib/env";
 import "./globals.css";
 import "../styles/animations.css";
@@ -7,79 +6,15 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import LiquidCursorEffect from "@/components/liquid-cursor-effect";
 import { SmoothScrollProvider } from "@/components/smooth-scroll-provider";
-import Header from "@/components/header";
 import { DatabaseClientProvider } from "./DatabaseClientProvider";
-import { ClerkProvider } from "@clerk/nextjs";
-import { dark } from "@clerk/themes";
 import DiagnosticsBoot from "@/components/diagnostics-boot"
 import ProjectPreload from "@/components/project-preload"
-
-// Clerk renders {{applicationName}} from the dashboard instance name; override it
-// here so the auth screens stay on-brand no matter which instance is wired up.
-const clerkLocalization = {
-  signIn: { start: { title: "Sign in to Phosmith" } },
-  signUp: { start: { title: "Create your Phosmith account" } },
-};
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
   display: "swap",
 })
-
-const clerkAppearance = {
-  baseTheme: dark,
-  variables: {
-    colorPrimary: "#53D8FF",
-    colorPrimaryForeground: "#050508",
-    colorTextOnPrimaryBackground: "#050508",
-    colorBackground: "#0C0F15",
-    colorInputBackground: "rgba(12, 15, 21, 0.78)",
-    colorInputText: "#E8ECF6",
-    colorText: "#E8ECF6",
-    colorTextSecondary: "#8892A4",
-    colorNeutral: "#E8ECF6",
-    colorDanger: "#F43F5E",
-    borderRadius: "14px",
-  },
-  elements: {
-    card: "bg-[#0C0F15]/95 border border-white/10 shadow-2xl backdrop-blur-xl !text-slate-100",
-    main: "text-white",
-    headerTitle: "!text-white",
-    headerSubtitle: "!text-white",
-    formHeaderTitle: "!text-white",
-    formHeaderSubtitle: "!text-white",
-    dividerText: "text-white",
-    dividerLine: "bg-white/10",
-    socialButtonsBlockButton:
-      "bg-white/5 border border-white/10 text-white hover:bg-white/10 backdrop-blur-md",
-    socialButtonsBlockButtonText: "!text-white",
-    formFieldLabelRow: "!text-white",
-    formFieldLabel: "!text-white",
-    formFieldInput:
-      "bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl backdrop-blur-md",
-    formFieldHintText: "text-white",
-    formFieldErrorText: "text-rose-300",
-    formResendCodeLink: "text-[#53D8FF] hover:text-[#53D8FF]",
-    formButtonPrimary:
-      "bg-[#53D8FF] !text-[#050508] hover:!text-[#050508] focus:!text-[#050508] !justify-center !items-center !text-center gap-2 border border-white/10 rounded-xl font-semibold hover:brightness-110 transition-all",
-    footerActionText: "text-white",
-    footerActionLink: "text-[#53D8FF] hover:text-[#53D8FF]",
-    userButtonAvatarBox: "ring-2 ring-[#53D8FF]/30 max-md:!size-11",
-    userButtonPopoverCard: "bg-[#0C0F15]/95 border border-white/10 shadow-2xl backdrop-blur-xl !text-white",
-    userButtonPopoverMain: "text-white",
-    userButtonPopoverActions: "border-t border-white/10",
-    userButtonPopoverActionButton: "text-white hover:bg-white/10",
-    userButtonPopoverActionButtonIcon: "text-white",
-    userButtonPopoverFooter: "border-t border-white/10",
-    userButtonPopoverFooterPagesLink: "text-[#53D8FF] hover:text-[#53D8FF]",
-    userPreviewTextContainer: "text-white",
-    userPreviewMainIdentifier: "text-white",
-    userPreviewMainIdentifierText: "text-white",
-    userPreviewSecondaryIdentifier: "text-white",
-    identityPreviewText: "text-white",
-  },
-};
 
 export const metadata = {
   title: {
@@ -128,45 +63,27 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   return (
-    <ClerkProvider
-      afterSignOutUrl="/"
-      appearance={clerkAppearance}
-      localization={clerkLocalization}
-    >
-      <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
-        <body className={`${jetbrainsMono.variable} phosmith-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
-          <ProjectPreload />
-          <DiagnosticsBoot />
-          <ThemeProvider
-            attribute="class"
-            defaultTheme="dark"
-            enableSystem={false}
-            disableTransitionOnChange
-          >
-            <DatabaseClientProvider>
-              <SmoothScrollProvider>
-                <LiquidCursorEffect />
-                <Suspense
-                  fallback={
-                    <div
-                      className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4 sm:pt-6 px-4 pointer-events-none"
-                      aria-hidden="true"
-                    >
-                      <div className="h-[52px] sm:h-[56px] w-full max-w-6xl rounded-full bg-white/[0.04] border border-white/10" />
-                    </div>
-                  }
-                >
-                  <Header />
-                </Suspense>
-                <main className="relative z-10 min-h-screen">
-                  <Toaster />
-                  {children}
-                </main>
-              </SmoothScrollProvider>
-            </DatabaseClientProvider>
-          </ThemeProvider>
-        </body>
-      </html>
-    </ClerkProvider>
+    <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
+      <body className={`${jetbrainsMono.variable} phosmith-agent-theme bg-[var(--bg-void-dark)] text-[var(--text-primary)] antialiased`}>
+        <ProjectPreload />
+        <DiagnosticsBoot />
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="dark"
+          enableSystem={false}
+          disableTransitionOnChange
+        >
+          <DatabaseClientProvider>
+            <SmoothScrollProvider>
+              <LiquidCursorEffect />
+              <main className="relative z-10 min-h-screen">
+                <Toaster />
+                {children}
+              </main>
+            </SmoothScrollProvider>
+          </DatabaseClientProvider>
+        </ThemeProvider>
+      </body>
+    </html>
   );
 }

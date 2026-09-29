@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useTransition } from "react"
 import { usePathname, useRouter } from "next/navigation"
+import { hasSessionCookie } from "@/lib/session-hint"
 
 export function useDashboardNavigation() {
   const router = useRouter()
@@ -9,8 +10,10 @@ export function useDashboardNavigation() {
   const [isPending, startTransition] = useTransition()
   const isDashboardRoute = pathname === "/dashboard"
 
+  // Prefetching /dashboard pulls the Clerk client SDK with it, so a signed-out
+  // visitor on the marketing page must not pay for it.
   useEffect(() => {
-    router.prefetch("/dashboard")
+    if (hasSessionCookie()) router.prefetch("/dashboard")
   }, [router])
 
   const navigateToDashboard = useCallback((event) => {

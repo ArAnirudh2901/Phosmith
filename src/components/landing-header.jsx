@@ -1,0 +1,46 @@
+"use client"
+
+import Link from 'next/link'
+import React, { useEffect, useState } from 'react'
+import { LayoutDashboard } from 'lucide-react'
+import NeoButton from '@/components/neo/NeoButton'
+import HeaderShell from '@/components/header-shell'
+import { hasSessionCookie } from '@/lib/session-hint'
+
+// The marketing route's header. Clerk's client SDK is 138 KB of app chunks plus 16
+// requests to its CDN, and the only thing this bar needs from it is whether a
+// session exists — which the readable __client_uat cookie already answers. Sign in
+// and sign up are real routes, so they are plain links: prefetching them would pull
+// Clerk back onto this page for the visitors least likely to need it.
+
+const SLOT_CLASS = 'flex items-center gap-3 min-w-[200px] sm:min-w-[280px] justify-end'
+
+function LandingAuth({ drawer = false }) {
+  // Static HTML renders the signed-out links, which is both the common case and
+  // what a crawler should see; the cookie check corrects it on hydration.
+  const [signedIn, setSignedIn] = useState(false)
+
+  useEffect(() => {
+    setSignedIn(hasSessionCookie())
+  }, [])
+
+  const body = signedIn ? (
+    <NeoButton as={Link} href="/dashboard" variant="secondary" size="md" magnetic={false}>
+      <LayoutDashboard className="h-4 w-4" strokeWidth={2.5} />
+      Dashboard
+    </NeoButton>
+  ) : (
+    <>
+      <NeoButton variant="ghost" size="md" magnetic={false} href="/sign-in">Sign In</NeoButton>
+      <NeoButton variant="primary" size="md" magnetic={!drawer} href="/sign-up">Get Started</NeoButton>
+    </>
+  )
+
+  return drawer ? body : <div className={SLOT_CLASS}>{body}</div>
+}
+
+const LandingHeader = () => (
+  <HeaderShell authSlot={<LandingAuth />} drawerAuthSlot={<LandingAuth drawer />} />
+)
+
+export default LandingHeader

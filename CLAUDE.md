@@ -345,7 +345,28 @@ What moved:
 
 One change was measured and then deleted: `experimental.optimizePackageImports: ['@clerk/nextjs', …]`, on the theory that Clerk's single entry point drags the organization and user-profile surfaces into the marketing page. The landing payload was byte-identical either way (same 33 files, same 928 KB, the same 84 KB Clerk chunk), so the config line went back out rather than stay as an unbacked claim.
 
-Still on the list, in the order they are worth doing: `@clerk/nextjs`'s 137 KB is in the root layout's graph, so the marketing page pays for it (moving `ClerkProvider` below `/` means a second header, which is why it was not done in passing); a signed-in visitor on the landing page pays a `/api/neon/query` (683–1458 ms) for `usePlanAccess` behind the header's Pro badge; `mask.jsx` (5627 lines), `imagekit-agent.jsx` (3207), `pixel-stretch.jsx` (2754) and `canvas.jsx` (2502) are each a module boundary waiting to be drawn, and none of them is on the critical path in a way that bytes measure.
+- **The marketing route no longer loads Clerk at all.** `ClerkProvider` sat in the root layout, so `/` downloaded the whole Clerk client SDK — 138 KB of app chunks plus 16 requests to `clerk.accounts.dev` and one to `img.clerk.com` — to render a header whose only question is *is someone signed in*. Clerk already answers that in the readable **`__client_uat`** cookie, published for exactly this purpose, so `src/lib/session-hint.js#hasSessionCookie()` reads it and the marketing header needs no SDK. The provider moved to `src/app/clerk-shell.jsx`, a **server** component (keeping Clerk's server-side auth prefetch, so `isLoaded` is not false on first paint) mounted by `src/app/(main)/layout.js` and `src/app/(auth)/layout.js` — the two route groups that actually use Clerk. `header.jsx` split into `header-shell.jsx` (all the chrome, no auth dependency, auth controls passed in as a slot) plus the Clerk variant, with `landing-header.jsx` as the Clerk-free one.
+
+  Three details are load-bearing. **Sign in / sign up are plain `<a>`** on `/`, not `next/link`: prefetching either route pulls Clerk straight back onto the page for the visitors least likely to need it. **`useDashboardNavigation` gates its `router.prefetch('/dashboard')` on the same cookie** — an ungated prefetch put the 84 KB and 54 KB Clerk chunks back in the fetch set at low priority, which is how this was caught (total landing JS had gone *up*, 928 → 960 KB, while the critical path went down). And the static HTML renders the **signed-out** links, which is both the common case and what a crawler should see; the cookie check corrects it on hydration.
+
+  Measured on a production build in the real signed-in Safari, one window and one tab, `?r=N` forcing fresh navigations. Signed-out is the same server on the LAN origin, which carries no Clerk cookies:
+
+  | | before | after |
+  |---|---|---|
+  | landing route manifest | 397 KB, 9 chunks | **172 KB, 6 chunks** |
+  | shared baseline manifest | 360 KB, 8 chunks | **111 KB, 5 chunks** |
+  | landing JS, signed out | 928 KB in 23 files | **632 KB in 15 files** |
+  | landing requests, signed out | 51 (35 local + 16 Clerk CDN) | **25, all local** |
+  | landing API calls | `/api/neon/query` 683–1458 ms | **none** |
+  | `window.Clerk` on `/` | `object` | **`undefined`** |
+
+  A signed-in visitor on `/` still fetches the dashboard route and its Clerk chunks — deferred, after `loadEventEnd` — because for them the prefetch is the point. The dashboard route (440 KB) and the editor (940 KB) are unchanged, and `/` is still prerendered static.
+
+  **One capability was traded for this, deliberately:** the marketing header shows a signed-in visitor only a *Dashboard* link — no `UserButton` avatar and no `ProBadge`. The badge is what pulled `usePlanAccess` and therefore the `/api/neon/query`; both controls remain on `/dashboard` and in the editor, which is where someone manages their account.
+
+  Fixed while in this file: the mobile drawer's `inert` was passed as the empty string, which React 19 reads as a boolean and treats as falsy — so a closed drawer kept its links focusable. It is `inert={!mobileMenuOpen}` now, verified by driving the real page (closed `inert: true` / `visibility: hidden`, open `false` / `visible`, closing by the X and by the scrim both restoring it).
+
+Still on the list, in the order they are worth doing: `mask.jsx` (5627 lines), `imagekit-agent.jsx` (3207), `pixel-stretch.jsx` (2754) and `canvas.jsx` (2502) are each a module boundary waiting to be drawn, and none of them is on the critical path in a way that bytes measure; the editor's `/api/canvas/snapshot` takes 737 ms on load.
 
 **Animations cannot be measured in an occluded window.** Safari never *starts* a CSS animation on a page whose `visibilityState` is `hidden`, and a terminal in fullscreen over the browser is enough to make it hidden — `getAnimations()` reports `playState: "running"` with `startTime: null` and `currentTime: 0` forever, so a reveal reads as a permanent `opacity: 0` and looks exactly like a broken keyframe. `activate` does not fix it across Spaces. Call `finish()` on each animation and read the computed style instead: the 17 `.reveal` elements on the landing page all resolve to `opacity: 1` and an identity transform, which is what a visitor with a visible tab gets.
 
