@@ -176,8 +176,20 @@ const getAuthUser = async (db, ctx) => {
   return await upsertAuthenticatedUser(db, auth);
 };
 
+// The FULL project row, canvasState included — ~840 KB on a real project. Only
+// for callers that need the document itself.
 const getOwnedProject = async (db, user, projectId) => {
   const project = await db.project.findUnique({ where: { id: projectId } });
+  if (!project) throw new Error("Project not found");
+  if (!user || project.userId !== user.id) throw new Error("Access denied");
+  return project;
+};
+
+// The ownership guard, which needs two columns. Every guard used to run
+// getOwnedProject and throw the row away, so an autosave, a presence ping and a
+// revision list each decoded the whole canvasState to compare one id.
+const assertProjectOwner = async (db, user, projectId, select = { id: true, userId: true }) => {
+  const project = await db.project.findUnique({ where: { id: projectId }, select });
   if (!project) throw new Error("Project not found");
   if (!user || project.userId !== user.id) throw new Error("Access denied");
   return project;
@@ -187,7 +199,7 @@ const getOwnedEditSet = async (db, user, editSetId) => {
   const editSet = await db.agentEditSet.findUnique({ where: { id: editSetId } });
   if (!editSet) throw new Error("Agent edit set not found");
   if (!user || editSet.userId !== user.id) throw new Error("Access denied");
-  await getOwnedProject(db, user, editSet.projectId);
+  await assertProjectOwner(db, user, editSet.projectId);
   return editSet;
 };
 
@@ -366,7 +378,7 @@ const functions = {
   "projects.deleteProject": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    await getOwnedProject(db, user, args.projectId);
+    await assertProjectOwner(db, user, args.projectId);
     await db.$transaction([
       db.project.delete({ where: { id: args.projectId } }),
       db.user.update({
@@ -414,10 +426,17 @@ const functions = {
     return withDocFields(await getOwnedProject(db, user, args.projectId));
   },
 
+  // Two columns, for the API routes whose only question is who owns this project.
+  "projects.getProjectOwner": async (ctx, args) => {
+    const db = await ensureDb();
+    const user = await getAuthUser(db, ctx);
+    return await assertProjectOwner(db, user, args.projectId);
+  },
+
   "projects.getProjectRevisions": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    await getOwnedProject(db, user, args.projectId);
+    await assertProjectOwner(db, user, args.projectId);
     const limit = Math.min(Math.max(Number(args.limit ?? 24), 1), 50);
     const rows = await db.projectRevision.findMany({
       where: { projectId: args.projectId },
@@ -430,7 +449,17 @@ const functions = {
   "projects.createProjectRevision": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    const project = await getOwnedProject(db, user, args.projectId);
+    // The revision's own canvasState comes from args; the row is only read for the
+    // fields a partial revision falls back on.
+    const project = await assertProjectOwner(db, user, args.projectId, {
+      id: true,
+      userId: true,
+      width: true,
+      height: true,
+      currentImageUrl: true,
+      originalImageUrl: true,
+      activeTransformations: true,
+    });
     const currentImageUrl = args.currentImageUrl || project.currentImageUrl || project.originalImageUrl;
 
     const revision = await db.projectRevision.create({
@@ -460,7 +489,7 @@ const functions = {
     const user = await getAuthUser(db, ctx);
     const revision = await db.projectRevision.findUnique({ where: { id: args.revisionId } });
     if (!revision) throw new Error("Version not found");
-    await getOwnedProject(db, user, revision.projectId);
+    await assertProjectOwner(db, user, revision.projectId);
 
     await db.project.update({
       where: { id: revision.projectId },
@@ -480,7 +509,7 @@ const functions = {
   "projects.updateProject": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    await getOwnedProject(db, user, args.projectId);
+    await assertProjectOwner(db, user, args.projectId);
 
     const updated = await db.project.update({
       where: { id: args.projectId },
@@ -508,7 +537,7 @@ const functions = {
   "projects.flushCanvasState": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    await getOwnedProject(db, user, args.projectId); // ownership guard
+    await assertProjectOwner(db, user, args.projectId); // ownership guard
 
     const data = clean({
       canvasState: args.canvasState,
@@ -552,7 +581,7 @@ const functions = {
   "agentEditSets.listForProject": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    await getOwnedProject(db, user, args.projectId);
+    await assertProjectOwner(db, user, args.projectId);
     const limit = Math.min(Math.max(Number(args.limit ?? 12), 1), 32);
     const rows = await db.agentEditSet.findMany({
       where: { projectId: args.projectId, userId: user.id },
@@ -566,7 +595,7 @@ const functions = {
   "agentEditSets.createOrUpdateDraft": async (ctx, args) => {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
-    await getOwnedProject(db, user, args.projectId);
+    await assertProjectOwner(db, user, args.projectId);
 
     const now = new Date();
     const payload = clean({
@@ -1070,6 +1099,7 @@ const QUERY_FUNCTIONS = new Set([
   "users.getCurrentUser",
   "projects.getUserProjects",
   "projects.getProject",
+  "projects.getProjectOwner",
   "projects.getProjectRevisions",
   "agentEditSets.listForProject",
   "agentEditSets.getWithSnapshots",

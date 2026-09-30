@@ -366,6 +366,37 @@ One change was measured and then deleted: `experimental.optimizePackageImports: 
 
   Fixed while in this file: the mobile drawer's `inert` was passed as the empty string, which React 19 reads as a boolean and treats as falsy — so a closed drawer kept its links focusable. It is `inert={!mobileMenuOpen}` now, verified by driving the real page (closed `inert: true` / `visibility: hidden`, open `false` / `visible`, closing by the X and by the scrim both restoring it).
 
+### Autosave must never persist a canvas the user has not seen
+
+Measuring the navigation work overwrote two real projects with `objects: []` — one of 5.66 MB and 3 objects, one of 990 bytes. Opening the editor and leaving again before hydration finished was enough: the pagehide/visibilitychange flush serialises whatever the Fabric canvas holds, and until the saved state has loaded that is an empty canvas. `__phosmithRestoreFailed` did not help, because it is only set once the load has finished and failed; the damaging write happens while the load is still in flight.
+
+`hydratedRef` in `canvas.jsx` is false until the init effect reaches `setCanvasEditor`, and `saveCanvasState` refuses to write while it is false AND the canvas is empty. A canvas the user genuinely emptied still saves, because by then hydration is done. `ProjectRevision` is what made one of the two recoverable — the other's only revision row was `null`.
+
+### Navigation between pages
+
+The first load was the data path and the bundle; a soft navigation is neither. A press on a project card, or on Dashboard in the marketing header, ran the whole chain in series: route transition, then the client bundle for the new route, then Clerk resolving a session, then the first Neon read. `src/lib/query-preload.js` breaks that order — `preloadProject(id)` and `preloadDashboard()` fire the exact `projects.getProject` / `projects.getUserProjects` + `users.getCurrentUser` POSTs on `pointerdown` and park the promise on `window.__phosmithPreload`, the same contract `project-preload.jsx` uses on a hard load. `useDatabaseQuery` adopts an in-flight promise once, then falls back to the network.
+
+Four things were needed to make that real:
+
+- **`onPointerDown`, not `onClick`.** A click fires after the press and after the route transition has begun, so the head start would be zero. This is also why a synthetic-click harness cannot measure it: `element.click()` dispatches no `pointerdown`, and the first version of the measurement reported no change because of that, not because the preload was wrong.
+- **`NeoButton` composes `onPointerDown` instead of spreading it.** `...rest` lands after the component's own handler, so a caller's handler silently replaced the ripple.
+- **One network request per identical query while it is in flight** (the `inflight` map in `useDatabaseQuery`). `usePlanAccess` is mounted by three editor components, so `users.getCurrentUser` went to the server three times on every editor load. The entry is dropped when the request settles, so a refetch after a mutation still hits the network.
+- **Reads no longer wait for the Clerk SDK.** `useStoreUser`'s `isSessionReady` falls back to `hasSessionCookie()` before `isLoaded`, and the dashboard's paint gate no longer waits on the `users.store` write. A read that starts from the cookie can meet a stale session, so a 401 from a query is logged and not toasted — the auth layer redirects, and a toast there tells nobody anything.
+
+Measured in the real signed-in Safari against a production build, warm:
+
+| | before | after |
+|---|---|---|
+| `/` to `/dashboard`, press to painted grid | 1882 ms | 862–1417 ms |
+| first API call leaves at | @626–1118 ms | @1–3 ms |
+| `/dashboard` to `/editor` | 1934 ms | 958–1433 ms |
+| editor `users.getCurrentUser` in the mount burst | 3 | 1 |
+| `/api/canvas/snapshot` | 847 ms | 110–195 ms |
+
+**One earlier number in this file was wrong and is corrected here.** The 1074 ms `projects.getProject` that motivated the preload was **Neon compute cold start**, not payload: the project it was measured on returns 990 bytes. Real `canvasState` sizes on this account run 990 bytes to 5.66 MB, and the largest rows are dominated by `history`, not by the live document. The preload buys a 35–270 ms head start, which is worth having and is not a second.
+
+`assertProjectOwner(db, user, projectId, select)` replaced eight full-row reads that existed only to check ownership; `projects.getProject` still reads the whole row, because the editor needs it.
+
 Still on the list, in the order they are worth doing: `mask.jsx` (5627 lines), `imagekit-agent.jsx` (3207), `pixel-stretch.jsx` (2754) and `canvas.jsx` (2502) are each a module boundary waiting to be drawn, and none of them is on the critical path in a way that bytes measure; the editor's `/api/canvas/snapshot` takes 737 ms on load.
 
 **Animations cannot be measured in an occluded window.** Safari never *starts* a CSS animation on a page whose `visibilityState` is `hidden`, and a terminal in fullscreen over the browser is enough to make it hidden — `getAnimations()` reports `playState: "running"` with `startTime: null` and `currentTime: 0` forever, so a reveal reads as a permanent `opacity: 0` and looks exactly like a broken keyframe. `activate` does not fix it across Spaces. Call `finish()` on each animation and read the computed style instead: the 17 `.reveal` elements on the landing page all resolve to `opacity: 1` and an identity transform, which is what a visitor with a visible tab gets.

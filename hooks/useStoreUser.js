@@ -1,9 +1,32 @@
 import { useAuth, useUser } from "@clerk/nextjs";
+import { hasSessionCookie } from "@/lib/session-hint";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/neon-api";
 import { isDatabaseSetupError } from "@/lib/database-errors";
 import { useDatabaseMutation } from "./useDatabaseQuery";
 import { toast } from "sonner";
+
+// Both pages that mount this unmount on a soft navigation, so dashboard -> editor
+// re-ran users.store and /api/billing/sync — two round trips in front of a route
+// transition that needs neither. The server already skips the write when the row is
+// fresher than 10 minutes, so remember the answer here for the same window and skip
+// the request too. The key carries the plan as well as the identity, so signing in as
+// someone else — or upgrading — still re-syncs.
+const STORE_TTL_MS = 10 * 60 * 1000;
+const stored = new Map();
+
+function storeOnce(key, run) {
+    const hit = stored.get(key);
+    if (hit && Date.now() - hit.at < STORE_TTL_MS) return hit.promise;
+    const promise = run().catch((error) => {
+        stored.delete(key);
+        throw error;
+    });
+    stored.set(key, { at: Date.now(), promise });
+    return promise;
+}
+
+let billingSynced = null;
 
 export function useStoreUser() {
     const { isLoaded, isSignedIn, has } = useAuth();
@@ -33,21 +56,27 @@ export function useStoreUser() {
         // Store the user in the database.
         // Recall that `storeUser` gets the user information via the `auth`
         // object on the server. You don't need to pass anything manually here.
+        const syncKey = `${user.id}:${isPro ? 'pro' : 'free'}`;
+
         async function createUser() {
             try {
-                const id = await storeUser();
+                const id = await storeOnce(syncKey, storeUser);
                 setDatabaseSetupMissing(false);
 
                 // The app is usable the moment the user row is known. Billing is
                 // reconciled in the background — awaiting it here put a second
                 // serial round trip in front of every page render.
-                fetch("/api/billing/sync", { method: "POST" })
-                    .then((response) => {
-                        if (!response.ok) throw new Error("Billing plan sync failed.");
-                    })
-                    .catch((syncError) => {
-                        console.error("Failed to sync billing plan to Neon.", syncError);
-                    });
+                if (billingSynced !== syncKey) {
+                    billingSynced = syncKey;
+                    fetch("/api/billing/sync", { method: "POST" })
+                        .then((response) => {
+                            if (!response.ok) throw new Error("Billing plan sync failed.");
+                        })
+                        .catch((syncError) => {
+                            billingSynced = null;
+                            console.error("Failed to sync billing plan to Neon.", syncError);
+                        });
+                }
 
                 if (!isCancelled) {
                     setUserId(id);
@@ -98,7 +127,11 @@ export function useStoreUser() {
         // is missing. Gating them on `isAuthenticated` made them wait for the
         // users.store write first, which put a whole round trip in front of the
         // first query on every page load.
-        isSessionReady: isLoaded && Boolean(isSignedIn),
+        // Before Clerk loads, the readable __client_uat cookie answers the same
+        // question, and every Neon function verifies the session itself. Waiting for
+        // the SDK's own handshake put ~1 s in front of the dashboard's first read on
+        // a navigation from the marketing route, which carries no Clerk.
+        isSessionReady: isLoaded ? Boolean(isSignedIn) : hasSessionCookie(),
         databaseSetupMissing,
     };
 }

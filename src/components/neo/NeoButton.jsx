@@ -48,6 +48,7 @@ const NeoButton = forwardRef(function NeoButton(
         disabled = false,
         magnetic = true,
         onClick,
+        onPointerDown,
         type = "button",
         as: Component,
         href,
@@ -98,12 +99,15 @@ const NeoButton = forwardRef(function NeoButton(
         }, 800)
     }, [])
 
+    // Named, not spread: rest lands after this handler, so a caller's own
+    // onPointerDown would replace the ripple instead of running beside it.
     const handlePointerDown = useCallback(
         (event) => {
             if (disabled) return
+            onPointerDown?.(event)
             spawnRipple(event.clientX, event.clientY)
         },
-        [disabled, spawnRipple]
+        [disabled, onPointerDown, spawnRipple]
     )
 
     const handleClick = useCallback(

@@ -6,6 +6,7 @@ import Link from "next/link"
 import { api } from "@/lib/neon-api";
 import { useDatabaseMutation, useDatabaseQuery } from "../../../../hooks/useDatabaseQuery"
 import { useStoreUser } from "../../../../hooks/useStoreUser"
+import { preloadProject } from "@/lib/query-preload"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -229,7 +230,10 @@ const Dashboard = () => {
     )
     const { mutate: deleteProjectMutate } = useDatabaseMutation(api.projects.deleteProject)
     const { mutate: bulkDeleteProjectsMutate } = useDatabaseMutation(api.projects.bulkDeleteProjects)
-    const isLoading = isAuthLoading || isProjectsLoading
+    // The grid needs the projects, not the users.store write: that row is refreshed
+    // for lastActiveAt and nothing here renders it. isAuthLoading still gates the
+    // case where nobody knows yet whether a session exists.
+    const isLoading = (!isSessionReady && isAuthLoading) || isProjectsLoading
     const visibleProjects = projects.filter((p) => !optimisticallyRemovedIds.includes(p._id))
     const projectCount = visibleProjects.length
     const hasProjects = projectCount > 0
@@ -637,6 +641,9 @@ const Dashboard = () => {
                                         key={project._id}
                                         href={`/editor/${project._id}`}
                                         className={cn("group block", isPendingDelete && "pointer-events-none")}
+                                        // The route transition cannot start the row read,
+                                        // so start it on the press instead.
+                                        onPointerDown={() => preloadProject(project._id)}
                                     >
                                         {cardContent}
                                     </Link>

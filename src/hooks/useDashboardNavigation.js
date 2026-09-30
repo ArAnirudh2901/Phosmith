@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useTransition } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import { hasSessionCookie } from "@/lib/session-hint"
+import { preloadDashboard } from "@/lib/query-preload"
 
 export function useDashboardNavigation() {
   const router = useRouter()
@@ -22,6 +23,8 @@ export function useDashboardNavigation() {
     if (isPending || isDashboardRoute) {
       return
     }
+
+    preloadDashboard()
 
     startTransition(() => {
       router.push("/dashboard", { scroll: false })

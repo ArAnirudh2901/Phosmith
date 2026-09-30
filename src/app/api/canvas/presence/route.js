@@ -44,7 +44,7 @@ const ensureOwnershipCached = async (projectId, userId, neonAuth, redis) => {
         const cached = await redis.get(ownerKey(projectId))
         if (cached && String(cached) === userId) return
     } catch { /* cache unavailable — fall through to Neon */ }
-    const project = await runNeonQuery("projects.getProject", { projectId }, { auth: neonAuth })
+    const project = await runNeonQuery("projects.getProjectOwner", { projectId }, { auth: neonAuth })
     if (!project) throw new Error("Project not found or access denied")
     try {
         await redis.set(ownerKey(projectId), userId, { ex: OWNER_CACHE_TTL_SECONDS })

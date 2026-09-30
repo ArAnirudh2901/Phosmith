@@ -393,6 +393,10 @@ const CanvasEditor = ({ project }) => {
     // Stable indirection to the latest direct-Neon writer so the sync manager
     // (created once per project) always calls the current updateProject mutation.
     const directWriteRef = useRef(async () => {})
+    // False until the project's saved state has finished loading. A flush that
+    // runs in that window (pagehide, visibilitychange, a fast navigation away)
+    // would otherwise persist the still-empty canvas over the real one.
+    const hydratedRef = useRef(false)
     const wasOfflineRef = useRef(false)
     // 'idle' | 'saving' | 'saved' | 'offline' | 'error' | 'conflict' | 'paused' — drives the status pill.
     const [syncStatus, setSyncStatus] = useState("idle")
@@ -674,6 +678,13 @@ const CanvasEditor = ({ project }) => {
         // Saved state failed to load: never overwrite it with the fallback canvas.
         if (canvas.__phosmithRestoreFailed) {
             if (rethrow) throw new Error("Saved edits failed to load — reload before saving")
+            return
+        }
+        // An empty canvas before hydration is not an edit, it is the blank one the
+        // user has not seen yet. Two projects were overwritten with objects: []
+        // this way by navigating away mid-load.
+        if (!hydratedRef.current && canvas.getObjects().length === 0) {
+            if (rethrow) throw new Error("Project is still loading — nothing to save yet")
             return
         }
 
@@ -1069,6 +1080,7 @@ const CanvasEditor = ({ project }) => {
             canvas.renderOnAddRemove = true
             canvas.calcOffset()
             canvas.requestRenderAll()
+            hydratedRef.current = true
             setCanvasEditor(canvas)
 
             const isExpansionMode = () =>

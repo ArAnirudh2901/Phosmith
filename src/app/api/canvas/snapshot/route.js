@@ -34,7 +34,7 @@ const ownerKey = (projectId) => `canvas:owner:${projectId}`
 const OWNER_CACHE_TTL_SECONDS = 60 * 60
 
 const ensureOwnership = async (projectId, neonAuth) => {
-    const project = await runNeonQuery("projects.getProject", { projectId }, { auth: neonAuth })
+    const project = await runNeonQuery("projects.getProjectOwner", { projectId }, { auth: neonAuth })
     if (!project) throw new Error("Project not found or access denied")
     return project
 }

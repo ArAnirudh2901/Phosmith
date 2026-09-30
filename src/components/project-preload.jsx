@@ -25,6 +25,10 @@
  * params, which is what lets this live in the root layout with no per-route
  * wiring. Pure optimisation: if the script is blocked, the promise rejects, or
  * the hook never looks, `useDatabaseQuery` fetches exactly as it did before.
+ *
+ * A soft navigation has no server-rendered document, so `lib/query-preload.js`
+ * does the same thing from the dashboard's project card. The two must agree on the
+ * payload key, since that is what `useDatabaseQuery` looks the promise up by.
  */
 
 const PRELOAD = `(function(){try{

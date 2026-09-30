@@ -6,6 +6,7 @@ import { LayoutDashboard } from 'lucide-react'
 import NeoButton from '@/components/neo/NeoButton'
 import HeaderShell from '@/components/header-shell'
 import { hasSessionCookie } from '@/lib/session-hint'
+import { preloadDashboard } from '@/lib/query-preload'
 
 // The marketing route's header. Clerk's client SDK is 138 KB of app chunks plus 16
 // requests to its CDN, and the only thing this bar needs from it is whether a
@@ -25,7 +26,16 @@ function LandingAuth({ drawer = false }) {
   }, [])
 
   const body = signedIn ? (
-    <NeoButton as={Link} href="/dashboard" variant="secondary" size="md" magnetic={false}>
+    <NeoButton
+      as={Link}
+      href="/dashboard"
+      variant="secondary"
+      size="md"
+      magnetic={false}
+      // Both dashboard reads wait on Clerk booting there; this page carries no
+      // Clerk, so start them on the press instead.
+      onPointerDown={preloadDashboard}
+    >
       <LayoutDashboard className="h-4 w-4" strokeWidth={2.5} />
       Dashboard
     </NeoButton>

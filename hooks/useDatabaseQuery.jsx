@@ -9,6 +9,40 @@ const QUERY_ENDPOINT = "/api/neon/query"
 const MUTATION_ENDPOINT = "/api/neon/mutation"
 const MUTATION_EVENT = "phosmith:neon-mutated"
 
+// One network request per identical query while it is in flight. usePlanAccess is
+// mounted by three editor components, so users.getCurrentUser went to the server
+// three times on every editor load. The entry is dropped when the request settles,
+// so a refetch after a mutation still hits the network.
+const inflight = new Map()
+
+function runQueryRequest(payload) {
+    const shared = inflight.get(payload)
+    if (shared) return shared
+
+    // The root layout's inline script starts this on a hard load, and
+    // lib/query-preload.js on a press that navigates here. Adopt it once, then fall
+    // back to the network — a refetch after a mutation must not replay a preload.
+    const preloaded = typeof window !== "undefined" ? window.__phosmithPreload?.[payload] : null
+    if (preloaded) delete window.__phosmithPreload[payload]
+
+    const promise = Promise.resolve(preloaded)
+        .then((result) => (result && typeof result.ok === "boolean" ? result : null))
+        .catch(() => null)
+        .then((adopted) => adopted || fetch(QUERY_ENDPOINT, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: payload,
+        }).then(async (response) => ({
+            ok: response.ok,
+            status: response.status,
+            body: await response.json().catch(() => ({})),
+        })))
+        .finally(() => inflight.delete(payload))
+
+    inflight.set(payload, promise)
+    return promise
+}
+
 const createDatabaseRequestError = (body, status, fallbackMessage) => {
     const error = new Error(body.error || fallbackMessage)
     error.status = status
@@ -79,42 +113,24 @@ export const useDatabaseQuery = (query, ...args) => {
                     args: JSON.parse(serializedQueryArgs),
                 })
 
-                // A server-rendered script may already have this request in
-                // flight (see the editor layout). Adopt it once, then fall back
-                // to fetching normally — refreshes after a mutation must always
-                // hit the network rather than replay a stale preload.
-                let result = null
-                const preloaded = typeof window !== "undefined" ? window.__phosmithPreload?.[payload] : null
-                if (preloaded) {
-                    delete window.__phosmithPreload[payload]
-                    result = await preloaded.catch(() => null)
-                }
-
-                let response
-                let body
-                if (result && typeof result.ok === "boolean") {
-                    response = { ok: result.ok, status: result.status }
-                    body = result.body || {}
-                } else {
-                    response = await fetch(QUERY_ENDPOINT, {
-                        method: "POST",
-                        headers: { "content-type": "application/json" },
-                        body: payload,
-                    })
-                    body = await response.json().catch(() => ({}))
-                }
-                if (!response.ok) {
-                    throw createDatabaseRequestError(body, response.status, "Database query failed")
+                const { ok, status, body } = await runQueryRequest(payload)
+                if (!ok) {
+                    throw createDatabaseRequestError(body || {}, status, "Database query failed")
                 }
                 if (!cancelled) {
-                    setData(body.data)
+                    setData(body?.data)
                     hasFetchedRef.current = true
                     lastErrorMessageRef.current = null
                 }
             } catch (err) {
                 if (!cancelled) {
                     setError(err)
-                    if (!isDatabaseSetupError(err) && lastErrorMessageRef.current !== err.message) {
+                    // A read may start from the session cookie before Clerk has
+                    // resolved. If that session is stale the server answers 401 and
+                    // the auth layer redirects — a toast there tells nobody anything.
+                    if (err.status === 401) {
+                        console.warn("Unauthorized database read.", err.message)
+                    } else if (!isDatabaseSetupError(err) && lastErrorMessageRef.current !== err.message) {
                         toast.error(err.message)
                         lastErrorMessageRef.current = err.message
                     }
@@ -139,7 +155,7 @@ export const useDatabaseQuery = (query, ...args) => {
  *   stale. Omit for the old behaviour (every query refetches). An empty array
  *   means "this changed nothing anyone is showing" — `users.store` is exactly
  *   that, and broadcasting from it made every page load refetch every query,
- *   including the ~840 KB project row.
+ *   including the project row (990 bytes to 5.7 MB across this account).
  */
 export const useDatabaseMutation = (mutation, options = {}) => {
     const mutationName = useMemo(() => getNeonFunctionName(mutation), [mutation])
