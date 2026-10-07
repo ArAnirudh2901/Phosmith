@@ -372,6 +372,15 @@ Measuring the navigation work overwrote two real projects with `objects: []` —
 
 `hydratedRef` in `canvas.jsx` is false until the init effect reaches `setCanvasEditor`, and `saveCanvasState` refuses to write while it is false AND the canvas is empty. A canvas the user genuinely emptied still saves, because by then hydration is done. `ProjectRevision` is what made one of the two recoverable — the other's only revision row was `null`.
 
+That fixed the path that fired; it did not stop the next one. **`src/lib/canvas-state-guard.js` is now the single rule, applied at every layer**: an empty canvas is assumed to be a bug and never replaces one with objects, unless the state carries `intentionallyEmpty: true`. The editor sets that flag only when this session has seen the canvas hold objects (`everHadObjectsRef`), so a user clearing their own work still saves, while an empty state that arrived from somewhere else does not.
+
+- **Server** (`guardCanvasWrite` in `neon/functions.js`): `updateProject` throws and `flushCanvasState` returns `{ ok: false, reason: "empty-overwrite" }` — before the "Keep mine" force path as well. The stored count is read in SQL (`jsonb_array_length` on the objects path), so a multi-megabyte state never travels to Node to be counted.
+- **Before a large shrink** (half or more of the objects gone, including a deliberate clear, and a revision restore to a sparser version) the stored state is copied into a `ProjectRevision` by one `INSERT … SELECT`, at most once per 10 minutes. Had this existed, "DSLR Test" would have been recoverable.
+- **Loading**: a newer Redis snapshot or IndexedDB copy may replace the Neon state — that is how unsynced work survives a reload — except an unmarked empty one never hides a state with objects.
+- **Replay**: `canvas-sync`'s startup replay drops an unmarked empty local copy instead of sending it. This one was found by driving the real `CanvasEditor`: with a newer empty copy in IndexedDB, the editor correctly showed the saved object and then the sync manager replayed the blank to Redis and Neon anyway.
+
+Verified three ways. `bun run verify:canvas-guard` (23 pure checks: the counting rule on every state shape, the refusal and shrink thresholds, and that both server write paths and the replay call the guard before they send). The SQL ran against the real database inside a rolled-back transaction: the count matched on four real rows including a `null` state, and the shrink copy reproduced a 5.66 MB state. And the real `CanvasEditor`, mounted headlessly with every `/api` write captured: a newer empty local copy loads the saved object and sends no empty write; a newer local copy WITH objects still wins; deleting the only object sends an empty write carrying `intentionallyEmpty: true`.
+
 ### Navigation between pages
 
 The first load was the data path and the bundle; a soft navigation is neither. A press on a project card, or on Dashboard in the marketing header, ran the whole chain in series: route transition, then the client bundle for the new route, then Clerk resolving a session, then the first Neon read. `src/lib/query-preload.js` breaks that order — `preloadProject(id)` and `preloadDashboard()` fire the exact `projects.getProject` / `projects.getUserProjects` + `users.getCurrentUser` POSTs on `pointerdown` and park the promise on `window.__phosmithPreload`, the same contract `project-preload.jsx` uses on a hard load. `useDatabaseQuery` adopts an in-flight promise once, then falls back to the network.
@@ -536,6 +545,7 @@ bun run verify:stretch      # Flow-path pixel stretch engine
 bun run verify:stretch-core # Scanline smear + stretch NL parser (pure)
 bun run verify:docs         # CLAUDE.md against reality: routes, verify list, check counts
 bun run verify:context      # Memory mirror's three-way rules (pure)
+bun run verify:canvas-guard # Empty-canvas overwrite rule + its call sites (pure)
 bun run verify:user-error   # Error-message humaniser (pure)
 bun run verify:heavy-queue  # One-heavy-job-at-a-time scheduler (pure)
 bun run verify:diagnostics  # Client error reporting + redaction (pure)

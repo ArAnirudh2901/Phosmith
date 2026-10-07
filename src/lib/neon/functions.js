@@ -1,5 +1,6 @@
 import { requirePrisma } from "@/lib/prisma";
 import { getRedis, isRedisConfigured } from "@/lib/redis";
+import { isAccidentalEmpty, isLargeShrink } from "@/lib/canvas-state-guard";
 
 // The canvas-snapshot route caches project ownership in Redis (1h TTL,
 // canvas:owner:<projectId>) to spare a Neon read per autosave. Deleting a
@@ -215,6 +216,44 @@ const trimProjectRevisions = async (db, projectId) => {
     await db.projectRevision.deleteMany({ where: { id: { in: old.map((row) => row.id) } } });
   }
 };
+
+// Read in SQL so a multi-megabyte canvasState is never shipped to Node to count it.
+const storedObjectCount = async (db, projectId) => {
+  const [row] = await db.$queryRaw`
+    SELECT CASE WHEN jsonb_typeof(COALESCE("canvasState"->'canvas'->'objects', "canvasState"->'objects')) = 'array'
+      THEN jsonb_array_length(COALESCE("canvasState"->'canvas'->'objects', "canvasState"->'objects')) ELSE 0 END AS n
+    FROM "Project" WHERE id = ${projectId}`;
+  return Number(row?.n ?? 0);
+};
+
+// One automatic copy per 10 minutes is enough to undo a mistake without
+// filling the revision list during a deleting spree.
+const SHRINK_SNAPSHOT_GAP_MS = 10 * 60 * 1000;
+
+const snapshotBeforeShrink = async (db, projectId) => {
+  const [latest] = await db.$queryRaw`SELECT max("createdAt") AS at FROM "ProjectRevision" WHERE "projectId" = ${projectId}`;
+  if (latest?.at && Date.now() - new Date(latest.at).getTime() < SHRINK_SNAPSHOT_GAP_MS) return;
+  await db.$executeRaw`
+    INSERT INTO "ProjectRevision" (id, "projectId", "userId", "canvasState", width, height, "currentImageUrl",
+      "activeTransformations", title, summary, changes, "createdAt")
+    SELECT gen_random_uuid()::text, p.id, p."userId", p."canvasState", p.width, p.height,
+      COALESCE(p."currentImageUrl", p."originalImageUrl"), p."activeTransformations",
+      'Before a large change', 'Saved automatically before most of this project''s objects were removed.',
+      '[]'::jsonb, now()
+    FROM "Project" p WHERE p.id = ${projectId}`;
+  await trimProjectRevisions(db, projectId);
+};
+
+// Server backstop for the editor's own load guard: false means refuse the write.
+const guardCanvasWrite = async (db, projectId, next) => {
+  if (next === undefined) return true;
+  const stored = await storedObjectCount(db, projectId);
+  if (isAccidentalEmpty(next, stored)) return false;
+  if (isLargeShrink(next, stored)) await snapshotBeforeShrink(db, projectId);
+  return true;
+};
+
+const EMPTY_OVERWRITE_MESSAGE = "Refused to replace saved edits with an empty canvas. Reload the project.";
 
 const snapshotPayload = ({ editSet, user, kind, canvasState, currentImageUrl, activeTransformations }) => {
   if (canvasState === undefined) return null;
@@ -490,6 +529,11 @@ const functions = {
     const revision = await db.projectRevision.findUnique({ where: { id: args.revisionId } });
     if (!revision) throw new Error("Version not found");
     await assertProjectOwner(db, user, revision.projectId);
+    // A restore is deliberate, so it is never refused — but restoring an old,
+    // sparser version should still leave the current one recoverable.
+    if (isLargeShrink(revision.canvasState, await storedObjectCount(db, revision.projectId))) {
+      await snapshotBeforeShrink(db, revision.projectId);
+    }
 
     await db.project.update({
       where: { id: revision.projectId },
@@ -510,6 +554,7 @@ const functions = {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
     await assertProjectOwner(db, user, args.projectId);
+    if (!(await guardCanvasWrite(db, args.projectId, args.canvasState))) throw new Error(EMPTY_OVERWRITE_MESSAGE);
 
     const updated = await db.project.update({
       where: { id: args.projectId },
@@ -538,6 +583,8 @@ const functions = {
     const db = await ensureDb();
     const user = await getAuthUser(db, ctx);
     await assertProjectOwner(db, user, args.projectId); // ownership guard
+    // Before the force path too: "Keep mine" must not keep an accidental blank.
+    if (!(await guardCanvasWrite(db, args.projectId, args.canvasState))) return { ok: false, reason: "empty-overwrite" };
 
     const data = clean({
       canvasState: args.canvasState,

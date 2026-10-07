@@ -66,6 +66,7 @@ import { createPresenceChannel } from "../../../../../lib/canvas-presence"
 import { toast } from "sonner"
 import { isPhosmithMaskOverlay } from "../../../../../lib/canvas-mask"
 import { setDomainHost } from "@/lib/agent/domain-host"
+import { INTENTIONALLY_EMPTY, canvasObjectCount, isAccidentalEmpty } from "@/lib/canvas-state-guard"
 import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
 import AuroraLoader from "./AuroraLoader"
 import { FLUSH_DEBOUNCE_MS, MAJOR_SAVE_DEBOUNCE_MS, MAX_NEON_STATE_CHARS, MAX_PERSISTED_HISTORY, MINOR_SAVE_TRICKLE_MS, MIN_PERSISTED_HISTORY_ENTRIES, MIN_SNAPSHOT_INTERVAL_MS, TEXT_HISTORY_DEBOUNCE_MS, getPrimaryRemoteImageUrl } from "./canvas-editor/persistence"
@@ -319,6 +320,9 @@ const CanvasEditor = ({ project }) => {
     // runs in that window (pagehide, visibilitychange, a fast navigation away)
     // would otherwise persist the still-empty canvas over the real one.
     const hydratedRef = useRef(false)
+    // Whether this session has seen the canvas hold objects. An empty save is
+    // only marked deliberate when it has — see lib/canvas-state-guard.js.
+    const everHadObjectsRef = useRef(false)
     const wasOfflineRef = useRef(false)
     // 'idle' | 'saving' | 'saved' | 'offline' | 'error' | 'conflict' | 'paused' — drives the status pill.
     const [syncStatus, setSyncStatus] = useState("idle")
@@ -612,10 +616,13 @@ const CanvasEditor = ({ project }) => {
 
         const canvasJSON = serializeCanvasState(canvas)
         const currentImageUrl = getPrimaryRemoteImageUrl(canvas)
+        const objectCount = canvasObjectCount(canvasJSON)
+        if (objectCount > 0) everHadObjectsRef.current = true
         let fullState = {
             ...canvasJSON,
             history: historyRef.current.slice(-MAX_PERSISTED_HISTORY),
             historyIndex: historyIndexRef.current,
+            ...(objectCount === 0 && everHadObjectsRef.current ? { [INTENTIONALLY_EMPTY]: true } : {}),
         }
         // Large projects (lots of objects + many history entries) can push the
         // serialized JSON over MAX_NEON_STATE_CHARS, which would make Neon
@@ -815,6 +822,7 @@ const CanvasEditor = ({ project }) => {
         const initGen = ++initGenerationRef.current
         let mounted = true
         hydratedRef.current = false
+        everHadObjectsRef.current = false
 
         disposeCanvasInstance()
         historyRef.current = []
@@ -867,7 +875,9 @@ const CanvasEditor = ({ project }) => {
                     // Redis snapshot wrongly win or lose against Neon. Older
                     // snapshots without it fall back to the client time.
                     const cachedUpdatedAt = Number(cachedSnapshot.serverUpdatedAt ?? cachedSnapshot.updatedAt) || 0
-                    if (cachedUpdatedAt > bestUpdatedAt) {
+                    if (cachedUpdatedAt > bestUpdatedAt && isAccidentalEmpty(cachedSnapshot.canvasState, canvasObjectCount(rawCanvasState))) {
+                        console.warn("[canvas] ignoring a newer but empty cached snapshot; the saved project has objects")
+                    } else if (cachedUpdatedAt > bestUpdatedAt) {
                         rawCanvasState = cachedSnapshot.canvasState
                         if (cachedSnapshot.currentImageUrl) {
                             effectiveCurrentImageUrl = cachedSnapshot.currentImageUrl
@@ -895,7 +905,9 @@ const CanvasEditor = ({ project }) => {
                 // from clobbering newer server state across devices.
                 if (localState?.fullState && localState.dirty !== false) {
                     const localUpdatedAt = Number(localState.updatedAt) || 0
-                    if (localUpdatedAt > bestUpdatedAt) {
+                    if (localUpdatedAt > bestUpdatedAt && isAccidentalEmpty(localState.fullState, canvasObjectCount(rawCanvasState))) {
+                        console.warn("[canvas] ignoring a newer but empty local copy; the saved project has objects")
+                    } else if (localUpdatedAt > bestUpdatedAt) {
                         rawCanvasState = localState.fullState
                         if (localState.currentImageUrl) {
                             effectiveCurrentImageUrl = localState.currentImageUrl
@@ -923,6 +935,7 @@ const CanvasEditor = ({ project }) => {
             try { syncRef.current?.setBaseRevision(effectiveBaseRevision) } catch { /* manager may not exist yet */ }
 
             loadedContentHashRef.current = canvasContentHash(rawCanvasState)
+            everHadObjectsRef.current = canvasObjectCount(rawCanvasState) > 0
             const canvasState = normalizeCanvasState(rawCanvasState)
             const persistedHistory = Array.isArray(rawCanvasState?.history) ? rawCanvasState.history : null
             let hasRestoredViewport = false

@@ -20,6 +20,7 @@
 // driver) can reuse the same manager.
 
 import { recordWrittenRevision } from "./canvas-content-hash.js"
+import { isUnmarkedEmpty } from "./canvas-state-guard.js"
 
 const DB_NAME = "phosmith-canvas-sync"
 const STORE = "states"
@@ -344,6 +345,13 @@ export const createCanvasSync = ({
             // it to Neon (dirty).
             const local = await loadLocalState(projectId)
             if (!local || !local.fullState) {
+                setStatus("saved")
+                return
+            }
+            // The editor refuses to load an unmarked empty copy, so replaying one
+            // could only push a blank over the project it just loaded.
+            if (isUnmarkedEmpty(local.fullState)) {
+                saveLocalState(projectId, { ...local, dirty: false }).catch(() => {})
                 setStatus("saved")
                 return
             }
