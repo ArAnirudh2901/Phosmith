@@ -19,6 +19,8 @@ export default function WandSection({
     wandSample,
     wandTolerance,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Magic Wand" icon={WandSparkles}>
             <div className="space-y-2">

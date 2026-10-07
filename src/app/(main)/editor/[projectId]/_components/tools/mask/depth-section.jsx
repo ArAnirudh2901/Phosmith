@@ -19,6 +19,8 @@ export default function DepthSection({
     setDepthMinBounded,
     setDepthSoftness,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Depth Range" icon={Mountain} badge="AI">
             <div className="space-y-2">

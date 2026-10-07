@@ -16,6 +16,8 @@ export default function LinearGradientSection({
     setGradFeather,
     setGradPosition,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Linear Gradient" icon={Blend}>
             <div className="space-y-3">

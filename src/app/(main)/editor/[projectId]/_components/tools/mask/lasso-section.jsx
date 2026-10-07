@@ -29,6 +29,8 @@ export default function LassoSection({
     setMagneticFrequency,
     setMagneticWidth,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Lasso Select" icon={Lasso}>
             <div className="space-y-2">

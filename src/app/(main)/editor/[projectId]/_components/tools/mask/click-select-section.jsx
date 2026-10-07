@@ -30,6 +30,8 @@ export default function ClickSelectSection({
     setSemanticRefineMode,
     stopModesRef,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
             <Section title="Click to Select" icon={MousePointer} badge="AI">
                 <div className="space-y-2">

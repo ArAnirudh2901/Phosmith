@@ -5,6 +5,8 @@ import { Section } from './ui'
 // Radial Gradient.
 
 export default function RadialGradientSection({ handleAddRadialLayer }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Radial Gradient" icon={Circle}>
             <div className="space-y-3">

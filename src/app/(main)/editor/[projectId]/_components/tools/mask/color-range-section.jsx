@@ -16,6 +16,8 @@ export default function ColorRangeSection({
     setColorTolerance,
     stopModesRef,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Color Range" icon={Palette}>
             <div className="flex items-center gap-2">

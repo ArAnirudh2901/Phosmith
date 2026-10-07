@@ -17,6 +17,8 @@ export default function MarqueeSection({
     setMarqueeOp,
     setMarqueeShape,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Marquee" icon={Frame}>
             <div className="space-y-2">

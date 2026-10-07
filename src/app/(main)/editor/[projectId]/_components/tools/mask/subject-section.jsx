@@ -24,6 +24,8 @@ export default function SubjectSection({
     subjectInstances,
     subjectSensitivity,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Select Subject" icon={Sparkles} defaultOpen={true} badge="AI">
             <motion.button

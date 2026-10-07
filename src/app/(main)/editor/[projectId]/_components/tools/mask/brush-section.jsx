@@ -34,6 +34,8 @@ export default function BrushSection({
     sigmaColor,
     sigmaSpace,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Selection Brush" icon={Paintbrush}>
             <div className="space-y-2">

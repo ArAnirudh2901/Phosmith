@@ -12,6 +12,8 @@ export default function AiRoutingSection({
     routingPolicy,
     selfTest,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="AI Processing" icon={Cpu} defaultOpen={false} badge={routingBadge}>
             <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>

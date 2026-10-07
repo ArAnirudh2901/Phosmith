@@ -43,6 +43,8 @@ export default function LayersSection({
     undoChain,
     updateLayer,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section
             title="Mask Layers"

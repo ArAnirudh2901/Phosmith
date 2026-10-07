@@ -15,6 +15,8 @@ export default function LuminanceSection({
     setLumaMax,
     setLumaMin,
 }) {
+    // Uncompiled, like the panel it was cut from: it reads live Fabric objects in render.
+    'use no memo'
     return (
         <Section title="Luminance Range" icon={Sun}>
             <div className="space-y-2">
