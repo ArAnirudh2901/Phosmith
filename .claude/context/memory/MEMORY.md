@@ -9,3 +9,4 @@
 - [Keep docs current](keep-docs-current.md) — CLAUDE.md + memory update in the same commit as the code, with the measured numbers
 - [No git hooks for the context mirror](context-sync-no-git-hooks.md) — auto mode denies creating them; user installs or nobody does
 - [Safari animations need a visible window](safari-hidden-window-animations.md) — occluded tab never starts one; call finish() to verify
+- [Pixel Stretch = Photoshop bar](pixel-stretch-photoshop-bar.md) — judge against the reference clips by contact sheet; tip off frame, root on line, subject in front

@@ -91,6 +91,29 @@ const boundaryErrors = (page) => page.evaluate(() => window.__errors.slice())
   check(modeCard > 0 && (await page.locator('#panel', { hasText: /Twist \(S-curve\)/ }).count()) > 0,
     'Pixel Stretch: reaches the stretch phase, switches modes and opens Refine')
 
+  // Photoshop flow: a confirmed rectangle lands on the stretch warp, and every
+  // look can be applied, flipped and reset without a render error.
+  await mount('stretch')
+  const rect = page.locator('#panel button', { hasText: /^\s*Rectangle\s*$/ })
+  if (await rect.count()) { await click(rect.first()); await page.waitForTimeout(200) }
+  const confirm = page.locator('#panel button', { hasText: /Confirm Region/ })
+  if (await confirm.count()) { await click(confirm.first()); await page.waitForTimeout(600) }
+  const looks = ['Rise', 'Swoosh', 'Arch', 'Fan', 'Wave', 'Fold', 'Twist']
+  let applied = 0
+  for (const name of looks) {
+    const b = page.locator('#panel button', { hasText: new RegExp(`^\\s*${name}\\s*$`) })
+    if (!(await b.count())) continue
+    await click(b.first()); await page.waitForTimeout(250)
+    // Chromium snaps computed border widths to device pixels; read the inline style.
+    if ((await b.first().evaluate((el) => el.style.border)).startsWith('1.5px')) applied++
+  }
+  const flip = page.locator('#panel button', { hasText: /Bend the other way/ })
+  if (await flip.count()) { await click(flip.first()); await page.waitForTimeout(250) }
+  const reset = page.locator('#panel button', { hasText: /Reset handles|Reset to look/ })
+  if (await reset.count()) { await click(reset.first()); await page.waitForTimeout(250) }
+  if (process.env.PANELS_SHOT) await page.screenshot({ path: path.join(OUT, 'stretch-warp.png') })
+  check(applied === looks.length && (await flip.count()) > 0, `Pixel Stretch: a confirmed region offers every look (${applied}/${looks.length}) and flips it`)
+
   await mount('adjust')
   const tabs = page.locator('.adjust-tabs button')
   const tabCount = await tabs.count()

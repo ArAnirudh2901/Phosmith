@@ -17,6 +17,11 @@ import {
     scanlineStretchPixels,
     clampStretchParams,
     DEFAULT_STRETCH,
+    applyWarpPreset,
+    getWarpGridCurves,
+    getWarpRest,
+    migrateStretchParams,
+    WARP_PRESETS,
 } from '../src/lib/pixel-stretch.js'
 import { parseStretchPrompt } from '../src/lib/agent/stretch-commands.js'
 
@@ -281,6 +286,80 @@ section('parser detail')
     check(parseStretchPrompt('') === null, 'empty input is not a request')
     check(parseStretchPrompt(null) === null, 'null input is not a request')
     check(parseStretchPrompt('стретч 🎨') === null, 'unicode noise is not a request')
+}
+
+section('stretch warp (Photoshop model)')
+{
+    const W = 1600, H = 1000
+    const bands = [
+        { axis: 'vertical', direction: -1, band: { x: 0.2, y: 0.45, w: 0.4, h: 0.2 }, seed: 0.5 },
+        { axis: 'vertical', direction: 1, band: { x: 0.5, y: 0.1, w: 0.3, h: 0.2 }, seed: 0.3 },
+        { axis: 'horizontal', direction: 1, band: { x: 0.3, y: 0.15, w: 0.1, h: 0.7 }, seed: 0.5 },
+        { axis: 'horizontal', direction: -1, band: { x: 0.6, y: 0.2, w: 0.1, h: 0.4 }, seed: 0.8 },
+    ]
+    let pinned = true, offFrame = true, noFold = true, finite = true
+    const misses = []
+    for (const look of WARP_PRESETS) {
+        for (const b of bands) {
+            for (const amount of [1, -1, 1.5]) {
+                const base = clampStretchParams({ ...b })
+                const { grid } = applyWarpPreset(base, look.id, amount, W, H)
+                if (!grid || grid.some((row) => row.some((pt) => !Number.isFinite(pt.x) || !Number.isFinite(pt.y)))) { finite = false; continue }
+                // Root row on the sampled line, spanning the band.
+                const vertical = b.axis === 'vertical'
+                const line = vertical ? b.band.y + b.seed * b.band.h : b.band.x + b.seed * b.band.w
+                const lo = vertical ? b.band.x : b.band.y, hi = lo + (vertical ? b.band.w : b.band.h)
+                const r0 = grid[0], C = r0.length
+                const along = (pt) => (vertical ? pt.y : pt.x), across = (pt) => (vertical ? pt.x : pt.y)
+                if (r0.some((pt) => Math.abs(along(pt) - line) > 1e-4) || Math.abs(across(r0[0]) - lo) > 1e-4 || Math.abs(across(r0[C - 1]) - hi) > 1e-4) {
+                    pinned = false; misses.push(`${look.id} root`)
+                }
+                // The band's end is never inside the frame.
+                const tip = grid[grid.length - 1]
+                const cx = (tip[0].x + tip[C - 1].x) / 2, cy = (tip[0].y + tip[C - 1].y) / 2
+                if (cx > 0 && cx < 1 && cy > 0 && cy < 1) { offFrame = false; misses.push(`${look.id} tip ${cx.toFixed(2)},${cy.toFixed(2)}`) }
+                // Neither edge runs backwards against the centreline (a fold).
+                const curves = getWarpGridCurves({ ...base, warpGrid: grid, warpModel: 'stretch' }, W, H, 24)
+                const L = curves.cols[0], R = curves.cols[curves.cols.length - 1]
+                for (let k = 1; k < L.length; k++) {
+                    const tx = (L[k].x + R[k].x - L[k - 1].x - R[k - 1].x) / 2, ty = (L[k].y + R[k].y - L[k - 1].y - R[k - 1].y) / 2
+                    const dl = (L[k].x - L[k - 1].x) * tx + (L[k].y - L[k - 1].y) * ty
+                    const dr = (R[k].x - R[k - 1].x) * tx + (R[k].y - R[k - 1].y) * ty
+                    if (dl < -1e-6 || dr < -1e-6) { noFold = false; misses.push(`${look.id} fold@${k}`); break }
+                }
+            }
+        }
+    }
+    check(finite, 'every look builds a finite net on both axes and directions')
+    check(pinned, 'every look keeps its root row on the sampled line', misses.filter((m) => m.endsWith('root')).slice(0, 3).join(', '))
+    check(offFrame, 'no look ends inside the frame', misses.filter((m) => m.includes('tip')).slice(0, 3).join(', '))
+    check(noFold, 'no look bends tighter than the band (edges never run backwards)', misses.filter((m) => m.includes('fold')).slice(0, 3).join(', '))
+
+    const side = (amount) => {
+        const { grid } = applyWarpPreset(clampStretchParams(bands[0]), 'swoosh', amount, W, H)
+        const t = grid[grid.length - 1]
+        return (t[0].x + t[t.length - 1].x) / 2
+    }
+    check(side(1) > 0.4 && side(-1) < 0.4, 'a negative amount bends the look to the other side', `${side(1).toFixed(2)} vs ${side(-1).toFixed(2)}`)
+    const aspect = applyWarpPreset(clampStretchParams(bands[0]), 'arch', 1, W, H).grid
+    const square = applyWarpPreset(clampStretchParams(bands[0]), 'arch', 1, 1, 1).grid
+    check(JSON.stringify(aspect) !== JSON.stringify(square), 'looks are built for the frame aspect they are given')
+
+    const odd = applyWarpPreset(clampStretchParams({}), 'nope', NaN, 0, -5)
+    check(odd.look.id === 'rise' && odd.grid && odd.grid.flat().every((pt) => Number.isFinite(pt.x)), 'an unknown look, NaN amount and a bad frame fall back to a straight rise')
+
+    const legacy = migrateStretchParams({ axis: 'vertical', band: { x: 0.1, y: 0.1, w: 0.5, h: 0.3 }, length: 2, warpGrid: null })
+    check(legacy.anchor === 'edge' && legacy.warpModel === 'image' && legacy.toEdge === false, 'a layer saved before the stretch model keeps rendering the old way')
+    const modern = migrateStretchParams(clampStretchParams({ warpLook: { id: 'fold', amount: -1.2 } }))
+    check(modern.anchor === 'seed' && modern.warpModel === 'stretch' && modern.toEdge && modern.warpLook?.id === 'fold' && modern.warpLook.amount === -1.2, 'a current layer round-trips its model and look')
+    check(migrateStretchParams(null).warpModel === DEFAULT_STRETCH.warpModel, 'a missing saved state gives the defaults')
+    const restOld = getWarpRest({ ...legacy })
+    check(Math.abs(restOld.h - 0.6) < 1e-9 && Math.abs(restOld.y - 0.1) < 1e-9, 'the legacy warp rest is unchanged', JSON.stringify(restOld))
+    const restNew = getWarpRest(clampStretchParams({ ...bands[0] }))
+    check(Math.abs(restNew.y + restNew.h - 0.55) < 1e-9 && restNew.y < 0, 'the stretch rest runs from the sampled line past the frame edge', JSON.stringify(restNew))
+
+    check(parseStretchPrompt('make the streaks curl over')?.params?.preset === 'swoosh', 'a curl asks for the swoosh look')
+    check(parseStretchPrompt('stretch it and fold the stripes over')?.params?.preset === 'fold', 'a fold asks for the fold look')
 }
 
 console.log(`\n[verify-stretch-core] ${checks - failures}/${checks} checks passed.`)

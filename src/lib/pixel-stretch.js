@@ -26,6 +26,10 @@
  * resolution-independent.
  */
 
+import { releaseStretchGL, renderMeshGL, sectionsToMesh } from './stretch-gl.js'
+import { canvasToPlane } from './cv/plane-image.js'
+import { lassoColourMatte } from './cv/lasso-matte.js'
+
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
 /**
@@ -83,6 +87,16 @@ export const DEFAULT_STRETCH = {
   warpRest: null,
   flowPath: null,
   scan: null,
+  // Where the ribbon grows from: 'seed' = the sampled line itself, as Photoshop's
+  // stretch does; 'edge' = the band's far edge (layers saved before this existed).
+  anchor: 'seed',
+  // Warp content: 'stretch' = the sampled line stretched off the frame edge, then
+  // warped (Photoshop's Free Transform → Warp); 'image' = the band's own pixels.
+  warpModel: 'stretch',
+  // Run an un-faded ribbon past the frame edge instead of ending it mid-frame.
+  toEdge: true,
+  // The warp look the net was built from ({ id, amount }), null once hand-edited.
+  warpLook: null,
 }
 
 // Warp is a composite bicubic Bézier surface — exactly Photoshop's Warp. The
@@ -120,6 +134,14 @@ export function getWarpRest(params = DEFAULT_STRETCH) {
   const p = { ...DEFAULT_STRETCH, ...params }
   const b = p.band
   const vertical = p.axis === 'vertical'
+  if (p.warpModel === 'stretch') {
+    // The sampled line to the frame edge, plus the same overshoot the looks use.
+    const s = vertical ? b.y + p.seed * b.h : b.x + p.seed * b.w
+    const far = p.direction > 0 ? 1.06 - s : s + 0.06
+    return vertical
+      ? { x: b.x, y: p.direction > 0 ? s : s - far, w: Math.max(0.001, b.w), h: Math.max(0.001, far) }
+      : { x: p.direction > 0 ? s : s - far, y: b.y, w: Math.max(0.001, far), h: Math.max(0.001, b.h) }
+  }
   let x0, y0, gw, gh
   if (vertical) {
     x0 = b.x
@@ -150,7 +172,13 @@ const snapNetDim = (n) => clamp(Math.round((Math.round(num(n, WARP_MIN_DIM)) - 1
  * @param {number} [cols=4]
  * @returns {Array<Array<{x:number,y:number}>>}
  */
-export function createDefaultWarpGrid(params = DEFAULT_STRETCH, rows = WARP_DEFAULT_ROWS, cols = WARP_DEFAULT_COLS) {
+export function createDefaultWarpGrid(params = DEFAULT_STRETCH, rows = WARP_DEFAULT_ROWS, cols = WARP_DEFAULT_COLS, W = 1, H = 1) {
+  if ((params?.warpModel ?? DEFAULT_STRETCH.warpModel) === 'stretch') {
+    const look = { ...LOOKS.rise, rows: snapNetDim(rows) }
+    const p = clampStretchParams(params)
+    const f = stretchFrame(p, W, H)
+    return sanitizeWarpGrid(netFromSurface(lookSurface(look, f, 1), look.rows, snapNetDim(cols), W, H))
+  }
   const R = snapNetDim(rows)
   const C = snapNetDim(cols)
   const rest = getWarpRest(params)
@@ -182,7 +210,7 @@ function sanitizeWarpGrid(grid) {
     for (let c = 0; c < C; c++) {
       const pt = grid[r][c]
       if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null
-      row.push({ x: clamp(pt.x, -0.6, 1.6), y: clamp(pt.y, -0.6, 1.6) })
+      row.push({ x: clamp(pt.x, -1.5, 2.5), y: clamp(pt.y, -1.5, 2.5) })
     }
     out.push(row)
   }
@@ -276,7 +304,23 @@ export function clampStretchParams(p = {}) {
     scan: clampScanline(base.scan),
     warpRest: sanitizeWarpRest(base.warpRest),
     flowPath: sanitizeFlowPath(base.flowPath),
+    anchor: base.anchor === 'edge' ? 'edge' : 'seed',
+    warpModel: base.warpModel === 'image' ? 'image' : 'stretch',
+    toEdge: base.toEdge !== false,
+    warpLook: base.warpLook && typeof base.warpLook.id === 'string'
+      ? { id: base.warpLook.id.slice(0, 24), amount: clamp(num(base.warpLook.amount, 1), -2, 2) }
+      : null,
   }
+}
+
+/**
+ * Params read back from a saved layer. Layers saved before the seed anchor and
+ * the stretch warp carry none of those keys, and keep rendering as they did.
+ */
+export function migrateStretchParams(saved) {
+  if (!saved || typeof saved !== 'object') return clampStretchParams(DEFAULT_STRETCH)
+  if ('warpModel' in saved) return clampStretchParams(saved)
+  return clampStretchParams({ anchor: 'edge', warpModel: 'image', toEdge: false, ...saved })
 }
 
 // ─── Presets ─────────────────────────────────────────────────────────────────
@@ -373,10 +417,11 @@ function resolveGeometry(p, W, H, dir = p.direction) {
   const d = vertical ? { x: 0, y: dir } : { x: dir, y: 0 }
   const n = vertical ? { x: 1, y: 0 } : { x: 0, y: 1 }
 
-  // Start = centre of the band's seed edge (the edge opposite to travel).
-  const start = vertical
-    ? { x: bx + bw / 2, y: dir > 0 ? by : by + bh }
-    : { x: dir > 0 ? bx : bx + bw, y: by + bh / 2 }
+  // Start: the sampled line itself, so each stripe begins on the pixel it
+  // repeats — or, for layers saved before that, the band edge opposite travel.
+  const start = p.anchor === 'edge'
+    ? (vertical ? { x: bx + bw / 2, y: dir > 0 ? by : by + bh } : { x: dir > 0 ? bx : bx + bw, y: by + bh / 2 })
+    : (vertical ? { x: bx + bw / 2, y: by + p.seed * bh } : { x: bx + p.seed * bw, y: by + bh / 2 })
 
   // Cubic control points. `bend` bows the path perpendicular to travel; `twist`
   // controls the SECOND control point's offset: twist 0 → both controls bow the
@@ -579,6 +624,17 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
   const fadeIn = opts.fadeIn || 0
   const seam = opts.quality === 'max' ? 0.7 : opts.quality === 'low' ? 0.5 : 0.6
 
+  const gpu = renderMeshGL({ source: strip, meshes: [sectionsToMesh(sections)], W, H, fade, fadeIn })
+  if (gpu) {
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.globalAlpha = opacity
+    ctx.drawImage(gpu, 0, 0)
+    ctx.restore()
+    ctx.globalAlpha = 1
+    return
+  }
+
   const rb = getRibbonBuf(W, H)
   const b = rb.ctx
   b.setTransform(1, 0, 0, 1, 0, 0)
@@ -640,6 +696,37 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
   ctx.globalAlpha = 1
 }
 
+// Photoshop's band is stretched past the canvas, so its end is never seen. An
+// un-faded ribbon whose tip lands inside the frame is carried on along its last
+// tangent until no part of the tip is inside.
+function extendToEdge(sections, W, H) {
+  const n = sections.length
+  if (n < 2) return sections
+  const last = sections[n - 1], prev = sections[n - 2]
+  let tx = last.cx - prev.cx, ty = last.cy - prev.cy
+  const tl = Math.hypot(tx, ty)
+  if (tl < 1e-6) return sections
+  tx /= tl; ty /= tl
+  const visible = (sec) => {
+    for (let k = 0; k <= 8; k++) {
+      const f = k / 4 - 1
+      const x = sec.cx + sec.nx * sec.hw * f, y = sec.cy + sec.ny * sec.hw * f
+      if (x >= 0 && x <= W && y >= 0 && y <= H) return true
+    }
+    return false
+  }
+  if (!visible(last)) return sections
+  const step = Math.max(W, H) / 24
+  const out = sections.slice()
+  const t0 = last.t ?? 1
+  let sec = last
+  for (let k = 1; k <= 72 && visible(sec); k++) {
+    sec = { ...last, cx: last.cx + tx * step * k, cy: last.cy + ty * step * k, t: t0 + k * 0.05 }
+    out.push(sec)
+  }
+  return out
+}
+
 /** Sweep one ribbon (one direction) onto ctx. */
 function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
   const stripLen = strip.width
@@ -654,7 +741,12 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
     // rotate about the start point, then draw in local space (+y = travel)
     ctx.setTransform(cos, sin, -sin, cos, g.start.x, g.start.y)
     const sv = strip.height > 2 ? 1 : 0
-    ctx.drawImage(strip, 0, sv, stripLen, 1, -g.stripLen / 2, 0, g.stripLen, g.total)
+    let len = g.total
+    if (p.toEdge) {
+      const exit = g.vertical ? (g.d.y < 0 ? g.start.y : H - g.start.y) : (g.d.x < 0 ? g.start.x : W - g.start.x)
+      len = Math.max(len, exit + 2)
+    }
+    ctx.drawImage(strip, 0, sv, stripLen, 1, -g.stripLen / 2, 0, g.stripLen, len)
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.globalAlpha = 1
     return
@@ -673,9 +765,10 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
     // centre -/+ n*hw, so as the cosine passes through zero the ribbon narrows to
     // an edge and the two sides trade places — a real half-turn, not a redraw.
     if (p.twistTurns) hw *= twistFactor(p, t)
-    sections[i] = { cx: c.x, cy: c.y, nx: tan.y, ny: -tan.x, hw }
+    sections[i] = { cx: c.x, cy: c.y, nx: tan.y, ny: -tan.x, hw, t }
   }
-  sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality })
+  const swept = p.toEdge && p.fade <= 0 ? extendToEdge(sections, W, H) : sections
+  sweepStripMesh(ctx, strip, swept, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality })
 }
 
 /**
@@ -948,6 +1041,7 @@ export function renderWarpMesh(ctx, sample, params, W, H, opts = {}) {
   const p = clampStretchParams(params)
   const grid = p.warpGrid
   if (!grid) return false
+  if (p.warpModel === 'stretch') return renderStretchWarp(ctx, sample, p, W, H, opts)
   const rest = p.warpRest || getWarpRest(p)
 
   // The already-stretched content the mesh deforms (reused across warp drags).
@@ -980,6 +1074,20 @@ export function renderWarpMesh(ctx, sample, params, W, H, opts = {}) {
       sX[idx] = (rest.x + u * rest.w) * W
       sY[idx] = sy
     }
+  }
+
+  const gpuMesh = { cols: nu + 1, rows: nv + 1, pos: new Float32Array(cells * 2), uv: new Float32Array(cells * 2), t: new Float32Array(cells) }
+  for (let k = 0; k < cells; k++) {
+    gpuMesh.pos[k * 2] = dX[k]; gpuMesh.pos[k * 2 + 1] = dY[k]
+    gpuMesh.uv[k * 2] = sX[k] / W; gpuMesh.uv[k * 2 + 1] = sY[k] / H
+  }
+  const gpu = renderMeshGL({ source: buf, sourceKey: _warpBuf.sig, meshes: [gpuMesh], W, H })
+  if (gpu) {
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.drawImage(gpu, 0, 0)
+    ctx.restore()
+    return true
   }
 
   ctx.save()
@@ -1185,73 +1293,268 @@ export function addWarpSplit(grid, axis) {
   return g.map((row) => subdivideBezierLine(row).map((pt) => ({ ...pt })))
 }
 
-// ─── Warp presets ────────────────────────────────────────────────────────────
-// Each fn returns a displacement {dx,dy} in rest-normalised units for a control
-// point at normalised cell coords (cu across the band, cv along the stretch:
-// cv=0 = seed edge, cv=1 = streak tips). `applyWarpPreset` adds it to the flat
-// grid — instant Photoshop-style warp shapes the user can then refine by hand.
+// ─── Warp looks (Photoshop's Free Transform → Warp, root pinned) ────────────
+// In Photoshop the sampled line is first stretched into a band of parallel
+// stripes that runs off the canvas, then warped. Every look below is that band
+// bent with its root nailed to the sampled line: a centreline whose heading
+// changes along the band, plus a width profile. The net is fitted to the
+// surface (Hermite → Bézier), so the handles the user then drags are the same
+// ones Photoshop shows.
+//
+// Net convention for warpModel 'stretch': grid[r][c], r runs from the sampled
+// line (0) to the tip, c across the band toward +n (texture u).
 
-const _falloff = (cu, cv) => Math.max(0, 1 - 2 * Math.hypot(cu - 0.5, cv - 0.5))
+const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t) }
 
-const PRESET_FNS = {
-  flat: () => ({ dx: 0, dy: 0 }),
-  arc: (cu, cv, a) => ({ dx: 0, dy: -0.45 * a * (1 - (2 * cu - 1) ** 2) }),
-  arch: (cu, cv, a) => ({ dx: 0, dy: -0.6 * a * (1 - (2 * cu - 1) ** 2) * cv }),
-  fan: (cu, cv, a) => ({ dx: (cu - 0.5) * 0.7 * a * cv, dy: -0.15 * a * (1 - (2 * cu - 1) ** 2) * cv }),
-  wave: (cu, cv, a) => ({ dx: 0.4 * a * Math.sin(cv * Math.PI * 2) * cv, dy: 0 }),
-  flag: (cu, cv, a) => ({ dx: 0, dy: 0.3 * a * Math.sin(cu * Math.PI * 3) * cv }),
-  bulge: (cu, cv, a) => {
-    const f = _falloff(cu, cv) * 0.6 * a
-    return { dx: (cu - 0.5) * f, dy: (cv - 0.5) * f }
-  },
-  twist: (cu, cv, a) => {
-    const ang = a * Math.PI * 0.6 * _falloff(cu, cv)
-    const rx = cu - 0.5, ry = cv - 0.5
-    const cos = Math.cos(ang), sin = Math.sin(ang)
-    return { dx: rx * cos - ry * sin - rx, dy: rx * sin + ry * cos - ry }
-  },
+// heading(r) in radians toward the roomier side; width(r) in band widths (signed
+// — a sign change is a half-turn); reach = arc length in units of the room ahead.
+const LOOKS = {
+  rise: { rows: 4, reach: 1, heading: () => 0, width: () => 1 },
+  swoosh: { rows: 10, reach: 1.3, heading: (r, a) => a * 2.2 * Math.pow(r, 1.5), width: (r, a) => 1 + 0.5 * a * r },
+  arch: { rows: 10, reach: 1.2, heading: (r, a) => a * Math.PI * Math.min(1, r / 0.7), width: (r, a) => 1 + 0.6 * a * r },
+  fan: { rows: 4, reach: 1, heading: () => 0, width: (r, a) => 1 + 7 * a * r },
+  wave: { rows: 10, reach: 1.15, heading: (r, a) => 0.55 * a * Math.sin(2 * Math.PI * 1.25 * r), width: (r, a) => 1 + 0.4 * a * r },
+  // The tightest turn the band allows: its radius is the band's own half-width
+  // (q = half-width / length), so the inner corner comes to a point and the legs
+  // either side stay straight, like a ribbon folded over.
+  fold: { rows: 13, reach: 1.25, heading: (r, a, q) => a * 0.55 * Math.PI * clamp01((r - 0.38) / Math.max(0.02, a * 0.55 * Math.PI * q * 1.2)), width: () => 1 },
+  twist: { rows: 10, reach: 1.25, heading: (r, a) => 0.3 * a * Math.sin(Math.PI * r), width: (r, a) => Math.cos(Math.PI * Math.min(1, r / 0.7)) * (1 + 0.5 * Math.abs(a) * r) },
 }
 
 export const WARP_PRESETS = [
-  { id: 'flat', label: 'Flat', hint: 'Straight grid (reset)' },
-  { id: 'arc', label: 'Arc', hint: 'Bow into a single arc' },
-  { id: 'arch', label: 'Arch', hint: 'Fan the tips into an arch' },
-  { id: 'fan', label: 'Fan', hint: 'Splay the streaks outward' },
-  { id: 'wave', label: 'Wave', hint: 'Growing serpentine wave' },
-  { id: 'flag', label: 'Flag', hint: 'Rippling flag flutter' },
-  { id: 'bulge', label: 'Bulge', hint: 'Push out from the centre' },
-  { id: 'twist', label: 'Twist', hint: 'Spiral around the centre' },
+  { id: 'rise', label: 'Rise', hint: 'Straight stripes to the frame edge' },
+  { id: 'swoosh', label: 'Swoosh', hint: 'Sweeps out and curls over' },
+  { id: 'arch', label: 'Arch', hint: 'Bends over into an arch' },
+  { id: 'fan', label: 'Fan', hint: 'Opens into a wide fan' },
+  { id: 'wave', label: 'Wave', hint: 'Snakes toward the edge' },
+  { id: 'fold', label: 'Fold', hint: 'Folds over to one side' },
+  { id: 'twist', label: 'Twist', hint: 'Turns over once' },
 ]
 
+/** The band's frame for the stretch model, in pixels. */
+function stretchFrame(p, W, H) {
+  const g = resolveGeometry({ ...p, anchor: 'seed' }, W, H)
+  const { d, n, start } = g
+  const ahead = g.vertical ? (d.y > 0 ? H - start.y : start.y) : (d.x > 0 ? W - start.x : start.x)
+  const span = g.vertical ? H : W
+  // Overshoot so the band's end is never inside the frame on a straight rise.
+  const room = Math.max(ahead, span * 0.35) + span * 0.06
+  const across = g.vertical ? (W - start.x) - start.x : (H - start.y) - start.y
+  return { g, d, n, start, room, W, H, width: g.stripLen, side: across >= 0 ? 1 : -1 }
+}
+
+// A band bent tighter than its own half-width folds through itself (the inner
+// edge runs backwards). Such a look is scaled up until every bend clears that.
+const LOOK_FOLD = 0.85
+
+/** Point on a look's surface at (s across, r along), in pixels. */
+function lookSurface(look, f, amount) {
+  const a = Math.abs(amount)
+  const side = f.side * (amount < 0 ? -1 : 1)
+  const N = 256
+  const hd = new Float64Array(N + 1), wd = new Float64Array(N + 1)
+  let L = f.room * (look.reach === 1 ? 1 : 1 + (look.reach - 1) * Math.min(1, a))
+  const q = f.width / 2 / L
+  for (let k = 0; k <= N; k++) { hd[k] = look.heading(k / N, a, q); wd[k] = look.width(k / N, a) }
+  let bend = 0
+  for (let k = 1; k <= N; k++) {
+    const hw = (Math.max(Math.abs(wd[k]), Math.abs(wd[k - 1])) * f.width) / 2
+    bend = Math.max(bend, Math.abs(hd[k] - hd[k - 1]) * N * hw)
+  }
+  // Half the cure goes to size, half to curvature: scaling only grows the look
+  // off the frame, flattening only erases it.
+  const over = bend / (L * LOOK_FOLD)
+  if (over > 1) {
+    const k = Math.sqrt(over)
+    L *= k
+    for (let i = 0; i <= N; i++) hd[i] /= k
+  }
+
+  // Integrate the heading into a centreline (lat, along) in pixels.
+  const lat = [0], alg = [0], head = [hd[0]], wid = [wd[0]]
+  for (let k = 1; k <= N; k++) {
+    const h = (hd[k - 1] + hd[k]) / 2
+    lat.push(lat[k - 1] + (Math.sin(h) * L) / N)
+    alg.push(alg[k - 1] + (Math.cos(h) * L) / N)
+    head.push(hd[k]); wid.push(wd[k])
+  }
+  const { d, n, start, W, H } = f
+  const world = (la, al) => ({ x: start.x + d.x * al + n.x * side * la, y: start.y + d.y * al + n.y * side * la })
+  // A tip still inside the frame reads as a cut: carry it on straight until the
+  // whole end is off the canvas, as Photoshop's oversized band would be.
+  const hEnd = hd[N], wEnd = Math.abs(wd[N]) * f.width
+  const step = L / N
+  const inside = (la, al) => {
+    const c = world(la, al)
+    const m = wEnd / 2 + 2
+    return c.x > -m && c.x < W + m && c.y > -m && c.y < H + m
+  }
+  for (let k = 0; k < 4 * N && inside(lat[lat.length - 1], alg[alg.length - 1]); k++) {
+    lat.push(lat[lat.length - 1] + Math.sin(hEnd) * step)
+    alg.push(alg[alg.length - 1] + Math.cos(hEnd) * step)
+    head.push(hEnd); wid.push(wd[N])
+  }
+  const M = lat.length - 1
+  const at = (r) => {
+    const x = clamp(r, 0, 1) * M
+    const k = Math.min(M - 1, Math.floor(x)), t = x - k
+    let la = lat[k] + (lat[k + 1] - lat[k]) * t
+    let al = alg[k] + (alg[k + 1] - alg[k]) * t
+    const h = head[k] + (head[k + 1] - head[k]) * t
+    const w = wid[k] + (wid[k + 1] - wid[k]) * t
+    // Past either end: carry on along the tangent (finite differences reach here).
+    const over = (r < 0 ? r : r > 1 ? r - 1 : 0) * M * step
+    la += Math.sin(h) * over
+    al += Math.cos(h) * over
+    return { la, al, h, w }
+  }
+  return (s, r) => {
+    const { la, al, h, w } = at(r)
+    const cos = Math.cos(h), sin = Math.sin(h)
+    // Normal: +n at heading 0, turning with the centreline.
+    const nx = n.x * cos - side * sin * d.x, ny = n.y * cos - side * sin * d.y
+    const off = (s - 0.5) * w * f.width
+    const c = world(la, al)
+    return { x: c.x + nx * off, y: c.y + ny * off }
+  }
+}
+
+// Fit a composite bicubic Bézier net to a parametric surface: anchors on the
+// surface, handles from its derivatives, interiors from the twist term.
+function netFromSurface(F, R, C, W, H) {
+  const pr = (R - 1) / 3, pc = (C - 1) / 3
+  const hu = 1 / (3 * pc), hv = 1 / (3 * pr)
+  const e = 1e-3
+  const grid = Array.from({ length: R }, () => new Array(C))
+  for (let i = 0; i <= pr; i++) {
+    for (let j = 0; j <= pc; j++) {
+      const v = i / pr, u = j / pc
+      const P = F(u, v)
+      const pu1 = F(u + e, v), pu0 = F(u - e, v), pv1 = F(u, v + e), pv0 = F(u, v - e)
+      const p11 = F(u + e, v + e), p10 = F(u + e, v - e), p01 = F(u - e, v + e), p00 = F(u - e, v - e)
+      const Du = { x: (pu1.x - pu0.x) / (2 * e), y: (pu1.y - pu0.y) / (2 * e) }
+      const Dv = { x: (pv1.x - pv0.x) / (2 * e), y: (pv1.y - pv0.y) / (2 * e) }
+      const Duv = { x: (p11.x - p10.x - p01.x + p00.x) / (4 * e * e), y: (p11.y - p10.y - p01.y + p00.y) / (4 * e * e) }
+      for (const sr of [-1, 0, 1]) {
+        const row = i * 3 + sr
+        if (row < 0 || row >= R) continue
+        for (const sc of [-1, 0, 1]) {
+          const col = j * 3 + sc
+          if (col < 0 || col >= C) continue
+          const x = P.x + Du.x * hu * sc + Dv.x * hv * sr + Duv.x * hu * hv * sr * sc
+          const y = P.y + Du.y * hu * sc + Dv.y * hv * sr + Duv.y * hu * hv * sr * sc
+          grid[row][col] = { x: x / W, y: y / H }
+        }
+      }
+    }
+  }
+  return grid
+}
+
 /**
- * Build a warp grid from a named preset over the current rest footprint.
- * Returns `{ grid, rest }` — commit both to params.
+ * Build a look's warp net for the stretch model. Returns `{ grid, rest }` —
+ * commit both, with `warpModel: 'stretch'`.
  *
  * @param {StretchParams} params
- * @param {string} presetId
- * @param {number} [amount=1]  Intensity multiplier.
- * @param {number} [rows]  Override grid rows (defaults to current/4).
- * @param {number} [cols]  Override grid cols (defaults to current/4).
+ * @param {string} presetId  One of WARP_PRESETS (unknown ids give 'rise').
+ * @param {number} [amount=1]  -2..2; the sign picks the side the band bends to.
+ * @param {number} [W=1]  Frame aspect — the look is built in pixels, so pass the
+ * @param {number} [H=1]  real (or proportional) size or arcs come out squashed.
  */
-export function applyWarpPreset(params, presetId, amount = 1, rows, cols) {
+export function applyWarpPreset(params, presetId, amount = 1, W = 1, H = 1) {
   amount = clamp(num(amount, 1), -2, 2)
-  const p = clampStretchParams(params)
-  const R = snapNetDim(rows || (p.warpGrid ? p.warpGrid.length : WARP_DEFAULT_ROWS))
-  const C = snapNetDim(cols || (p.warpGrid ? p.warpGrid[0].length : WARP_DEFAULT_COLS))
-  const rest = getWarpRest(p)
-  const fn = PRESET_FNS[presetId] || PRESET_FNS.flat
-  const grid = []
-  for (let r = 0; r < R; r++) {
-    const row = []
-    for (let c = 0; c < C; c++) {
-      const cu = C > 1 ? c / (C - 1) : 0
-      const cv = R > 1 ? r / (R - 1) : 0
-      const d = fn(cu, cv, amount)
-      row.push({ x: rest.x + (cu + d.dx) * rest.w, y: rest.y + (cv + d.dy) * rest.h })
+  W = num(W, 1) > 0 ? num(W, 1) : 1
+  H = num(H, 1) > 0 ? num(H, 1) : 1
+  const p = clampStretchParams({ ...params, warpModel: 'stretch', anchor: 'seed' })
+  const look = LOOKS[presetId] || LOOKS.rise
+  const f = stretchFrame(p, W, H)
+  const grid = sanitizeWarpGrid(netFromSurface(lookSurface(look, f, amount), look.rows, WARP_DEFAULT_COLS, W, H))
+  const id = LOOKS[presetId] ? presetId : 'rise'
+  return { grid, rest: getWarpRest(p), look: { id, amount } }
+}
+
+/** Stretch-model render: the seed strip mapped through the warp net. */
+function renderStretchWarp(ctx, sample, p, W, H, opts) {
+  const g = resolveGeometry({ ...p, anchor: 'seed' }, W, H)
+  if (g.stripLen < 1) return false
+  const strip = buildSeedStrip(sample, g)
+  const grid = p.warpGrid
+  const { pr, pc } = warpPatches(grid)
+  const per = opts.quality === 'low' ? 18 : opts.quality === 'max' ? 56 : 32
+  const nu = Math.max(4, pc * 6)
+  const nv = Math.max(8, Math.min(320, pr * per))
+  const cells = (nu + 1) * (nv + 1)
+  const build = (mirrorAxis) => {
+    const m = { cols: nu + 1, rows: nv + 1, pos: new Float32Array(cells * 2), uv: new Float32Array(cells * 2), t: new Float32Array(cells) }
+    for (let j = 0; j <= nv; j++) {
+      const v = j / nv
+      for (let i = 0; i <= nu; i++) {
+        const u = i / nu
+        const q = evalWarpSurface(grid, u, v)
+        let x = q.x * W, y = q.y * H
+        if (mirrorAxis) {
+          // Reflect across the sampled line: the band runs both ways from it.
+          const k = (x - g.start.x) * g.d.x + (y - g.start.y) * g.d.y
+          x -= 2 * k * g.d.x
+          y -= 2 * k * g.d.y
+        }
+        const idx = j * (nu + 1) + i
+        m.pos[idx * 2] = x; m.pos[idx * 2 + 1] = y
+        m.uv[idx * 2] = u; m.uv[idx * 2 + 1] = 0.5
+        m.t[idx] = v
+      }
     }
-    grid.push(row)
+    return m
   }
-  return { grid, rest }
+  const meshes = [build(false)]
+  if (p.mirror) meshes.push(build(true))
+
+  const gpu = renderMeshGL({ source: strip, meshes, W, H, fade: p.fade, fadeIn: p.fadeIn })
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.globalAlpha = p.opacity
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  if (gpu) {
+    ctx.drawImage(gpu, 0, 0)
+    ctx.restore()
+    return true
+  }
+  // Canvas2D: the stripes stretched into a small texture, the fades painted
+  // into it along v, then mapped triangle by triangle.
+  const TV = 64
+  const tex = createStretchBuffer(strip.width, TV)
+  const tctx = tex.getContext('2d')
+  tctx.imageSmoothingEnabled = true
+  tctx.drawImage(strip, 0, strip.height > 2 ? 1 : 0, strip.width, 1, 0, 0, strip.width, TV)
+  if (p.fade > 0 || p.fadeIn > 0) {
+    const ramp = Math.max(0.02, p.fadeIn * 0.6)
+    const grad = tctx.createLinearGradient(0, 0, 0, TV)
+    for (let k = 0; k <= 16; k++) {
+      const t = k / 16
+      grad.addColorStop(t, `rgba(0,0,0,${clamp01((1 - p.fadeIn * (1 - Math.min(1, t / ramp))) * (1 - p.fade * t))})`)
+    }
+    tctx.globalCompositeOperation = 'destination-in'
+    tctx.fillStyle = grad
+    tctx.fillRect(0, 0, strip.width, TV)
+  }
+  const seam = opts.quality === 'max' ? 0.75 : 0.6
+  for (const m of meshes) {
+    const stride = m.cols
+    const P = m.pos, U = m.uv
+    const sx = (k) => U[k * 2] * tex.width, sy = (k) => m.t[k] * TV
+    for (let j = 0; j < m.rows - 1; j++) {
+      for (let i = 0; i < m.cols - 1; i++) {
+        const a = j * stride + i, b = a + 1, c = a + stride, e = c + 1
+        drawTexturedTriangle(ctx, tex, P[a * 2], P[a * 2 + 1], P[b * 2], P[b * 2 + 1], P[c * 2], P[c * 2 + 1],
+          sx(a), sy(a), sx(b), sy(b), sx(c), sy(c), seam)
+        drawTexturedTriangle(ctx, tex, P[b * 2], P[b * 2 + 1], P[e * 2], P[e * 2 + 1], P[c * 2], P[c * 2 + 1],
+          sx(b), sy(b), sx(e), sy(e), sx(c), sy(c), seam)
+      }
+    }
+  }
+  ctx.restore()
+  return true
 }
 
 // ─── Flow Path (multi-anchor directional spline smear) ───────────────────────
@@ -1444,7 +1747,9 @@ export function renderFlowStretch(ctx, sample, params, W, H, opts = {}) {
     const scale = Math.max(FOLD_FLOOR, (minRadius * FOLD_LIMIT) / maxHw)
     for (const sec of sections) if (sec) sec.hw *= scale
   }
-  sweepStripMesh(ctx, strip, sections, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality })
+  for (let i = 0; i <= slices; i++) if (sections[i]) sections[i] = { ...sections[i], t: i / slices }
+  const swept = p.toEdge && p.fade <= 0 ? extendToEdge(sections.filter(Boolean), W, H) : sections
+  sweepStripMesh(ctx, strip, swept, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality })
   return true
 }
 
@@ -1809,6 +2114,36 @@ export function matteToAlphaCanvas(matte, W, H, feather = 0) {
 }
 
 /**
+ * Pull a hand-drawn front matte onto the subject. A lasso drawn around a subject
+ * takes in background wherever the hand went wide; `lassoColourMatte` decides
+ * that rim by colour and lays the boundary on the photo's edges, and the
+ * contrast curve keeps the result a clean cut-out rather than a soft halo.
+ * `matte` (white-on-black) is rewritten in place; `guide` is the photo at the
+ * same size.
+ */
+export function snapMatteToEdges(matte, guide, opts = {}) {
+  const W = matte?.width, H = matte?.height
+  if (!W || !H || guide?.width !== W || guide?.height !== H) return matte
+  let refined
+  try {
+    const rgba = guide.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H)
+    refined = lassoColourMatte(rgba, canvasToPlane(matte, 'red'), opts)
+  } catch {
+    return matte   // a tainted guide cannot be read; the plain lasso still works
+  }
+  const ctx = matte.getContext('2d', { willReadFrequently: true })
+  const img = ctx.createImageData(W, H)
+  const d = img.data
+  for (let p = 0, i = 0; p < refined.data.length; p += 1, i += 4) {
+    const t = clamp01((refined.data[p] - 0.3) / 0.4)
+    const v = Math.round(t * t * (3 - 2 * t) * 255)
+    d[i] = v; d[i + 1] = v; d[i + 2] = v; d[i + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+  return matte
+}
+
+/**
  * Knock the subject out of an already-painted ribbon layer (destination-out) so
  * the subject on the layer BELOW shows through. `alphaMatte` is from
  * matteToAlphaCanvas; `strength` 0..1 scales removal (1 = subject fully behind
@@ -1879,6 +2214,7 @@ export function releaseStretchScratch() {
   _ribbonBuf = { canvas: null, ctx: null }
   drop(_warpBuf.canvas)
   _warpBuf = { canvas: null, ctx: null, sig: '' }
+  releaseStretchGL()
 }
 
 /**

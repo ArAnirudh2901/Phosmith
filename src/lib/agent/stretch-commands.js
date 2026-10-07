@@ -114,7 +114,7 @@ export const parseStretchPrompt = (text) => {
         return { command: 'flow', params: { preset: flow || 'ribbon', from } }
     }
     if (warp || has(/\b(warp|arch|bend over|curl|loop)\b/)) {
-        return { command: 'warp', params: { preset: warp || 'arch', amount: Math.round(100 * gain), from } }
+        return { command: 'warp', params: { preset: warp || (has(/\bcurl\b/) ? 'swoosh' : 'arch'), amount: Math.round(100 * gain), from } }
     }
 
     return {
@@ -382,13 +382,12 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
         },
 
         warp: {
-            description: 'Bend an existing-style ribbon through a Photoshop-style warp mesh — the step that turns a straight column of streaks into an arch or a curl.',
+            description: 'Photoshop\'s stretch-then-warp: the sampled line is stretched into stripes that run off the frame edge, then bent by a look with its root pinned to the subject (rise = straight, swoosh = curl, arch, fan, wave, fold, twist).',
             params: {
                 preset: `one of ${WARP_IDS.join(', ')}`,
-                amount: '-200..200 — how hard the mesh is pulled (default 100)',
+                amount: '-200..200 — how hard the look bends (default 100); negative bends it to the other side',
                 from: 'same slice words as `ribbon`',
                 band: 'exact source slice { x, y, w, h }',
-                length: '1..200 — ribbon length before warping. Omitted, it is sized to cross the frame.',
                 behind: '0..100 — how much of the selected slice the ribbon passes behind',
                 behindSubject: 'true to use subject detection instead (see `ribbon`)',
                 blend: 'layer blend mode (see `ribbon`)',
@@ -398,9 +397,11 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const id = WARP_IDS.includes(preset) ? preset : 'arch'
                 const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: clamp(length, 1, 200, Math.min(200, Math.max(1, 0.85 / Math.max(0.02, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w)))), taper: 0.05 })
-                const { grid, rest } = applyWarpPreset(flat, id, clamp(amount, -200, 200, 100) / 100)
+                // Built in pixels: the frame's real aspect keeps arcs round.
+                const W = el.naturalWidth || el.width || 1, H = el.naturalHeight || el.height || 1
+                const { grid, rest, look } = applyWarpPreset(flat, id, clamp(amount, -200, 200, 100) / 100, W, H)
                 const placement = await placementFor(el, behind, blend, resolved, behindSubject)
-                await commit(image, { ...flat, warpGrid: grid, warpRest: rest }, `Pixel stretch warp (${id})`, placement)
+                await commit(image, { ...flat, warpGrid: grid, warpRest: rest, warpLook: look, warpModel: 'stretch', anchor: 'seed' }, `Pixel stretch warp (${id})`, placement)
                 return { applied: 'warp', preset: id, from: resolved.from, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
             },
         },

@@ -22,7 +22,7 @@
  * Pure: planes in, planes out (see box-filter.js). No DOM, no Fabric.
  */
 
-import { boxMean, makePlane, mapPlane, resamplePlane, upsamplePlane, zipPlanes } from './box-filter'
+import { boxMean, makePlane, mapPlane, resamplePlane, upsamplePlane, zipPlanes } from './box-filter.js'
 
 /** @typedef {import('./box-filter').Plane} Plane */
 

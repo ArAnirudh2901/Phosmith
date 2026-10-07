@@ -7,8 +7,8 @@
  * All but the first run on-device with no model.
  */
 
-import { makePlane, mapPlane } from './box-filter'
-import { distanceRamp } from './distance-transform'
+import { makePlane, mapPlane } from './box-filter.js'
+import { distanceRamp } from './distance-transform.js'
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v)
 

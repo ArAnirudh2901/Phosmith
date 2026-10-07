@@ -1,6 +1,7 @@
-import { AudioLines, Columns3, FlipHorizontal2, Grid3X3, Minus, RotateCcw, Route, Rows3, Spline, Wand2, Waypoints } from 'lucide-react'
+import { AudioLines, Columns3, FlipHorizontal2, Grid3X3, Minus, RotateCcw, Route, Rows3, Sparkles, Spline, Wand2, Waypoints } from 'lucide-react'
+import { toast } from 'sonner'
 import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
-import { DEFAULT_SCANLINE, FLOW_MIN_ANCHORS, FLOW_PRESETS, WARP_MAX_DIM, WARP_PRESETS, applyWarpPreset } from '@/lib/pixel-stretch'
+import { DEFAULT_SCANLINE, FLOW_MIN_ANCHORS, FLOW_PRESETS, WARP_MAX_DIM, WARP_PRESETS, bestSeedInBand } from '@/lib/pixel-stretch'
 import { EASE } from './constants'
 
 // Mode (ribbon, warp, flow, scanline) and the controls that belong to each.
@@ -10,6 +11,9 @@ export default function ModeCard({
     applyFlowPresetUI,
     applyWarp,
     cardStyle,
+    getSample,
+    previewWarp,
+    rebuildWarp,
     flowAnchorCount,
     flowMode,
     flowPresetId,
@@ -146,19 +150,19 @@ export default function ModeCard({
       {warpMode && params.warpGrid && (
         <div className="mt-3 space-y-3">
           <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-            Drag a <strong style={{ color: 'rgba(90, 170, 255, 1)' }}>■ anchor</strong> to move the sheet, a <strong style={{ color: 'rgba(120, 190, 255, 1)' }}>● handle</strong> to bend the curve through it (the tangent line shows the direction), or an interior dot to push the patch. Split to sculpt more curves — exactly like the Photoshop Warp transform.
+            The sampled line is stretched into stripes that run off the frame, then warped — Photoshop&apos;s Free Transform and Warp in one step. Pick a look, then drag the <strong style={{ color: 'rgba(90, 170, 255, 1)' }}>■ anchors</strong> and <strong style={{ color: 'rgba(120, 190, 255, 1)' }}>● handles</strong> to shape it. The first row stays on the sampled line.
           </p>
 
-          {/* Warp shape presets */}
+          {/* Looks */}
           <div>
-            <span className="panel-label inline-flex items-center gap-1.5"><Spline className="h-3 w-3" /> Warp Shape</span>
+            <span className="panel-label inline-flex items-center gap-1.5"><Spline className="h-3 w-3" /> Look</span>
             <div className="mt-1.5 grid grid-cols-4 gap-1.5">
               {WARP_PRESETS.map((wp) => {
                 const on = warpPresetId === wp.id
                 return (
                   <button
                     key={wp.id} type="button" title={wp.hint}
-                    onClick={() => applyWarp(wp.id, wp.id === 'flat' ? 1 : warpStrength)}
+                    onClick={() => applyWarp(wp.id, warpStrength || 1)}
                     className={`flex h-9 items-center justify-center rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
                     style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
                   >
@@ -167,18 +171,56 @@ export default function ModeCard({
                 )
               })}
             </div>
+            {!warpPresetId && (
+              <p className="mt-1.5 text-[10px]" style={{ color: 'var(--text-muted)' }}>Custom shape — pick a look to start over from it.</p>
+            )}
           </div>
 
-          {/* Preset strength — re-applies the active shape live */}
-          {warpPresetId && warpPresetId !== 'flat' && (
+          {/* Strength (magnitude) + side (sign) of the active look */}
+          {warpPresetId && warpPresetId !== 'rise' && (<>
             <ProRulerSlider
-              variant="instrument" label="Warp Strength" suffix="%"
-              value={Math.round(warpStrength * 100)} min={0} max={150} step={5}
-              onPreview={(v) => { const r = applyWarpPreset(paramsRef.current, warpPresetId, v / 100); livePatch({ warpGrid: r.grid, warpRest: r.rest }) }}
-              onCommit={(v) => applyWarp(warpPresetId, v / 100)}
+              variant="instrument" label="Amount" suffix="%"
+              value={Math.round(Math.abs(warpStrength) * 100)} min={0} max={150} step={5}
+              onPreview={(v) => previewWarp((warpStrength < 0 ? -v : v) / 100)}
+              onCommit={(v) => applyWarp(warpPresetId, (warpStrength < 0 ? -v : v) / 100)}
               visual={sliderVisual}
             />
-          )}
+            {warpPresetId !== 'fan' && (
+              <button
+                type="button" onClick={() => applyWarp(warpPresetId, -warpStrength)}
+                className={`flex w-full items-center justify-center gap-2 rounded-lg py-2 text-[11px] font-medium editor-interactive ${tapClass}`}
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
+              >
+                <FlipHorizontal2 className="h-3.5 w-3.5" />
+                Bend the other way
+              </button>
+            )}
+          </>)}
+
+          {/* The line the stripes repeat — moving it rebuilds the look there */}
+          {params.warpModel === 'stretch' && (<>
+            <ProRulerSlider
+              variant="instrument" label="Sampled line" suffix="%"
+              value={Math.round(params.seed * 100)} min={0} max={100} step={1}
+              onPreview={(v) => rebuildWarp({ seed: v / 100 }, true)}
+              onCommit={(v) => rebuildWarp({ seed: v / 100 })}
+              visual={sliderVisual}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const smp = getSample()
+                const best = smp?.canvas ? bestSeedInBand(smp.canvas, paramsRef.current.band, paramsRef.current.axis) : null
+                if (!best) { toast.error('Could not read this region'); return }
+                rebuildWarp({ seed: best.seed })
+              }}
+              className={`flex h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[10.5px] font-medium editor-interactive ${tapClass}`}
+              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
+            >
+              <Sparkles className="h-3 w-3" />
+              Find the most colourful line
+            </button>
+          </>)}
 
           {/* Grid density / split-warp */}
           <div>
@@ -214,7 +256,7 @@ export default function ModeCard({
             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
           >
             <RotateCcw className="h-3 w-3" />
-            Reset Grid
+            {warpPresetId ? 'Reset handles' : 'Reset to look'}
           </button>
         </div>
       )}

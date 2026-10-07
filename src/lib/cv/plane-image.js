@@ -7,7 +7,7 @@
  * the guided filter is what makes that upscale follow real edges.
  */
 
-import { makePlane, resamplePlane, upsamplePlane } from './box-filter'
+import { makePlane, resamplePlane, upsamplePlane } from './box-filter.js'
 
 /** Long edge of the analysis copy. 512 is where defocus estimation stops gaining. */
 export const WORKING_SIDE = 512

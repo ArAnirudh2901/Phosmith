@@ -7,8 +7,8 @@
  * Laplacian: same shape of result, two O(N) passes instead of a sparse solve.
  */
 
-import { gaussianBlur, makePlane, mapPlane } from './box-filter'
-import { propagateSparse } from './guided-filter'
+import { gaussianBlur, makePlane, mapPlane } from './box-filter.js'
+import { propagateSparse } from './guided-filter.js'
 
 /** Sobel gradient magnitude. */
 export const gradientMagnitude = (plane) => {

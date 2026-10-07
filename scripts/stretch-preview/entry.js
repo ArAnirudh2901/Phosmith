@@ -14,6 +14,10 @@ import {
     applyFlowPreset,
     analyzeStretchPlan,
     createFlowPathFromPoints,
+    createStretchBuffer,
+    matteToAlphaCanvas,
+    applySubjectKnockout,
+    snapMatteToEdges,
 } from '../../src/lib/pixel-stretch.js'
 
 import { isRawFile, resolveSourceFile } from '../../src/lib/raw-preview.js'
@@ -43,7 +47,7 @@ const getPhoto = async (name) => {
     return el
 }
 
-const buildParams = (spec, sample) => {
+const buildParams = (spec, sample, W = 1, H = 1) => {
     let base = { ...DEFAULT_STRETCH, ...(spec.params || {}) }
     if (spec.auto) {
         const plan = analyzeStretchPlan(sample)
@@ -58,12 +62,12 @@ const buildParams = (spec, sample) => {
     }
     let p = clampStretchParams(base)
     if (spec.warpPreset) {
-        const r = applyWarpPreset(p, spec.warpPreset, spec.warpAmount == null ? 1 : spec.warpAmount, spec.warpRows, spec.warpCols)
-        p = { ...p, warpGrid: r.grid, warpRest: r.rest }
+        const r = applyWarpPreset(p, spec.warpPreset, spec.warpAmount == null ? 1 : spec.warpAmount, W, H)
+        p = { ...p, warpGrid: r.grid, warpRest: r.rest, warpModel: 'stretch' }
     }
     if (spec.flowPreset) p = { ...p, flowPath: applyFlowPreset(p, spec.flowPreset) }
     if (spec.defaultFlow) p = { ...p, flowPath: createDefaultFlowPath(p, spec.flowAnchors || 4) }
-    if (spec.defaultWarp) p = { ...p, warpGrid: createDefaultWarpGrid(p, spec.warpRows, spec.warpCols), warpRest: getWarpRest(p) }
+    if (spec.defaultWarp) p = { ...p, warpGrid: createDefaultWarpGrid(p, spec.warpRows, spec.warpCols, W, H), warpRest: getWarpRest(p) }
     if (spec.warpDrag) {
         const grid = (p.warpGrid || createDefaultWarpGrid(p)).map((row) => row.map((pt) => ({ ...pt })))
         for (const d of spec.warpDrag) {
@@ -91,10 +95,28 @@ const shot = async (spec) => {
     if (spec.bg) { ctx.fillStyle = spec.bg; ctx.fillRect(0, 0, W, H) }
     else ctx.drawImage(sample, 0, 0)
     lastPlan = null
-    const p = buildParams(spec, sample)
+    const p = buildParams(spec, sample, W, H)
+    globalThis.__phosmithStretchNoGL = Boolean(spec.noGL)
     const t0 = performance.now()
-    const ok = renderPixelStretch(ctx, sample, p, W, H, { quality: spec.quality || 'max' })
+    let ok
+    if (spec.behind && p.polygon) {
+        // Same as the bake: ribbon on its own layer, the lasso knocked back out.
+        const layer = createStretchBuffer(W, H)
+        const lctx = layer.getContext('2d')
+        ok = renderPixelStretch(lctx, sample, p, W, H, { quality: spec.quality || 'max' })
+        const matte = createStretchBuffer(W, H)
+        const m = matte.getContext('2d')
+        m.fillStyle = '#000'; m.fillRect(0, 0, W, H); m.fillStyle = '#fff'
+        m.beginPath()
+        p.polygon.forEach((pt, i) => (i ? m.lineTo(pt.x * W, pt.y * H) : m.moveTo(pt.x * W, pt.y * H)))
+        m.closePath(); m.fill()
+        if (spec.snap) snapMatteToEdges(matte, sample)
+        applySubjectKnockout(lctx, matteToAlphaCanvas(matte, W, H, 0.006 * Math.min(W, H)), W, H, 1)
+        ctx.drawImage(layer, 0, 0)
+    } else ok = renderPixelStretch(ctx, sample, p, W, H, { quality: spec.quality || 'max' })
     if (spec.subjectOverlay) renderSubjectOverlay(ctx, sample, p, W, H)
+    // Canvas2D defers work until a readback; one pixel forces it inside the timing.
+    ctx.getImageData(0, 0, 1, 1)
     const ms = performance.now() - t0
     // Count how much of the probe colour survives where the ribbon drew.
     let bleed = null

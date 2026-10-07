@@ -7,7 +7,7 @@ import { isTaintError } from '@/lib/canvas-snapshot'
 import { toast } from 'sonner'
 import { adaptiveTextColor } from '@/lib/color-extraction'
 import { AudioLines, Check, ChevronDown, FlipHorizontal2, Layers, Loader2, RotateCcw, Sparkles, StretchHorizontal, StretchVertical, Wand2 } from 'lucide-react'
-import { DEFAULT_STRETCH, clampStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, createDefaultWarpGrid, getWarpRest, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, analyzeStretchPlan, bestSeedInBand, createDefaultFlowPath, createFlowPathFromPoints, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, buildSubjectCutout, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
+import { DEFAULT_STRETCH, clampStretchParams, migrateStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, analyzeStretchPlan, bestSeedInBand, createDefaultFlowPath, createFlowPathFromPoints, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, snapMatteToEdges, buildSubjectCutout, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
 import {
   MAX_BAKE_DIM,
   getSourceElement,
@@ -304,18 +304,33 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const rasterizeSelectionMatte = useCallback(() => {
     const p = paramsRef.current
     const img = selectedImageRef.current
-    const natW = Math.min(1600, Math.max(64, img?.width || 1024))
-    const natH = Math.min(1600, Math.max(64, img?.height || 1024))
+    const lasso = Array.isArray(p.polygon) && p.polygon.length >= 3
+    // The lasso is refined by colour below, which is O(pixels); the matte is
+    // upscaled smoothly when composited, so 1024 loses nothing visible.
+    const cap = lasso ? 1024 : 1600
+    const natW = Math.min(cap, Math.max(64, img?.width || 1024))
+    const natH = Math.min(cap, Math.max(64, img?.height || 1024))
     const c = createStretchBuffer(natW, natH)
     const ctx = c.getContext('2d')
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, natW, natH)
     ctx.fillStyle = '#fff'
-    if (Array.isArray(p.polygon) && p.polygon.length >= 3) {
+    if (lasso) {
       ctx.beginPath()
       p.polygon.forEach((pt, i) => { const x = pt.x * natW, y = pt.y * natH; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) })
       ctx.closePath()
       ctx.fill()
+      // A hand-drawn outline takes in background wherever it went wide; snap it
+      // to the subject so the ribbon does not show polygon-shaped holes.
+      const srcEl = sampleElRef.current || getSourceElement(img)
+      if (isSourceReady(srcEl)) {
+        const flipX = sampleElRef.current ? sampleFlipRef.current.x : img?.flipX
+        const flipY = sampleElRef.current ? sampleFlipRef.current.y : img?.flipY
+        const guide = snapshotSource(srcEl, natW, natH, flipX, flipY)
+        snapMatteToEdges(c, guide)
+        guide.width = 1
+        guide.height = 1
+      }
     } else {
       const b = p.band
       ctx.fillRect(b.x * natW, b.y * natH, b.w * natW, b.h * natH)
@@ -838,6 +853,44 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     setParams(paramsRef.current)
   }, [])
 
+  // Looks are built in pixels, so they need the photo's real aspect.
+  const frameWH = useCallback(() => {
+    const el = sampleElRef.current || getSourceElement(selectedImageRef.current)
+    return [el?.naturalWidth || el?.videoWidth || el?.width || 1, el?.naturalHeight || el?.videoHeight || el?.height || 1]
+  }, [])
+
+  // Photoshop's stretch-then-warp: the sampled line run to the frame edge, bent by a look.
+  const lookPatch = useCallback((base, id = 'rise', amount = 1) => {
+    const r = applyWarpPreset(base, id, amount, ...frameWH())
+    return { warpGrid: r.grid, warpRest: r.rest, warpLook: r.look, warpModel: 'stretch', anchor: 'seed' }
+  }, [frameWH])
+
+  // Seed, axis or direction changed under a stretch warp: the root moves, so the
+  // look is rebuilt there. A hand-edited net is carried along with the seed.
+  const rebuildWarp = useCallback((patch, live = false) => {
+    const cur = paramsRef.current
+    const next = clampStretchParams({ ...cur, ...patch })
+    let full
+    if (!next.warpLook && cur.warpGrid && next.axis === cur.axis && next.direction === cur.direction) {
+      const [W, H] = frameWH()
+      const a = getStretchAnchors({ ...cur, anchor: 'seed' }, W, H).start
+      const b = getStretchAnchors({ ...next, anchor: 'seed' }, W, H).start
+      full = { ...patch, warpGrid: cur.warpGrid.map((row) => row.map((pt) => ({ x: pt.x + b.x - a.x, y: pt.y + b.y - a.y }))) }
+    } else {
+      const lk = next.warpLook || { id: 'rise', amount: 1 }
+      full = { ...patch, ...lookPatch(next, lk.id, lk.amount) }
+      if (!live) { setWarpPresetId(lk.id); setWarpStrength(lk.amount) }
+    }
+    if (live) livePatch(full)
+    else commit(full)
+  }, [commit, livePatch, lookPatch, frameWH])
+
+  // Axis / direction: under a stretch warp they move where the band runs.
+  const setStretchAxis = useCallback((patch) => {
+    if (warpMode && paramsRef.current.warpModel === 'stretch') rebuildWarp(patch)
+    else commit(patch)
+  }, [commit, rebuildWarp, warpMode])
+
   const applyPreset = useCallback((preset) => {
     setActivePresetId(preset.id)
     // Preset lengths are multiples of the SLICE, which means "Tall Smear" on a
@@ -859,9 +912,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     const base = { ...DEFAULT_STRETCH, axis: paramsRef.current.axis, band: paramsRef.current.band, polygon: paramsRef.current.polygon }
     if (warpMode) {
       // In warp mode, reset the grid to default positions but keep warp active
-      base.warpGrid = createDefaultWarpGrid({ ...base })
-      base.warpRest = getWarpRest({ ...base })
-      setWarpPresetId(null)
+      Object.assign(base, lookPatch(base, 'rise', 1))
+      setWarpPresetId('rise')
       setWarpStrength(1)
     } else if (flowMode) {
       // In flow mode, reset to a fresh default spline but stay in flow mode.
@@ -870,7 +922,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       setFlowAnchorCount(base.flowPath?.anchors.length || 0)
     }
     commit(base)
-  }, [commit, warpMode, flowMode])
+  }, [commit, warpMode, flowMode, lookPatch])
 
   // ── Region phase transitions ──────────────────────────────────────────────
   const confirmRegion = useCallback(() => {
@@ -895,16 +947,30 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     const bandNow = regionPatch.band || paramsRef.current.band
     const best = sampled?.canvas ? bestSeedInBand(sampled.canvas, bandNow, paramsRef.current.axis) : null
     if (best) regionPatch = { ...regionPatch, seed: best.seed }
+    // Run toward the frame edge with more room from the sampled line.
+    {
+      const b = bandNow
+      const vertical = paramsRef.current.axis === 'vertical'
+      const seed = regionPatch.seed ?? paramsRef.current.seed
+      const at = vertical ? b.y + seed * b.h : b.x + seed * b.w
+      regionPatch = { ...regionPatch, direction: at >= 0.5 ? -1 : 1 }
+    }
     const base = clampStretchParams({ ...paramsRef.current, ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null })
     setWarpMode(true)
     setFlowMode(false)
-    setWarpPresetId(null)
+    setWarpPresetId('rise')
     setWarpStrength(1)
     setFlowPresetId(null)
     setActivePresetId(null)
-    commit({ ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null, warpGrid: createDefaultWarpGrid(base), warpRest: getWarpRest(base) })
+    commit({ ...regionPatch, length: 1, bend: 0, twist: 0, flowPath: null, ...lookPatch(base, 'rise', 1) })
     setPhase('stretch')
-  }, [commit, getSample])
+    // The reference look keeps the subject in front, and a lasso is its outline.
+    if (regionPatch.polygon && coverageRef.current <= 0) {
+      setCoverage(1)
+      coverageRef.current = 1
+      ensureSubjectMatte().then(() => scheduleFrame())
+    }
+  }, [commit, getSample, lookPatch, ensureSubjectMatte, scheduleFrame])
 
   const reselect = useCallback(() => {
     if (selModeRef.current === 'lasso') lassoPtsRef.current = []
@@ -963,10 +1029,10 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       const base = clampStretchParams({ ...paramsRef.current, band: result.bbox, polygon: pts, length: 1, bend: 0, twist: 0, flowPath: null })
       setWarpMode(true)
       setFlowMode(false)
-      setWarpPresetId(null)
+      setWarpPresetId('rise')
       setWarpStrength(1)
       setFlowPresetId(null)
-      commit({ band: result.bbox, polygon: pts, length: 1, bend: 0, twist: 0, flowPath: null, warpGrid: createDefaultWarpGrid(base), warpRest: getWarpRest(base) })
+      commit({ band: result.bbox, polygon: pts, length: 1, bend: 0, twist: 0, flowPath: null, ...lookPatch(base, 'rise', 1) })
       setPhase('stretch')
       setActivePresetId(null)
 
@@ -977,37 +1043,44 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     } finally {
       setSamLoading(false)
     }
-  }, [commit])
+  }, [commit, lookPatch])
 
   // ── Warp mesh controls ──────────────────────────────────────────────────────
+  // Back to the active look (hand edits dropped), or a straight Rise.
   const resetWarpGrid = useCallback(() => {
-    setWarpPresetId(null)
-    setWarpStrength(1)
-    commit({ warpGrid: createDefaultWarpGrid(paramsRef.current), warpRest: getWarpRest(paramsRef.current) })
-  }, [commit])
+    const lk = paramsRef.current.warpLook || { id: warpPresetId || 'rise', amount: warpStrength }
+    setWarpPresetId(lk.id)
+    setWarpStrength(lk.amount)
+    commit(lookPatch(paramsRef.current, lk.id, lk.amount))
+  }, [commit, lookPatch, warpPresetId, warpStrength])
 
   // Split-warp: add a row/column of control points → more curves, anywhere.
   const splitWarp = useCallback((axis) => {
     const grid = paramsRef.current.warpGrid
     if (!grid) return
     setWarpPresetId(null)
-    commit({ warpGrid: addWarpSplit(grid, axis) })
+    commit({ warpGrid: addWarpSplit(grid, axis), warpLook: null })
   }, [commit])
 
   // Apply a named warp preset at the given strength (re-applied live by the slider).
   const applyWarp = useCallback((presetId, amount) => {
     setWarpPresetId(presetId)
     setWarpStrength(amount)
-    const { grid, rest } = applyWarpPreset(paramsRef.current, presetId, amount)
-    commit({ warpGrid: grid, warpRest: rest })
-  }, [commit])
+    commit(lookPatch(paramsRef.current, presetId, amount))
+  }, [commit, lookPatch])
+
+  // Strength slider drag: rebuild the active look live.
+  const previewWarp = useCallback((amount) => {
+    livePatch(lookPatch(paramsRef.current, warpPresetId || 'rise', amount))
+  }, [livePatch, lookPatch, warpPresetId])
 
   // ── Mode switching (Simple / Flow Path / Mesh — mutually exclusive) ──────────
   const setStretchMode = useCallback((mode) => {
     setWarpPresetId(null); setWarpStrength(1); setFlowPresetId(null); setActivePresetId(null)
     if (mode === 'mesh') {
       setWarpMode(true); setFlowMode(false); setScanMode(false)
-      commit({ scan: null, warpGrid: createDefaultWarpGrid(paramsRef.current), warpRest: getWarpRest(paramsRef.current), flowPath: null })
+      setWarpPresetId('rise')
+      commit({ scan: null, flowPath: null, ...lookPatch(paramsRef.current, 'rise', 1) })
     } else if (mode === 'flow') {
       setFlowMode(true); setWarpMode(false); setScanMode(false)
       const fp = createDefaultFlowPath(paramsRef.current)
@@ -1022,7 +1095,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       setWarpMode(false); setFlowMode(false); setScanMode(false)
       commit({ scan: null, warpGrid: null, warpRest: null, flowPath: null })
     }
-  }, [commit])
+  }, [commit, lookPatch])
 
   /** Patch one field of the scanline config, keeping the rest. */
   const patchScan = useCallback((patch, live) => {
@@ -1220,7 +1293,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     subjectCutoutRef.current = null
     matteIsManualRef.current = false
     subjectPickRef.current = false
-    setSubjectMaskKind('none')
+    // Front = the user's own selection by default: no model, no download.
+    subjectMaskKindRef.current = 'selection'
+    setSubjectMaskKind('selection')
     setSubjectPicking(false)
     sampleElRef.current = null
     sampleFlipRef.current = { x: false, y: false }
@@ -1250,8 +1325,10 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         flipX: !!editMeta.sourceFlipX, flipY: !!editMeta.sourceFlipY,
       }
       sampleFlipRef.current = { x: !!editMeta.sourceFlipX, y: !!editMeta.sourceFlipY }
-      paramsRef.current = clampStretchParams(editMeta.params || DEFAULT_STRETCH)
+      paramsRef.current = migrateStretchParams(editMeta.params)
       setParams(paramsRef.current)
+      setWarpPresetId(paramsRef.current.warpLook?.id ?? null)
+      setWarpStrength(paramsRef.current.warpLook?.amount ?? 1)
       const cov = Math.min(1, Math.max(0, editMeta.coverage || 0))
       setCoverage(cov); coverageRef.current = cov
       featherRef.current = editMeta.feather || 0.006
@@ -1435,6 +1512,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       }
       // Generous hit radius (touch-friendly), in image-pixel space.
       if (!best || bestDist > 20 / Math.min(zX, zY)) return
+      // The root row sits on the sampled line; moving it would tear the band off
+      // the subject, so a stretch warp keeps it pinned.
+      if (wp.warpModel === 'stretch' && best.row === 0) return
       const { row, col } = best
       const origGrid = wp.warpGrid.map((r) => r.map((pt) => ({ ...pt })))
       const R = origGrid.length, C = origGrid[0].length
@@ -1450,8 +1530,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       const startX = e.clientX, startY = e.clientY
       interactingRef.current = true
       setActivePresetId(null)
-      setWarpPresetId(null) // hand-edited → no preset is "active" anymore
+      let moved = false
       const onMove = (ev) => {
+        if (!moved) { moved = true; setWarpPresetId(null) } // hand-edited → custom
         const dxN = (ev.clientX - startX) / zX / bounds.width
         const dyN = (ev.clientY - startY) / zY / bounds.height
         const newGrid = origGrid.map((r) => r.map((pt) => ({ ...pt })))
@@ -1463,7 +1544,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       const onUp = () => {
         window.removeEventListener('pointermove', onMove)
         window.removeEventListener('pointerup', onUp)
-        commit({})
+        commit(moved ? { warpLook: null } : {})
       }
       window.addEventListener('pointermove', onMove)
       window.addEventListener('pointerup', onUp)
@@ -1940,8 +2021,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           tapClass={tapClass}
       />
 
-      {/* Direction / axis — Simple mode only; Flow/Mesh own their own shape */}
-      {!warpMode && !flowMode && (
+      {/* Direction / axis — Simple and stretch-warp; Flow and image-warp own their shape */}
+      {!flowMode && !scanMode && (!warpMode || params.warpModel === 'stretch') && (
       <div className="panel-card" style={cardStyle}>
         <label className="panel-label">Streak Direction</label>
         <div className="mt-2 grid grid-cols-2 gap-2">
@@ -1954,7 +2035,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
               <button
                 key={id}
                 type="button"
-                onClick={() => commit({ axis: id })}
+                onClick={() => setStretchAxis({ axis: id })}
                 className={`flex h-9 items-center justify-center gap-2 rounded-lg text-xs font-medium editor-interactive ${tapClass}`}
                 style={{ background: on ? accent : 'var(--bg-elevated)', color: on ? onAccent : 'var(--text-secondary)', border: on ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
               >
@@ -1966,7 +2047,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         </div>
         <button
           type="button"
-          onClick={() => commit({ direction: params.direction * -1 })}
+          onClick={() => setStretchAxis({ direction: params.direction * -1 })}
           className={`mt-2 flex w-full items-center justify-center gap-2 rounded-lg py-2 text-[11px] font-medium editor-interactive ${tapClass}`}
           style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
         >
@@ -1982,6 +2063,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           applyFlowPresetUI={applyFlowPresetUI}
           applyWarp={applyWarp}
           cardStyle={cardStyle}
+          getSample={getSample}
+          previewWarp={previewWarp}
+          rebuildWarp={rebuildWarp}
           flowAnchorCount={flowAnchorCount}
           flowMode={flowMode}
           flowPresetId={flowPresetId}

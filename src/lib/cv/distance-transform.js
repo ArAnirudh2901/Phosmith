@@ -15,7 +15,7 @@
  * Pure: planes in, planes out.
  */
 
-import { makePlane } from './box-filter'
+import { makePlane } from './box-filter.js'
 
 const INF = 1e20
 

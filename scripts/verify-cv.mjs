@@ -12,6 +12,7 @@ import { detailSplit, fastGuidedCoefficients, fastGuidedFilter, guidedFilter, pr
 import { distanceRamp, distanceTransform, signedDistanceTransform, squaredDistanceTransform } from '../src/lib/cv/distance-transform.js'
 import { defocusCoverage, defocusMap, gradientMagnitude, sparseDefocus } from '../src/lib/cv/defocus-map.js'
 import { combine, fromDefocus, fromDepth, fromGroundPlane, fromLinear, fromMatte, fromRadial, refocus } from '../src/lib/cv/coc.js'
+import { lassoColourMatte } from '../src/lib/cv/lasso-matte.js'
 
 let failures = 0
 let checks = 0
@@ -431,6 +432,37 @@ const maxAbsDiff = (a, b) => {
     const bigUp = upsamplePlane(planeFrom(4, 4, (x, y) => ((x + y) % 2)), 512, 512)
     check(bigUp.data.every((v) => v >= -1e-6 && v <= 1 + 1e-6), 'a 128× upsample does not overshoot',
         `range ${Math.min(...bigUp.data).toFixed(3)}..${Math.max(...bigUp.data).toFixed(3)}`)
+}
+
+// ── Lasso → colour matte ────────────────────────────────────────────────────
+{
+    // A red disc on blue, lassoed 18px wide of its edge: the rim between the two
+    // is background the hand took in.
+    const W = 240, H = 200, cx = 120, cy = 100, R = 50, loose = 18
+    const rgba = { width: W, height: H, data: new Uint8ClampedArray(W * H * 4) }
+    const lasso = makePlane(W, H)
+    for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
+        const p = y * W + x, i = p * 4, r = Math.hypot(x - cx, y - cy)
+        const disc = r <= R
+        rgba.data[i] = disc ? 210 : 30; rgba.data[i + 1] = disc ? 40 : 60; rgba.data[i + 2] = disc ? 40 : 200; rgba.data[i + 3] = 255
+        lasso.data[p] = r <= R + loose ? 1 : 0
+    }
+    const m = lassoColourMatte(rgba, lasso, { band: 0.12 })
+    const at = (x, y) => m.data[y * W + x]
+    check(at(cx, cy) > 0.95 && at(cx + R - 6, cy) > 0.9, 'the subject inside a loose lasso stays in the matte', `${at(cx, cy).toFixed(2)}, ${at(cx + R - 6, cy).toFixed(2)}`)
+    // Under 0.3 is below the cut-out curve snapMatteToEdges applies, i.e. gone.
+    check(at(cx + R + 10, cy) < 0.3 && at(cx, cy - R - 12) < 0.3, 'background the lasso took in is dropped by colour', `${at(cx + R + 10, cy).toFixed(2)}, ${at(cx, cy - R - 12).toFixed(2)}`)
+    check(at(5, 5) < 0.02, 'outside the lasso stays out')
+    check(m.data.every((v) => Number.isFinite(v) && v >= -1e-6 && v <= 1 + 1e-6), 'the lasso matte is finite and bounded')
+
+    // Same colour inside and out: nothing to learn, so the drawn outline holds.
+    const flat = { width: W, height: H, data: new Uint8ClampedArray(W * H * 4).fill(128) }
+    const f = lassoColourMatte(flat, lasso, { band: 0.12 })
+    check(f.data[cy * W + cx] > 0.9 && f.data[5 * W + 5] < 0.1, 'a lasso over a flat frame keeps its own outline')
+    const tiny = makePlane(W, H)
+    tiny.data[cy * W + cx] = 1
+    check(lassoColourMatte(rgba, tiny) === tiny, 'a lasso too small to model is returned unchanged')
+    check(lassoColourMatte({ width: 3, height: 3, data: new Uint8ClampedArray(36) }, lasso) === lasso, 'a photo of the wrong size is refused')
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed.`)

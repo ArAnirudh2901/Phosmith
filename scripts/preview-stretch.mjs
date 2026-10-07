@@ -42,41 +42,56 @@ const server = createServer(async (req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r))
 const BASE = `http://127.0.0.1:${server.address().port}/`
 
+// The real Chrome on :9222 when it is running; otherwise Playwright's Chromium,
+// so a look at the output never waits on a debugging session being open.
+let evaluate
+let finish
 const probe = await fetch(`http://127.0.0.1:${DEVTOOLS}/json/version`, { signal: AbortSignal.timeout(1500) })
     .then((r) => r.json()).catch(() => null)
-if (!probe) { server.close(); die(`no Chrome on :${DEVTOOLS}`) }
-const target = await fetch(`http://127.0.0.1:${DEVTOOLS}/json/new?${encodeURIComponent(BASE)}`, { method: 'PUT' })
-    .then((r) => r.json()).catch(() => null)
-if (!target?.webSocketDebuggerUrl) { server.close(); die('could not open a tab') }
-const ws = new WebSocket(target.webSocketDebuggerUrl)
-await new Promise((res, rej) => {
-    ws.addEventListener('open', res, { once: true })
-    ws.addEventListener('error', () => rej(new Error('cdp socket failed')), { once: true })
-})
-let id = 0
-const pending = new Map()
-ws.addEventListener('message', (e) => {
-    const m = JSON.parse(e.data)
-    const slot = pending.get(m.id)
-    if (!slot) return
-    pending.delete(m.id)
-    m.error ? slot.reject(new Error(m.error.message)) : slot.resolve(m.result)
-})
-const send = (method, params) => new Promise((resolve, reject) => {
-    id += 1
-    pending.set(id, { resolve, reject })
-    ws.send(JSON.stringify({ id, method, params }))
-})
-const evaluate = async (expression) => {
-    const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || 'evaluate threw')
-    return r.result.value
-}
-
-const finish = async () => {
-    ws.close()
-    await fetch(`http://127.0.0.1:${DEVTOOLS}/json/close/${target.id}`).catch(() => {})
-    server.close()
+if (probe) {
+    const target = await fetch(`http://127.0.0.1:${DEVTOOLS}/json/new?${encodeURIComponent(BASE)}`, { method: 'PUT' })
+        .then((r) => r.json()).catch(() => null)
+    if (!target?.webSocketDebuggerUrl) { server.close(); die('could not open a tab') }
+    const ws = new WebSocket(target.webSocketDebuggerUrl)
+    await new Promise((res, rej) => {
+        ws.addEventListener('open', res, { once: true })
+        ws.addEventListener('error', () => rej(new Error('cdp socket failed')), { once: true })
+    })
+    let id = 0
+    const pending = new Map()
+    ws.addEventListener('message', (e) => {
+        const m = JSON.parse(e.data)
+        const slot = pending.get(m.id)
+        if (!slot) return
+        pending.delete(m.id)
+        m.error ? slot.reject(new Error(m.error.message)) : slot.resolve(m.result)
+    })
+    const send = (method, params) => new Promise((resolve, reject) => {
+        id += 1
+        pending.set(id, { resolve, reject })
+        ws.send(JSON.stringify({ id, method, params }))
+    })
+    evaluate = async (expression) => {
+        const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
+        if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || 'evaluate threw')
+        return r.result.value
+    }
+    finish = async () => {
+        ws.close()
+        await fetch(`http://127.0.0.1:${DEVTOOLS}/json/close/${target.id}`).catch(() => {})
+        server.close()
+    }
+} else {
+    let chromium
+    try { ({ chromium } = await import('playwright')) } catch { server.close(); die(`no Chrome on :${DEVTOOLS} and no playwright`) }
+    // Headless defaults to SwiftShader; on a Mac ask for the real GPU so timings
+    // and the WebGL path are the ones a user gets.
+    const browser = await chromium.launch({ args: process.platform === 'darwin' ? ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] : [] })
+    const page = await browser.newPage()
+    await page.goto(BASE)
+    console.log('[preview-stretch] no Chrome on :9222 — using Playwright Chromium')
+    evaluate = (expression) => page.evaluate(expression)
+    finish = async () => { await browser.close(); server.close() }
 }
 
 const DEFAULT_SPECS = [
