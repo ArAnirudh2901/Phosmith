@@ -422,7 +422,7 @@ The editor's biggest files were one component each, holding every control's stat
 
 | file | before | after | moved to |
 |---|---|---|---|
-| `tools/mask.jsx` | 5627 | 3859 | `tools/mask/` — 14 section components (`layers-section` … `quick-erase-section`), `ui.jsx`, `geometry.js` |
+| `tools/mask.jsx` | 5627 | 2865 | `tools/mask/` — 14 section components (`layers-section` … `quick-erase-section`), `ui.jsx`, `geometry.js`, and four hooks: `useClickSelect`, `useDepthRange`, `useGradientGizmos`, `useRangeLayers` |
 | `tools/imagekit-agent.jsx` | 3223 | 1745 | `tools/agent/` — header, chat area, edits panel; `intents`, `transform-cache`, `chat-storage`, `canvas-targets`, `plan`, `format`, `ui` |
 | `tools/pixel-stretch.jsx` | 2754 | 2101 | `tools/stretch/` — selection, placement and mode cards, shape and refine sliders; `canvas-geometry`, `constants` |
 | `tools/adjust.jsx` | 1845 | 583 | `tools/adjust/` — `config`, `filters`, `targets`, `curves`, `color-wheel`, `imagekit`, `utils` |
@@ -456,7 +456,9 @@ The editor's biggest files were one component each, holding every control's stat
 
 **`CanvasEditor`'s logic moved as hooks, by the same method.** Each run of top-level statements became a custom hook called at the same position, so React's hook order is unchanged; Babel scope analysis gave each hook's inputs (what the run reads from the component) and outputs (what the component reads back) and refused any run that reassigns a binding across the boundary. The seams were chosen from that analysis rather than by eye — the mask-preview pipeline reads 3 things from the component and gives nothing back, which is what a boundary looks like. Each hook carries `"use no memo"`, like the component. Verified by a behaviour trace of the real `CanvasEditor` in the headless harness — load, add an object, autosave, undo, redo, preview zoom, container resize refit, hand-tool key, fit, and a real luminance mask layer installing the megashader filter on an image — recorded on the code before the split and after it: identical in all ten steps (objects, zoom, history state, cursor, autosave write count, the editor's buttons, image filters). `verify:panels`, `verify:canvas-guard`, `verify:history`, `verify:agent` and `verify:mask-render` pass.
 
-What has NOT moved: the state and handlers of `MaskControls`, `ImageKitAgent` and `PixelStretchControls`, and `usePixelMaskTool`'s body.
+`MaskControls` gave up four hooks the same way — click select, depth range, the gradient gizmos and the range layers — checked by a trace that presses every add/apply/run button in the Luminance, Colour Range, Linear and Radial Gradient, Depth and Click-to-Select sections and records the layer chain, the canvas objects (the gizmo handles are Fabric objects) and the panel text after each: identical before and after, no page errors. The rest of its state is not split, and should not be by this method: the brush / lasso / marquee block hands **93** values back to the component and the subject tool's state is not contiguous, so "hooks" there would only turn locals into long parameter lists. The same is true of `ImageKitAgent`, `PixelStretchControls` and `usePixelMaskTool`'s body, which were not attempted.
+
+Source-reading checks must read the whole panel: `verify-megashader.mjs` had six invariants that read `mask.jsx` alone, two of which (the re-entry guards in click select and depth) failed once those moved — correctly — and the others would have kept passing while blind to the moved code. They read `mask.jsx` plus `tools/mask/` now.
 
 ## Resize path, and the selection toolbar
 

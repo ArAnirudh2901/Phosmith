@@ -1393,14 +1393,20 @@ const log = (ok, name, detail) => {
     }
 }
 
+const readMaskPanelSource = (fs) => {
+    const dir = 'src/app/(main)/editor/[projectId]/_components/tools'
+    return [`${dir}/mask.jsx`, ...fs.readdirSync(`${dir}/mask`).map((f) => `${dir}/mask/${f}`)]
+        .map((f) => fs.readFileSync(f, 'utf8')).join('\n')
+}
+
 // 85. `handleSemanticRun` must read its running flag from a ref
 //     (`isSemanticRunningRef.current`), not closure-captured state, and
 //     must attach an `AbortController` so a re-entrant call can cancel
 //     the in-flight request.
 {
     const fs = await import('node:fs')
-    const file = 'src/app/(main)/editor/[projectId]/_components/tools/mask.jsx'
-    const src = fs.readFileSync(file, 'utf8')
+    // The panel's logic is split across mask.jsx and tools/mask/, so read them all.
+    const src = readMaskPanelSource(fs)
     // Ref-based guard present
     const usesRefGuard = /isSemanticRunningRef\.current/.test(src)
     log(usesRefGuard, 'handleSemanticRun guards re-entry via isSemanticRunningRef.current')
@@ -1414,8 +1420,8 @@ const log = (ok, name, detail) => {
 //     guard and abort plumbing.
 {
     const fs = await import('node:fs')
-    const file = 'src/app/(main)/editor/[projectId]/_components/tools/mask.jsx'
-    const src = fs.readFileSync(file, 'utf8')
+    // The panel's logic is split across mask.jsx and tools/mask/, so read them all.
+    const src = readMaskPanelSource(fs)
     const usesRefGuard = /isDepthRunningRef\.current/.test(src)
     log(usesRefGuard, 'handleDepthRun guards re-entry via isDepthRunningRef.current')
     const hasAbortCtl = /depthAbortRef/.test(src) && /new\s+AbortController\(\)/.test(src)
@@ -1426,8 +1432,8 @@ const log = (ok, name, detail) => {
 // 87. `handleSelectSubject` (BiRefNet / step 4) — same shape.
 {
     const fs = await import('node:fs')
-    const file = 'src/app/(main)/editor/[projectId]/_components/tools/mask.jsx'
-    const src = fs.readFileSync(file, 'utf8')
+    // The panel's logic is split across mask.jsx and tools/mask/, so read them all.
+    const src = readMaskPanelSource(fs)
     const usesRefGuard = /isSegmentingRef\.current/.test(src)
     log(usesRefGuard, 'handleSelectSubject guards re-entry via isSegmentingRef.current')
     const hasAbortCtl = /segmentAbortRef/.test(src) && /new\s+AbortController\(\)/.test(src)
@@ -1440,8 +1446,8 @@ const log = (ok, name, detail) => {
 //     in-flight fetches don't resolve after unmount.
 {
     const fs = await import('node:fs')
-    const file = 'src/app/(main)/editor/[projectId]/_components/tools/mask.jsx'
-    const src = fs.readFileSync(file, 'utf8')
+    // The panel's logic is split across mask.jsx and tools/mask/, so read them all.
+    const src = readMaskPanelSource(fs)
     const abortsAll = /segmentAbortRef\.current\?\.abort\(\)/
         .test(src)
         && /semanticAbortRef\.current\?\.abort\(\)/
@@ -1457,8 +1463,8 @@ const log = (ok, name, detail) => {
 //     dispatch, which would re-run the effect on every mousemove tick.
 {
     const fs = await import('node:fs')
-    const file = 'src/app/(main)/editor/[projectId]/_components/tools/mask.jsx'
-    const src = fs.readFileSync(file, 'utf8')
+    // The panel's logic is split across mask.jsx and tools/mask/, so read them all.
+    const src = readMaskPanelSource(fs)
     // A ref named `handleSpatialCancelRef` is created and read inside
     // the keydown handler. This is the canonical fix.
     const hasRef = /handleSpatialCancelRef\s*=/.test(src)
@@ -1471,8 +1477,8 @@ const log = (ok, name, detail) => {
 //     decouple the listener lifecycle from the handler's identity.
 {
     const fs = await import('node:fs')
-    const file = 'src/app/(main)/editor/[projectId]/_components/tools/mask.jsx'
-    const src = fs.readFileSync(file, 'utf8')
+    // The panel's logic is split across mask.jsx and tools/mask/, so read them all.
+    const src = readMaskPanelSource(fs)
     // Find the keydown listener effect. Its deps should be `[activeDraft]`
     // (or a superset that does not include `handleSpatialCancel`).
     const effectMatch = src.match(
