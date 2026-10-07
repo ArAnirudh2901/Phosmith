@@ -1,160 +1,33 @@
 "use client"
 
-import React, { useState, useCallback, useEffect, useRef } from 'react'
-import { motion } from 'framer-motion'
-import { LayoutGrid, Rows, Check, Sparkles, Palette, Square, Circle, Loader2, X, Replace, SlidersHorizontal, Wand2, Shuffle } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { FabricImage, Rect } from 'fabric'
 import { FastAverageColor } from 'fast-average-color'
-import { useCanvas } from '../../../../../../../context/context'
+import { motion } from 'framer-motion'
+import { LayoutGrid, Loader2, Replace, SlidersHorizontal, Wand2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { applyCanvasSizedBackground } from '@/lib/canvas-background'
 import { loadFabricImageFromFile, workingEdgeForProject } from '@/lib/canvas-images'
-import {
-    COLLAGE_STYLES,
-    COLLAGE_BACKDROPS,
-    AI_BG_THEMES,
-    applyCollageBackground,
-    backdropPreviewCss,
-    buildAiBackgroundPrompt,
-} from '@/lib/collage-styles'
-import { collagePlanCacheKey, readCollagePlan, writeCollagePlan, wrapCollageBgPrompt } from '@/lib/collage-ai'
-import { computePerceptualHash } from '@/lib/image-fingerprint'
+import { collagePlanCacheKey, readCollagePlan, wrapCollageBgPrompt, writeCollagePlan } from '@/lib/collage-ai'
 import { assignPhotosToCells, focusForCell, photoDescriptor } from '@/lib/collage-arrange'
-import {
-    LAYOUTS,
-    buildLayoutCells,
-    collageFrameFor,
-    computeCollageCells,
-    defaultWeightsFor,
-    layoutBoundaries,
-    applyBoundaryDrag,
-    generateTemplateRecipes,
-    isVisibleImage,
-    getCellCoverScale,
-    assessCellResolution,
-    setCellFitMode,
-    fitImageToCell,
-    restyleImage,
-    clampToCell,
-    cellFromClipPath,
-} from '@/lib/collage-layout'
-import { toast } from 'sonner'
-import CollageComposer, { sourceElement } from './collage-composer'
+import { LAYOUTS, applyBoundaryDrag, assessCellResolution, cellFromClipPath, clampToCell, collageFrameFor, computeCollageCells, defaultWeightsFor, fitImageToCell, generateTemplateRecipes, getCellCoverScale, isVisibleImage, layoutBoundaries, restyleImage, setCellFitMode } from '@/lib/collage-layout'
+import { AI_BG_THEMES, applyCollageBackground, backdropPreviewCss, buildAiBackgroundPrompt, buildCellMatte, isCollageMatte } from '@/lib/collage-styles'
 import { analyzeElement } from '@/lib/collage/analyze'
 import { cellFromImage, placeImageInCell, swapFramedPhotos } from '@/lib/collage/render'
 import { cellFromSlot, createSlot, isCollageSlot } from '@/lib/collage/slot'
-import { buildCellMatte, isCollageMatte } from '@/lib/collage-styles'
+import { computePerceptualHash } from '@/lib/image-fingerprint'
+import { useCanvas } from '../../../../../../../context/context'
+import CollageComposer, { sourceElement } from './collage-composer'
+import { Section } from './collage/ui'
+import TemplatesSection from './collage/templates-section'
+import LayoutSection from './collage/layout-section'
+import TemplateStyleSection from './collage/template-style-section'
+import BackgroundSection from './collage/background-section'
+import PhotoShapeSection from './collage/photo-shape-section'
+import AiBackgroundSection from './collage/ai-background-section'
+import SpacingSection from './collage/spacing-section'
 
 const fac = new FastAverageColor()
-
-const LabeledSlider = ({ label, value, min, max, onChange, suffix = 'px' }) => (
-    <div className="space-y-1.5">
-        <div className="flex justify-between items-center text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-            <span className="font-medium">{label}</span>
-            <span className="font-mono text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                {value}{suffix}
-            </span>
-        </div>
-        <input
-            type="range"
-            min={min}
-            max={max}
-            value={value}
-            onChange={(e) => onChange(Number(e.target.value))}
-            className="w-full accent-[var(--accent-primary)] editor-interactive"
-            style={{
-                height: '4px',
-                background: 'var(--border-subtle)',
-                borderRadius: '2px',
-                appearance: 'none'
-            }}
-        />
-    </div>
-)
-
-/** A mini diagram of a layout's actual cell arrangement (Google-Photos-style
- *  template thumbnail), derived from the same geometry the canvas uses. */
-const LayoutPreview = ({ layoutId, active }) => {
-    const cells = buildLayoutCells(layoutId, { x: 0, y: 0, w: 100, h: 100 }, 5)
-    return (
-        <div className="relative" style={{ width: 30, height: 30 }}>
-            {cells.map((cell, index) => (
-                <div
-                    key={index}
-                    style={{
-                        position: 'absolute',
-                        left: `${cell.x}%`,
-                        top: `${cell.y}%`,
-                        width: `${cell.w}%`,
-                        height: `${cell.h}%`,
-                        borderRadius: 2,
-                        background: active ? 'var(--accent-primary)' : 'var(--text-muted)',
-                        opacity: active ? 0.95 : 0.5,
-                    }}
-                />
-            ))}
-        </div>
-    )
-}
-
-/** A realistic thumbnail of a generated template recipe: the backdrop with the
- *  layout's cells drawn at the recipe's spacing (gap + padding), frame shape,
- *  and inner mat (framePct) — so the gallery actually shows the variety. */
-const TemplatePreview = ({ recipe }) => {
-    // Map canvas-px spacing into the 100-unit preview box (rough, for the look).
-    const previewPad = Math.min(20, (Number.isFinite(recipe.padding) ? recipe.padding : 6) / 8)
-    const previewGap = Math.min(12, (Number.isFinite(recipe.gap) ? recipe.gap : 6) / 8)
-    const frame = { x: previewPad, y: previewPad, w: 100 - 2 * previewPad, h: 100 - 2 * previewPad }
-    const cells = buildLayoutCells(recipe.layoutId, frame, previewGap)
-    const matPct = recipe.style.shape === 'circle' ? 0 : Math.min(14, recipe.style.framePct || 0)
-    const radius = recipe.style.shape === 'circle' ? '50%' : `${Math.round((recipe.style.radiusPct || 0) / 5) + 1}px`
-    return (
-        <div
-            className="relative w-full overflow-hidden rounded-md"
-            style={{ aspectRatio: '1 / 1', background: recipe.previewBg }}
-        >
-            {cells.map((cell, index) => (
-                <div
-                    key={index}
-                    style={{
-                        position: 'absolute',
-                        left: `${cell.x}%`,
-                        top: `${cell.y}%`,
-                        width: `${cell.w}%`,
-                        height: `${cell.h}%`,
-                        padding: `${matPct}%`,
-                        boxSizing: 'border-box',
-                    }}
-                >
-                    <div
-                        style={{
-                            width: '100%',
-                            height: '100%',
-                            borderRadius: radius,
-                            background: 'rgba(255,255,255,0.94)',
-                            boxShadow: recipe.style.shadow
-                                ? '0 1px 3px rgba(0,0,0,0.4)'
-                                : 'inset 0 0 0 1px rgba(0,0,0,0.10)',
-                        }}
-                    />
-                </div>
-            ))}
-        </div>
-    )
-}
-
-const Section = ({ title, icon: Icon, children }) => (
-    <div className="px-4 py-4" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-        <div className="flex items-center gap-2 mb-3">
-            <div className="flex items-center justify-center w-5 h-5 rounded" style={{ background: 'rgba(6,184,212,0.1)' }}>
-                <Icon className="w-3 h-3" style={{ color: 'var(--accent-primary)' }} />
-            </div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-primary)' }}>
-                {title}
-            </h3>
-        </div>
-        {children}
-    </div>
-)
 
 const enterCollageConstraints = (image) => {
     image.set({ lockRotation: true, lockSkewingX: true, lockSkewingY: true })
@@ -1203,100 +1076,19 @@ export default function CollageControls({ project, dominantColor }) {
             </Section>
 
             {imageCount >= 2 && (
-                <Section title="Stylish Templates" icon={Sparkles}>
-                    <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                            {isPlanning
-                                ? 'Matching templates to your photos…'
-                                : aiAnalysis?.contentType
-                                    ? `Matched to your ${aiAnalysis.contentType} photos${aiAnalysis.mood ? ` · ${aiAnalysis.mood}` : ''}.`
-                                    : `Ready-made looks for your ${imageCount} photos.`}
-                        </p>
-                        <button
-                            type="button"
-                            onClick={regenerateTemplates}
-                            disabled={isGenerating}
-                            className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-medium editor-interactive disabled:opacity-50"
-                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
-                        >
-                            {isPlanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shuffle className="w-3 h-3" />}
-                            {isPlanning ? 'Matching…' : 'Shuffle'}
-                        </button>
-                    </div>
-
-                    {/* Creative direction — steer the whole plan toward a style.
-                        A chip or free text becomes the model's directionHint. */}
-                    <div className="mb-3 space-y-1.5">
-                        <div className="flex flex-wrap gap-1">
-                            {['Editorial', 'Vintage', 'Scrapbook', 'Minimal', 'Bold', 'Cinematic'].map((d) => {
-                                const active = aiDirection.trim().toLowerCase() === d.toLowerCase()
-                                return (
-                                    <button
-                                        key={d}
-                                        type="button"
-                                        disabled={isGenerating}
-                                        onClick={() => {
-                                            const next = active ? '' : d
-                                            setAiDirection(next)
-                                            requestAiTemplates(next)
-                                        }}
-                                        className="rounded-full px-2 py-0.5 text-[10px] font-medium editor-interactive disabled:opacity-50"
-                                        style={{
-                                            background: active ? 'rgba(6,184,212,0.15)' : 'var(--bg-elevated)',
-                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                        }}
-                                    >
-                                        {d}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                        <input
-                            type="text"
-                            value={aiDirection}
-                            onChange={(e) => setAiDirection(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); requestAiTemplates(aiDirection) } }}
-                            disabled={isGenerating}
-                            placeholder="Or describe a direction, then ↵ (e.g. 90s film album)"
-                            className="w-full rounded-md px-2 py-1.5 text-[10px] editor-interactive disabled:opacity-50"
-                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
-                        />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                        {templateRecipes.map((recipe) => (
-                            <motion.button
-                                key={recipe.id}
-                                type="button"
-                                onClick={() => applyRecipe(recipe)}
-                                disabled={isGenerating || Boolean(processingMessage)}
-                                whileTap={{ scale: 0.96 }}
-                                className="relative flex flex-col gap-1.5 rounded-lg p-1.5 text-left editor-interactive disabled:opacity-50"
-                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
-                                title={[
-                                    recipe.direction && recipe.direction !== recipe.label ? `${recipe.label} · ${recipe.direction}` : `${recipe.label}`,
-                                    recipe.rationale,
-                                ].filter(Boolean).join(' — ')}
-                            >
-                                <TemplatePreview recipe={recipe} />
-                                <div className="flex items-center justify-between gap-1 px-0.5">
-                                    <span className="truncate text-[10px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-                                        {recipe.label}
-                                    </span>
-                                    {recipe.isAi && (
-                                        <span
-                                            className="shrink-0 rounded px-1 text-[8px] font-semibold uppercase tracking-wide"
-                                            style={{ background: 'rgba(6,184,212,0.15)', color: 'var(--accent-primary)' }}
-                                        >
-                                            AI
-                                        </span>
-                                    )}
-                                </div>
-                            </motion.button>
-                        ))}
-                    </div>
-                </Section>
+                <TemplatesSection
+                    aiAnalysis={aiAnalysis}
+                    aiDirection={aiDirection}
+                    applyRecipe={applyRecipe}
+                    imageCount={imageCount}
+                    isGenerating={isGenerating}
+                    isPlanning={isPlanning}
+                    processingMessage={processingMessage}
+                    regenerateTemplates={regenerateTemplates}
+                    requestAiTemplates={requestAiTemplates}
+                    setAiDirection={setAiDirection}
+                    templateRecipes={templateRecipes}
+                />
             )}
 
             {selectedPhoto && (
@@ -1328,358 +1120,48 @@ export default function CollageControls({ project, dominantColor }) {
                 </Section>
             )}
 
-            <Section title="Layout" icon={LayoutGrid}>
-                <div className="grid grid-cols-3 gap-2">
-                    {LAYOUTS.map(layout => {
-                        const isActive = selectedLayout === layout.id
-                        return (
-                            <motion.button
-                                key={layout.id}
-                                type="button"
-                                onClick={() => setSelectedLayout(layout.id)}
-                                aria-label={`Use ${layout.label} collage layout`}
-                                title={layout.label}
-                                whileTap={{ scale: 0.95 }}
-                                className="flex min-h-[68px] flex-col items-center justify-center gap-1.5 rounded-lg p-2 text-center editor-interactive relative"
-                                style={{
-                                    background: isActive ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${isActive ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                    color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)'
-                                }}
-                            >
-                                <LayoutPreview layoutId={layout.id} active={isActive} />
-                                <span className="text-[9px] font-medium leading-tight">{layout.label}</span>
-                                {isActive && (
-                                    <div className="absolute top-1 right-1">
-                                        <div className="bg-[var(--accent-primary)] rounded-full p-0.5">
-                                            <Check className="w-2 h-2 text-white" strokeWidth={3} />
-                                        </div>
-                                    </div>
-                                )}
-                            </motion.button>
-                        )
-                    })}
-                </div>
-            </Section>
+            <LayoutSection selectedLayout={selectedLayout} setSelectedLayout={setSelectedLayout} />
 
-            <Section title="Template Style" icon={Sparkles}>
-                <div className="grid grid-cols-2 gap-2">
-                    {COLLAGE_STYLES.map((preset) => {
-                        const isActive = selectedStyle === preset.id
-                        return (
-                            <motion.button
-                                key={preset.id}
-                                type="button"
-                                onClick={() => applyStylePreset(preset)}
-                                aria-label={`Use ${preset.label} style`}
-                                title={preset.label}
-                                whileTap={{ scale: 0.95 }}
-                                className="relative flex items-center gap-2 rounded-lg p-2 editor-interactive"
-                                style={{
-                                    background: isActive ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${isActive ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                }}
-                            >
-                                <span
-                                    className="h-8 w-8 shrink-0"
-                                    style={{
-                                        background: backdropPreviewCss(preset.backdrop),
-                                        border: '1px solid var(--border-default)',
-                                        borderRadius: preset.shape === 'circle' ? '999px' : `${Math.round(preset.radiusPct / 4) + 2}px`,
-                                        boxShadow: preset.shadow ? '0 2px 6px rgba(0,0,0,0.35)' : 'none',
-                                    }}
-                                />
-                                <span
-                                    className="text-[10px] font-medium leading-tight text-left"
-                                    style={{ color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}
-                                >
-                                    {preset.label}
-                                </span>
-                                {isActive && (
-                                    <div className="absolute top-1 right-1 rounded-full bg-[var(--accent-primary)] p-0.5">
-                                        <Check className="w-2 h-2 text-white" strokeWidth={3} />
-                                    </div>
-                                )}
-                            </motion.button>
-                        )
-                    })}
-                </div>
-            </Section>
+            <TemplateStyleSection applyStylePreset={applyStylePreset} selectedStyle={selectedStyle} />
 
-            <Section title="Background" icon={Palette}>
-                <div className="grid grid-cols-6 gap-1.5">
-                    {COLLAGE_BACKDROPS.map((backdrop) => {
-                        const isActive =
-                            activeBackdrop &&
-                            activeBackdrop.type === backdrop.type &&
-                            activeBackdrop.color === backdrop.color &&
-                            JSON.stringify(activeBackdrop.stops || null) === JSON.stringify(backdrop.stops || null)
-                        return (
-                            <button
-                                key={backdrop.label}
-                                type="button"
-                                onClick={() => applyBackdrop(backdrop)}
-                                aria-label={`Set ${backdrop.label} background`}
-                                title={backdrop.label}
-                                className="h-7 rounded-md editor-interactive"
-                                style={{
-                                    background: backdropPreviewCss(backdrop),
-                                    border: `2px solid ${isActive ? 'var(--accent-primary)' : 'transparent'}`,
-                                    boxShadow: isActive ? '0 0 0 1px rgba(6,184,212,0.3)' : 'inset 0 0 0 1px var(--border-subtle)',
-                                }}
-                            />
-                        )
-                    })}
-                </div>
-                <button
-                    type="button"
-                    onClick={() => applyBackdrop(null)}
-                    className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[10px] font-medium editor-interactive"
-                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
-                >
-                    <X className="w-3 h-3" />
-                    Clear Background
-                </button>
-            </Section>
+            <BackgroundSection activeBackdrop={activeBackdrop} applyBackdrop={applyBackdrop} />
 
-            <Section title="Photo Shape" icon={Square}>
-                <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-2">
-                        {[
-                            { id: 'rect', label: 'Rounded', Icon: Square },
-                            { id: 'circle', label: 'Circle', Icon: Circle },
-                        ].map(({ id, label, Icon }) => {
-                            const isActive = shape === id
-                            return (
-                                <button
-                                    key={id}
-                                    type="button"
-                                    onClick={() => updateStyle({ shape: id })}
-                                    className="flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{
-                                        background: isActive ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                        border: `1px solid ${isActive ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                        color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                    }}
-                                >
-                                    <Icon className="w-3.5 h-3.5" />
-                                    {label}
-                                </button>
-                            )
-                        })}
-                    </div>
-                    {shape === 'rect' && (
-                        <LabeledSlider
-                            label="Corner Radius"
-                            value={radiusPct}
-                            min={0}
-                            max={50}
-                            onChange={(v) => updateStyle({ radiusPct: v })}
-                            suffix="%"
-                        />
-                    )}
-                    <button
-                        type="button"
-                        onClick={() => updateStyle({ shadow: !shadow })}
-                        aria-pressed={shadow}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-[11px] font-medium editor-interactive"
-                        style={{
-                            background: shadow ? 'rgba(6,184,212,0.1)' : 'var(--bg-elevated)',
-                            border: `1px solid ${shadow ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                            color: shadow ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                        }}
-                    >
-                        <span>Drop Shadow</span>
-                        <span
-                            className="h-4 w-7 rounded-full transition-colors"
-                            style={{ background: shadow ? 'var(--accent-primary)' : 'var(--border-default)', position: 'relative' }}
-                        >
-                            <span
-                                className="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
-                                style={{ left: shadow ? '14px' : '2px' }}
-                            />
-                        </span>
-                    </button>
-                </div>
-            </Section>
+            <PhotoShapeSection
+                radiusPct={radiusPct}
+                shadow={shadow}
+                shape={shape}
+                updateStyle={updateStyle}
+            />
 
-            <Section title="AI Background" icon={Sparkles}>
-                <p className="mb-3 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    Generate a decorative background tuned to your photos&apos; colors.
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                    {AI_BG_THEMES.map((theme) => {
-                        const isThisGenerating = generatingTheme === theme.id
-                        return (
-                            <motion.button
-                                key={theme.id}
-                                type="button"
-                                onClick={() => generateThemedBackground(theme)}
-                                disabled={isGenerating || Boolean(processingMessage) || imageCount === 0}
-                                whileTap={{ scale: 0.96 }}
-                                className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2.5 text-[11px] font-medium editor-interactive disabled:cursor-not-allowed disabled:opacity-50"
-                                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}
-                            >
-                                {isThisGenerating ? (
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: 'var(--accent-primary)' }} />
-                                ) : (
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                )}
-                                {theme.label}
-                            </motion.button>
-                        )
-                    })}
-                </div>
-                {imageCount === 0 && (
-                    <p className="mt-2 text-[10px]" style={{ color: 'var(--accent-warning)' }}>
-                        ⚠ Add photos first so the background can match them
-                    </p>
-                )}
-            </Section>
+            <AiBackgroundSection
+                generateThemedBackground={generateThemedBackground}
+                generatingTheme={generatingTheme}
+                imageCount={imageCount}
+                isGenerating={isGenerating}
+                processingMessage={processingMessage}
+            />
 
-            <Section title="Spacing" icon={Rows}>
-                <div className="space-y-4">
-                    <LabeledSlider
-                        label="Gap"
-                        value={gap}
-                        min={0}
-                        max={100}
-                        onChange={setGap}
-                    />
-                    <LabeledSlider
-                        label="Padding"
-                        value={padding}
-                        min={0}
-                        max={100}
-                        onChange={setPadding}
-                    />
-                    <div className="space-y-1.5">
-                        <div className="flex justify-between items-center text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                            <span className="font-medium">Photo fit</span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-1.5">
-                            {[['cover', 'Fill frame'], ['contain', 'Fit whole photo']].map(([id, label]) => (
-                                <button
-                                    key={id}
-                                    type="button"
-                                    onClick={() => changeFitMode(id)}
-                                    className="rounded-lg px-2 py-2 text-[10px] font-semibold editor-interactive"
-                                    style={{
-                                        background: fitMode === id ? 'var(--accent-primary)' : 'var(--surface-raised)',
-                                        color: fitMode === id ? '#ffffff' : 'var(--text-secondary)',
-                                        border: '1px solid var(--border-subtle)',
-                                    }}
-                                >
-                                    {label}
-                                </button>
-                            ))}
-                        </div>
-                        <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                            {fitMode === 'cover'
-                                ? 'Fills each frame and crops the overflow — pan a photo to choose what stays.'
-                                : 'Shows every photo whole; panoramas and tall shots keep their shape, backdrop fills the rest.'}
-                        </p>
-                    </div>
-                    <LabeledSlider
-                        label="Mat"
-                        value={framePct}
-                        min={0}
-                        max={14}
-                        onChange={setFramePct}
-                        suffix="%"
-                    />
-                    <div className="grid grid-cols-2 gap-1.5">
-                        {[['inner', 'Mat inside'], ['outer', 'Mat outside']].map(([id, label]) => (
-                            <button
-                                key={id}
-                                type="button"
-                                onClick={() => setFrameMode(id)}
-                                className="rounded-lg px-2 py-2 text-[10px] font-semibold editor-interactive"
-                                style={{
-                                    background: frameMode === id ? 'var(--accent-primary)' : 'var(--surface-raised)',
-                                    color: frameMode === id ? '#ffffff' : 'var(--text-secondary)',
-                                    border: '1px solid var(--border-subtle)',
-                                }}
-                            >
-                                {label}
-                            </button>
-                        ))}
-                    </div>
-                    <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                        {frameMode === 'inner'
-                            ? 'The mat eats into the photo, leaving backdrop as a border.'
-                            : `The mat grows outward into the gutter, so the photo keeps its size. Needs a gap to grow into${gap > 0 ? '' : ' — raise Gap above 0'}.`}
-                    </p>
-                    <div className="space-y-1.5">
-                        <div className="flex justify-between items-center text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                            <span className="font-medium">Panel behind photo</span>
-                            {matte && (
-                                <button type="button" onClick={() => setMatte(null)} className="text-[9px] editor-interactive" style={{ color: 'var(--text-muted)' }}>
-                                    clear
-                                </button>
-                            )}
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                            {['#ffffff', '#0b0d12', '#f4ede3', '#111827'].map((color) => (
-                                <button
-                                    key={color}
-                                    type="button"
-                                    onClick={() => setMatte(color)}
-                                    className="h-6 w-6 rounded editor-interactive"
-                                    style={{ background: color, border: matte === color ? '2px solid var(--accent-primary)' : '1px solid var(--border-subtle)' }}
-                                    aria-label={`Panel ${color}`}
-                                />
-                            ))}
-                            <input
-                                type="color"
-                                value={typeof matte === 'string' ? matte : '#ffffff'}
-                                onChange={(e) => setMatte(e.target.value)}
-                                className="h-6 w-8 rounded editor-interactive"
-                                style={{ background: 'transparent', border: '1px solid var(--border-subtle)' }}
-                                aria-label="Custom panel colour"
-                            />
-                        </div>
-                        <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                            Gives each frame its own ground, so a cut-out PNG reads as a photo instead of a hole.
-                        </p>
-                    </div>
-                    <div className="flex items-center justify-between gap-2 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                        <span>
-                            <span className="font-medium">Frame sizes</span>
-                            <span className="block text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                                Drag the lines between frames on the canvas. Neighbours keep a minimum size.
-                            </span>
-                        </span>
-                        <button
-                            type="button"
-                            onClick={() => {
-                                const reset = defaultWeightsFor(selectedLayout)
-                                setWeights(reset)
-                                weightsRef.current = reset
-                                applyCellsToPhotos(computeCollageCells({ width: project?.width, height: project?.height }, selectedLayout, gap, padding, reset))
-                            }}
-                            className="rounded-lg px-2 py-1.5 text-[10px] font-semibold editor-interactive"
-                            style={{ background: 'var(--surface-raised)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)' }}
-                        >
-                            Even
-                        </button>
-                    </div>
-                    <label className="flex items-start gap-2 text-[10px] editor-interactive" style={{ color: 'var(--text-secondary)' }}>
-                        <input
-                            type="checkbox"
-                            checked={smartArrange}
-                            onChange={(e) => setSmartArrange(e.target.checked)}
-                            className="mt-0.5 accent-[var(--accent-primary)]"
-                        />
-                        <span>
-                            <span className="font-medium">Arrange by content</span>
-                            <span className="block text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                                Strongest photo takes the biggest frame, each photo goes where its shape fits, and faces stay in frame. Off = upload order, centred.
-                            </span>
-                        </span>
-                    </label>
-                </div>
-            </Section>
+            <SpacingSection
+                applyCellsToPhotos={applyCellsToPhotos}
+                changeFitMode={changeFitMode}
+                fitMode={fitMode}
+                frameMode={frameMode}
+                framePct={framePct}
+                gap={gap}
+                matte={matte}
+                padding={padding}
+                project={project}
+                selectedLayout={selectedLayout}
+                setFrameMode={setFrameMode}
+                setFramePct={setFramePct}
+                setGap={setGap}
+                setMatte={setMatte}
+                setPadding={setPadding}
+                setSmartArrange={setSmartArrange}
+                setWeights={setWeights}
+                smartArrange={smartArrange}
+                weightsRef={weightsRef}
+            />
 
             <div className="p-4 mt-auto" style={{ borderTop: '1px solid var(--border-subtle)' }}>
                 <p className="mb-2 text-[10px]" style={{ color: missingCount ? 'var(--text-muted)' : 'var(--text-secondary)' }}>
