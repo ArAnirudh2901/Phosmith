@@ -24,6 +24,12 @@ export const emptyHistogram = () => ({
     luma: Array(HISTOGRAM_BUCKETS).fill(0),
 })
 
+// The curves-panel histogram is a SOURCE reference — it shows the tonal distribution
+// of the input pixels so the user can see where their data lives while shaping the
+// curve. Reading from `_filteredEl` (the post-filter canvas) would make the bars
+// shift around as the user drags the curve, which is confusing and non-standard.
+// Apple Photos / Lightroom / Photoshop all show the original histogram with the
+// curve overlaid on top. Prefer the original element here for the same behavior.
 /**
  * Resolve the original (pre-filter) image source element from a Fabric
  * image object. Matches the convention used by `adjust.jsx` so the

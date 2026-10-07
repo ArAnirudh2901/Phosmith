@@ -2,24 +2,25 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowLeftRight, Bot, Image as ImageIcon, Loader2, Send } from "lucide-react";
+import { Bot, Image as ImageIcon, Loader2, Send } from "lucide-react";
 import { toast } from "sonner";
-import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
-import { ensureDomains } from "@/lib/agent/domain-host";
-import { parseFocusPrompt } from "@/lib/agent/focus-commands";
-import { parseStretchPrompt } from "@/lib/agent/stretch-commands";
-import { isPhosmithMaskOverlay } from "@/lib/canvas-mask";
-import { flattenLiveCanvasForAnalysis } from "@/lib/canvas-snapshot";
-import { extractImageFeatures } from "@/lib/image-features";
-import { computeImageFingerprint, computePerceptualHash } from "@/lib/image-fingerprint";
-import { api } from "@/lib/neon-api";
-import { toUserMessage } from "@/lib/user-error";
 import { useCanvas } from "../../../../../../../context/context";
 import { useDatabaseMutation, useDatabaseQuery } from "../../../../../../../hooks/useDatabaseQuery";
+import { api } from "@/lib/neon-api";
+import { getCanvasActiveImage, hasImageKitAiTransform, isImageKitUrl, replaceCanvasImageFromUrl, waitForImageKitUrl } from "../../../../../../lib/imagekit-ai";
 import { restoreCanvasFromHistory } from "../../../../../../lib/canvas-history";
 import { serializeCanvasState } from "../../../../../../lib/canvas-state";
-import { getCanvasActiveImage, hasImageKitAiTransform, isImageKitUrl, replaceCanvasImageFromUrl, waitForImageKitUrl } from "../../../../../../lib/imagekit-ai";
 import { applyProfessionalFilters } from "../../../../../../lib/professional-image-filters";
+import { computeImageFingerprint, computePerceptualHash } from "@/lib/image-fingerprint";
+import { extractImageFeatures } from "@/lib/image-features";
+import { flattenLiveCanvasForAnalysis } from "@/lib/canvas-snapshot";
+import { isPhosmithMaskOverlay } from "@/lib/canvas-mask";
+import { parseFocusPrompt } from "@/lib/agent/focus-commands";
+import { parseStretchPrompt } from "@/lib/agent/stretch-commands";
+import BeforeAfterCompare from "@/components/neo/BeforeAfterCompare";
+import { ArrowLeftRight } from "lucide-react";
+import { toUserMessage } from '@/lib/user-error'
+import { ensureDomains } from "@/lib/agent/domain-host";
 import { MAX_AGENT_RENDER_CHARS, analyzeActiveImage, collectLayersForTargeting, getSourceUrl, isVisibleImageOnCanvas } from "./agent/canvas-targets";
 import { INITIAL_MESSAGES, INITIAL_WELCOME_MESSAGE, inferThreadTitle, loadStoredState, makeEmptyThread, newMessage, saveStoredState } from "./agent/chat-storage";
 import { compactPayload, truncate } from "./agent/format";

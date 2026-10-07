@@ -1,18 +1,27 @@
 "use client"
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AudioLines, Check, ChevronDown, FlipHorizontal2, Layers, Loader2, RotateCcw, Sparkles, StretchHorizontal, StretchVertical, Wand2 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { toast } from 'sonner'
-import { isTaintError } from '@/lib/canvas-snapshot'
-import { clientSubjectMask } from '@/lib/client-ai'
-import { adaptiveTextColor } from '@/lib/color-extraction'
-import { traceContour } from '@/lib/contour-trace'
-import { isSuperseded, runHeavy } from '@/lib/heavy-job-queue'
-import { DEFAULT_SCANLINE, DEFAULT_STRETCH, PIXEL_STRETCH_PRESETS, addWarpSplit, analyzeStretchPlan, applyFlowPreset, applyWarpPreset, bestSeedInBand, buildSubjectCutout, clampStretchParams, createDefaultFlowPath, createDefaultWarpGrid, createFlowPathFromPoints, createStretchBuffer, getFlowPathCurve, getFlowPathHandles, getPolygonBBox, getStretchAnchors, getStretchPath, getWarpGridCurves, getWarpGridHandles, getWarpRest, insertFlowAnchor, matteToAlphaCanvas, removeFlowAnchor, renderPixelStretch, smoothFlowPath } from '@/lib/pixel-stretch'
-import { MAX_BAKE_DIM, bakeStretchBuffer, encodeToPngBlob, getSourceElement, isSourceReady, placeStretchLayer, snapshotSource, uploadStretchBlob } from '@/lib/pixel-stretch-apply'
-import { toUserMessage } from '@/lib/user-error'
 import { useCanvas } from '../../../../../../../context/context'
+import { isTaintError } from '@/lib/canvas-snapshot'
+import { toast } from 'sonner'
+import { adaptiveTextColor } from '@/lib/color-extraction'
+import { AudioLines, Check, ChevronDown, FlipHorizontal2, Layers, Loader2, RotateCcw, Sparkles, StretchHorizontal, StretchVertical, Wand2 } from 'lucide-react'
+import { DEFAULT_STRETCH, clampStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, createDefaultWarpGrid, getWarpRest, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, analyzeStretchPlan, bestSeedInBand, createDefaultFlowPath, createFlowPathFromPoints, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, buildSubjectCutout, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
+import {
+  MAX_BAKE_DIM,
+  getSourceElement,
+  isSourceReady,
+  snapshotSource,
+  encodeToPngBlob,
+  uploadStretchBlob,
+  placeStretchLayer,
+  bakeStretchBuffer,
+} from '@/lib/pixel-stretch-apply'
+import { runHeavy, isSuperseded } from '@/lib/heavy-job-queue'
+import { traceContour } from '@/lib/contour-trace'
+import { clientSubjectMask } from '@/lib/client-ai'
+import { toUserMessage } from '@/lib/user-error'
 import { canvasToScreen, getActiveImage, getImageCanvasBounds, isImageObject, polygonArea, simplifyPolygon } from './stretch/canvas-geometry'
 import { DIM_BG, EASE, HANDLE, HANDLE_DEFS, MAX_PREVIEW_DIM, MIN_BAND, SETTLE_MS, SUBJECT_DETECT_MAX_DIM } from './stretch/constants'
 import SelectionCard from './stretch/selection-card'
