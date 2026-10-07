@@ -26,7 +26,9 @@ function runQueryRequest(payload) {
     if (preloaded) delete window.__phosmithPreload[payload]
 
     const promise = Promise.resolve(preloaded)
-        .then((result) => (result && typeof result.ok === "boolean" ? result : null))
+        // Only a success is worth adopting: a 401 parked by a signed-out press would
+        // otherwise be served to the dashboard that loads after sign-in.
+        .then((result) => (result?.ok === true ? result : null))
         .catch(() => null)
         .then((adopted) => adopted || fetch(QUERY_ENDPOINT, {
             method: "POST",
@@ -183,6 +185,10 @@ export const useDatabaseMutation = (mutation, options = {}) => {
                 throw createDatabaseRequestError(body, response.status, "Database mutation failed")
             }
             setData(body.data)
+            // A refetch must not join a read that left before this write landed.
+            for (const key of inflight.keys()) {
+                if (!Array.isArray(invalidates) || invalidates.includes(JSON.parse(key).name)) inflight.delete(key)
+            }
             if (typeof window !== "undefined") {
                 window.dispatchEvent(new CustomEvent(MUTATION_EVENT, { detail: { name: mutationName, invalidates } }))
             }

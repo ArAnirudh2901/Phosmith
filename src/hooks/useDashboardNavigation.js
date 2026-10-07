@@ -24,7 +24,8 @@ export function useDashboardNavigation() {
       return
     }
 
-    preloadDashboard()
+    // Signed out, both reads can only answer 401.
+    if (hasSessionCookie()) preloadDashboard()
 
     startTransition(() => {
       router.push("/dashboard", { scroll: false })

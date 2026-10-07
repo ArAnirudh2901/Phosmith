@@ -9,13 +9,17 @@
 
 const key = (name, args) => JSON.stringify({ name, args })
 
+// A press that navigates adopts its preload well inside this. One that did not
+// (Cmd-click, right-click > new tab) must not serve that row minutes later.
+const PRELOAD_TTL_MS = 10_000
+
 /** Fire the request now, or do nothing if it is already in flight. */
 export function preloadQuery(name, args) {
   if (typeof window === 'undefined') return
   const payload = key(name, args)
   const store = (window.__phosmithPreload = window.__phosmithPreload || {})
   if (store[payload]) return
-  store[payload] = fetch('/api/neon/query', {
+  const pending = fetch('/api/neon/query', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: payload,
@@ -23,6 +27,10 @@ export function preloadQuery(name, args) {
   })
     .then((r) => r.json().then((body) => ({ ok: r.ok, status: r.status, body })))
     .catch(() => null)
+  store[payload] = pending
+  setTimeout(() => {
+    if (store[payload] === pending) delete store[payload]
+  }, PRELOAD_TTL_MS)
 }
 
 /** The editor's project row — the one request worth starting on a card press. */

@@ -892,6 +892,7 @@ const CanvasEditor = ({ project }) => {
 
         const initGen = ++initGenerationRef.current
         let mounted = true
+        hydratedRef.current = false
 
         disposeCanvasInstance()
         historyRef.current = []
