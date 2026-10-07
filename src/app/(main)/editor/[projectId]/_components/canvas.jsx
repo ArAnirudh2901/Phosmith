@@ -5,13 +5,7 @@ import { useCanvas } from "../../../../../../context/context"
 import { useDatabaseMutation } from "../../../../../../hooks/useDatabaseQuery"
 import { api } from "@/lib/neon-api";
 import { Hand, Maximize2, ZoomIn, ZoomOut, ArrowLeftRight } from "lucide-react"
-import {
-    Canvas,
-    FabricImage,
-    InteractiveFabricObject,
-    Point,
-    config as fabricConfig,
-} from "fabric"
+import { Canvas, InteractiveFabricObject, Point, config as fabricConfig } from "fabric"
 import { bindDoodlesToImage, followDoodles } from "@/lib/canvas-doodle-bind"
 // PhosmithCurves/Megashader registered before loadFromJSON only when the saved state
 // names them, else warmed after paint — see lib/canvas-filter-registry.js.
@@ -74,80 +68,8 @@ import { isPhosmithMaskOverlay } from "../../../../../lib/canvas-mask"
 import { setDomainHost } from "@/lib/agent/domain-host"
 import { syncBackgroundGrade } from "../../../../../lib/canvas-background"
 import AuroraLoader from "./AuroraLoader"
-
-const MIN_ZOOM = 0.05
-const MAX_ZOOM = 64
-const MIN_PREVIEW_ZOOM_PERCENT = 5
-const MAX_PREVIEW_ZOOM_PERCENT = 300
-// Button zoom walks preset stops (Photoshop-style); the slider stays 1% fine.
-const PREVIEW_ZOOM_STOPS = [5, 8, 10, 12, 16, 20, 25, 33, 40, 50, 67, 75, 100, 125, 150, 200, 250, 300]
-const nextPreviewZoomStop = (percent, dir) => {
-    const p = Math.round(Number(percent) || 100)
-    return dir > 0
-        ? PREVIEW_ZOOM_STOPS.find((z) => z > p) ?? MAX_PREVIEW_ZOOM_PERCENT
-        : [...PREVIEW_ZOOM_STOPS].reverse().find((z) => z < p) ?? MIN_PREVIEW_ZOOM_PERCENT
-}
-const VIEWPORT_PADDING = 32
-const MAX_PERSISTED_HISTORY = 30
-// How long after the last resize step the deferred chrome catches up. Long enough
-// that a drag never crosses it, short enough to read as instant on release.
-const RESIZE_SETTLE_MS = 150
-const MIN_PERSISTED_HISTORY_ENTRIES = 3
-const MAX_NEON_STATE_CHARS = 900_000
-// Tiered autosave: MAJOR changes (real edits) save on the fast debounce as
-// before; MINOR ones (sub-threshold nudges — see canvas-change-describe) ride
-// a slow trickle so fidgeting can't generate a stream of snapshot/flush API
-// calls. Minor edits are still durable immediately via the IndexedDB mirror
-// and the unload beacon, and any pending major save carries them for free.
-const MAJOR_SAVE_DEBOUNCE_MS = 2000
-const MINOR_SAVE_TRICKLE_MS = 30_000
-// 'text:changed' fires per keystroke. Without a debounce every keystroke
-// became its own undo state and evicted the whole 30-entry history while
-// typing a sentence — push ONE history state per typing pause instead.
-const TEXT_HISTORY_DEBOUNCE_MS = 900
-// How long the network snapshot (Redis write-behind) is allowed to lag the
-// freshest state — see minSnapshotIntervalMs in canvas-sync.
-const MIN_SNAPSHOT_INTERVAL_MS = 4000
-// Neon flush debounce. Was 8s; 15s halves database writes in active sessions
-// with no durability cost (Redis snapshot + IndexedDB hold the latest state,
-// and tab-hide/unload force a flush anyway).
-const FLUSH_DEBOUNCE_MS = 15_000
-const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
-const readPreviewZoomPercent = (canvas) => Math.round((canvas?.getZoom?.() || 1) * 100)
-const getPrimaryRemoteImageUrl = (canvas) => {
-    const image = canvas
-        ?.getObjects?.()
-        ?.find((object) => object?.type?.toLowerCase() === 'image')
-    const src =
-        image?.getSrc?.() ||
-        image?._originalElement?.src ||
-        image?._element?.src ||
-        image?.src ||
-        ''
-
-    if (!src || src.startsWith('data:') || src.startsWith('blob:')) return null
-    return src.startsWith('http') ? src : null
-}
-
-const fitImageInsideProject = (image, projectSize) => {
-    const projectW = Math.max(1, projectSize?.width || image?.width || 1)
-    const projectH = Math.max(1, projectSize?.height || image?.height || 1)
-    const imageW = Math.max(1, image?.width || projectW)
-    const imageH = Math.max(1, image?.height || projectH)
-    const scale = Math.min(projectW / imageW, projectH / imageH)
-
-    image.set({
-        left: projectW / 2,
-        top: projectH / 2,
-        originX: "center",
-        originY: "center",
-        scaleX: scale,
-        scaleY: scale,
-        selectable: true,
-        evented: true,
-    })
-    image.setCoords()
-}
+import { FLUSH_DEBOUNCE_MS, MAJOR_SAVE_DEBOUNCE_MS, MAX_NEON_STATE_CHARS, MAX_PERSISTED_HISTORY, MINOR_SAVE_TRICKLE_MS, MIN_PERSISTED_HISTORY_ENTRIES, MIN_SNAPSHOT_INTERVAL_MS, TEXT_HISTORY_DEBOUNCE_MS, getPrimaryRemoteImageUrl } from "./canvas-editor/persistence"
+import { MAX_PREVIEW_ZOOM_PERCENT, MAX_ZOOM, MIN_PREVIEW_ZOOM_PERCENT, MIN_ZOOM, RESIZE_SETTLE_MS, VIEWPORT_PADDING, clamp, fitImageInsideProject, nextPreviewZoomStop, readPreviewZoomPercent } from "./canvas-editor/viewport"
 
 const CanvasEditor = ({ project }) => {
     const [isLoading, setIsLoading] = useState(true)

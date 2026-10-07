@@ -399,13 +399,38 @@ Measured in the real signed-in Safari against a production build, warm:
 
 `assertProjectOwner(db, user, projectId, select)` replaced eight full-row reads that existed only to check ownership; `projects.getProject` still reads the whole row, because the editor needs it.
 
-Still on the list, in the order they are worth doing: `mask.jsx` (5627 lines), `imagekit-agent.jsx` (3207), `pixel-stretch.jsx` (2754) and `canvas.jsx` (2502) are each a module boundary waiting to be drawn, and none of them is on the critical path in a way that bytes measure; the editor's `/api/canvas/snapshot` takes 737 ms on load.
+The oversized editor files have since been split — see **Code layout: the split panels**. None of them was on the critical path in a way bytes measure, so that work is about ownership, not load time.
 
 **Animations cannot be measured in an occluded window.** Safari never *starts* a CSS animation on a page whose `visibilityState` is `hidden`, and a terminal in fullscreen over the browser is enough to make it hidden — `getAnimations()` reports `playState: "running"` with `startTime: null` and `currentTime: 0` forever, so a reveal reads as a permanent `opacity: 0` and looks exactly like a broken keyframe. `activate` does not fix it across Spaces. Call `finish()` on each animation and read the computed style instead: the 17 `.reveal` elements on the landing page all resolve to `opacity: 1` and an identity transform, which is what a visitor with a visible tab gets.
 
 **Profiler:** not in the repo; profile with CDP against a page and look at the API waterfall (start offset + duration per `/api/` call).
 
 **Memory discipline** (the sibling `seglab` project is the reference): one heavy job at a time so peak allocations cannot stack, lazy modules that are disposed after use, and a megapixel cap before any full-resolution unpack. Pixel Stretch already follows the second of those — see `releaseStretchScratch`.
+
+## Code layout: the split panels
+
+The editor's biggest files were one component each, holding every control's state AND all of its markup. Their markup and module-level code now live beside them:
+
+| file | before | after | moved to |
+|---|---|---|---|
+| `tools/mask.jsx` | 5627 | 3859 | `tools/mask/` — 14 section components (`layers-section` … `quick-erase-section`), `ui.jsx`, `geometry.js` |
+| `tools/imagekit-agent.jsx` | 3223 | 1745 | `tools/agent/` — header, chat area, edits panel; `intents`, `transform-cache`, `chat-storage`, `canvas-targets`, `plan`, `format`, `ui` |
+| `tools/pixel-stretch.jsx` | 2754 | 2101 | `tools/stretch/` — selection, placement and mode cards, shape and refine sliders; `canvas-geometry`, `constants` |
+| `tools/adjust.jsx` | 1845 | 583 | `tools/adjust/` — `config`, `filters`, `targets`, `curves`, `color-wheel`, `imagekit`, `utils` |
+| `tools/collage.jsx` | 1705 | 1187 | `tools/collage/` — seven section components, `ui.jsx` |
+| `_components/canvas.jsx` | 2504 | 2423 | `_components/canvas-editor/` — `viewport.js`, `persistence.js` (constants and pure helpers only) |
+| `hooks/usePixelMaskTool.js` | 2286 | 2030 | `hooks/pixel-mask/` — the object remover's `inpaint.js`, `canvas.js` |
+
+`adjust.jsx` also carried private copies of nine helpers `src/lib` already exports (`hexToRgb`, `rgbToHex`, `rgbToHsv`, `hsvToRgb` from `color-utils`; the histogram set from `image-histogram`). Compared with formatting stripped they behave the same — the lib histogram only adds `width`/`height`, which the curves panel never reads — so the copies are gone.
+
+**The split was mechanical, not hand-edited**, because a hand-moved block that silently stops seeing one variable is a bug no test here would catch. A Babel pass resolved every identifier each moved block reads to its binding: a component-scope binding became a prop, a program-scope one an import. Each split was then checked for what the tools do NOT catch on their own:
+
+- `eslint` with `no-undef`, `react/jsx-no-undef`, `import/named|default|no-cycle` — 0 errors.
+- **Every comment survives**, compared whitespace-insensitively against the original. This is the check that caught the one real defect: the first version of the splitter rebuilt the parent's whole import region, and `canvas.jsx` keeps two module-level statements between its imports — the one that forces Fabric's Canvas2D filter backend (the WebGL one blacked out canvases) and the selection-control defaults. Lint and the build both passed without them. The splitter now prunes imports in place, and every parent keeps its original import order (which is module evaluation order).
+- No extracted component writes to a prop, calls a hook, or reads `ref.current` during render.
+- **The React Compiler sees the same code as before.** None of these parents is compiled (each breaks a rule of React or uses an unsupported construct), so their inline markup re-ran on every render. The extracted sections were clean enough to be compiled, which would let them cache reads of live Fabric objects — so every extracted section carries `"use no memo"` and re-renders exactly as it did inline. `AgentEditsPanel` read `liveSnapshotRef.current` in render; its parent now reads it and passes `hasLiveSnapshot`, as the original did.
+
+What did NOT move, deliberately: the state and handlers themselves. `MaskControls`, `ImageKitAgent`, `PixelStretchControls`, `CanvasEditor` and `usePixelMaskTool` still own their logic, and the next boundary in each is a set of hooks (autosave, history and viewport in `CanvasEditor`; per-tool state in `MaskControls`). Those touch the autosave path that once wrote an empty canvas over a real project, so they are the kind of change that has to be driven in a signed-in browser, not only built.
 
 ## Resize path, and the selection toolbar
 
