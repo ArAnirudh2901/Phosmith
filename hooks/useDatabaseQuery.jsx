@@ -148,7 +148,9 @@ export const useDatabaseQuery = (query, ...args) => {
         }
     }, [isSkipped, queryName, refreshToken, serializedQueryArgs])
 
-    return { data, isLoading, error }
+    const refetch = useCallback(() => setRefreshToken((value) => value + 1), [])
+
+    return { data, isLoading, error, refetch }
 }
 
 /**

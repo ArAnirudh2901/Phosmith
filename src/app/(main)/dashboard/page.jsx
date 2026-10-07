@@ -10,7 +10,7 @@ import { preloadProject } from "@/lib/query-preload"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { Calendar, Check, Database, ImageIcon, Loader2, Plus, Trash2, X } from "lucide-react"
+import { Calendar, Check, Database, ImageIcon, Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react"
 import useDashboardShortcuts from "../../../../hooks/useDashboardShortcuts"
 import { staggerDelay } from "@/lib/motion"
 import { createProjectPixelDissolver } from "@/lib/project-pixel-effect"
@@ -224,10 +224,28 @@ const Dashboard = () => {
         if (showShortcuts) setShortcutsMounted(true)
     }, [showShortcuts])
 
-    const { data: projects = [], isLoading: isProjectsLoading } = useDatabaseQuery(
-        api.projects.getUserProjects,
-        isSessionReady ? {} : "skip"
-    )
+    const {
+        data: projectsData,
+        isLoading: isProjectsLoading,
+        error: projectsError,
+        refetch: refetchProjects,
+    } = useDatabaseQuery(api.projects.getUserProjects, isSessionReady ? {} : "skip")
+    const projects = projectsData ?? []
+    // A failed read is not an empty account: "No projects yet" there reads as data loss.
+    const projectsLoadFailed = Boolean(projectsError) && projectsData === undefined
+    // A read started from the session cookie can beat Clerk's token refresh and get a
+    // 401. Once users.store proves the session, retry that read once.
+    const retried401Ref = useRef(false)
+    useEffect(() => {
+        if (projectsError?.status !== 401) {
+            retried401Ref.current = false
+            return
+        }
+        if (isAuthenticated && !retried401Ref.current) {
+            retried401Ref.current = true
+            refetchProjects()
+        }
+    }, [projectsError, isAuthenticated, refetchProjects])
     const { mutate: deleteProjectMutate } = useDatabaseMutation(api.projects.deleteProject)
     const { mutate: bulkDeleteProjectsMutate } = useDatabaseMutation(api.projects.bulkDeleteProjects)
     // The grid needs the projects, not the users.store write: that row is refreshed
@@ -239,7 +257,9 @@ const Dashboard = () => {
     const hasProjects = projectCount > 0
     const projectCountLabel = isLoading
         ? "Loading projects"
-        : `${projectCount} ${projectCount === 1 ? "project" : "projects"}`
+        : projectsLoadFailed
+            ? "Projects unavailable"
+            : `${projectCount} ${projectCount === 1 ? "project" : "projects"}`
     const prevProjectIdsRef = useRef(null)
     const pixelControllersRef = useRef(new Map())
 
@@ -650,6 +670,22 @@ const Dashboard = () => {
                                 )
                             })}
                         </section>
+                    ) : projectsLoadFailed ? (
+                        <GlassPanel className="!py-16 !px-6 text-center">
+                            <div className="flex flex-col items-center gap-4" role="alert">
+                                <p className="text-lg font-medium text-[var(--text-secondary)]">Couldn&apos;t load your projects</p>
+                                <p className="text-sm text-[var(--text-muted)] mt-1">
+                                    {toUserMessage(projectsError, "Something went wrong reaching the server.")}
+                                </p>
+                                <p className="text-sm text-[var(--text-muted)]">Nothing has been lost — this is only the list failing to load.</p>
+                                <div className="mt-4">
+                                    <NeoButton variant="primary" size="md" onClick={refetchProjects}>
+                                        <RefreshCw className="h-4 w-4" strokeWidth={2.5} />
+                                        Try again
+                                    </NeoButton>
+                                </div>
+                            </div>
+                        </GlassPanel>
                     ) : (
                         <GlassPanel className="!py-16 !px-6 text-center">
                             <div className="flex flex-col items-center gap-4">
