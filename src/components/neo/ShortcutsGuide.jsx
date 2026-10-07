@@ -171,7 +171,7 @@ const ShortcutsGuide = ({ open, onClose, variant = "editor" }) => {
             className="overlay-scrim"
             data-open={open}
             onClick={onClose}
-            {...(open ? {} : { inert: "" })}
+            inert={!open}
             style={{
                         position: "fixed",
                         inset: 0,
