@@ -25,7 +25,7 @@
  *
  * Target (by `type`):
  *   subjects   { labels: string[], qualifiers?: { position?, ordinal?, size?, color? } }
- *   concept    { phrase: string }                       // open-vocab → /api/ai/ground
+ *   concept    { phrase: string }                       // open-vocab → on-device CLIPSeg
  *   depth      { region: 'foreground'|'background'|'midground' }
  *   luminance  { region: 'shadows'|'midtones'|'highlights' }
  *   colorRange { name?: string, hex?: string, tolerance?: number }

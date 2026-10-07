@@ -8,10 +8,10 @@
  *   description ─→ /api/ai/mask-plan (Gemini, heuristic fallback)
  *               ─→ MaskPlan steps ─→ THIS module resolves each target:
  *
- *   subjects    → /api/ai/segment-instances (cached per image) + qualifier
- *                 scoring (position/ordinal/size/color); falls back to
- *                 concept grounding when no instance matches the label.
- *   concept     → /api/ai/ground (CLIPSeg + SAM 2 box refinement).
+ *   subjects    → on-device SlimSAM subjects (cached per image), named by
+ *                 CLIPSeg overlap, then qualifier scoring (position/ordinal/
+ *                 size/color); the grounded region alone when none matches.
+ *   concept     → on-device CLIPSeg grounding.
  *   depth       → /api/ai/depth → depth-range layer.
  *   luminance   → pure GPU luminance-range layer.
  *   colorRange  → pure GPU colour-range layer.
@@ -39,7 +39,7 @@ import {
 } from '@/lib/megashader'
 import { growMaskCanvas } from '@/lib/mask-grow'
 import { clientGroundPhrase } from '@/lib/client-ai'
-import { getRoutingMode, prefersClient, resolveOrder } from '@/lib/ai-routing'
+import { prefersClient } from '@/lib/ai-routing'
 import {
     COLOR_NAME_HEX,
     classifyColor,
@@ -66,6 +66,32 @@ const uniqueKey = (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.rando
 const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase())
 
 /* ─── Canvas helpers (DOM) ───────────────────────────────────────────────── */
+
+// Share of a subject's mask that lies inside the grounded region, measured on a
+// small common grid — both canvases are coverage maps (R channel = selected).
+const NAMED_SUBJECT_OVERLAP = 0.5
+const shareInside = (subject, region) => {
+    const size = 96
+    const read = (canvas) => {
+        const c = document.createElement('canvas')
+        c.width = size
+        c.height = size
+        const ctx = c.getContext('2d', { willReadFrequently: true })
+        ctx.drawImage(canvas, 0, 0, size, size)
+        return ctx.getImageData(0, 0, size, size).data
+    }
+    const a = read(subject)
+    const b = read(region)
+    let inA = 0
+    let both = 0
+    for (let i = 0; i < a.length; i += 4) {
+        if (a[i] > 127) {
+            inA += 1
+            if (b[i] > 127) both += 1
+        }
+    }
+    return inA ? both / inA : 0
+}
 
 const unionCanvases = (canvases) => {
     const w = Math.max(...canvases.map((c) => c.width))
@@ -156,52 +182,11 @@ export const createNlMaskRunner = (deps) => {
         return clientGroundPhrase(el, phrase, { width: w, height: h })
     }
 
-    /** Server grounding via /api/ai/ground (CLIPSeg + SAM 2 refinement). */
-    const groundPhraseOnServer = async (image, phrase) => {
-        const { blob } = await deps.imageToUploadBlob(image)
-        const form = new FormData()
-        form.append('image', blob, 'image.jpg')
-        form.append('phrases', JSON.stringify([phrase]))
-        const resp = await fetch('/api/ai/ground', { method: 'POST', body: form })
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}))
-            const e = new Error(err.error || `/api/ai/ground failed (${resp.status})`)
-            e.status = resp.status
-            throw e
-        }
-        const data = await resp.json()
-        const result = data?.results?.[0]
-        if (!result?.found || !result?.maskPng) {
-            return { canvas: null, score: result?.score ?? 0 }
-        }
-        const img = await deps.decodeBase64Png(result.maskPng)
-        return { canvas: deps.toCoverageCanvas(img), score: result.score }
-    }
-
-    /**
-     * Ground a phrase → coverage canvas (or null), following the user's AI
-     * routing policy (`ai-routing.js`): the preferred side runs first and the
-     * other side is the runtime fallback, so masking keeps working whichever
-     * stack is actually available.
-     */
+    /** Ground a phrase → coverage canvas (or null), on device. */
     const groundPhrase = async (image, phrase, notes = []) => {
-        const order = resolveOrder('ground')
-        let lastErr = null
-        for (const side of order) {
-            try {
-                if (side === 'client') {
-                    const r = await groundPhraseOnDevice(image, phrase)
-                    notes.push(`"${phrase}" grounded on-device (in-browser CLIPSeg)`)
-                    return r
-                }
-                return await groundPhraseOnServer(image, phrase)
-            } catch (err) {
-                lastErr = err
-                notes.push(`${side === 'client' ? 'on-device' : 'server'} grounding failed (${err?.message}); ${
-                    side === order[order.length - 1] ? 'no fallback left' : 'trying the other side'}`)
-            }
-        }
-        throw lastErr || new Error('grounding failed on every configured side')
+        const r = await groundPhraseOnDevice(image, phrase)
+        notes.push(`"${phrase}" grounded on-device (in-browser CLIPSeg)`)
+        return r
     }
 
     /**
@@ -213,46 +198,40 @@ export const createNlMaskRunner = (deps) => {
         switch (target.type) {
             case 'subjects': {
                 const phrase = target.phrase || target.labels.join(' ')
-                // Instance detection itself is server-only (YOLO), but the
-                // capability still honours an explicit "Device" routing: it
-                // skips the server and resolves the phrase via on-device
-                // grounding instead (degraded — no instance separation).
-                // Any server failure falls through to grounding the same way.
+                // SlimSAM separates the subjects but cannot read text; CLIPSeg reads
+                // text but cannot separate instances. A subject takes the phrase's
+                // name when most of it lies inside CLIPSeg's region, and the
+                // qualifiers (left, second, red) then choose among whole subjects.
                 let data = null
-                if (getRoutingMode('subjects') !== 'client') {
-                    try {
-                        data = await deps.fetchSubjectInstances(image)
-                    } catch (err) {
-                        helpers.notes.push(`instance detection unavailable (${err?.message}); using text grounding for "${phrase}"`)
-                    }
-                } else {
-                    helpers.notes.push(`subject detection routed to device — text grounding "${phrase}" (positional qualifiers can't separate instances)`)
+                try {
+                    data = await deps.fetchSubjectInstances(image)
+                } catch (err) {
+                    helpers.notes.push(`subject detection unavailable (${err?.message}); using text grounding for "${phrase}"`)
                 }
-                if (data) {
-                    const { picked, note } = pickSubjectInstances(data.instances || [], target, {
-                        imageWidth: data.width || 0,
+                const { canvas: grounded, score } = await groundPhrase(image, phrase, helpers.notes)
+                if (data?.instances?.length && grounded) {
+                    const named = []
+                    for (const inst of data.instances) {
+                        const cover = deps.toCoverageCanvas(await deps.decodeBase64Png(inst.maskPng))
+                        if (shareInside(cover, grounded) >= NAMED_SUBJECT_OVERLAP) {
+                            named.push({ ...inst, label: target.labels[0] || phrase, cover })
+                        }
+                    }
+                    const { picked, note } = pickSubjectInstances(named, target, {
+                        imageWidth: deps.naturalSize(image).w || 0,
                         colorOf: helpers.colorOf,
                     })
                     if (note) helpers.notes.push(note)
                     if (picked.length) {
-                        const canvases = []
-                        for (const inst of picked) {
-                            canvases.push(deps.toCoverageCanvas(await deps.decodeBase64Png(inst.maskPng)))
-                        }
                         const label = picked.length === 1
                             ? `NL ${titleCase(picked[0].label)}`
                             : `NL ${titleCase(target.labels.join('+'))} (${picked.length})`
-                        return { canvas: unionCanvases(canvases), label }
+                        return { canvas: unionCanvases(picked.map((inst) => inst.cover)), label }
                     }
-                    // Detection ran but no instance carries this label.
-                    helpers.notes.push(`no "${target.labels.join('/')}" instance detected; fell back to text grounding for "${phrase}"`)
+                    helpers.notes.push(`no detected subject matched "${phrase}"; used the text-grounded region`)
                 }
-                const { canvas, score } = await groundPhrase(image, phrase, helpers.notes)
-                if (!canvas) {
-                    const have = (data?.instances || []).map((i) => i.label).join(', ') || 'nothing'
-                    throw new Error(`Couldn't find "${phrase}" (grounding score ${score}). Detected subjects: ${have}.`)
-                }
-                return { canvas, label: `NL ${titleCase(phrase)}` }
+                if (!grounded) throw new Error(`Couldn't find "${phrase}" (grounding score ${score}).`)
+                return { canvas: grounded, label: `NL ${titleCase(phrase)}` }
             }
             case 'concept': {
                 const { canvas, score } = await groundPhrase(image, target.phrase, helpers.notes)

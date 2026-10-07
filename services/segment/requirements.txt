@@ -2,56 +2,11 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
 pillow>=10.0.0
+numpy>=1.26
 
-# rembg requires an explicit onnxruntime backend:
-#   - rembg[cpu] -> onnxruntime (CoreML EP auto on Apple Silicon)
-#   - rembg[gpu] -> onnxruntime-gpu (CUDA on NVIDIA; only on Linux)
-# Default is `cpu` (cross-platform). Override with one of:
-#   pip install -U "rembg[gpu]"     # Linux + NVIDIA
-#   pip install -U "rembg[cpu]"     # macOS / Windows / Linux CPU
-# <2.0.70: 2.0.70+ needs numpy>=2.3, breaks sam3's numpy<2 (shared global env, no venv).
-rembg[cpu]>=2.0.59,<2.0.70
-
-# <2 required by sam3; raising rembg/opencv floors past their ceilings pulls numpy 2.x -> sam3 breaks.
-numpy>=1.26,<2
-
-# Step 5: SAM 2 click-to-select semantic masking.
-# Optional — only needed for the /sam2/click endpoint. If absent, the
-# /segment endpoint still works; /sam2/click returns 501 Not Implemented.
-#   pip install -U transformers torch torchvision
-# Hiera-Small is 180 MB; other variants: tiny 160, base-plus 340, large 1.5 GB.
+# LaMa inpainting (/inpaint) — the one model this service runs.
 torch>=2.1.0
-torchvision>=0.16.0
-transformers>=4.45.0
-
-# Step 6: Depth Anything V2 monocular depth estimation.
-# Optional — only needed for the /depth endpoint. If absent, /segment
-# and /sam2/click still work; /depth returns 501 Not Implemented.
-# Small is ~100 MB; HF also publishes Base (~340 MB) and Large (~1.3 GB).
-# (transformers / torch are already pulled in by the SAM 2 block above.)
-
-# LaMa inpainting for the /inpaint endpoint ("AI Object Remover").
-# Optional — if absent, /inpaint returns 501; the Next.js route falls back to
-# Hugging Face SD inpainting (slower but works without the mask service).
-# ~200 MB model, MIT license, reuses torch/torchvision from above.
 simple-lama-inpainting>=0.1.0
 
-# SAM 3.1 — primary AI subject / instance / text-grounding engine (SAM3_ENABLE=1).
-# The package itself is gated and not on PyPI; install from Meta's GitHub:
-#   pip install "git+https://github.com/facebookresearch/sam3.git"
-# and authenticate for the gated checkpoint (downloads from facebook/sam3.1):
-#   hf auth login        # account must be approved at hf.co/facebook/sam3.1
-# sam3 hard-imports NVIDIA `triton`, which has NO macOS / Apple-Silicon wheel.
-# On non-CUDA hosts main.py installs a CPU triton stub (_ensure_triton_stub) so
-# the import succeeds; sam3.perflib already dispatches NMS / connected-components
-# to numpy/skimage off-GPU, and inference runs on CPU (slow). On a CUDA host the
-# real triton is used and the stub is a no-op.
-# These two are runtime deps sam3 needs but does NOT declare in its metadata:
-pycocotools>=2.0.7          # sam3.train.data COCO loaders (pulled in transitively)
-opencv-python-headless>=4.8,<4.11 # cv2, used across sam3 image ops; <4.11 keeps numpy<2
-einops>=0.7                 # sam3.sam.rope imports it; undeclared in metadata
-# Alpha matting for SAM3_REFINE_MATTING (hair-level edge refinement). The
-# PyMatting closed-form solver is the quality path; the cv2 guided-filter
-# fallback needs only opencv. scipy/numpy come transitively.
-pymatting>=1.1
-
+# /shape/fill draws the polygon with OpenCV (Pillow is the fallback).
+opencv-python-headless>=4.8

@@ -6,10 +6,10 @@ export const runtime = 'nodejs'
 /* ═══════════════════════════════════════════════════════════════════════════
  * /api/ai/warmup — Proactively warm up all lazy-loaded AI models
  *
- * The Python services lazy-load heavy models (SAM 3.1, Depth, LaMa) on first
- * use, which can take 30–120s on a free-tier CPU host. This route warms both
- * the masking service (MASKING_SERVICE_URL — SAM 3.1 / depth / grounding) and
- * the segment service (MASK_SERVICE_URL — inpaint / auto-crop) so the first
+ * The Python services lazy-load their models (Depth, LaMa) on first use,
+ * which can take 30–120s on a free-tier CPU host. This route warms both the
+ * masking service (MASKING_SERVICE_URL — depth) and the segment service
+ * (MASK_SERVICE_URL — inpaint) so the first
  * real AI request doesn't surprise the user. Fire-and-forget.
  *
  * No auth required — warmup is idempotent and free (just loads models).

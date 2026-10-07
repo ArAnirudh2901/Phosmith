@@ -1,6 +1,6 @@
 - [Brief comments going forward](comment-style-brief.md) — short new comments; never trim existing ones
-- [Masking setup state](masking-setup-state.md) — mask-studio = testbed of phosmith src; both services must run; sam3 installed + needs einops/numpy<2 pins; SAM 3.1 checkpoint downloaded + VERIFIED (box IoU 1.00); 8 GB can't hold SAM3+birefnet together — pause services to load; birefnet-general stays
-- [Quality over memory](quality-over-memory.md) — never downgrade mask models for RAM; birefnet-general stays; "SAM 3" = Meta SAM 3.1
+- [Masking setup state](masking-setup-state.md) — selection = SlimSAM on device; services = depth (8002) + LaMa (8001) only; mask-studio = testbed of phosmith src
+- [One selection model](one-selection-model.md) — SlimSAM does all selection; extra models only where it can't (CLIPSeg, Depth, LaMa); supersedes keep-SAM-3.1/BiRefNet
 - [pxpipe proxy](pxpipe-proxy.md) — installed at ~/.bun/bin/pxpipe, port 47821; ANTHROPIC_BASE_URL must be set by the user manually
 - [Engineering bar: next level](engineering-bar-next-level.md) — every project: reliable, thought-through work; own the outcome, propose improvements
 - [Collage generator bar](collage-generator-bar.md) — must produce keepable results via the agent; full user-written edge-case matrix (DSLR 50MP, EXIF, grid math, touch, export, device state)

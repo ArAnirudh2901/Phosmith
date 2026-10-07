@@ -1,22 +1,16 @@
 /**
- * mask-service-client — browser client for the AI masking endpoints.
+ * mask-service-client — browser client for the AI service endpoints that
+ * remain on the server (depth, health), plus the upload-downscale and
+ * mask-decode helpers the editor and the agent share.
  *
  * Calls the Next.js proxy routes (/api/ai/*), NOT the Python service directly,
- * so every request keeps Clerk auth + rate limiting. Encapsulates the upload
- * downscale, mask decode, and PNG→coverage-canvas plumbing that was duplicated
- * across the editor (mask.jsx) and the agent (mask-commands.js).
- *
- * Coordinate contract: click/box points are passed in ORIGINAL image-pixel
- * coords; this module scales them to the (downscaled) upload so the proxy route
- * sees consistent coords, and returns mask canvases scaled to the natural image
- * resolution so they drop onto the editor canvas 1:1.
+ * so every request keeps Clerk auth + rate limiting. Selection (click, box,
+ * subject, text, every-subject) runs on device in client-ai.js.
  */
 
 // SAM resizes to ~1024 internally, so uploading the full canvas wastes encode +
 // network + decode. Send a downscaled copy; the returned mask is scaled back up.
 const SAM_INPUT = 1024
-const SUBJECT_INPUT = 2048 // BiRefNet/YOLO benefit from more resolution
-const SUBJECT_CONCEPT = 'main subject'
 
 const naturalSize = (el) => ({
     w: el?.naturalWidth || el?.width || 0,
@@ -161,52 +155,17 @@ export const checkMaskService = async (timeoutMs = 4000) => {
     }
 }
 
-export const serviceSubjectMask = async (
-    sourceEl,
-    { concept = SUBJECT_CONCEPT, subjectBox = true, width, height, signal } = {},
-) => {
-    const up = await imageToUploadBlob(sourceEl, { maxSide: SUBJECT_INPUT, quality: 0.92 })
-    const form = new FormData()
-    form.append('image', up.blob, 'image.jpg')
-    if (concept) form.append('prompt', concept)
-    if (subjectBox) form.append('subject_box', 'true')
-    const r = await fetch('/api/ai/segment-instances', { method: 'POST', body: form, signal })
-    if (!r.ok) throw await errorFromResponse(r, 'subject detection failed')
-    const j = await r.json()
-    if (!j.unionPng) throw new Error(j.count === 0 ? 'no subject found' : 'no mask returned')
-    const canvas = await pngToMaskCanvas(
-        'data:image/png;base64,' + j.unionPng,
-        width || j.width || up.origWidth,
-        height || j.height || up.origHeight,
-    )
-    return { canvas, count: j.count || 0, mode: j.mode || 'sam3', model: j.model || '', instances: j.instances || [] }
-}
-
-/** POST /api/ai/ground — text-grounded mask. Returns the coverage canvas + score. */
-export const serviceGroundText = async (sourceEl, phrase, { width, height, signal } = {}) => {
-    const up = await imageToUploadBlob(sourceEl, { maxSide: SUBJECT_INPUT, quality: 0.9 })
-    const form = new FormData()
-    form.append('image', up.blob, 'image.jpg')
-    form.append('phrases', JSON.stringify([phrase]))
-    const r = await fetch('/api/ai/ground', { method: 'POST', body: form, signal })
-    if (!r.ok) throw await errorFromResponse(r, 'text grounding failed')
-    const j = await r.json()
-    const res = Array.isArray(j.results) ? j.results[0] : null
-    if (!res || !res.found || !res.maskPng) throw new Error(`no region matched "${phrase}"`)
-    const canvas = await pngToMaskCanvas(
-        'data:image/png;base64,' + res.maskPng,
-        width || j.width || up.origWidth,
-        height || j.height || up.origHeight,
-    )
-    return { canvas, engine: j.model || 'clipseg', score: res.score, coverage: res.coverage }
-}
-
-/** POST /api/ai/depth — depth map. Returns the decoded ImageData (white=near). */
+/** POST /api/ai/depth — depth map as a canvas (white = near), what buildDepthOfField reads. */
 export const serviceDepthMap = async (sourceEl, { signal } = {}) => {
     const up = await imageToUploadBlob(sourceEl, { maxSide: SAM_INPUT })
     const form = new FormData()
     form.append('image', up.blob, 'image.jpg')
     const r = await fetch('/api/ai/depth', { method: 'POST', body: form, signal })
     if (!r.ok) throw await errorFromResponse(r, 'depth failed')
-    return decodeMaskBlob(await r.blob())
+    const { imageData, width, height } = await decodeMaskBlob(await r.blob())
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    canvas.getContext('2d').putImageData(imageData, 0, 0)
+    return canvas
 }

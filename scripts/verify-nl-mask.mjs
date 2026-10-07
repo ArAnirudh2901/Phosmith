@@ -10,9 +10,8 @@
  *     plural vs singular)
  *   - growCoverage: boundary extension morphology (dilate/erode distances)
  *
- * Live part (skipped when the mask service is unreachable):
- *   - POST /ground/text with a synthetic image and asserts the phrase binds
- *     to the right region.
+ * The grounding itself runs on device now; verify:client-ai checks it with the
+ * real CLIPSeg model.
  *
  * Usage: bun scripts/verify-nl-mask.mjs
  */
@@ -48,9 +47,6 @@ import {
   withTimeout,
 } from '../src/lib/client-ai-core.js'
 
-const MASK_SERVICE_URL = (process.env.MASKING_SERVICE_URL || process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8002')
-  .trim()
-  .replace(/\/+$/, '')
 
 let failures = 0
 const check = (label, cond, detail = '') => {
@@ -313,22 +309,23 @@ const check = (label, cond, detail = '') => {
 /* ─── 6. AI routing policy ──────────────────────────────────────────────── */
 {
   resetRoutingPolicy()
-  check('default mode is auto', getRoutingMode('ground') === 'auto')
+  check('default mode is auto', getRoutingMode('maskPlan') === 'auto')
   check('auto order prefers server with client fallback',
-    JSON.stringify(resolveOrder('ground')) === JSON.stringify(['server', 'client']))
+    JSON.stringify(resolveOrder('maskPlan')) === JSON.stringify(['server', 'client']))
 
-  setRoutingMode('ground', 'client')
+  setRoutingMode('maskPlan', 'client')
   check('client mode flips the attempt order',
-    JSON.stringify(resolveOrder('ground')) === JSON.stringify(['client', 'server'])
-    && prefersClient('ground') === true)
+    JSON.stringify(resolveOrder('maskPlan')) === JSON.stringify(['client', 'server'])
+    && prefersClient('maskPlan') === true)
 
-  setRoutingMode('ground', 'server')
+  setRoutingMode('maskPlan', 'server')
   check('server mode keeps server first',
-    resolveOrder('ground')[0] === 'server' && prefersClient('ground') === false)
+    resolveOrder('maskPlan')[0] === 'server' && prefersClient('maskPlan') === false)
 
-  setRoutingMode('segment', 'client')
-  check('segment is client-capable (RMBG-1.4 in browser)',
-    JSON.stringify(resolveOrder('segment')) === JSON.stringify(['client', 'server']))
+  // Selection runs on device only: SlimSAM, with CLIPSeg for text.
+  setRoutingMode('ground', 'server')
+  check('selection capabilities are device-only, whatever the preference',
+    ['sam', 'segment', 'ground', 'subjects'].every((cap) => JSON.stringify(resolveOrder(cap)) === JSON.stringify(['client'])))
 
   check('unknown capabilities resolve server-only',
     JSON.stringify(resolveOrder('definitely-not-a-capability')) === JSON.stringify(['server']))
@@ -446,56 +443,6 @@ const check = (label, cond, detail = '') => {
   check('withTimeout rejects hung promises', timedOut === true)
 }
 
-/* ─── 8. live /ground/text (optional) ───────────────────────────────────── */
-const reachable = async () => {
-  try {
-    const ac = new AbortController()
-    const t = setTimeout(() => ac.abort(), 1500)
-    const resp = await fetch(`${MASK_SERVICE_URL}/health`, { signal: ac.signal })
-    clearTimeout(t)
-    return resp.ok
-  } catch { return false }
-}
-
-const liveGroundCheck = async () => {
-  if (!(await reachable())) {
-    console.log(`[verify-nl-mask] skip live grounding — mask service at ${MASK_SERVICE_URL} unreachable (bun run mask:dev)`)
-    return
-  }
-  const sharp = (await import('sharp')).default
-  const W = 640
-  const H = 480
-  const CX = 200
-  const CY = 240
-  const R = 110
-  const svg = Buffer.from(
-    `<svg width="${W}" height="${H}">
-       <rect width="${W}" height="${H}" fill="rgb(120,130,140)"/>
-       <circle cx="${CX}" cy="${CY}" r="${R}" fill="rgb(225,30,30)"/>
-     </svg>`,
-  )
-  const image = await sharp(svg).jpeg({ quality: 92 }).toBuffer()
-
-  const form = new FormData()
-  form.append('image', new Blob([image], { type: 'image/jpeg' }), 'disc.jpg')
-  form.append('phrases', JSON.stringify(['the red circle']))
-  const resp = await fetch(`${MASK_SERVICE_URL}/ground/text`, { method: 'POST', body: form })
-  if (!resp.ok) {
-    check('live grounding HTTP ok', false, `${resp.status} ${await resp.text().catch(() => '')}`)
-    return
-  }
-  const data = await resp.json()
-  const r = data.results?.[0]
-  check('live: "the red circle" binds', !!r?.found, JSON.stringify(r))
-  if (r?.found && Array.isArray(r.bbox)) {
-    const [x, y, w, h] = r.bbox
-    const containsCenter = CX >= x && CX <= x + w && CY >= y && CY <= y + h
-    check('live: mask bbox contains the disc center', containsCenter, JSON.stringify(r.bbox))
-    check('live: coverage is plausible for the disc', r.coverage > 0.04 && r.coverage < 0.5, String(r.coverage))
-  }
-}
-
-await liveGroundCheck()
 
 if (failures > 0) {
   console.error(`\n[verify-nl-mask] ✗ ${failures} check(s) failed`)

@@ -36,8 +36,7 @@ import {
 import { rgbToHsb } from '@/lib/color-utils'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
 import { expandLayerBoundary, MAX_GROW_PX } from '@/lib/mask-grow'
-import { clientSamBox, clientSamClick, clientSubjectMask } from '@/lib/client-ai'
-import { resolveOrder } from '@/lib/ai-routing'
+import { clientSamBox, clientSamClick, clientSubjectInstances, clientSubjectMask } from '@/lib/client-ai'
 import { createNlMaskRunner } from './nl-mask'
 
 const MEGASHADER_TYPE = 'Megashader'
@@ -99,29 +98,18 @@ const decodeBase64Png = (b64) => new Promise((resolve, reject) => {
 })
 
 /**
- * Fetch per-subject instance masks from /api/ai/segment-instances, cached on
- * the Fabric image (one detection pass per image, however many subjects the
- * agent subsequently selects). bbox/centroid are scaled from the capped
- * upload back to true image-pixel coords so they line up with the coordinate
+ * Every subject in the photo from on-device SlimSAM (clientSubjectInstances),
+ * cached on the Fabric image so one detection pass serves every later
+ * selection. bbox/centroid come back in natural image pixels — the coordinate
  * space every other mask command uses.
  */
 const fetchSubjectInstances = async (image, { refresh = false } = {}) => {
     if (!refresh && image.__phosmithSubjectInstances) return image.__phosmithSubjectInstances
-    const { blob, scale } = await imageToUploadBlob(image)
-    const form = new FormData()
-    form.append('image', blob, 'image.jpg')
-    const resp = await fetch('/api/ai/segment-instances', { method: 'POST', body: form })
-    if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}))
-        throw new Error(err.error || `/api/ai/segment-instances failed (${resp.status})`)
-    }
-    const data = await resp.json()
-    const inv = scale > 0 ? 1 / scale : 1
-    const instances = (data.instances || []).map((inst) => ({
-        ...inst,
-        bboxImage: (inst.bbox || []).map((v) => Math.round(v * inv)),
-        centroidImage: (inst.centroid || []).map((v) => Math.round(v * inv)),
-    }))
+    const el = getSourceEl(image)
+    const { w, h } = naturalSize(image)
+    if (!el || !w || !h) throw new Error('[agent.mask] image element not ready for subject detection')
+    const data = await clientSubjectInstances(el, { width: w, height: h })
+    const instances = data.instances.map((inst) => ({ ...inst, source: 'slimsam', bboxImage: inst.bbox, centroidImage: inst.centroid }))
     const out = { ...data, instances }
     image.__phosmithSubjectInstances = out
     return out
@@ -420,36 +408,21 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
             run: ({ value }) => { apply(getStack(requireImage()), { globalMaskAlpha: Math.max(0, Math.min(1, Number(value))) }); try { window.dispatchEvent(new CustomEvent('phosmith:mask-global-alpha', { detail: { value } })) } catch {} return { ok: true } },
         },
         selectSubject: {
-            description: 'AI: detect the photo subject(s) and add them as a mask layer. Follows the AI routing policy — BiRefNet on the service, or RMBG-1.4 in the browser.',
+            description: 'AI: detect the photo subject(s) and add them as a mask layer (on-device SlimSAM, seeded by a saliency box).',
             params: { fillMode: 'string (default fill)' },
             run: async (a) => {
                 const image = requireImage()
-                let cover = null
-                let lastErr = null
-                for (const side of resolveOrder('segment')) {
-                    try {
-                        if (side === 'client') {
-                            const el = getSourceEl(image)
-                            const { w, h } = naturalSize(image)
-                            if (!el || !w || !h) throw new Error('image element not ready for on-device segmentation')
-                            cover = await clientSubjectMask(el, { width: w, height: h })
-                        } else {
-                            const maskBlob = await postMask('/api/ai/segment')
-                            cover = toCoverageCanvas(await decodePng(maskBlob))
-                        }
-                        break
-                    } catch (err) {
-                        lastErr = err
-                    }
-                }
-                if (!cover) throw lastErr || new Error('[agent.mask] subject segmentation failed on every configured side')
+                const el = getSourceEl(image)
+                const { w, h } = naturalSize(image)
+                if (!el || !w || !h) throw new Error('image element not ready for on-device segmentation')
+                const cover = await clientSubjectMask(el, { width: w, height: h })
                 const key = uniqueKey('subject')
                 setMaskTexture(key, cover)
                 return { id: addLayer({ ...semanticLayer({ maskTextureKey: key, feather: 0.05, label: 'AI Subject' }), fillMode: a.fillMode || 'fill', ...pickFill(a) }, a.op) }
             },
         },
         detectSubjects: {
-            description: 'AI: detect EVERY subject instance in the photo (multi-subject). Returns [{index,label,confidence,source,bbox,centroid}] in image-pixel coords without changing the mask. Use mask.selectSubjects to mask specific ones.',
+            description: 'AI: detect EVERY separate subject in the photo (on-device SlimSAM). Returns [{index,label,confidence,source,bbox,centroid}] in image-pixel coords without changing the mask. Subjects are unlabelled (label "Subject"): pick by index using bbox/centroid, and use mask.fromDescription to mask something by name. Use mask.selectSubjects to mask specific ones.',
             params: { refresh: 'boolean — bypass the per-image cache (default false)' },
             run: async (a) => {
                 const data = await fetchSubjectInstances(requireImage(), { refresh: !!a?.refresh })
@@ -464,7 +437,7 @@ export const createMaskCommands = ({ getPrimaryImage }) => {
             },
         },
         selectSubjects: {
-            description: 'AI: mask specific subject instances from mask.detectSubjects. Select by indices and/or labels (e.g. ["person"]); omit both to select every subject. separateLayers=true adds one layer per subject so each can be adjusted independently.',
+            description: 'AI: mask specific subject instances from mask.detectSubjects. Select by indices (subjects are unlabelled, so labels only match "subject"); omit both to select every subject. separateLayers=true adds one layer per subject so each can be adjusted independently.',
             params: { indices: 'number[] — instance indices from detectSubjects', labels: 'string[] — class labels, case-insensitive', separateLayers: 'boolean (default false — one unioned layer)', fillMode: 'string (default fill)', op: 'blend op' },
             run: async (a) => {
                 const image = requireImage()

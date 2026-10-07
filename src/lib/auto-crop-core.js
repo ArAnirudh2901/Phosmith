@@ -1,4 +1,4 @@
-// On-device port of the segment service's /crop/auto strategies
+// On-device port of the segment service's former /crop/auto strategies
 // (services/segment/main.py). Pure: typed arrays in, boxes out, so the
 // fallback stays numerically in step with the server and is unit-testable.
 // Boxes are [x, y, w, h] in the analysed image's pixels.

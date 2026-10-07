@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 // Start a Python service with an interpreter that has its dependencies: the
-// service's own .venv, else the sibling's (masking's requirements are a subset
-// of segment's), else $PYTHON / python3. A bare `python` resolves to whatever
-// pyenv/global shim is active and usually lacks fastapi.
+// service's own .venv, else the sibling's (both need fastapi + torch; masking
+// adds transformers, segment adds simple-lama-inpainting + opencv), else
+// $PYTHON / python3. A bare `python` resolves to whatever pyenv/global shim is
+// active and usually lacks fastapi.
 //
 // Usage: bun scripts/run-service.mjs <segment|masking> [--check]
 

@@ -17,7 +17,6 @@ import { buildColorPop } from '@/lib/effects/color-pop'
 import { castShadowAlpha, frameShadowParams, GLOBAL_LIGHT_ANGLE } from '@/lib/effects/shadow'
 import { canvasToPlane, imageToLumaPlane, matchPlane, planeToCoverageCanvas } from '@/lib/cv/plane-image'
 import { refineMatte } from '@/lib/cv/guided-filter'
-import { resolveOrder } from '@/lib/ai-routing'
 
 const elementOf = (image) => image?._originalElement || image?._element || image?.getElement?.() || null
 
@@ -202,23 +201,15 @@ export const createFocusCommands = ({ getPrimaryImage, getCanvas }) => {
         return entries.map((e) => e.layer.id)
     }
 
-    /** Subject matte, on-device first, service second — the Mask tool's order. */
+    /** Subject matte from on-device SlimSAM, as in the Mask tool. */
     const subjectMatte = async (el) => {
         const dims = { width: el.naturalWidth || el.width, height: el.naturalHeight || el.height }
-        for (const side of resolveOrder('segment')) {
-            try {
-                if (side === 'client') {
-                    const { clientSubjectMask } = await import('@/lib/client-ai')
-                    const mask = await clientSubjectMask(el, dims)
-                    if (mask) return { mask, side }
-                } else {
-                    const { serviceSubjectMask } = await import('@/lib/mask-service-client')
-                    const mask = await serviceSubjectMask(el, dims)
-                    if (mask) return { mask, side }
-                }
-            } catch (error) {
-                console.warn('[agent.focus] subject mask failed on', side, error)
-            }
+        try {
+            const { clientSubjectMask } = await import('@/lib/client-ai')
+            const mask = await clientSubjectMask(el, dims)
+            if (mask) return { mask, side: 'client' }
+        } catch (error) {
+            console.warn('[agent.focus] subject mask failed', error)
         }
         return { mask: null, side: null }
     }
@@ -227,7 +218,7 @@ export const createFocusCommands = ({ getPrimaryImage, getCanvas }) => {
         try {
             const { checkMaskService, serviceDepthMap } = await import('@/lib/mask-service-client')
             const health = await checkMaskService()
-            if (!health?.ok) return null
+            if (!health?.available || !health?.depth) return null
             return await serviceDepthMap(el)
         } catch {
             return null

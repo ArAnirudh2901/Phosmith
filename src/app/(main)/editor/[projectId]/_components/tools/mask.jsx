@@ -12,9 +12,9 @@ import { setMaskTexture, getMaskTexture, rasterisePath, smoothToBezier, MAX_LAYE
 import { buildMaskBoundary } from '@/lib/mask-boundary'
 import { buildPackedLutFromCurves } from '@/lib/curve-lut'
 import { expandLayerBoundary, beginLayerRefine, applyRefineStroke } from '@/lib/mask-grow'
-import { AI_CAPABILITIES, getRoutingPolicy, subscribeRouting, resolveOrder } from '@/lib/ai-routing'
-import { getClientAIState, runClientAISelfTest, subscribeClientAI, clientSubjectMask, clientGroundPhrase } from '@/lib/client-ai'
-import { serviceSubjectMask, serviceGroundText, checkMaskService } from '@/lib/mask-service-client'
+import { AI_CAPABILITIES, getRoutingPolicy, subscribeRouting } from '@/lib/ai-routing'
+import { getClientAIState, runClientAISelfTest, subscribeClientAI, clientSubjectMask, clientGroundPhrase, clientSubjectInstances } from '@/lib/client-ai'
+import { checkMaskService } from '@/lib/mask-service-client'
 import { cleanSubjectMatte } from '@/lib/subject-mask-cleanup'
 import { magicWandMask } from '@/lib/magic-wand'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
@@ -2153,44 +2153,28 @@ const MaskControls = ({ dominantColor }) => {
         const noun = invert ? 'Background' : 'Subject'
         const dims = { width: origW, height: origH }
         try {
-            let maskCanvas = null
-            let lastSideError = null
-            for (const side of resolveOrder('segment')) {
-                try {
-                    if (side === 'client') {
-                        maskCanvas = await clientSubjectMask(sourceEl, dims)
-                        // Studio-parity matte cleanup: sensitivity → binarize
-                        // threshold, hole fill, luminance assist for backlit rims.
-                        try {
-                            const src = document.createElement('canvas')
-                            src.width = origW
-                            src.height = origH
-                            src.getContext('2d').drawImage(sourceEl, 0, 0, origW, origH)
-                            const cleaned = cleanSubjectMatte(maskCanvas, {
-                                threshold: Math.min(0.95, Math.max(0.05, 1 - subjectSensitivityRef.current / 100)),
-                                fillHoles: subjectFillHolesRef.current,
-                                luminanceAssist: true,
-                                sourceCanvas: src,
-                            })
-                            if (cleaned?.canvas) maskCanvas = cleaned.canvas
-                        } catch { /* raw matte */ }
-                    } else {
-                        const r = await serviceSubjectMask(sourceEl, { ...dims, signal: abortController.signal })
-                        maskCanvas = r.canvas
-                    }
-                    if (maskCanvas) break
-                } catch (err) {
-                    if (err?.name === 'AbortError') return
-                    lastSideError = err
-                    console.warn(`[mask] ${side} subject selection failed:`, err?.message || err)
-                }
+            let maskCanvas
+            try {
+                maskCanvas = await clientSubjectMask(sourceEl, dims)
+            } catch (err) {
+                throw new Error(`${noun} detection failed — ${err?.message || err}`)
             }
+            // Studio-parity matte cleanup: sensitivity → binarize
+            // threshold, hole fill, luminance assist for backlit rims.
+            try {
+                const src = document.createElement('canvas')
+                src.width = origW
+                src.height = origH
+                src.getContext('2d').drawImage(sourceEl, 0, 0, origW, origH)
+                const cleaned = cleanSubjectMatte(maskCanvas, {
+                    threshold: Math.min(0.95, Math.max(0.05, 1 - subjectSensitivityRef.current / 100)),
+                    fillHoles: subjectFillHolesRef.current,
+                    luminanceAssist: true,
+                    sourceCanvas: src,
+                })
+                if (cleaned?.canvas) maskCanvas = cleaned.canvas
+            } catch { /* raw matte */ }
             if (segmentAbortRef.current !== abortController) return
-            if (!maskCanvas) {
-                throw new Error(lastSideError?.message
-                    ? `${noun} detection failed — ${lastSideError.message}`
-                    : `${noun} detection failed`)
-            }
             const ctx = maskCanvas.getContext('2d', { willReadFrequently: true })
             const imageData = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
             if (invert) {
@@ -2225,7 +2209,7 @@ const MaskControls = ({ dominantColor }) => {
     const handleSelectBackground = useCallback(() => runSubjectSelection({ invert: true }), [runSubjectSelection])
 
     // Free-text NL masking: bg-ish phrases → inverted subject (grounding only
-    // binds the bright blob); else /ground/text with on-device CLIPSeg fallback.
+    // binds the bright blob); else on-device CLIPSeg grounding.
     const [conceptPhrase, setConceptPhrase] = useState('')
     const [isGrounding, setIsGrounding] = useState(false)
     const groundAbortRef = useRef(/** @type {AbortController | null} */ (null))
@@ -2247,21 +2231,10 @@ const MaskControls = ({ dominantColor }) => {
         setIsGrounding(true)
         const dims = { width: origW, height: origH }
         try {
-            let canvas = null
-            let lastErr = null
-            for (const side of resolveOrder('ground')) {
-                try {
-                    canvas = side === 'client'
-                        ? await clientGroundPhrase(sourceEl, phrase, dims)
-                        : (await serviceGroundText(sourceEl, phrase, { ...dims, signal: abortController.signal })).canvas
-                    if (canvas) break
-                } catch (err) {
-                    if (err?.name === 'AbortError') return
-                    lastErr = err
-                }
-            }
+            // Returns { canvas, score, bbox } — the canvas is null when nothing matched.
+            const { canvas } = await clientGroundPhrase(sourceEl, phrase, dims)
             if (groundAbortRef.current !== abortController) return
-            if (!canvas) throw lastErr || new Error(`No region matched "${phrase}"`)
+            if (!canvas) throw new Error(`No region matched "${phrase}"`)
             const ctx = canvas.getContext('2d', { willReadFrequently: true })
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
             const key = `concept-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
@@ -2280,8 +2253,8 @@ const MaskControls = ({ dominantColor }) => {
     }, [conceptPhrase, tool, runSubjectSelection, addChainLayer])
 
     /* ─── Multi-Subject Detection (Detect All Subjects) ──────────────────────
-     * Calls /api/ai/segment-instances to enumerate every subject in the image
-     * and lets the user mask either the union or a specific instance with one
+     * Runs SlimSAM on device (clientSubjectInstances) to enumerate every subject
+     * in the image and lets the user mask either the union or a specific instance with one
      * click. Results are cached on the Fabric image (one detection pass per
      * image) so re-clicking individual subjects is free.
      */
@@ -2309,30 +2282,11 @@ const MaskControls = ({ dominantColor }) => {
 
             const origW = sourceEl.naturalWidth || sourceEl.width || fabricObj.width
             const origH = sourceEl.naturalHeight || sourceEl.height || fabricObj.height
-            const scale = Math.min(1, 2048 / Math.max(origW, origH))
-            const c = document.createElement('canvas')
-            c.width = Math.round(origW * scale)
-            c.height = Math.round(origH * scale)
-            c.getContext('2d').drawImage(sourceEl, 0, 0, c.width, c.height)
-            const blob = await new Promise((resolve, reject) =>
-                c.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.9),
-            )
-
-            const form = new FormData()
-            form.append('image', blob, 'image.jpg')
-
-            const resp = await fetch('/api/ai/segment-instances', {
-                method: 'POST', body: form, signal: abortController.signal,
-            })
-            if (!resp.ok) {
-                const err = await resp.json().catch(() => ({}))
-                throw new Error(err.error || `Detection failed (${resp.status})`)
-            }
-            const data = await resp.json()
+            const data = await clientSubjectInstances(sourceEl, { width: origW, height: origH })
             if (instancesAbortRef.current !== abortController) return
 
             if (!data.instances?.length) {
-                // No distinct instances (a single blended subject, or YOLO found
+                // No distinct instances (a single blended subject, or SlimSAM found
                 // nothing) — fall back to the unified subject matte so the one
                 // button always produces a selection.
                 setSubjectInstances([])
@@ -2361,10 +2315,8 @@ const MaskControls = ({ dominantColor }) => {
             )
         } catch (err) {
             if (err?.name === 'AbortError') return
-            // The instance pass needs the masking service; when it's unreachable
-            // (fetch failed / 501) fall back to the unified subject matte, which
-            // has its own client (on-device) → server ordering and still selects
-            // offline. Only surface an error if that fallback also fails.
+            // Fall back to the single subject matte so the button always
+            // selects something. Only surface an error if that fails too.
             console.warn('[mask] detect-all-subjects failed, falling back to subject matte:', err?.message || err)
             setSubjectInstances([])
             try {

@@ -9,11 +9,11 @@ export const dynamic = 'force-dynamic'
  * Thin server-side proxy for the masking service's GET /health so the editor's
  * Mask tool can show a live service badge without hitting the Python service
  * directly (no CORS, no exposed service URL). Reads MASKING_SERVICE_URL (the
- * dedicated SAM 3.1 / depth / grounding service), falling back to the legacy
- * combined MASK_SERVICE_URL when only that is configured.
+ * depth service), falling back to the legacy combined MASK_SERVICE_URL when
+ * only that is configured.
  *
- * Response: { available, sam3, sam3Loaded, subjectEngine, depth, model } plus
- * the raw service payload. Always 200 so the client can branch on `available`.
+ * Response: { available, depth, model } plus the raw service payload. Always
+ * 200 so the client can branch on `available`.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 const MASKING_SERVICE_URL =
@@ -40,11 +40,8 @@ export async function GET() {
     return NextResponse.json(
       {
         available: true,
-        sam3: !!j.sam3_available,
-        sam3Loaded: !!j.sam3_loaded,
-        subjectEngine: j.subject_engine || (j.sam3_available ? 'sam3' : 'saliency'),
         depth: !!j.depth_available,
-        model: j.sam3_model || j.model || '',
+        model: j.depth_model || '',
         service: j,
       },
       { headers: { 'Cache-Control': 'no-store' } },

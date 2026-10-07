@@ -200,21 +200,12 @@ export default function FocusControls() {
         const cached = matteRef.current.get(el)
         if (cached) return cached
         const dims = { width: el.naturalWidth || el.width, height: el.naturalHeight || el.height }
-        const { resolveOrder } = await import('@/lib/ai-routing')
-        for (const side of resolveOrder('segment')) {
-            try {
-                if (side === 'client') {
-                    const { clientSubjectMask } = await import('@/lib/client-ai')
-                    const mask = await clientSubjectMask(el, dims)
-                    if (mask) { matteRef.current.set(el, mask); return mask }
-                } else {
-                    const { serviceSubjectMask } = await import('@/lib/mask-service-client')
-                    const mask = await serviceSubjectMask(el, dims)
-                    if (mask) { matteRef.current.set(el, mask); return mask }
-                }
-            } catch (error) {
-                console.warn('[focus] subject mask failed on', side, error)
-            }
+        try {
+            const { clientSubjectMask } = await import('@/lib/client-ai')
+            const mask = await clientSubjectMask(el, dims)
+            if (mask) { matteRef.current.set(el, mask); return mask }
+        } catch (error) {
+            console.warn('[focus] subject mask failed', error)
         }
         return null
     }, [])
@@ -268,7 +259,7 @@ export default function FocusControls() {
                 try {
                     const { checkMaskService } = await import('@/lib/mask-service-client')
                     const health = await checkMaskService()
-                    if (health?.ok) {
+                    if (health?.available && health?.depth) {
                         const { serviceDepthMap } = await import('@/lib/mask-service-client')
                         depthCanvas = await serviceDepthMap(el).catch(() => null)
                     }

@@ -892,6 +892,159 @@ export const clientSamClick = (el, points, labels, dims) =>
 export const clientSamBox = (el, box, dims) =>
     withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims)))
 
+/* ─── On-device subject instances (SlimSAM "everything" mode) ────────────── */
+
+// A grid of single-point prompts decoded in ONE batched pass against the cached
+// image embedding. Every prompt SlimSAM is confident about is a candidate; the
+// largest whole objects are kept and anything that overlaps or sits inside one
+// is a duplicate or a part. Selection happens on the 256px decoder output, so
+// only the kept masks are ever upsampled to full size.
+const INSTANCE_GRID = 6
+const INSTANCE_MIN_SCORE = 0.8
+const INSTANCE_MIN_AREA = 0.01
+const INSTANCE_MAX_AREA = 0.8
+const INSTANCE_OVERLAP = 0.6 // IoU, or share of the smaller mask inside a kept one
+// Background runs round the frame; a subject cut by the edge covers little of it.
+const INSTANCE_MAX_BORDER = 0.4
+const INSTANCE_MAX = 8
+const INSTANCE_PNG_MAX_SIDE = 2048
+
+const instancesOnce = async (el, dims) => {
+    const { Tensor } = await loadTransformers()
+    const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
+    const W = dims.width
+    const H = dims.height
+    const prompts = []
+    for (let gy = 0; gy < INSTANCE_GRID; gy += 1) {
+        for (let gx = 0; gx < INSTANCE_GRID; gx += 1) {
+            prompts.push([Math.round(((gx + 0.5) / INSTANCE_GRID) * W * scale), Math.round(((gy + 0.5) / INSTANCE_GRID) * H * scale)])
+        }
+    }
+    // [image][prompt][points-in-prompt][xy]: one point per prompt, N prompts.
+    const inputs = await processor(rawImage, {
+        input_points: [prompts.map((pt) => [pt])],
+        input_labels: [prompts.map(() => [1])],
+    })
+    let outputs = null
+    if (embeddings) {
+        try { outputs = await model({ ...embeddings, input_points: inputs.input_points, input_labels: inputs.input_labels }) } catch { outputs = null }
+        if (!outputs?.pred_masks) outputs = null
+    }
+    if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
+
+    const pm = outputs.pred_masks
+    const [, n, k, lowH, lowW] = pm.dims
+    const iou = Array.from(outputs.iou_scores.data)
+    const [rh, rw] = Array.from(inputs.reshaped_input_sizes[0] ?? inputs.reshaped_input_sizes)
+    const [oh, ow] = Array.from(inputs.original_sizes[0] ?? inputs.original_sizes)
+    const longest = Math.max(rh, rw) || 1024
+    const vw = Math.max(1, Math.min(lowW, Math.round((lowW * rw) / longest)))
+    const vh = Math.max(1, Math.min(lowH, Math.round((lowH * rh) / longest)))
+    const plane = lowW * lowH
+
+    const candidates = []
+    for (let i = 0; i < n; i += 1) {
+        let m = 0
+        for (let j = 1; j < k; j += 1) if (iou[i * k + j] > iou[i * k + m]) m = j
+        const score = iou[i * k + m]
+        if (!(score >= INSTANCE_MIN_SCORE)) continue
+        const off = (i * k + m) * plane
+        const bits = new Uint8Array(vw * vh)
+        let area = 0
+        let x0 = vw, y0 = vh, x1 = -1, y1 = -1, sx = 0, sy = 0
+        for (let y = 0; y < vh; y += 1) {
+            for (let x = 0; x < vw; x += 1) {
+                if (pm.data[off + y * lowW + x] > 0) {
+                    bits[y * vw + x] = 1
+                    area += 1
+                    sx += x; sy += y
+                    if (x < x0) x0 = x
+                    if (x > x1) x1 = x
+                    if (y < y0) y0 = y
+                    if (y > y1) y1 = y
+                }
+            }
+        }
+        const frac = area / (vw * vh)
+        if (frac < INSTANCE_MIN_AREA || frac > INSTANCE_MAX_AREA) continue
+        let edge = 0
+        for (let x = 0; x < vw; x += 1) edge += bits[x] + bits[(vh - 1) * vw + x]
+        for (let y = 1; y < vh - 1; y += 1) edge += bits[y * vw] + bits[y * vw + vw - 1]
+        if (edge / (2 * (vw + vh) - 4) > INSTANCE_MAX_BORDER) continue
+        candidates.push({ off, score, bits, area, frac, box: [x0, y0, x1, y1], c: [sx / area, sy / area] })
+    }
+
+    // Whole objects first: a part (a face, a sleeve) arrives later and is
+    // dropped because it sits inside a subject that is already kept.
+    candidates.sort((a, b) => b.area - a.area || b.score - a.score)
+    const kept = []
+    let truncated = false
+    for (const cand of candidates) {
+        const dup = kept.some((other) => {
+            let inter = 0
+            for (let p = 0; p < cand.bits.length; p += 1) if (cand.bits[p] && other.bits[p]) inter += 1
+            const union = cand.area + other.area - inter
+            return inter / union > INSTANCE_OVERLAP || inter / Math.min(cand.area, other.area) > INSTANCE_OVERLAP
+        })
+        if (dup) continue
+        if (kept.length === INSTANCE_MAX) { truncated = true; break }
+        kept.push(cand)
+    }
+
+    const outScale = Math.min(1, INSTANCE_PNG_MAX_SIDE / Math.max(W, H))
+    const outW = Math.max(1, Math.round(W * outScale))
+    const outH = Math.max(1, Math.round(H * outScale))
+    // Decoder grid → the input SlimSAM was given (its longest side spans the grid) → natural px.
+    const toNatural = (lx, ly) => [(lx * Math.max(oh, ow)) / lowW / scale, (ly * Math.max(oh, ow)) / lowH / scale]
+    const union = document.createElement('canvas')
+    union.width = outW
+    union.height = outH
+    const uctx = union.getContext('2d')
+    uctx.fillStyle = '#000'
+    uctx.fillRect(0, 0, outW, outH)
+    uctx.globalCompositeOperation = 'lighten'
+
+    const instances = []
+    for (const [index, cand] of kept.entries()) {
+        const one = new Tensor('float32', pm.data.slice(cand.off, cand.off + plane), [1, 1, 1, lowH, lowW])
+        const masks = await processor.post_process_masks(one, inputs.original_sizes, inputs.reshaped_input_sizes)
+        const canvas = samMaskToCanvas(masks[0], null, outW, outH)
+        uctx.drawImage(canvas, 0, 0)
+        const [bx0, by0] = toNatural(cand.box[0], cand.box[1])
+        const [bx1, by1] = toNatural(cand.box[2] + 1, cand.box[3] + 1)
+        const [cx, cy] = toNatural(cand.c[0] + 0.5, cand.c[1] + 0.5)
+        instances.push({
+            index,
+            label: 'Subject',
+            confidence: Math.round(cand.score * 1000) / 1000,
+            area: Math.round(cand.frac * 1000) / 1000,
+            bbox: [Math.round(bx0), Math.round(by0), Math.round(bx1 - bx0), Math.round(by1 - by0)],
+            centroid: [Math.round(cx), Math.round(cy)],
+            maskPng: canvas.toDataURL('image/png').split(',')[1],
+        })
+    }
+    return {
+        instances,
+        count: instances.length,
+        truncated,
+        unionPng: instances.length ? union.toDataURL('image/png').split(',')[1] : null,
+        width: outW,
+        height: outH,
+        mode: 'slimsam-grid',
+        model: engine.id,
+    }
+}
+
+/**
+ * Every separate subject in the photo, on device, from the same SlimSAM that
+ * does click select — the job SAM 3.1's concept detector used to do on the
+ * service. Subjects come back unlabelled ('Subject'); bbox and centroid are in
+ * NATURAL px, masks are PNGs capped at 2048px.
+ */
+export const clientSubjectInstances = (el, dims) =>
+    runHeavy('subject detection', () =>
+        withModelUse('sam', () => withDeviceFallback('sam', () => instancesOnce(el, dims))))
+
 /* ─── Self-test ──────────────────────────────────────────────────────────── */
 
 /** Synthetic scene with a known answer: red disc, off-centre, on flat grey. */
@@ -911,6 +1064,25 @@ const buildSelfTestScene = () => {
     ctx.arc(cx, cy, 58, 0, Math.PI * 2)
     ctx.fill()
     return { canvas: c, disc: { cx, cy, w, h } }
+}
+
+/** Two separate objects on flat grey: a red disc and a blue square. */
+const buildInstancesScene = () => {
+    const w = 320
+    const h = 240
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d')
+    ctx.fillStyle = 'rgb(122,130,140)'
+    ctx.fillRect(0, 0, w, h)
+    ctx.fillStyle = 'rgb(225,30,30)'
+    ctx.beginPath()
+    ctx.arc(90, 120, 50, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = 'rgb(30,60,220)'
+    ctx.fillRect(190, 70, 95, 95)
+    return { canvas: c, w, h, targets: [[90, 120], [237.5, 117.5]] }
 }
 
 /**
@@ -978,7 +1150,26 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
         progress(`SAM click-select failed: ${err?.message}`)
     }
 
+    progress('Finding every subject with SlimSAM…')
+    const shapes = buildInstancesScene()
+    let instances = null
+    try {
+        const r = await clientSubjectInstances(shapes.canvas, { width: shapes.w, height: shapes.h })
+        instances = { count: r.count, centroids: r.instances.map((i) => i.centroid), areas: r.instances.map((i) => i.area) }
+    } catch (err) {
+        progress(`Subject detection failed: ${err?.message}`)
+    }
+
     const report = evaluateSelfTest({ ground, depth, segment, sam }, disc)
+    const near = (c, t) => c && Math.hypot(c[0] - t[0], c[1] - t[1]) < 30
+    report.checks.push({
+        label: 'Detect all subjects finds both shapes and nothing else',
+        ok: Boolean(instances)
+            && shapes.targets.every((t) => instances.centroids.some((c) => near(c, t)))
+            && instances.centroids.every((c) => shapes.targets.some((t) => near(c, t))),
+        detail: instances ? `${instances.count} found · centroids ${JSON.stringify(instances.centroids)}` : 'failed',
+    })
+    report.ok = report.checks.every((c) => c.ok)
     return {
         ...report,
         device: state.device || 'unknown',

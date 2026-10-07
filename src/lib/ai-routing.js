@@ -47,9 +47,9 @@ export const AI_CAPABILITIES = {
         label: 'Text grounding',
         hint: 'Finds "the red jacket" in the image',
         client: true,
-        server: true,
+        server: false,
         clientImpl: 'CLIPSeg in browser',
-        serverImpl: 'SAM 3.1 concept grounding (service)',
+        serverImpl: null,
     },
     depth: {
         label: 'Depth estimation',
@@ -63,26 +63,25 @@ export const AI_CAPABILITIES = {
     subjects: {
         label: 'Subject detection',
         hint: 'Per-instance people/animals/objects',
-        // "client" here is the degraded path: the executor resolves subject
-        // phrases via on-device text grounding (no instance separation).
+        // SlimSAM finds the separate subjects; CLIPSeg names them when a
+        // phrase asks for one ("the dog on the left").
         client: true,
-        server: true,
-        clientImpl: 'Text grounding (no instance split)',
-        serverImpl: 'YOLO + BiRefNet (service)',
+        server: false,
+        clientImpl: 'SlimSAM point grid + CLIPSeg (browser)',
+        serverImpl: null,
     },
     segment: {
         label: 'Select subject',
         hint: 'One-click subject matte',
         client: true,
-        server: true,
+        server: false,
         clientImpl: 'SlimSAM + saliency box (browser)',
-        serverImpl: 'rembg / BiRefNet (service)',
+        serverImpl: null,
     },
     sam: {
         label: 'Click / box select',
         hint: 'Point or drag to select an object',
-        // Masking uses one selection model: SlimSAM, in the browser. The
-        // service's SAM 3.1 still powers instance detection and grounding.
+        // Selection uses one model: SlimSAM, in the browser.
         client: true,
         server: false,
         clientImpl: 'SlimSAM in browser',

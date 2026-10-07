@@ -28,7 +28,6 @@ import {
     bestSeedInBand,
 } from '@/lib/pixel-stretch'
 import { applyStretchToCanvas, getSourceElement, isSourceReady, isStretchBlend, STRETCH_BLEND_MODES } from '@/lib/pixel-stretch-apply'
-import { resolveOrder } from '@/lib/ai-routing'
 
 const clamp = (v, lo, hi, fallback) => {
     const n = Number(v)
@@ -151,33 +150,29 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
     // One matte per image per run: `from: "subject"` and `behind` both want it.
     let matteCache = null
 
-    /** Subject matte + bounding box in normalised coords, or null. Mirrors the Mask order. */
+    /** Subject matte + bounding box in normalised coords, or null. On-device SlimSAM, as in the Mask tool. */
     const subjectBox = async (el) => {
         if (matteCache !== null) return matteCache
         const dims = { width: el.naturalWidth || el.width, height: el.naturalHeight || el.height }
-        for (const side of resolveOrder('segment')) {
-            try {
-                const mask = side === 'client'
-                    ? await (await import('@/lib/client-ai')).clientSubjectMask(el, dims)
-                    : await (await import('@/lib/mask-service-client')).serviceSubjectMask(el, dims)
-                if (!mask) continue
-                const { bboxOfMaskCanvas } = await import('@/lib/mask-service-client')
-                // [x0, y0, x1, y1] in the MASK's own pixels, which need not match
-                // the source's — normalise against the mask, not the photo.
-                const box = bboxOfMaskCanvas(mask)
-                if (!box) continue
+        try {
+            const mask = await (await import('@/lib/client-ai')).clientSubjectMask(el, dims)
+            const { bboxOfMaskCanvas } = await import('@/lib/mask-service-client')
+            // [x0, y0, x1, y1] in the MASK's own pixels, which need not match
+            // the source's — normalise against the mask, not the photo.
+            const box = mask ? bboxOfMaskCanvas(mask) : null
+            if (box) {
                 const mw = mask.width || dims.width
                 const mh = mask.height || dims.height
                 matteCache = {
                     x: box[0] / mw, y: box[1] / mh,
                     w: (box[2] - box[0] + 1) / mw, h: (box[3] - box[1] + 1) / mh,
-                    side,
+                    side: 'client',
                     mask,
                 }
                 return matteCache
-            } catch (error) {
-                console.warn('[agent.stretch] subject box failed on', side, error)
             }
+        } catch (error) {
+            console.warn('[agent.stretch] subject box failed', error)
         }
         matteCache = null
         return null
