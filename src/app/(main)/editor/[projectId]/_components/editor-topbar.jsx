@@ -236,7 +236,8 @@ const EditorTopbar = ({ project, onToggleSidebar, isSidebarOpen = false, isNarro
         setIsSaving(true)
         const toastId = toast.loading('Saving project...')
         try {
-            await canvasEditor.__saveCanvasState({ rethrow: true })
+            // immediate: wait for the write itself, or "saved" is shown before anything persists.
+            await canvasEditor.__saveCanvasState({ rethrow: true, immediate: true })
             toast.success('Project saved', { id: toastId })
         } catch (error) {
             console.error('[Save] Failed:', error)

@@ -1054,7 +1054,8 @@ const CanvasEditor = ({ project }) => {
         canvas.__undoCanvasState = () => undoCanvasState()
         canvas.__redoCanvasState = () => redoCanvasState()
         canvas.__pushHistoryState = (meta) => pushHistoryState(canvas, meta)
-        canvas.__saveCanvasState = () => saveCanvasState()
+        // Pass options through: Save relies on { rethrow, immediate } to report a failed save.
+        canvas.__saveCanvasState = (opts) => saveCanvasState(opts)
         canvas.__getHistoryState = () => ({
             canUndo: historyIndexRef.current > 0,
             canRedo: historyIndexRef.current < historyRef.current.length - 1,

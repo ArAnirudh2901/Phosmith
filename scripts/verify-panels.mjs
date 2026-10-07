@@ -150,6 +150,15 @@ const save = (page) => page.evaluate(() => window.__editorCanvas?.__saveCanvasSt
     `deleting the only object saves an empty canvas marked intentionallyEmpty (${empties.length} writes)`)
   check(r.errs.length === 0 && r.pageErrors.length === 0, 'CanvasEditor ran without errors')
 }
+{
+  // Every /api answers 501 here, so a manual save must fail loudly, not report success.
+  let outcome = 'not run'
+  await editor({ saved: 1, local: null }, async (page) => {
+    outcome = await page.evaluate(() => window.__editorCanvas.__saveCanvasState({ rethrow: true, immediate: true })
+      .then(() => 'resolved', (e) => `rejected: ${e?.message}`))
+  })
+  check(outcome.startsWith('rejected'), `a manual save that did not persist rejects (${outcome})`)
+}
 
 await browser.close()
 server.stop()
