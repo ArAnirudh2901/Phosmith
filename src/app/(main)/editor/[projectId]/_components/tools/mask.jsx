@@ -1,331 +1,43 @@
 "use client"
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import {
-    ArrowDown,
-    ArrowDownLeft,
-    ArrowDownRight,
-    ArrowLeft,
-    ArrowRight,
-    ArrowUp,
-    ArrowUpLeft,
-    ArrowUpRight,
-    Blend,
-    Check,
-    ChevronRight,
-    Circle,
-    CircleDashed,
-    Combine,
-    Contrast,
-    Cpu,
-    Crosshair,
-    Eraser,
-    Eye,
-    EyeOff,
-    FlaskConical,
-    Frame,
-    ImageOff,
-    Lasso,
-    Layers,
-    Loader2,
-    Magnet,
-    Mountain,
-    MousePointer,
-    Paintbrush,
-    Palette,
-    Pentagon,
-    Pipette,
-    Play,
-    Plus,
-    RectangleHorizontal,
-    Redo2,
-    RotateCcw,
-    ScanLine,
-    Scissors,
-    Sparkles,
-    Spline,
-    Square,
-    SquareDashed,
-    SquarePlus,
-    SquaresIntersect,
-    SquaresSubtract,
-    SquaresUnite,
-    Stamp,
-    Sun,
-    Undo2,
-    Wallpaper,
-    Wand2,
-    WandSparkles,
-    X,
-} from 'lucide-react'
-import { motion, AnimatePresence } from 'framer-motion'
 import { Circle as FabricCircle, Ellipse, FabricImage, Line, Polygon, Polyline, Rect as FabricRect } from 'fabric'
+import { ImageOff } from 'lucide-react'
 import { toast } from 'sonner'
-import { useCanvas } from '../../../../../../../context/context'
-import usePixelMaskTool, { MIN_BRUSH, MAX_BRUSH } from '../../../../../../../hooks/usePixelMaskTool'
-import useMaskLayers from '../../../../../../../hooks/useMaskLayers'
-import { computeImageHistogram, getHistogramSourceElement } from '@/lib/image-histogram'
-import { rgbToHsb, hexToRgb, rgbToHsv, hsvToRgb } from '@/lib/color-utils'
-import { setMaskTexture, getMaskTexture, rasterisePath, smoothToBezier, MAX_LAYERS } from '@/lib/megashader'
-import { buildMaskBoundary } from '@/lib/mask-boundary'
+import { AI_CAPABILITIES, getRoutingPolicy, resolveOrder, subscribeRouting } from '@/lib/ai-routing'
+import { getImageBitmapSize, pointToImageSpace } from '@/lib/canvas-mask'
+import { clientGroundPhrase, clientSamBox, clientSamClick, clientSubjectMask, getClientAIState, runClientAISelfTest, subscribeClientAI } from '@/lib/client-ai'
+import { rgbToHsb } from '@/lib/color-utils'
 import { buildPackedLutFromCurves } from '@/lib/curve-lut'
-import { expandLayerBoundary, beginLayerRefine, applyRefineStroke } from '@/lib/mask-grow'
-import { AI_CAPABILITIES, getRoutingPolicy, getRoutingMode, resetRoutingPolicy, setRoutingMode, subscribeRouting, resolveOrder } from '@/lib/ai-routing'
-import { getClientAIState, runClientAISelfTest, subscribeClientAI, clientSamClick, clientSamBox, clientSubjectMask, clientGroundPhrase } from '@/lib/client-ai'
-import { serviceSubjectMask, serviceGroundText, bboxOfMaskCanvas, checkMaskService } from '@/lib/mask-service-client'
-import { cleanSubjectMatte } from '@/lib/subject-mask-cleanup'
+import { computeImageHistogram, getHistogramSourceElement } from '@/lib/image-histogram'
 import { magicWandMask } from '@/lib/magic-wand'
+import { buildMaskBoundary } from '@/lib/mask-boundary'
 import { computeGradientMagnitude, snapToEdgePoint } from '@/lib/mask-edge-snap'
-import { pointToImageSpace, getImageBitmapSize } from '@/lib/canvas-mask'
-import {
-    BrushSizeControl,
-    LabeledSlider,
-    LuminanceHistogram,
-    MaskActionButtons,
-    MaskChainCard,
-    ModeToggle,
-    TipCard,
-    ToolEmptyState,
-} from './_pixel-tool-ui'
-import LayerGradeEditor from './_layer-grade-editor'
+import { applyRefineStroke, beginLayerRefine, expandLayerBoundary } from '@/lib/mask-grow'
+import { checkMaskService, serviceGroundText, serviceSubjectMask } from '@/lib/mask-service-client'
+import { MAX_LAYERS, getMaskTexture, rasterisePath, setMaskTexture, smoothToBezier } from '@/lib/megashader'
+import { cleanSubjectMatte } from '@/lib/subject-mask-cleanup'
 import { toUserMessage } from '@/lib/user-error'
-
-/* ─── collapsible section ─── */
-const Section = ({ title, icon: Icon, defaultOpen = false, children, badge }) => {
-    const [open, setOpen] = useState(defaultOpen)
-    return (
-        <div className={`mask-section ${open ? 'mask-section--open' : ''}`}>
-            <button
-                type="button"
-                onClick={() => setOpen(v => !v)}
-                aria-expanded={open}
-                className="mask-section__header"
-            >
-                {Icon && <Icon className="mask-section__icon" />}
-                <span className="mask-section__title">{title}</span>
-                {badge && (
-                    <span className="mask-section__badge">{badge}</span>
-                )}
-                <ChevronRight className="mask-section__chevron" />
-            </button>
-            <AnimatePresence initial={false}>
-                {open && (
-                    <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-                        className="overflow-hidden"
-                    >
-                        <div className="mask-section__body space-y-3">
-                            {children}
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-        </div>
-    )
-}
-
-/* ─── category divider between section groups ─── */
-const CategoryHeader = ({ label }) => (
-    <div className="mask-category-header">
-        <span>{label}</span>
-    </div>
-)
-
-/* ─── gradient direction icons ─── */
-const DIRECTIONS = [
-    { id: 'top', icon: ArrowUp, label: 'Top → Bottom' },
-    { id: 'bottom', icon: ArrowDown, label: 'Bottom → Top' },
-    { id: 'left', icon: ArrowLeft, label: 'Left → Right' },
-    { id: 'right', icon: ArrowRight, label: 'Right → Left' },
-    { id: 'top-left', icon: ArrowUpLeft, label: 'Top-Left' },
-    { id: 'top-right', icon: ArrowUpRight, label: 'Top-Right' },
-    { id: 'bottom-left', icon: ArrowDownLeft, label: 'Bottom-Left' },
-    { id: 'bottom-right', icon: ArrowDownRight, label: 'Bottom-Right' },
-]
-
-/* ─── color swatch component ─── */
-const ColorSwatch = ({ color, size = 24 }) => {
-    if (!color) return null
-    return (
-        <div
-            className="rounded border shrink-0"
-            style={{
-                width: size, height: size,
-                background: `rgb(${color.r}, ${color.g}, ${color.b})`,
-                borderColor: 'var(--border-subtle)',
-            }}
-        />
-    )
-}
-
-const CLOSED_BRUSH_MIN_POINTS = 8
-const CLOSED_BRUSH_MIN_AREA = 64
-
-const pathLength = (points) => {
-    let length = 0
-    for (let i = 1; i < points.length; i += 1) {
-        const dx = points[i].x - points[i - 1].x
-        const dy = points[i].y - points[i - 1].y
-        length += Math.sqrt(dx * dx + dy * dy)
-    }
-    return length
-}
-
-const polygonArea = (points) => {
-    let area = 0
-    for (let i = 0; i < points.length; i += 1) {
-        const a = points[i]
-        const b = points[(i + 1) % points.length]
-        area += a.x * b.y - b.x * a.y
-    }
-    return Math.abs(area) / 2
-}
-
-const isClosedBrushPath = (points, brushSize) => {
-    if (!Array.isArray(points) || points.length < CLOSED_BRUSH_MIN_POINTS) return false
-    const first = points[0]
-    const last = points[points.length - 1]
-    const dx = last.x - first.x
-    const dy = last.y - first.y
-    const closeDistance = Math.sqrt(dx * dx + dy * dy)
-    const radius = Math.max(0.5, brushSize / 2)
-    const closeThreshold = Math.max(10, Math.min(96, radius * 1.5))
-    const area = polygonArea(points)
-    return (
-        closeDistance <= closeThreshold &&
-        pathLength(points) >= closeThreshold * 3 &&
-        area >= Math.max(CLOSED_BRUSH_MIN_AREA, radius * radius * 3)
-    )
-}
-
-// The megashader engine, the brush canvas, the layer geometry, and the SAM
-// upload dims all speak the source element's NATURAL pixels, but Fabric's
-// transform matrix (and pointToImageSpace) speak the object's logical
-// width/height. These are equal for a freshly loaded image, but diverge when
-// the object's width was set independently of its element (resize, re-encode,
-// a chain restored from JSON). These two helpers convert between the spaces and
-// are a strict no-op when the two sizes match, so they never touch the common
-// case — they only rescue the mismatch that otherwise makes every brush/click
-// land off-target while the marker overlay (same matrix) still tracks the cursor.
-// Fabric swaps _element for the filtered canvas once a filter runs, and a
-// canvas has no naturalWidth, so size reads must use the untouched source.
-const sourceNaturalSize = (img) => {
-    const el = img?._originalElement || img?._element || img?.getElement?.()
-    return {
-        w: el?.naturalWidth || el?.width || 0,
-        h: el?.naturalHeight || el?.height || 0,
-    }
-}
-
-const naturalVsObject = (img) => {
-    const { w: natW, h: natH } = sourceNaturalSize(img)
-    const bw = Math.max(1, Math.round(img?.width || natW || 1))
-    const bh = Math.max(1, Math.round(img?.height || natH || 1))
-    const differs = natW > 0 && natH > 0 && (natW !== bw || natH !== bh)
-    return { natW, natH, bw, bh, differs }
-}
-const toNaturalPx = (img, p) => {
-    if (!p) return p
-    const { natW, natH, bw, bh, differs } = naturalVsObject(img)
-    return differs ? { x: p.x * (natW / bw), y: p.y * (natH / bh) } : p
-}
-const toObjectPx = (img, p) => {
-    if (!p) return p
-    const { natW, natH, bw, bh, differs } = naturalVsObject(img)
-    return differs ? { x: p.x * (bw / natW), y: p.y * (bh / natH) } : p
-}
-
-// Kinds whose mask texture is luma-styled — safe for click-select refine
-// compositing (brush textures are alpha-styled; refine those with the brush).
-const REFINABLE_KINDS = ['semantic', 'lasso', 'path']
-
-// 0..255 coverage → opaque luma canvas (the lasso/semantic texture convention).
-const coverToCanvas = (cover, w, h) => {
-    const c = document.createElement('canvas')
-    c.width = w
-    c.height = h
-    const ctx = c.getContext('2d')
-    const img = ctx.createImageData(w, h)
-    const d = img.data
-    for (let p = 0, i = 0; p < cover.length; p += 1, i += 4) {
-        const v = cover[p]
-        d[i] = v; d[i + 1] = v; d[i + 2] = v; d[i + 3] = 255
-    }
-    ctx.putImageData(img, 0, 0)
-    return c
-}
-
-// Marquee outline in image px. Shift constrains to a square/circle, Alt draws
-// from the centre (Photoshop modifiers).
-const marqueePoints = (a, b, shape, constrain, fromCenter) => {
-    let dx = b.x - a.x
-    let dy = b.y - a.y
-    if (constrain) {
-        const m = Math.max(Math.abs(dx), Math.abs(dy))
-        dx = Math.sign(dx || 1) * m
-        dy = Math.sign(dy || 1) * m
-    }
-    const x0 = fromCenter ? a.x - dx : a.x
-    const y0 = fromCenter ? a.y - dy : a.y
-    const l = Math.min(x0, a.x + dx), r = Math.max(x0, a.x + dx)
-    const t = Math.min(y0, a.y + dy), btm = Math.max(y0, a.y + dy)
-    if (shape === 'ellipse') {
-        const cx = (l + r) / 2, cy = (t + btm) / 2, rx = (r - l) / 2, ry = (btm - t) / 2
-        return Array.from({ length: 96 }, (_, i) => {
-            const ang = (i / 96) * Math.PI * 2
-            return { x: cx + rx * Math.cos(ang), y: cy + ry * Math.sin(ang) }
-        })
-    }
-    return [{ x: l, y: t }, { x: r, y: t }, { x: r, y: btm }, { x: l, y: btm }]
-}
-
-// getMaskTexture may return ImageData — drawImage needs a canvas/image.
-const asDrawable = (t) => {
-    if (!t) return null
-    if (typeof ImageData !== 'undefined' && t instanceof ImageData) {
-        const c = document.createElement('canvas')
-        c.width = t.width
-        c.height = t.height
-        c.getContext('2d').putImageData(t, 0, 0)
-        return c
-    }
-    return t
-}
-
-const fillClosedBrushPath = (ctx, points, scale, brushSize) => {
-    if (!ctx || !isClosedBrushPath(points, brushSize)) return false
-    const s = Math.max(0.0001, scale || 1)
-    ctx.save()
-    ctx.globalCompositeOperation = 'source-over'
-    ctx.fillStyle = 'rgba(255, 255, 255, 1)'
-    ctx.beginPath()
-    ctx.moveTo(points[0].x * s, points[0].y * s)
-    for (let i = 1; i < points.length; i += 1) {
-        ctx.lineTo(points[i].x * s, points[i].y * s)
-    }
-    ctx.closePath()
-    ctx.fill('evenodd')
-    ctx.restore()
-    return true
-}
-
-// A fill/tint that CONTRASTS with the image's dominant hue, so a freshly
-// created selection's 'fill' output is visible instantly instead of blending
-// in (the old fixed-magenta default vanished on magenta/pink photos). Rotate
-// the dominant hue 180° and force a vivid, bright colour. Returns a 0-1 triple
-// (the megashader fillColor space). Cyan fallback if the hex can't be parsed.
-const contrastFillFromHex = (hex) => {
-    try {
-        const hsv = rgbToHsv(hexToRgb(hex))
-        const out = hsvToRgb((hsv.h + 180) % 360, Math.max(0.72, hsv.s), hsv.v < 0.55 ? 0.96 : 0.9)
-        return { r: out.r / 255, g: out.g / 255, b: out.b / 255 }
-    } catch {
-        return { r: 0, g: 0.85, b: 1 }
-    }
-}
+import { useCanvas } from '../../../../../../../context/context'
+import useMaskLayers from '../../../../../../../hooks/useMaskLayers'
+import usePixelMaskTool from '../../../../../../../hooks/usePixelMaskTool'
+import { MaskActionButtons, TipCard, ToolEmptyState } from './_pixel-tool-ui'
+import { REFINABLE_KINDS, asDrawable, contrastFillFromHex, coverToCanvas, fillClosedBrushPath, marqueePoints, naturalVsObject, sourceNaturalSize, toNaturalPx, toObjectPx } from './mask/geometry'
+import { CategoryHeader } from './mask/ui'
+import LayersSection from './mask/layers-section'
+import AiRoutingSection from './mask/ai-routing-section'
+import SubjectSection from './mask/subject-section'
+import ClickSelectSection from './mask/click-select-section'
+import BrushSection from './mask/brush-section'
+import LassoSection from './mask/lasso-section'
+import WandSection from './mask/wand-section'
+import MarqueeSection from './mask/marquee-section'
+import DepthSection from './mask/depth-section'
+import ColorRangeSection from './mask/color-range-section'
+import LuminanceSection from './mask/luminance-section'
+import LinearGradientSection from './mask/linear-gradient-section'
+import RadialGradientSection from './mask/radial-gradient-section'
+import QuickEraseSection from './mask/quick-erase-section'
 
 const MaskControls = ({ dominantColor }) => {
     const { canvasEditor } = useCanvas()
@@ -3860,215 +3572,40 @@ const MaskControls = ({ dominantColor }) => {
     return (
         <div className="mask-panel space-y-0 overflow-y-auto pr-1 panel-scroll">
             {/* ────────── Mask Layers (megashader chain) — pinned to top ────────── */}
-            <Section
-                title="Mask Layers"
-                icon={Layers}
-                defaultOpen={true}
-                badge={stack.chain.length > 0 ? `${stack.chain.length}` : null}
-            >
-                <div className="space-y-1.5">
-                    {stack.chain.length > 0 && (
-                        <div className="seg-row seg-row--3 flex items-center gap-1.5 pb-1">
-                            <button
-                                type="button"
-                                onClick={() => setShowMaskOverlay(!showMaskOverlay)}
-                                aria-pressed={showMaskOverlay}
-                                title="Show the selected area as a red overlay"
-                                className={`mask-btn seg-btn flex-1 text-[10px] py-1.5 ${showMaskOverlay ? 'mask-btn--danger' : ''}`}
-                            >
-                                <Eye className="h-3 w-3" />
-                                Show mask
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setGlobalInvert(!globalInvert)}
-                                aria-pressed={globalInvert}
-                                title="Invert the whole mask"
-                                className={`mask-btn seg-btn flex-1 text-[10px] py-1.5 ${globalInvert ? 'mask-btn--primary' : ''}`}
-                            >
-                                <Contrast className="h-3 w-3" />
-                                Invert
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setCleanPreview(!cleanPreview)}
-                                aria-pressed={cleanPreview}
-                                title="Clean view: hide handles and outlines to see the graded result"
-                                aria-label="Clean view"
-                                className={`mask-btn seg-btn flex-1 text-[10px] py-1.5 ${cleanPreview ? 'mask-btn--primary' : ''}`}
-                            >
-                                <EyeOff className="h-3 w-3" />
-                                Clean
-                            </button>
-                        </div>
-                    )}
-                    {stack.chain.length > 0 && showMaskOverlay && (
-                        <div className="seg-row seg-row--2 grid grid-cols-2 gap-1.5 pb-1" role="group" aria-label="Mask view">
-                            {[
-                                { id: 'tint', label: 'Overlay', title: 'Tint the selection over the photo (\\ cycles views)' },
-                                { id: 'bw', label: 'Black & white', title: 'Show the mask itself: white = selected (\\ cycles views)' },
-                            ].map((v) => (
-                                <button
-                                    key={v.id}
-                                    type="button"
-                                    onClick={() => setMaskView(v.id)}
-                                    aria-pressed={maskView === v.id}
-                                    title={v.title}
-                                    className={`mask-btn seg-btn text-[10px] py-1.5 ${maskView === v.id ? 'mask-btn--primary' : ''}`}
-                                >
-                                    {v.label}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                    {stack.chain.length > 0 && (
-                        <div className="flex items-center justify-end gap-1.5 pb-1">
-                            <button
-                                type="button"
-                                onClick={undoChain}
-                                disabled={!canUndo}
-                                title="Undo layer change"
-                                className="mask-icon-btn"
-                            >
-                                <Undo2 className="h-3 w-3" />
-                            </button>
-                            <button
-                                type="button"
-                                onClick={redoChain}
-                                disabled={!canRedo}
-                                title="Redo layer change"
-                                className="mask-icon-btn"
-                            >
-                                <Redo2 className="h-3 w-3" />
-                            </button>
-                        </div>
-                    )}
-                    {/* Pinned Base grade — pre-grades the whole image (pass 1)
-                        so per-layer grades stack on top of it. */}
-                    <div
-                        className="rounded-lg p-2"
-                        style={{
-                            background: 'var(--bg-elevated)',
-                            border: `1px solid ${baseHasVisibleGrade ? 'rgba(155,249,91,0.35)' : 'var(--border-subtle)'}`,
-                        }}
-                    >
-                        <div className="pb-1">
-                            <span className="text-[10px] font-semibold" style={{ color: baseHasVisibleGrade ? '#9bf95b' : 'var(--text-secondary)' }}>
-                                Base — whole image
-                            </span>
-                        </div>
-                        <LayerGradeEditor
-                            layer={{
-                                id: 'base',
-                                gamma: 1,
-                                wheelShadows: [0, 0, 0],
-                                wheelMidtones: [0, 0, 0],
-                                wheelHighlights: [0, 0, 0],
-                                ...(stack.base || {}),
-                            }}
-                            onUpdate={(patch) => setBase(patch)}
-                            onApplyCurve={applyCurve}
-                            histogram={histogram}
-                            dominantColor={dominantColor}
-                        />
-                    </div>
-                    <AnimatePresence>
-                        {stack.chain.map((entry, i) => (
-                            <MaskChainCard
-                                key={entry.layer.id}
-                                entry={entry}
-                                index={i}
-                                total={stack.chain.length}
-                                isFirst={i === 0}
-                                imageSize={imageSize}
-                                selected={selectedLayerId === entry.layer.id}
-                                onSelect={selectLayer}
-                                onUpdate={(patch) => updateLayer(entry.layer.id, patch)}
-                                onRemove={removeLayer}
-                                onMove={moveLayer}
-                                onSetOp={setLayerOp}
-                                onSetFillMode={setFillMode}
-                                onApplyCurve={applyCurve}
-                                histogram={histogram}
-                                dominantColor={dominantColor}
-                                onExpandBoundary={(layerId, px, edge) => {
-                                    // Regenerates the layer's texture from its
-                                    // pristine base and re-syncs the panel via
-                                    // the chain-replaced event — so the edge of
-                                    // an AI-detected subject stays extendable.
-                                    try {
-                                        expandLayerBoundary(tool.mainImage, layerId, px, edge)
-                                    } catch (err) {
-                                        toast.error(toUserMessage(err, 'Could not adjust the mask boundary'))
-                                    }
-                                }}
-                                onRefineRegion={handleStartRefine}
-                            />
-                        ))}
-                    </AnimatePresence>
-
-                    {/* Brush-refine bar (studio-style): strokes land on release;
-                        the toggle picks add vs erase, Alt flips per stroke. */}
-                    {refineTarget && (
-                        <div
-                            className="space-y-1.5 rounded-md p-2"
-                            style={{ border: '1px dashed rgba(124,58,237,0.45)', background: 'rgba(124,58,237,0.06)' }}
-                        >
-                            <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                                Refining the mask — drag to paint, each stroke applies on
-                                release. <strong>Alt-drag</strong> flips add/erase. Brush size
-                                &amp; hardness are under “Selection Brush”.
-                            </p>
-                            <div className="grid grid-cols-3 gap-1.5">
-                                <button
-                                    type="button"
-                                    onClick={() => setRefineTarget((t) => (t ? { ...t, mode: 'add' } : t))}
-                                    className={`mask-fill-mode-btn ${refineTarget.mode === 'add' ? 'mask-fill-mode-btn--active' : ''}`}
-                                >
-                                    Add
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setRefineTarget((t) => (t ? { ...t, mode: 'erase' } : t))}
-                                    className={`mask-fill-mode-btn ${refineTarget.mode === 'erase' ? 'mask-fill-mode-btn--active' : ''}`}
-                                >
-                                    Erase
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={handleStopRefine}
-                                    className="mask-btn mask-btn--primary text-[10px] py-1.5"
-                                >
-                                    Done
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {stack.chain.length === 0 && (
-                        <p
-                            className="text-[10px] text-center py-3 rounded-md"
-                            style={{ color: 'var(--text-muted)', border: '1px dashed var(--border-subtle)' }}
-                        >
-                            No layers yet — use any selection tool below to add one.
-                        </p>
-                    )}
-
-                    {stack.chain.length > 0 && (
-                        <button
-                            type="button"
-                            onClick={clearAll}
-                            className="mask-btn mask-btn--danger w-full text-[10px] py-1.5 mt-1"
-                        >
-                            Clear all layers
-                        </button>
-                    )}
-                </div>
-                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    Each selection you create becomes a non-destructive mask layer.
-                    Layers are composited by the megashader filter.
-                </p>
-            </Section>
+            <LayersSection
+                applyCurve={applyCurve}
+                baseHasVisibleGrade={baseHasVisibleGrade}
+                canRedo={canRedo}
+                canUndo={canUndo}
+                cleanPreview={cleanPreview}
+                clearAll={clearAll}
+                dominantColor={dominantColor}
+                globalInvert={globalInvert}
+                handleStartRefine={handleStartRefine}
+                handleStopRefine={handleStopRefine}
+                histogram={histogram}
+                imageSize={imageSize}
+                maskView={maskView}
+                moveLayer={moveLayer}
+                redoChain={redoChain}
+                refineTarget={refineTarget}
+                removeLayer={removeLayer}
+                selectLayer={selectLayer}
+                selectedLayerId={selectedLayerId}
+                setBase={setBase}
+                setCleanPreview={setCleanPreview}
+                setFillMode={setFillMode}
+                setGlobalInvert={setGlobalInvert}
+                setLayerOp={setLayerOp}
+                setMaskView={setMaskView}
+                setRefineTarget={setRefineTarget}
+                setShowMaskOverlay={setShowMaskOverlay}
+                showMaskOverlay={showMaskOverlay}
+                stack={stack}
+                tool={tool}
+                undoChain={undoChain}
+                updateLayer={updateLayer}
+            />
 
             <CategoryHeader label="AI Tools" />
 
@@ -4079,1526 +3616,221 @@ const MaskControls = ({ dominantColor }) => {
                 executor follows this policy with runtime fallback to the
                 other side, so a misconfigured side degrades instead of
                 failing (see src/lib/ai-routing.js). */}
-            <Section title="AI Processing" icon={Cpu} defaultOpen={false} badge={routingBadge}>
-                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    Choose where each AI function runs. <strong>Device</strong> keeps
-                    everything in this browser (models download once);{' '}
-                    <strong>Server</strong> uses the local AI service / Gemini;{' '}
-                    <strong>Auto</strong> prefers the server and falls back to the device.
-                </p>
-                {Object.entries(AI_CAPABILITIES).map(([cap, def]) => (
-                    <div key={cap} className="space-y-1">
-                        {/* flex-wrap: in a narrow sidebar the three-mode pill
-                            row drops below the label instead of overlapping it */}
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <span
-                                className="text-[10px] font-semibold"
-                                style={{ color: 'var(--text-secondary)' }}
-                                title={def.hint}
-                            >
-                                {def.label}
-                            </span>
-                            <div className="mask-fill-modes" style={{ marginTop: 0 }}>
-                                {['auto', ...(def.client ? ['client'] : []), ...(def.server ? ['server'] : [])].map((mode) => (
-                                    <button
-                                        key={mode}
-                                        type="button"
-                                        onClick={() => setRoutingMode(cap, mode)}
-                                        className={`mask-fill-mode-btn ${routingPolicy[cap] === mode ? 'mask-fill-mode-btn--active' : ''}`}
-                                        title={mode === 'client' ? (def.clientImpl || 'In this browser')
-                                            : mode === 'server' ? (def.serverImpl || 'On the server')
-                                                : 'Server first, device fallback'}
-                                    >
-                                        {mode === 'auto' ? 'Auto' : mode === 'client' ? 'Device' : 'Server'}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                        {/* Device-model readiness: this capability is set to run
-                            on-device and has a downloadable browser model. The
-                            background prefetch downloads it; show its progress. */}
-                        {routingPolicy[cap] === 'client' && cap in CLIENT_READY && (
-                            <span
-                                className="text-[9px]"
-                                style={{ color: CLIENT_READY[cap] ? '#4ade80' : 'var(--text-muted)' }}
-                            >
-                                {CLIENT_READY[cap]
-                                    ? '✓ Model ready on device'
-                                    : clientAI.loading
-                                        ? `Downloading ${clientAI.loading}…`
-                                        : 'Model downloads in the background'}
-                            </span>
-                        )}
-                    </div>
-                ))}
-                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
-                    <button
-                        type="button"
-                        onClick={resetRoutingPolicy}
-                        className="whitespace-nowrap text-[10px]"
-                        style={{ color: 'var(--text-muted)' }}
-                    >
-                        Reset to Auto
-                    </button>
-                    <button
-                        type="button"
-                        onClick={handleSelfTest}
-                        disabled={selfTest.running}
-                        className="mask-btn whitespace-nowrap px-2 py-1 text-[10px] font-semibold"
-                        title="Runs the in-browser models on a test image with a known answer. First run downloads the models (one-time)."
-                    >
-                        {selfTest.running ? (
-                            <>
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                                Testing…
-                            </>
-                        ) : (
-                            <>
-                                <FlaskConical className="h-3 w-3" />
-                                Test device AI
-                            </>
-                        )}
-                    </button>
-                </div>
-                {selfTest.running && selfTest.progress && (
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{selfTest.progress}</p>
-                )}
-                {selfTest.report && (
-                    <div className="space-y-1">
-                        {selfTest.report.checks.map((c) => (
-                            <div key={c.label} className="flex items-center gap-1.5 text-[10px]">
-                                <span style={{ color: c.ok ? '#4ade80' : '#ef4444' }}>{c.ok ? '✓' : '✗'}</span>
-                                <span style={{ color: 'var(--text-secondary)' }}>{c.label}</span>
-                                <span className="ml-auto font-mono" style={{ color: 'var(--text-muted)' }}>{c.detail}</span>
-                            </div>
-                        ))}
-                        <p className="text-[9px]" style={{ color: 'var(--text-muted)' }}>
-                            {selfTest.report.device?.toUpperCase()} · {(selfTest.report.totalMs / 1000).toFixed(1)}s
-                        </p>
-                    </div>
-                )}
-            </Section>
+            <AiRoutingSection
+                CLIENT_READY={CLIENT_READY}
+                clientAI={clientAI}
+                handleSelfTest={handleSelfTest}
+                routingBadge={routingBadge}
+                routingPolicy={routingPolicy}
+                selfTest={selfTest}
+            />
 
             {/* ────────── AI Masking ────────── */}
-            <Section title="Select Subject" icon={Sparkles} defaultOpen={true} badge="AI">
-                <motion.button
-                    type="button"
-                    onClick={handleDetectAllSubjects}
-                    disabled={isSegmenting || isDetectingInstances}
-                    whileTap={{ scale: 0.97 }}
-                    className="mask-btn mask-btn--primary w-full py-2.5 text-xs font-semibold"
-                >
-                    {(isSegmenting || isDetectingInstances) ? (
-                        <>
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Detecting Subjects…
-                        </>
-                    ) : (
-                        <>
-                            <Sparkles className="h-4 w-4" />
-                            Select Subject
-                        </>
-                    )}
-                </motion.button>
-                <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
-                    AI detects every subject as a layer — pick one below or keep them all; background stays intact
-                </p>
-
-                {/* ── AI Background: subject mask, inverted ─────────────── */}
-                <motion.button
-                    type="button"
-                    onClick={handleSelectBackground}
-                    disabled={isSegmenting}
-                    whileTap={{ scale: 0.97 }}
-                    className="mask-btn w-full py-2 text-[11px] font-semibold"
-                    style={{
-                        background: 'rgba(6,184,212,0.10)',
-                        border: '1px solid rgba(6,184,212,0.30)',
-                        color: '#67E8F9',
-                    }}
-                >
-                    {isSegmenting ? (
-                        <>
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            Selecting Background…
-                        </>
-                    ) : (
-                        <>
-                            <Wallpaper className="h-3.5 w-3.5" />
-                            Select Background
-                        </>
-                    )}
-                </motion.button>
-                <p className="text-[10px] text-center" style={{ color: 'var(--text-muted)' }}>
-                    Everything except the subject — the reliable way to grade sky / backdrop
-                </p>
-
-                {/* ── NL phrase → mask (grounding) ─────────────────────── */}
-                <div className="flex items-center gap-1.5">
-                    <input
-                        type="text"
-                        value={conceptPhrase}
-                        onChange={(e) => setConceptPhrase(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') runConcept() }}
-                        placeholder='e.g. the sky'
-                        title='e.g. "the sky" or "everything except the person"'
-                        aria-label='Describe a region to mask'
-                        disabled={isGrounding}
-                        className="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-[11px] editor-interactive"
-                        style={{
-                            background: 'var(--bg-elevated)',
-                            border: '1px solid var(--border-subtle)',
-                            color: 'var(--text-primary)',
-                        }}
-                    />
-                    <motion.button
-                        type="button"
-                        onClick={() => runConcept()}
-                        disabled={isGrounding || !conceptPhrase.trim()}
-                        whileTap={{ scale: 0.97 }}
-                        className="shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[11px] font-semibold editor-interactive disabled:opacity-40"
-                        style={{
-                            background: 'rgba(124,58,237,0.18)',
-                            border: '1px solid rgba(124,58,237,0.45)',
-                            color: '#C4B5FD',
-                        }}
-                    >
-                        {isGrounding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Mask it'}
-                    </motion.button>
-                </div>
-
-                {/* ── On-device matte tuning (used on the Device fallback) ── */}
-                <LabeledSlider
-                    label="Sensitivity"
-                    value={subjectSensitivity}
-                    min={0}
-                    max={100}
-                    suffix="%"
-                    onChange={setSubjectSensitivity}
-                    dominantColor={dominantColor}
-                />
-                <label className="mask-toggle" title="On-device Select Subject / Background: fill holes enclosed by the subject">
-                    <input type="checkbox" checked={subjectFillHoles} onChange={(e) => setSubjectFillHoles(e.target.checked)} />
-                    Fill enclosed holes
-                </label>
-
-                {/* ── Multi-subject: per-instance picker ──────────────────
-                    Populated by the primary Select Subject button, which runs
-                    the detect-all-subjects pass. */}
-                {subjectInstances && subjectInstances.length > 0 && (
-                    <div className="space-y-1.5">
-                        <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                            Detected {subjectInstances.length} subject{subjectInstances.length === 1 ? '' : 's'}. Pick one or All:
-                        </p>
-                        <div className="flex flex-wrap gap-1">
-                            <button
-                                type="button"
-                                onClick={handleApplyAllSubjectsUnion}
-                                className="rounded-md px-2 py-1 text-[10px] font-semibold editor-interactive"
-                                style={{
-                                    background: activeInstanceIndex === -1 ? 'rgba(124,58,237,0.25)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${activeInstanceIndex === -1 ? 'rgba(124,58,237,0.55)' : 'var(--border-subtle)'}`,
-                                    color: activeInstanceIndex === -1 ? '#C4B5FD' : 'var(--text-primary)',
-                                }}
-                            >
-                                All ({subjectInstances.length})
-                            </button>
-                            {subjectInstances.map((inst) => {
-                                const isActive = activeInstanceIndex === inst.index
-                                return (
-                                    <button
-                                        key={inst.index}
-                                        type="button"
-                                        onClick={() => handleApplyInstance(inst)}
-                                        title={`${inst.label} · conf ${(inst.confidence * 100).toFixed(0)}%`}
-                                        className="rounded-md px-2 py-1 text-[10px] font-medium editor-interactive"
-                                        style={{
-                                            background: isActive ? 'rgba(124,58,237,0.25)' : 'var(--bg-elevated)',
-                                            border: `1px solid ${isActive ? 'rgba(124,58,237,0.55)' : 'var(--border-subtle)'}`,
-                                            color: isActive ? '#C4B5FD' : 'var(--text-primary)',
-                                        }}
-                                    >
-                                        {inst.label} #{inst.index + 1}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
-                )}
-            </Section>
+            <SubjectSection
+                activeInstanceIndex={activeInstanceIndex}
+                conceptPhrase={conceptPhrase}
+                dominantColor={dominantColor}
+                handleApplyAllSubjectsUnion={handleApplyAllSubjectsUnion}
+                handleApplyInstance={handleApplyInstance}
+                handleDetectAllSubjects={handleDetectAllSubjects}
+                handleSelectBackground={handleSelectBackground}
+                isDetectingInstances={isDetectingInstances}
+                isGrounding={isGrounding}
+                isSegmenting={isSegmenting}
+                runConcept={runConcept}
+                setConceptPhrase={setConceptPhrase}
+                setSubjectFillHoles={setSubjectFillHoles}
+                setSubjectSensitivity={setSubjectSensitivity}
+                subjectFillHoles={subjectFillHoles}
+                subjectInstances={subjectInstances}
+                subjectSensitivity={subjectSensitivity}
+            />
 
             {/* ────────── Click-to-Select (SlimSAM) ────────── */}
-            <Section title="Click to Select" icon={MousePointer} badge="AI">
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Click to mark the subject — or draw a box around it — then run SlimSAM. Hold{' '}
-                        <kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Alt</kbd>{' '}
-                        to mark background (negative click).
-                    </p>
-
-                    <div className="flex items-center gap-1.5">
-                        {!semanticActive ? (
-                            <motion.button
-                                type="button"
-                                onClick={() => {
-                                    if (activeDraft) {
-                                        toast('Finish or cancel the current draft first', { icon: 'ℹ️' })
-                                        return
-                                    }
-                                    stopModesRef.current('semantic')
-                                    setSemanticActive(true)
-                                    toast('Click the subject on the canvas', { id: 'mask-tool-hint' })
-                                }}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(124,58,237,0.08)',
-                                    border: '1px solid rgba(124,58,237,0.25)',
-                                    color: '#A78BFA',
-                                }}
-                            >
-                                <Crosshair className="h-3.5 w-3.5" />
-                                Start Clicking
-                            </motion.button>
-                        ) : (
-                            <motion.button
-                                type="button"
-                                onClick={handleSemanticStop}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(239,68,68,0.10)',
-                                    border: '1px solid rgba(239,68,68,0.30)',
-                                    color: '#FCA5A5',
-                                }}
-                            >
-                                <X className="h-3.5 w-3.5" />
-                                Stop
-                            </motion.button>
-                        )}
-                        <motion.button
-                            type="button"
-                            onClick={handleSemanticReset}
-                            disabled={!semanticActive || (semanticClicks.length === 0 && !lastSemanticMask)}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive disabled:opacity-40"
-                            style={{
-                                background: 'var(--bg-elevated)',
-                                border: '1px solid var(--border-subtle)',
-                                color: 'var(--text-secondary)',
-                            }}
-                            title="Clear clicks and last result"
-                        >
-                            <RotateCcw className="h-3.5 w-3.5" />
-                        </motion.button>
-                    </div>
-
-                    {/* Box prompt — the strongest single prompt for whole
-                        objects. One box at a time; a new drag replaces it. */}
-                    {semanticActive && (
-                        <div className="flex items-center gap-1.5">
-                            <motion.button
-                                type="button"
-                                onClick={() => setBoxArmed((v) => !v)}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[10px] font-medium editor-interactive"
-                                style={{
-                                    background: boxArmed ? 'rgba(6,184,212,0.18)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${boxArmed ? 'rgba(6,184,212,0.45)' : 'var(--border-subtle)'}`,
-                                    color: boxArmed ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                }}
-                                title="Drag a rectangle around the object — SlimSAM selects what is inside"
-                            >
-                                <Square className="h-3 w-3" />
-                                {boxArmed ? 'Drag on the image…' : semanticBox ? 'Redraw box' : 'Draw box'}
-                            </motion.button>
-                            {semanticBox && (
-                                <button
-                                    type="button"
-                                    onClick={() => setSemanticBox(null)}
-                                    className="flex items-center gap-1 text-[9px] px-1.5 py-1.5 rounded"
-                                    title="Remove the box prompt"
-                                    style={{
-                                        background: 'rgba(6,184,212,0.15)',
-                                        color: 'var(--accent-primary)',
-                                        border: '1px solid rgba(6,184,212,0.35)',
-                                    }}
-                                >
-                                    {Math.round(semanticBox[2] - semanticBox[0])}×{Math.round(semanticBox[3] - semanticBox[1])}
-                                    <X className="h-2.5 w-2.5" />
-                                </button>
-                            )}
-                        </div>
-                    )}
-
-                    {/* Refine: composite results onto the SELECTED mask layer. */}
-                    {semanticActive && refineTargetLayer && (
-                        <div className="flex items-center gap-1.5">
-                            <motion.button
-                                type="button"
-                                onClick={() => setSemanticRefine((v) => !v)}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[10px] font-medium editor-interactive truncate"
-                                style={{
-                                    background: semanticRefine ? 'rgba(155,249,91,0.14)' : 'var(--bg-elevated)',
-                                    border: `1px solid ${semanticRefine ? 'rgba(155,249,91,0.40)' : 'var(--border-subtle)'}`,
-                                    color: semanticRefine ? '#9bf95b' : 'var(--text-secondary)',
-                                }}
-                                title="Clicks refine the selected mask instead of staging a new layer"
-                            >
-                                <Combine className="h-3 w-3" />
-                                {semanticRefine ? 'Refining' : 'Refine'} “{refineTargetLayer.label || refineTargetLayer.kind}”
-                            </motion.button>
-                            {semanticRefine && ['add', 'remove'].map((m) => (
-                                <button
-                                    key={m}
-                                    type="button"
-                                    onClick={() => setSemanticRefineMode(m)}
-                                    className="text-[9px] px-2 py-1.5 rounded capitalize"
-                                    style={{
-                                        background: semanticRefineMode === m
-                                            ? (m === 'add' ? 'rgba(6,184,212,0.18)' : 'rgba(239,68,68,0.18)')
-                                            : 'var(--bg-elevated)',
-                                        color: semanticRefineMode === m
-                                            ? (m === 'add' ? 'var(--accent-primary)' : '#FCA5A5')
-                                            : 'var(--text-secondary)',
-                                        border: `1px solid ${semanticRefineMode === m
-                                            ? (m === 'add' ? 'rgba(6,184,212,0.45)' : 'rgba(239,68,68,0.40)')
-                                            : 'var(--border-subtle)'}`,
-                                    }}
-                                >
-                                    {m}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-
-                    {/* Click list — cyan dot = positive, red = negative */}
-                    {semanticActive && semanticClicks.length > 0 && (
-                        <div
-                            className="rounded-md p-1.5 flex flex-wrap gap-1"
-                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
-                        >
-                            {semanticClicks.map((c, i) => (
-                                <button
-                                    key={i}
-                                    type="button"
-                                    onClick={() => setSemanticClicks((prev) => prev.filter((_, j) => j !== i))}
-                                    className="flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded"
-                                    title={`${c[0].toFixed(0)}, ${c[1].toFixed(0)} — click to remove`}
-                                    style={{
-                                        background: c[2] === 1 ? 'rgba(6,184,212,0.15)' : 'rgba(239,68,68,0.15)',
-                                        color: c[2] === 1 ? 'var(--accent-primary)' : '#FCA5A5',
-                                        border: `1px solid ${c[2] === 1 ? 'rgba(6,184,212,0.35)' : 'rgba(239,68,68,0.35)'}`,
-                                    }}
-                                >
-                                    <span>{c[2] === 1 ? '+' : '−'}</span>
-                                    <span>({c[0].toFixed(0)}, {c[1].toFixed(0)})</span>
-                                </button>
-                            ))}
-                        </div>
-                    )}
-
-                    <motion.button
-                        type="button"
-                        onClick={handleSemanticRun}
-                        disabled={isSemanticRunning || (semanticClicks.length === 0 && !semanticBox)}
-                        whileTap={{ scale: 0.97 }}
-                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold editor-interactive disabled:opacity-40"
-                        style={{
-                            background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(124,58,237,0.18) 100%)',
-                            border: '1px solid rgba(6,184,212,0.35)',
-                            color: 'var(--accent-primary)',
-                        }}
-                    >
-                        {isSemanticRunning ? (
-                            <>
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                {clientAI.samReady ? 'Running SlimSAM…' : 'Downloading SlimSAM…'}
-                            </>
-                        ) : (
-                            <>
-                                <Play className="h-3.5 w-3.5" />
-                                Run ({semanticClicks.length}{semanticBox ? ' + box' : ''})
-                            </>
-                        )}
-                    </motion.button>
-
-                    {/* Mask preview + add-to-chain */}
-                    {lastSemanticPreview && (
-                        <div
-                            className="rounded-md p-2 space-y-1.5"
-                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
-                        >
-                            <div className="flex items-center gap-2">
-                                <img
-                                    src={lastSemanticPreview}
-                                    alt="SlimSAM mask preview"
-                                    className="rounded"
-                                    style={{ width: 64, height: 64, objectFit: 'contain', background: '#000' }}
-                                />
-                                <div className="flex-1 text-[10px] leading-tight" style={{ color: 'var(--text-muted)' }}>
-                                    <div className="font-semibold mb-0.5" style={{ color: 'var(--text-secondary)' }}>
-                                        Mask ready
-                                    </div>
-                                    White = keep, black = remove. The mask is at the
-                                    original image&apos;s resolution.
-                                </div>
-                            </div>
-                            <motion.button
-                                type="button"
-                                onClick={handleAddSemanticLayer}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(6,184,212,0.10)',
-                                    border: '1px solid rgba(6,184,212,0.30)',
-                                    color: 'var(--accent-primary)',
-                                }}
-                            >
-                                <Plus className="h-3.5 w-3.5" />
-                                Add to Mask Layers
-                            </motion.button>
-                        </div>
-                    )}
-                </div>
-            </Section>
+            <ClickSelectSection
+                activeDraft={activeDraft}
+                boxArmed={boxArmed}
+                clientAI={clientAI}
+                handleAddSemanticLayer={handleAddSemanticLayer}
+                handleSemanticReset={handleSemanticReset}
+                handleSemanticRun={handleSemanticRun}
+                handleSemanticStop={handleSemanticStop}
+                isSemanticRunning={isSemanticRunning}
+                lastSemanticMask={lastSemanticMask}
+                lastSemanticPreview={lastSemanticPreview}
+                refineTargetLayer={refineTargetLayer}
+                semanticActive={semanticActive}
+                semanticBox={semanticBox}
+                semanticClicks={semanticClicks}
+                semanticRefine={semanticRefine}
+                semanticRefineMode={semanticRefineMode}
+                setBoxArmed={setBoxArmed}
+                setSemanticActive={setSemanticActive}
+                setSemanticBox={setSemanticBox}
+                setSemanticClicks={setSemanticClicks}
+                setSemanticRefine={setSemanticRefine}
+                setSemanticRefineMode={setSemanticRefineMode}
+                stopModesRef={stopModesRef}
+            />
 
             {/* ────────── Smart Brush (Step 7) ────────── */}
             <CategoryHeader label="Draw Selection" />
 
-            <Section title="Selection Brush" icon={Paintbrush}>
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Paint a <strong>selection</strong> — it shows as a live
-                        overlay and becomes an editable, non-destructive layer.
-                        Closed outlines fill their entire inside automatically.
-                        Nothing is erased. Use <strong>Erase / Cut</strong> below
-                        to knock the painted region out instead.
-                    </p>
-
-                    {/* Output: select (fill) vs erase (cut) — same as the lasso */}
-                    <div className="seg-row seg-row--2 grid grid-cols-2 gap-1.5">
-                        {[
-                            { id: 'select', label: 'Select', icon: SquareDashed, hint: 'visible selection layer' },
-                            { id: 'erase', label: 'Erase / Cut', icon: Scissors, hint: 'cut the painted region out' },
-                        ].map((s) => {
-                            const SIcon = s.icon
-                            const active = brushSink === s.id
-                            return (
-                                <button
-                                    key={s.id}
-                                    type="button"
-                                    onClick={() => setBrushSink(s.id)}
-                                    title={s.hint}
-                                    className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{
-                                        background: active ? 'rgba(124,58,237,0.10)' : 'var(--bg-elevated)',
-                                        border: `1px solid ${active ? 'rgba(124,58,237,0.35)' : 'var(--border-subtle)'}`,
-                                        color: active ? '#A78BFA' : 'var(--text-secondary)',
-                                    }}
-                                >
-                                    <SIcon className="h-3.5 w-3.5" />
-                                    {s.label}
-                                </button>
-                            )
-                        })}
-                    </div>
-
-                    <BrushSizeControl
-                        value={brushSize}
-                        setValue={setBrushSize}
-                        min={2}
-                        max={200}
-                        dominantColor={dominantColor}
-                    />
-                    <LabeledSlider
-                        label="Hardness"
-                        value={Math.round(brushHardness * 100)}
-                        min={0}
-                        max={100}
-                        suffix="%"
-                        onChange={(v) => setBrushHardness(Math.max(0, Math.min(1, v / 100)))}
-                        dominantColor={dominantColor}
-                    />
-                    {!brushEdgeSnap && (
-                        <LabeledSlider
-                            label="Edge Feather"
-                            value={brushFeather}
-                            min={0}
-                            max={50}
-                            suffix="px"
-                            onChange={setBrushFeather}
-                            dominantColor={dominantColor}
-                        />
-                    )}
-
-                    {/* Snap-to-edges toggle → smartBrush (bilateral) vs plain brush */}
-                    <button
-                        type="button"
-                        onClick={() => setBrushEdgeSnap((v) => !v)}
-                        aria-pressed={brushEdgeSnap}
-                        title="Snap the stroke to underlying edges (bilateral filter)"
-                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium editor-interactive"
-                        style={{
-                            background: brushEdgeSnap ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                            border: `1px solid ${brushEdgeSnap ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                            color: brushEdgeSnap ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                        }}
-                    >
-                        <ScanLine className="h-3.5 w-3.5" />
-                        Snap to edges {brushEdgeSnap ? 'ON' : 'OFF'}
-                    </button>
-
-                    {/* Boolean modifier — how this selection combines with the chain */}
-                    <div>
-                        <label className="text-[10px] block mb-1" style={{ color: 'var(--text-muted)' }}>
-                            Combine (Shift = add, Alt = subtract)
-                        </label>
-                        <div className="grid grid-cols-4 gap-1">
-                            {[
-                                { id: 'new', label: 'New', icon: SquarePlus },
-                                { id: 'add', label: 'Add', icon: SquaresUnite },
-                                { id: 'subtract', label: 'Sub', icon: SquaresSubtract },
-                                { id: 'intersect', label: 'Int', icon: SquaresIntersect },
-                            ].map((m) => {
-                                const MIcon = m.icon
-                                const active = brushModifier === m.id
-                                return (
-                                    <button
-                                        key={m.id}
-                                        type="button"
-                                        onClick={() => setBrushModifier(m.id)}
-                                        title={m.label}
-                                        className="flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-[10px] font-medium editor-interactive"
-                                        style={{
-                                            background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                        }}
-                                    >
-                                        <MIcon className="h-3 w-3" />
-                                        {m.label}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
-
-                    <div className="seg-row seg-row--2 grid grid-cols-2 gap-1.5 pt-1">
-                        {!brushActive ? (
-                            <motion.button
-                                type="button"
-                                onClick={handleStartBrush}
-                                whileTap={{ scale: 0.97 }}
-                                className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(124,58,237,0.10)',
-                                    border: '1px solid rgba(124,58,237,0.30)',
-                                    color: '#A78BFA',
-                                }}
-                            >
-                                <Paintbrush className="h-3.5 w-3.5" />
-                                Start Painting
-                            </motion.button>
-                        ) : (
-                            <motion.button
-                                type="button"
-                                onClick={handleStopBrush}
-                                whileTap={{ scale: 0.97 }}
-                                className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(239,68,68,0.10)',
-                                    border: '1px solid rgba(239,68,68,0.30)',
-                                    color: '#FCA5A5',
-                                }}
-                            >
-                                <X className="h-3.5 w-3.5" />
-                                Stop
-                            </motion.button>
-                        )}
-                        <motion.button
-                            type="button"
-                            onClick={handleClearBrush}
-                            disabled={!brushHasContent && !brushActive}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive disabled:opacity-40"
-                            style={{
-                                background: 'var(--bg-elevated)',
-                                border: '1px solid var(--border-subtle)',
-                                color: 'var(--text-secondary)',
-                            }}
-                            title="Clear the painted stroke"
-                        >
-                            <RotateCcw className="h-3.5 w-3.5" />
-                            Clear
-                        </motion.button>
-                    </div>
-
-                    {/* Edge-snap (bilateral) filter settings — only relevant
-                        when "Snap to edges" is on; become the layer's params. */}
-                    {brushEdgeSnap && (
-                        <div className="space-y-1.5 pt-1">
-                            <LabeledSlider
-                                label="Filter Radius"
-                                value={filterRadius}
-                                min={1}
-                                max={8}
-                                step={1}
-                                onChange={setFilterRadius}
-                                format={(v) => `${v} px`}
-                            />
-                            <LabeledSlider
-                                label="Color Sigma (edge strictness)"
-                                value={sigmaColor}
-                                min={0.01}
-                                max={1}
-                                step={0.01}
-                                onChange={setSigmaColor}
-                                format={(v) => v.toFixed(2)}
-                            />
-                            <LabeledSlider
-                                label="Space Sigma (spatial spread)"
-                                value={sigmaSpace}
-                                min={0.5}
-                                max={8}
-                                step={0.1}
-                                onChange={setSigmaSpace}
-                                format={(v) => v.toFixed(1)}
-                            />
-                        </div>
-                    )}
-
-                    <motion.button
-                        type="button"
-                        onClick={handleAddBrushLayer}
-                        disabled={!brushHasContent || isShapeFilling || !!refineTarget}
-                        whileTap={{ scale: 0.97 }}
-                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold editor-interactive disabled:opacity-40"
-                        style={{
-                            background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(124,58,237,0.18) 100%)',
-                            border: '1px solid rgba(6,184,212,0.35)',
-                            color: 'var(--accent-primary)',
-                        }}
-                    >
-                        {isShapeFilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                        {isShapeFilling
-                            ? 'Filling shape...'
-                            : refineTarget
-                                ? 'Refining layer — strokes apply on release'
-                                : brushSink === 'erase'
-                                    ? 'Add cut to layers'
-                                    : 'Add selection to layers'}
-                    </motion.button>
-                </div>
-            </Section>
+            <BrushSection
+                brushActive={brushActive}
+                brushEdgeSnap={brushEdgeSnap}
+                brushFeather={brushFeather}
+                brushHardness={brushHardness}
+                brushHasContent={brushHasContent}
+                brushModifier={brushModifier}
+                brushSink={brushSink}
+                brushSize={brushSize}
+                dominantColor={dominantColor}
+                filterRadius={filterRadius}
+                handleAddBrushLayer={handleAddBrushLayer}
+                handleClearBrush={handleClearBrush}
+                handleStartBrush={handleStartBrush}
+                handleStopBrush={handleStopBrush}
+                isShapeFilling={isShapeFilling}
+                refineTarget={refineTarget}
+                setBrushEdgeSnap={setBrushEdgeSnap}
+                setBrushFeather={setBrushFeather}
+                setBrushHardness={setBrushHardness}
+                setBrushModifier={setBrushModifier}
+                setBrushSink={setBrushSink}
+                setBrushSize={setBrushSize}
+                setFilterRadius={setFilterRadius}
+                setSigmaColor={setSigmaColor}
+                setSigmaSpace={setSigmaSpace}
+                sigmaColor={sigmaColor}
+                sigmaSpace={sigmaSpace}
+            />
 
             {/* ────────── Lasso (freehand + polygonal + magnetic) ────────── */}
-            <Section title="Lasso Select" icon={Lasso}>
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Draw a selection. <strong>Freehand</strong> = drag;{' '}
-                        <strong>Polygonal</strong> = click points;{' '}
-                        <strong>Magnetic</strong> = click to start, glide along an
-                        edge and the path snaps to it. Double-click or{' '}
-                        <kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Enter</kbd>{' '}
-                        to close (<kbd className="px-1 rounded text-[9px]" style={{ background: 'var(--bg-elevated)' }}>Backspace</kbd> undoes a point).
-                    </p>
-
-                    {/* Mode: freehand / polygonal / magnetic */}
-                    <div className="seg-row seg-row--3 grid grid-cols-3 gap-1.5">
-                        {[
-                            { id: 'freehand', label: 'Freehand', icon: Lasso },
-                            { id: 'polygonal', label: 'Polygonal', icon: Pentagon },
-                            { id: 'magnetic', label: 'Magnetic', icon: Magnet },
-                        ].map((m) => {
-                            const MIcon = m.icon
-                            const active = lassoMode === m.id
-                            return (
-                                <button
-                                    key={m.id}
-                                    type="button"
-                                    onClick={() => setLassoMode(m.id)}
-                                    className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{
-                                        background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                        border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                        color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                    }}
-                                >
-                                    <MIcon className="h-3.5 w-3.5" />
-                                    {m.label}
-                                </button>
-                            )
-                        })}
-                    </div>
-
-                    {/* Magnetic options — Width / Contrast / Frequency (Photoshop parity) */}
-                    {lassoMode === 'magnetic' && (
-                        <div className="space-y-1.5 rounded-lg px-2 py-2" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
-                            <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                                The path snaps to the strongest nearby edge. Tune how
-                                far it looks (Width), how strong an edge must be
-                                (Contrast), and how often it drops anchors (Frequency).
-                            </p>
-                            <LabeledSlider
-                                label="Width (search)"
-                                value={magneticWidth}
-                                min={4}
-                                max={60}
-                                suffix="px"
-                                onChange={setMagneticWidth}
-                                dominantColor={dominantColor}
-                            />
-                            <LabeledSlider
-                                label="Contrast (edge threshold)"
-                                value={magneticContrast}
-                                min={1}
-                                max={60}
-                                suffix="%"
-                                onChange={setMagneticContrast}
-                                dominantColor={dominantColor}
-                            />
-                            <LabeledSlider
-                                label="Frequency (anchor spacing)"
-                                value={magneticFrequency}
-                                min={4}
-                                max={48}
-                                suffix="px"
-                                onChange={setMagneticFrequency}
-                                dominantColor={dominantColor}
-                            />
-                        </div>
-                    )}
-
-                    {/* Pen mode — smooth the captured anchors into a Bézier 'path'
-                        layer (Photoshop Pen-tool parity) instead of a straight lasso. */}
-                    <button
-                        type="button"
-                        onClick={() => setLassoSmooth((v) => !v)}
-                        title="Smooth the captured points into a Bézier pen path before committing"
-                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                        style={{
-                            background: lassoSmooth ? 'rgba(83,216,255,0.12)' : 'var(--bg-elevated)',
-                            border: `1px solid ${lassoSmooth ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                            color: lassoSmooth ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                        }}
-                    >
-                        <Spline className="h-3.5 w-3.5" />
-                        {lassoSmooth ? 'Pen: smooth curves ON' : 'Pen: smooth curves'}
-                    </button>
-
-                    {/* Output: select (fill) vs erase (cut) */}
-                    <div className="seg-row seg-row--2 grid grid-cols-2 gap-1.5">
-                        {[
-                            { id: 'select', label: 'Select', icon: SquareDashed, hint: 'visible selection layer' },
-                            { id: 'erase', label: 'Erase / Cut', icon: Scissors, hint: 'cut the region out' },
-                        ].map((s) => {
-                            const SIcon = s.icon
-                            const active = lassoSink === s.id
-                            return (
-                                <button
-                                    key={s.id}
-                                    type="button"
-                                    onClick={() => setLassoSink(s.id)}
-                                    title={s.hint}
-                                    className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{
-                                        background: active ? 'rgba(124,58,237,0.10)' : 'var(--bg-elevated)',
-                                        border: `1px solid ${active ? 'rgba(124,58,237,0.35)' : 'var(--border-subtle)'}`,
-                                        color: active ? '#A78BFA' : 'var(--text-secondary)',
-                                    }}
-                                >
-                                    <SIcon className="h-3.5 w-3.5" />
-                                    {s.label}
-                                </button>
-                            )
-                        })}
-                    </div>
-
-                    {/* Boolean modifier — how this selection combines with the chain */}
-                    <div>
-                        <label className="text-[10px] block mb-1" style={{ color: 'var(--text-muted)' }}>
-                            Combine (Shift = add, Alt = subtract)
-                        </label>
-                        <div className="grid grid-cols-4 gap-1">
-                            {[
-                                { id: 'new', label: 'New', icon: SquarePlus },
-                                { id: 'add', label: 'Add', icon: SquaresUnite },
-                                { id: 'subtract', label: 'Sub', icon: SquaresSubtract },
-                                { id: 'intersect', label: 'Int', icon: SquaresIntersect },
-                            ].map((m) => {
-                                const MIcon = m.icon
-                                const active = lassoModifier === m.id
-                                return (
-                                    <button
-                                        key={m.id}
-                                        type="button"
-                                        onClick={() => setLassoModifier(m.id)}
-                                        title={m.label}
-                                        className="flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-[10px] font-medium editor-interactive"
-                                        style={{
-                                            background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                        }}
-                                    >
-                                        <MIcon className="h-3 w-3" />
-                                        {m.label}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
-
-                    <LabeledSlider
-                        label="Feather"
-                        value={Math.round(lassoFeather * 100)}
-                        min={0}
-                        max={40}
-                        suffix="%"
-                        onChange={(v) => setLassoFeather(Math.max(0, Math.min(0.4, v / 100)))}
-                        dominantColor={dominantColor}
-                    />
-
-                    <div className="flex items-center gap-1.5">
-                        {!lassoActive ? (
-                            <motion.button
-                                type="button"
-                                onClick={handleStartLasso}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-semibold editor-interactive"
-                                style={{
-                                    background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(124,58,237,0.18) 100%)',
-                                    border: '1px solid rgba(6,184,212,0.35)',
-                                    color: 'var(--accent-primary)',
-                                }}
-                            >
-                                <Lasso className="h-3.5 w-3.5" />
-                                Start Lasso
-                            </motion.button>
-                        ) : (
-                            <>
-                                {(lassoMode === 'polygonal' || lassoMode === 'magnetic') && lassoVertexCount >= 3 && (
-                                    <motion.button
-                                        type="button"
-                                        onClick={() => finishLassoSelection(null)}
-                                        whileTap={{ scale: 0.97 }}
-                                        className="flex items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                        style={{ background: 'rgba(6,184,212,0.12)', border: '1px solid var(--accent-primary)', color: 'var(--accent-primary)' }}
-                                        title="Close the selection"
-                                    >
-                                        <Check className="h-3.5 w-3.5" /> Close
-                                    </motion.button>
-                                )}
-                                <motion.button
-                                    type="button"
-                                    onClick={handleStopLasso}
-                                    whileTap={{ scale: 0.97 }}
-                                    className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.30)', color: '#FCA5A5' }}
-                                >
-                                    <X className="h-3.5 w-3.5" />
-                                    Stop{lassoVertexCount > 0 ? ` (${lassoVertexCount})` : ''}
-                                </motion.button>
-                            </>
-                        )}
-                    </div>
-                </div>
-            </Section>
+            <LassoSection
+                dominantColor={dominantColor}
+                finishLassoSelection={finishLassoSelection}
+                handleStartLasso={handleStartLasso}
+                handleStopLasso={handleStopLasso}
+                lassoActive={lassoActive}
+                lassoFeather={lassoFeather}
+                lassoMode={lassoMode}
+                lassoModifier={lassoModifier}
+                lassoSink={lassoSink}
+                lassoSmooth={lassoSmooth}
+                lassoVertexCount={lassoVertexCount}
+                magneticContrast={magneticContrast}
+                magneticFrequency={magneticFrequency}
+                magneticWidth={magneticWidth}
+                setLassoFeather={setLassoFeather}
+                setLassoMode={setLassoMode}
+                setLassoModifier={setLassoModifier}
+                setLassoSink={setLassoSink}
+                setLassoSmooth={setLassoSmooth}
+                setMagneticContrast={setMagneticContrast}
+                setMagneticFrequency={setMagneticFrequency}
+                setMagneticWidth={setMagneticWidth}
+            />
 
             {/* ────────── Magic Wand (colour flood fill) ────────── */}
-            <Section title="Magic Wand" icon={WandSparkles}>
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Click a colour to select similar pixels. <strong>Shift</strong>+click adds to the
-                        selected layer, <strong>Alt</strong>+click subtracts. Tip: lower Tolerance for tighter picks.
-                    </p>
-                    <LabeledSlider
-                        label="Tolerance"
-                        suffix=""
-                        value={wandTolerance}
-                        min={0}
-                        max={255}
-                        onChange={(v) => setWandTolerance(Math.max(0, Math.min(255, Math.round(v))))}
-                        dominantColor={dominantColor}
-                    />
-                    <div className="seg-row seg-row--3 grid grid-cols-3 gap-1.5">
-                        {[{ id: 'point', label: 'Point', title: 'Sample the exact pixel' }, { id: '3x3', label: '3×3', title: 'Average a 3×3 area' }, { id: '5x5', label: '5×5', title: 'Average a 5×5 area' }].map((m) => {
-                            const MIcon = m.icon
-                            const active = wandSample === m.id
-                            return (
-                                <button
-                                    key={m.id}
-                                    type="button"
-                                    onClick={() => setWandSample(m.id)}
-                                    aria-pressed={active}
-                                    title={m.title || m.label}
-                                    className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{
-                                        background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                        border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                        color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                    }}
-                                >
-                                    {MIcon && <MIcon className="h-3.5 w-3.5" />}
-                                    {m.label}
-                                </button>
-                            )
-                        })}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                        <label className="mask-toggle" title="Only select pixels connected to the click">
-                            <input type="checkbox" checked={wandContiguous} onChange={(e) => setWandContiguous(e.target.checked)} />
-                            Contiguous
-                        </label>
-                        <label className="mask-toggle" title="Soften the selection edge by one pixel">
-                            <input type="checkbox" checked={wandAntiAlias} onChange={(e) => setWandAntiAlias(e.target.checked)} />
-                            Anti-alias
-                        </label>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                        {!wandActive ? (
-                        <motion.button
-                            type="button"
-                            onClick={handleStartWand}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-semibold editor-interactive"
-                            style={{
-                                background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(124,58,237,0.18) 100%)',
-                                border: '1px solid rgba(6,184,212,0.35)',
-                                color: 'var(--accent-primary)',
-                            }}
-                        >
-                            <WandSparkles className="h-3.5 w-3.5" />
-                            Start Magic Wand
-                        </motion.button>
-                        ) : (
-                        <motion.button
-                            type="button"
-                            onClick={() => setWandActive(false)}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                            style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.30)', color: '#FCA5A5' }}
-                        >
-                            <X className="h-3.5 w-3.5" />
-                            Stop
-                        </motion.button>
-                        )}
-                    </div>
-                </div>
-            </Section>
+            <WandSection
+                dominantColor={dominantColor}
+                handleStartWand={handleStartWand}
+                setWandActive={setWandActive}
+                setWandAntiAlias={setWandAntiAlias}
+                setWandContiguous={setWandContiguous}
+                setWandSample={setWandSample}
+                setWandTolerance={setWandTolerance}
+                wandActive={wandActive}
+                wandAntiAlias={wandAntiAlias}
+                wandContiguous={wandContiguous}
+                wandSample={wandSample}
+                wandTolerance={wandTolerance}
+            />
 
             {/* ────────── Marquee (rectangle / ellipse) ────────── */}
-            <Section title="Marquee" icon={Frame}>
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Drag a rectangle or ellipse. Hold <strong>Shift</strong> for a square/circle,
-                        <strong> Alt</strong> to draw from the centre.
-                    </p>
-                    <div className="seg-row seg-row--2 grid grid-cols-2 gap-1.5">
-                        {[{ id: 'rect', label: 'Rectangle', icon: RectangleHorizontal }, { id: 'ellipse', label: 'Ellipse', icon: CircleDashed }].map((m) => {
-                            const MIcon = m.icon
-                            const active = marqueeShape === m.id
-                            return (
-                                <button
-                                    key={m.id}
-                                    type="button"
-                                    onClick={() => setMarqueeShape(m.id)}
-                                    aria-pressed={active}
-                                    title={m.title || m.label}
-                                    className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                    style={{
-                                        background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                        border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                        color: active ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                    }}
-                                >
-                                    {MIcon && <MIcon className="h-3.5 w-3.5" />}
-                                    {m.label}
-                                </button>
-                            )
-                        })}
-                    </div>
-                    <div>
-                        <label className="text-[10px] block mb-1" style={{ color: 'var(--text-muted)' }}>Combine</label>
-                        <div className="grid grid-cols-4 gap-1">
-                            {[
-                                { id: 'new', label: 'New', icon: SquarePlus },
-                                { id: 'add', label: 'Add', icon: SquaresUnite },
-                                { id: 'subtract', label: 'Sub', icon: SquaresSubtract },
-                                { id: 'intersect', label: 'Int', icon: SquaresIntersect },
-                            ].map((m) => {
-                                const MIcon = m.icon
-                                const active = marqueeOp === m.id
-                                return (
-                                    <button
-                                        key={m.id}
-                                        type="button"
-                                        onClick={() => setMarqueeOp(m.id)}
-                                        aria-pressed={active}
-                                        title={m.label}
-                                        className="flex items-center justify-center gap-1 rounded-md px-1 py-1.5 text-[10px] font-medium editor-interactive"
-                                        style={{
-                                            background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                        }}
-                                    >
-                                        <MIcon className="h-3 w-3" />
-                                        {m.label}
-                                    </button>
-                                )
-                            })}
-                        </div>
-                    </div>
-                    <LabeledSlider
-                        label="Feather"
-                        value={Math.round(marqueeFeather * 100)}
-                        min={0}
-                        max={40}
-                        suffix="%"
-                        onChange={(v) => setMarqueeFeather(Math.max(0, Math.min(0.4, v / 100)))}
-                        dominantColor={dominantColor}
-                    />
-                    <div className="flex items-center gap-1.5">
-                        {!marqueeActive ? (
-                        <motion.button
-                            type="button"
-                            onClick={handleStartMarquee}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-semibold editor-interactive"
-                            style={{
-                                background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(124,58,237,0.18) 100%)',
-                                border: '1px solid rgba(6,184,212,0.35)',
-                                color: 'var(--accent-primary)',
-                            }}
-                        >
-                            <Frame className="h-3.5 w-3.5" />
-                            Start Marquee
-                        </motion.button>
-                        ) : (
-                        <motion.button
-                            type="button"
-                            onClick={() => setMarqueeActive(false)}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                            style={{ background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.30)', color: '#FCA5A5' }}
-                        >
-                            <X className="h-3.5 w-3.5" />
-                            Stop
-                        </motion.button>
-                        )}
-                    </div>
-                </div>
-            </Section>
+            <MarqueeSection
+                dominantColor={dominantColor}
+                handleStartMarquee={handleStartMarquee}
+                marqueeActive={marqueeActive}
+                marqueeFeather={marqueeFeather}
+                marqueeOp={marqueeOp}
+                marqueeShape={marqueeShape}
+                setMarqueeActive={setMarqueeActive}
+                setMarqueeFeather={setMarqueeFeather}
+                setMarqueeOp={setMarqueeOp}
+                setMarqueeShape={setMarqueeShape}
+            />
 
             {/* ────────── Depth Range (Depth Anything V2) ────────── */}
-            <Section title="Depth Range" icon={Mountain} badge="AI">
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Generate a per-pixel depth map, then add it as a
-                        non-destructive layer with a custom depth range.
-                    </p>
-
-                    <div className="flex items-center gap-1.5">
-                        <motion.button
-                            type="button"
-                            onClick={handleDepthRun}
-                            disabled={isDepthRunning}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex-1 whitespace-nowrap flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive disabled:opacity-40"
-                            style={{
-                                background: 'linear-gradient(135deg, rgba(6,184,212,0.20) 0%, rgba(20,184,166,0.18) 100%)',
-                                border: '1px solid rgba(6,184,212,0.35)',
-                                color: 'var(--accent-primary)',
-                            }}
-                        >
-                            {isDepthRunning ? (
-                                <>
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    Generating…
-                                </>
-                            ) : (
-                                <>
-                                    <Mountain className="h-3.5 w-3.5" />
-                                    Generate Depth Map
-                                </>
-                            )}
-                        </motion.button>
-                        <motion.button
-                            type="button"
-                            onClick={handleDepthReset}
-                            disabled={!lastDepthMap}
-                            whileTap={{ scale: 0.97 }}
-                            className="flex items-center justify-center gap-1 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive disabled:opacity-40"
-                            style={{
-                                background: 'var(--bg-elevated)',
-                                border: '1px solid var(--border-subtle)',
-                                color: 'var(--text-secondary)',
-                            }}
-                            title="Clear last result"
-                        >
-                            <RotateCcw className="h-3.5 w-3.5" />
-                        </motion.button>
-                    </div>
-
-                    {/* Depth preview + range controls + add-to-chain */}
-                    {lastDepthPreview && (
-                        <div
-                            className="rounded-md p-2 space-y-1.5"
-                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
-                        >
-                            <div className="flex items-center gap-2">
-                                <img
-                                    src={lastDepthPreview}
-                                    alt="Depth map preview"
-                                    className="rounded"
-                                    style={{ width: 64, height: 64, objectFit: 'contain', background: '#000' }}
-                                />
-                                <div className="flex-1 text-[10px] leading-tight" style={{ color: 'var(--text-muted)' }}>
-                                    <div className="font-semibold mb-0.5" style={{ color: 'var(--text-secondary)' }}>
-                                        Depth map ready
-                                    </div>
-                                    White = near, black = far. Use the sliders
-                                    below to select a range.
-                                </div>
-                            </div>
-
-                            <div className="space-y-1.5 pt-1">
-                                <LabeledSlider
-                                    label="Near floor"
-                                    value={depthMin}
-                                    onChange={setDepthMinBounded}
-                                    min={0}
-                                    max={1}
-                                    step={0.01}
-                                    format={(v) => v.toFixed(2)}
-                                />
-                                <LabeledSlider
-                                    label="Far ceiling"
-                                    value={depthMax}
-                                    onChange={setDepthMaxBounded}
-                                    min={0}
-                                    max={1}
-                                    step={0.01}
-                                    format={(v) => v.toFixed(2)}
-                                />
-                                <LabeledSlider
-                                    label="Softness"
-                                    value={depthSoftness}
-                                    onChange={setDepthSoftness}
-                                    min={0}
-                                    max={0.5}
-                                    step={0.01}
-                                    format={(v) => v.toFixed(2)}
-                                />
-                            </div>
-
-                            <motion.button
-                                type="button"
-                                onClick={handleAddDepthLayer}
-                                whileTap={{ scale: 0.97 }}
-                                className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(6,184,212,0.10)',
-                                    border: '1px solid rgba(6,184,212,0.30)',
-                                    color: 'var(--accent-primary)',
-                                }}
-                            >
-                                <Plus className="h-3.5 w-3.5" />
-                                Add to Mask Layers
-                            </motion.button>
-                        </div>
-                    )}
-                </div>
-            </Section>
+            <DepthSection
+                depthMax={depthMax}
+                depthMin={depthMin}
+                depthSoftness={depthSoftness}
+                handleAddDepthLayer={handleAddDepthLayer}
+                handleDepthReset={handleDepthReset}
+                handleDepthRun={handleDepthRun}
+                isDepthRunning={isDepthRunning}
+                lastDepthMap={lastDepthMap}
+                lastDepthPreview={lastDepthPreview}
+                setDepthMaxBounded={setDepthMaxBounded}
+                setDepthMinBounded={setDepthMinBounded}
+                setDepthSoftness={setDepthSoftness}
+            />
 
             <CategoryHeader label="Range Selection" />
 
             {/* ────────── Color Range ────────── */}
-            <Section title="Color Range" icon={Palette}>
-                <div className="flex items-center gap-2">
-                    <motion.button
-                        type="button"
-                        onClick={() => { if (!colorPickerActive) stopModesRef.current('picker'); setColorPickerActive(v => !v) }}
-                        whileTap={{ scale: 0.95 }}
-                        className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive flex-1"
-                        style={{
-                            background: colorPickerActive
-                                ? 'rgba(6,184,212,0.12)'
-                                : 'var(--bg-elevated)',
-                            border: `1px solid ${colorPickerActive ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                            color: colorPickerActive ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                        }}
-                    >
-                        <Pipette className="h-3.5 w-3.5" />
-                        {colorPickerActive ? 'Click image to pick…' : 'Pick Color'}
-                    </motion.button>
-                    {pickedColor && <ColorSwatch color={pickedColor} />}
-                </div>
-
-                {pickedColor && (
-                    <div className="space-y-2">
-                        <LabeledSlider
-                            label="Tolerance"
-                            value={colorTolerance}
-                            min={5}
-                            max={100}
-                            suffix=""
-                            onChange={setColorTolerance}
-                            dominantColor={dominantColor}
-                        />
-                        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(9.5rem, 1fr))' }}>
-                            <motion.button
-                                type="button"
-                                onClick={handleApplyColorRange}
-                                whileTap={{ scale: 0.97 }}
-                                className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'var(--bg-elevated)',
-                                    border: '1px solid var(--border-subtle)',
-                                    color: 'var(--text-secondary)',
-                                }}
-                            >
-                                <Stamp className="h-3.5 w-3.5" />
-                                Apply (bake)
-                            </motion.button>
-                            <motion.button
-                                type="button"
-                                onClick={handleAddColorLayer}
-                                whileTap={{ scale: 0.97 }}
-                                className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                                style={{
-                                    background: 'rgba(6,184,212,0.10)',
-                                    border: '1px solid rgba(6,184,212,0.3)',
-                                    color: 'var(--accent-primary)',
-                                }}
-                                title="Add as a live megashader layer"
-                            >
-                                <Plus className="h-3.5 w-3.5" />
-                                Add to Mask Layers
-                            </motion.button>
-                        </div>
-                    </div>
-                )}
-            </Section>
+            <ColorRangeSection
+                colorPickerActive={colorPickerActive}
+                colorTolerance={colorTolerance}
+                dominantColor={dominantColor}
+                handleAddColorLayer={handleAddColorLayer}
+                handleApplyColorRange={handleApplyColorRange}
+                pickedColor={pickedColor}
+                setColorPickerActive={setColorPickerActive}
+                setColorTolerance={setColorTolerance}
+                stopModesRef={stopModesRef}
+            />
 
             {/* ────────── Luminance Range ────────── */}
-            <Section title="Luminance Range" icon={Sun}>
-                <div className="space-y-2">
-                    <LuminanceHistogram
-                        histogram={histogram}
-                        min={lumaMin / 255}
-                        max={lumaMax / 255}
-                        softness={0.1}
-                    />
-                    <LabeledSlider
-                        label="Min Brightness"
-                        value={lumaMin}
-                        min={0}
-                        max={254}
-                        suffix=""
-                        onChange={(v) => { setLumaMin(Math.min(v, lumaMax - 1)) }}
-                        dominantColor={dominantColor}
-                    />
-                    <LabeledSlider
-                        label="Max Brightness"
-                        value={lumaMax}
-                        min={1}
-                        max={255}
-                        suffix=""
-                        onChange={(v) => { setLumaMax(Math.max(v, lumaMin + 1)) }}
-                        dominantColor={dominantColor}
-                    />
-                    <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(9.5rem, 1fr))' }}>
-                        <motion.button
-                            type="button"
-                            onClick={handleApplyLuminance}
-                            whileTap={{ scale: 0.97 }}
-                            className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                            style={{
-                                background: 'var(--bg-elevated)',
-                                border: '1px solid var(--border-subtle)',
-                                color: 'var(--text-secondary)',
-                            }}
-                        >
-                            <Stamp className="h-3.5 w-3.5" />
-                            Apply (bake)
-                        </motion.button>
-                        <motion.button
-                            type="button"
-                            onClick={handleAddLuminanceLayer}
-                            whileTap={{ scale: 0.97 }}
-                            className="seg-btn flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-medium editor-interactive"
-                            style={{
-                                background: 'rgba(6,184,212,0.10)',
-                                border: '1px solid rgba(6,184,212,0.3)',
-                                color: 'var(--accent-primary)',
-                            }}
-                            title="Add as a live megashader layer"
-                        >
-                            <Plus className="h-3.5 w-3.5" />
-                            Add to Mask Layers
-                        </motion.button>
-                    </div>
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Apply (bake) writes to the brush mask. Add to Mask Layers
-                        keeps it as a live, editable megashader layer.
-                    </p>
-                </div>
-            </Section>
+            <LuminanceSection
+                dominantColor={dominantColor}
+                handleAddLuminanceLayer={handleAddLuminanceLayer}
+                handleApplyLuminance={handleApplyLuminance}
+                histogram={histogram}
+                lumaMax={lumaMax}
+                lumaMin={lumaMin}
+                setLumaMax={setLumaMax}
+                setLumaMin={setLumaMin}
+            />
 
             {/* ────────── Linear Gradient ────────── */}
-            <Section title="Linear Gradient" icon={Blend}>
-                <div className="space-y-3">
-                    {/* Direction grid */}
-                    <div>
-                        <label className="text-[10px] block mb-1.5" style={{ color: 'var(--text-muted)' }}>Direction</label>
-                        <div className="grid grid-cols-4 gap-1">
-                            {DIRECTIONS.map(d => {
-                                const DirIcon = d.icon
-                                const active = gradDirection === d.id
-                                return (
-                                    <motion.button
-                                        key={d.id}
-                                        type="button"
-                                        onClick={() => setGradDirection(d.id)}
-                                        whileTap={{ scale: 0.9 }}
-                                        className="flex items-center justify-center rounded-md p-1.5 editor-interactive"
-                                        style={{
-                                            background: active ? 'rgba(6,184,212,0.12)' : 'var(--bg-elevated)',
-                                            border: `1px solid ${active ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            color: active ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                        }}
-                                        title={d.label}
-                                    >
-                                        <DirIcon className="h-3.5 w-3.5" />
-                                    </motion.button>
-                                )
-                            })}
-                        </div>
-                    </div>
-
-                    <LabeledSlider
-                        label="Position"
-                        value={gradPosition}
-                        min={10}
-                        max={90}
-                        suffix="%"
-                        onChange={setGradPosition}
-                        dominantColor={dominantColor}
-                    />
-                    <LabeledSlider
-                        label="Feather"
-                        value={gradFeather}
-                        min={5}
-                        max={80}
-                        suffix="%"
-                        onChange={setGradFeather}
-                        dominantColor={dominantColor}
-                    />
-                    <motion.button
-                        type="button"
-                        onClick={handleApplyGradient}
-                        whileTap={{ scale: 0.97 }}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
-                        style={{
-                            background: 'var(--bg-elevated)',
-                            border: '1px solid var(--border-subtle)',
-                            color: 'var(--text-secondary)',
-                        }}
-                    >
-                        <Blend className="h-3.5 w-3.5" />
-                        Apply Gradient Mask
-                    </motion.button>
-                    <motion.button
-                        type="button"
-                        onClick={handleAddGradientLayer}
-                        whileTap={{ scale: 0.97 }}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
-                        style={{
-                            background: 'rgba(124,58,237,0.08)',
-                            border: '1px solid rgba(124,58,237,0.25)',
-                            color: '#A78BFA',
-                        }}
-                        title="Adds a linear megashader layer — drag on canvas to set p1/p2"
-                    >
-                        <Plus className="h-3.5 w-3.5" />
-                        Add Linear to Mask Layers
-
-                    </motion.button>
-                </div>
-            </Section>
+            <LinearGradientSection
+                dominantColor={dominantColor}
+                gradDirection={gradDirection}
+                gradFeather={gradFeather}
+                gradPosition={gradPosition}
+                handleAddGradientLayer={handleAddGradientLayer}
+                handleApplyGradient={handleApplyGradient}
+                setGradDirection={setGradDirection}
+                setGradFeather={setGradFeather}
+                setGradPosition={setGradPosition}
+            />
 
             {/* ────────── Radial Gradient ────────── */}
-            <Section title="Radial Gradient" icon={Circle}>
-                <div className="space-y-3">
-                    <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Drag a bounding box on the canvas to define the ellipse.
-                        Rotate it afterwards with the green handle.
-                    </p>
-                    <motion.button
-                        type="button"
-                        onClick={handleAddRadialLayer}
-                        whileTap={{ scale: 0.97 }}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium editor-interactive"
-                        style={{
-                            background: 'rgba(124,58,237,0.08)',
-                            border: '1px solid rgba(124,58,237,0.25)',
-                            color: '#A78BFA',
-                        }}
-                        title="Adds a radial megashader layer — drag on canvas to set the bounding box"
-                    >
-                        <Plus className="h-3.5 w-3.5" />
-                        Add Radial to Mask Layers
-
-                    </motion.button>
-                </div>
-            </Section>
+            <RadialGradientSection handleAddRadialLayer={handleAddRadialLayer} />
 
             <CategoryHeader label="Destructive" />
 
             {/* ────────── Brush (manual) ────────── */}
-            <Section title="Quick Erase" icon={Eraser} defaultOpen={false}>
-                <div className="space-y-2">
-                    <p className="text-[10px]" style={{ color: '#FCA5A5' }}>
-                        ⚠ This paints directly onto the image and hides pixels
-                        (destructive). For a reversible result, use the
-                        <strong> Selection Brush</strong> with Erase / Cut instead.
-                        Turn this on to paint; turn it off to stop.
-                    </p>
-                    <button
-                        type="button"
-                        onClick={quickEraseActive ? handleStopQuickErase : handleStartQuickErase}
-                        aria-pressed={quickEraseActive}
-                        className="flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[11px] font-semibold editor-interactive"
-                        style={{
-                            background: quickEraseActive ? 'rgba(239,68,68,0.14)' : 'var(--bg-elevated)',
-                            border: `1px solid ${quickEraseActive ? 'rgba(239,68,68,0.45)' : 'var(--border-subtle)'}`,
-                            color: quickEraseActive ? '#FCA5A5' : 'var(--text-secondary)',
-                        }}
-                    >
-                        {quickEraseActive ? <X className="h-3.5 w-3.5" /> : <Eraser className="h-3.5 w-3.5" />}
-                        {quickEraseActive ? 'Stop erasing' : 'Enable Quick Erase'}
-                    </button>
-                    {quickEraseActive && (
-                        <>
-                            <ModeToggle mode={tool.mode} setMode={tool.setMode} altActive={tool.altActive} />
-                            <BrushSizeControl
-                                value={tool.brushSize}
-                                setValue={tool.setBrushSize}
-                                min={MIN_BRUSH}
-                                max={MAX_BRUSH}
-                                dominantColor={dominantColor}
-                            />
-                            <LabeledSlider label="Hardness" value={tool.hardness} min={1} max={100} suffix="%" onChange={tool.setHardness} dominantColor={dominantColor} />
-                            <LabeledSlider label="Flow" value={tool.flow} min={5} max={100} suffix="%" onChange={tool.setFlow} dominantColor={dominantColor} />
-                            <LabeledSlider label="Edge Feather" value={tool.feather} min={0} max={50} suffix="px" onChange={tool.setFeather} dominantColor={dominantColor} />
-                        </>
-                    )}
-                </div>
-            </Section>
+            <QuickEraseSection
+                dominantColor={dominantColor}
+                handleStartQuickErase={handleStartQuickErase}
+                handleStopQuickErase={handleStopQuickErase}
+                quickEraseActive={quickEraseActive}
+                tool={tool}
+            />
 
             {/* ────────── Actions ────────── */}
             <div style={{ paddingTop: '4px' }}>
