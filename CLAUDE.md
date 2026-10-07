@@ -441,6 +441,19 @@ The editor's biggest files were one component each, holding every control's stat
 
 **`bun run verify:panels` keeps it that way** (12 checks). It bundles the real panels and `CanvasEditor` with `bun build` (no Next, no Clerk), mounts them in headless Chromium against a real Fabric canvas and a generated test photo, answers every `/api` call 501 and records it, then: opens all 14 Mask sections, takes Pixel Stretch into its stretch phase and through its modes and Refine, clicks every Adjust tab, mounts Collage and the agent, and fails on any render error or uncaught page error. It also drives `CanvasEditor` through the three save cases in the section above. Mutation-tested: with the replay guard removed it fails with "no empty canvas is sent anywhere (5 writes)". When it was first run as a one-off it also compared every panel state against the pre-split code — element count, text and structure identical in all 16 states — which is the evidence the split changed nothing; that comparison needs a second checkout, so the gate asserts behaviour instead.
 
+**Two optimisations were measured and then declined**, with the numbers that decided it (React `Profiler` in the same headless harness, development build — production is typically 2–4× faster):
+
+| | commits | mean | p95 |
+|---|---|---|---|
+| dragging the photo, 60 frames, any panel | **0** | — | — |
+| mounting a panel (Stretch → Mask) | 2–3 | 3.6–21 ms | 3.7–41 ms |
+| opening all 14 Mask sections | 1 | 36–43 ms | — |
+| Mask control change, all 14 sections open | 29 | 10.2 ms | 21.5 ms |
+| Collage slider drag, 40 frames | 39 | 4.7 ms | 8.4 ms |
+
+- **Letting the React Compiler compile the big panels.** It skips all six (suppressed hook-dependency lint, `try/finally`, an update to a module variable). Making them compilable means changing those effects' dependencies — behaviour, not style — and would let the panels cache reads of live Fabric objects, the stale-UI risk the extracted sections already opt out of. The prize is a few milliseconds on a click; canvas interaction already costs React nothing.
+- **Replacing `framer-motion` in the editor.** It is already off the editor's critical path (the default tool is Resize, and every importer is a lazily loaded tool, the command palette or the radial menu). What it costs is 128 KB raw / 42 KB gzip (`motion` + `AnimatePresence`, minified), fetched once when a tool that uses it first opens. Removing it means rewriting enter/exit/hover animations in 33 files, each exit needing the mount latch the dashboard dialogs use — a broad visual-regression risk for a one-time 42 KB.
+
 What did NOT move, deliberately: the state and handlers themselves. `MaskControls`, `ImageKitAgent`, `PixelStretchControls`, `CanvasEditor` and `usePixelMaskTool` still own their logic, and the next boundary in each is a set of hooks (autosave, history and viewport in `CanvasEditor`; per-tool state in `MaskControls`). Those touch the autosave path that once wrote an empty canvas over a real project, so they are the kind of change that has to be driven in a signed-in browser, not only built.
 
 ## Resize path, and the selection toolbar
@@ -535,6 +548,8 @@ Verify with `bun run verify:context` (43 pure checks in a temp directory: the sl
 It has already caught a route table claiming 17 routes when there were 20, and a list claiming 289 GLSL invariants when there were 303. A count a suite does not print should not be written down at all — it cannot be checked, so it will rot.
 
 ## Verification scripts
+
+**A skip is not a pass.** The browser suites print `skip — …` and exit 0 when they find no browser, so a missing one looks green. They need Playwright's OWN Chromium build for the installed `playwright` version (`bunx playwright install chromium`; a newer build already in `~/Library/Caches/ms-playwright` does not count). On 2026-10-07 five suites were found skipping this way — `playwright` 1.60 wants Chromium 1223 and only 1243 was installed. After installing it: `verify:mask-render` 60 ok / 0 failed, `verify:fold` 46/46, `verify:collage-render` 49/49, `verify:client-ai` 6/6 (206 s on WebGPU, models cached in `.cache/playwright-client-ai`), `verify:panels` 12/12. `verify:blur-perf` still skips without Chrome on `:9222`, deliberately: frame times on a software rasteriser mean nothing.
 
 ```bash
 bun run verify              # 303 Megashader GLSL invariants (incl. batch + fold pass roles)
