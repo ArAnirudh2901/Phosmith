@@ -439,6 +439,8 @@ The editor's biggest files were one component each, holding every control's stat
 - No extracted component writes to a prop, calls a hook, or reads `ref.current` during render.
 - **The React Compiler sees the same code as before.** None of these parents is compiled (each breaks a rule of React or uses an unsupported construct), so their inline markup re-ran on every render. The extracted sections were clean enough to be compiled, which would let them cache reads of live Fabric objects — so every extracted section carries `"use no memo"` and re-renders exactly as it did inline. `AgentEditsPanel` read `liveSnapshotRef.current` in render; its parent now reads it and passes `hasLiveSnapshot`, as the original did.
 
+**`bun run verify:panels` keeps it that way** (12 checks). It bundles the real panels and `CanvasEditor` with `bun build` (no Next, no Clerk), mounts them in headless Chromium against a real Fabric canvas and a generated test photo, answers every `/api` call 501 and records it, then: opens all 14 Mask sections, takes Pixel Stretch into its stretch phase and through its modes and Refine, clicks every Adjust tab, mounts Collage and the agent, and fails on any render error or uncaught page error. It also drives `CanvasEditor` through the three save cases in the section above. Mutation-tested: with the replay guard removed it fails with "no empty canvas is sent anywhere (5 writes)". When it was first run as a one-off it also compared every panel state against the pre-split code — element count, text and structure identical in all 16 states — which is the evidence the split changed nothing; that comparison needs a second checkout, so the gate asserts behaviour instead.
+
 What did NOT move, deliberately: the state and handlers themselves. `MaskControls`, `ImageKitAgent`, `PixelStretchControls`, `CanvasEditor` and `usePixelMaskTool` still own their logic, and the next boundary in each is a set of hooks (autosave, history and viewport in `CanvasEditor`; per-tool state in `MaskControls`). Those touch the autosave path that once wrote an empty canvas over a real project, so they are the kind of change that has to be driven in a signed-in browser, not only built.
 
 ## Resize path, and the selection toolbar
@@ -546,6 +548,7 @@ bun run verify:stretch-core # Scanline smear + stretch NL parser (pure)
 bun run verify:docs         # CLAUDE.md against reality: routes, verify list, check counts
 bun run verify:context      # Memory mirror's three-way rules (pure)
 bun run verify:canvas-guard # Empty-canvas overwrite rule + its call sites (pure)
+bun run verify:panels       # Real panels + CanvasEditor in headless Chromium: sections, tabs, save guard
 bun run verify:user-error   # Error-message humaniser (pure)
 bun run verify:heavy-queue  # One-heavy-job-at-a-time scheduler (pure)
 bun run verify:diagnostics  # Client error reporting + redaction (pure)
