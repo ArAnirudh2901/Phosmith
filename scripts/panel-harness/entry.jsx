@@ -11,6 +11,10 @@ import CollageControls from '../../src/app/(main)/editor/[projectId]/_components
 import ImageKitAgent from '../../src/app/(main)/editor/[projectId]/_components/tools/imagekit-agent'
 import CanvasEditor from '../../src/app/(main)/editor/[projectId]/_components/canvas'
 import { saveLocalState } from '../../src/lib/canvas-sync'
+import { luminanceLayer } from '../../src/lib/megashader/mask-types'
+
+window.__luminanceLayer = luminanceLayer
+window.__FabricImage = FabricImage
 
 window.__errors = []
 class Boundary extends React.Component {
@@ -73,8 +77,16 @@ window.__runEditor = async ({ saved, local }) => {
   }
   const project = { _id: projectId, id: projectId, title: 'Harness', width: 1200, height: 800, revision: 5,
     updatedAt: Date.now() - 60_000, canvasState: savedState(saved), originalImageUrl: null, currentImageUrl: null }
-  createRoot(document.getElementById('editor')).render(
-    <CanvasContext.Provider value={contextValue(null, null, (c) => { window.__editorCanvas = c })}>
+  createRoot(document.getElementById('editor')).render(<EditorHost project={project} />)
+}
+
+// Holds the canvas in state, as the editor page does: CanvasEditor's own effects
+// key on `canvasEditor`, so a fixed null would leave half of them unexercised.
+function EditorHost({ project }) {
+  const [canvasEditor, setCanvasEditor] = React.useState(null)
+  React.useEffect(() => { window.__editorCanvas = canvasEditor }, [canvasEditor])
+  return (
+    <CanvasContext.Provider value={contextValue(canvasEditor, null, setCanvasEditor)}>
       <Boundary><CanvasEditor project={project} /></Boundary>
     </CanvasContext.Provider>
   )
