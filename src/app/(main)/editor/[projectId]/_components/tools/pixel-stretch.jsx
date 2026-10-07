@@ -1,145 +1,25 @@
 "use client"
 
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { AudioLines, Check, ChevronDown, FlipHorizontal2, Layers, Loader2, RotateCcw, Sparkles, StretchHorizontal, StretchVertical, Wand2 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { useCanvas } from '../../../../../../../context/context'
-import { isTaintError } from '@/lib/canvas-snapshot'
-import { FabricImage } from 'fabric'
 import { toast } from 'sonner'
-import { adaptiveTextColor } from '@/lib/color-extraction'
-import {
-  AudioLines, BrainCircuit, Check, ChevronDown, Columns3, FlipHorizontal2, Grid3X3, Lasso, Layers, Loader2,
-  Minus, Pencil, Route, RotateCcw, Rows3, ScanSearch, Sparkles, Spline, Square, StretchHorizontal,
-  StretchVertical, Wand2, Waypoints, X, Zap,
-} from 'lucide-react'
-import { ProRulerSlider } from '@/components/editor/ProRulerSlider'
-import {
-  DEFAULT_STRETCH,
-  clampStretchParams,
-  renderPixelStretch,
-  getStretchAnchors,
-  getStretchPath,
-  getPolygonBBox,
-  createStretchBuffer,
-  createDefaultWarpGrid,
-  getWarpRest,
-  getWarpGridHandles,
-  getWarpGridCurves,
-  addWarpSplit,
-  applyWarpPreset,
-  analyzeStretchPlan,
-  bestSeedInBand,
-  createDefaultFlowPath,
-  createFlowPathFromPoints,
-  getFlowPathCurve,
-  getFlowPathHandles,
-  insertFlowAnchor,
-  removeFlowAnchor,
-  smoothFlowPath,
-  applyFlowPreset,
-  matteToAlphaCanvas,
-  applySubjectKnockout,
-  buildSubjectCutout,
-  FLOW_PRESETS,
-  FLOW_MIN_ANCHORS,
-  WARP_PRESETS,
-  WARP_MAX_DIM,
-  PIXEL_STRETCH_PRESETS,
-  DEFAULT_SCANLINE,
-} from '@/lib/pixel-stretch'
-import {
-  MAX_BAKE_DIM,
-  getSourceElement,
-  isSourceReady,
-  snapshotSource,
-  encodeToPngBlob,
-  uploadStretchBlob,
-  placeStretchLayer,
-  bakeStretchBuffer,
-} from '@/lib/pixel-stretch-apply'
-import { runHeavy, isSuperseded } from '@/lib/heavy-job-queue'
-import { traceContour } from '@/lib/contour-trace'
+import { isTaintError } from '@/lib/canvas-snapshot'
 import { clientSubjectMask } from '@/lib/client-ai'
+import { adaptiveTextColor } from '@/lib/color-extraction'
+import { traceContour } from '@/lib/contour-trace'
+import { isSuperseded, runHeavy } from '@/lib/heavy-job-queue'
+import { DEFAULT_SCANLINE, DEFAULT_STRETCH, PIXEL_STRETCH_PRESETS, addWarpSplit, analyzeStretchPlan, applyFlowPreset, applyWarpPreset, bestSeedInBand, buildSubjectCutout, clampStretchParams, createDefaultFlowPath, createDefaultWarpGrid, createFlowPathFromPoints, createStretchBuffer, getFlowPathCurve, getFlowPathHandles, getPolygonBBox, getStretchAnchors, getStretchPath, getWarpGridCurves, getWarpGridHandles, getWarpRest, insertFlowAnchor, matteToAlphaCanvas, removeFlowAnchor, renderPixelStretch, smoothFlowPath } from '@/lib/pixel-stretch'
+import { MAX_BAKE_DIM, bakeStretchBuffer, encodeToPngBlob, getSourceElement, isSourceReady, placeStretchLayer, snapshotSource, uploadStretchBlob } from '@/lib/pixel-stretch-apply'
 import { toUserMessage } from '@/lib/user-error'
-
-// ─── Geometry helpers (shared conventions with the Crop tool) ─────────────────
-
-const canvasToScreen = (canvas, cx, cy) => {
-  const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0]
-  return { x: cx * vpt[0] + vpt[4], y: cy * vpt[3] + vpt[5] }
-}
-
-const getImageCanvasBounds = (image) => {
-  if (!image) return null
-  const scaleX = Math.abs(image.scaleX || 1)
-  const scaleY = Math.abs(image.scaleY || 1)
-  const w = (image.width || 0) * scaleX
-  const h = (image.height || 0) * scaleY
-  const left = image.originX === 'center' ? (image.left || 0) - w / 2 : (image.left || 0)
-  const top = image.originY === 'center' ? (image.top || 0) - h / 2 : (image.top || 0)
-  return { left, top, width: w, height: h }
-}
-
-const isImageObject = (obj) => obj?.type?.toLowerCase() === 'image'
-
-// ─── Lasso helpers ────────────────────────────────────────────────────────────
-
-/** Twice the signed area of a normalized polygon (sign ignored by callers). */
-const polygonArea = (pts) => {
-  let a = 0
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    a += (pts[j].x - pts[i].x) * (pts[j].y + pts[i].y)
-  }
-  return Math.abs(a) / 2
-}
-
-/**
- * Drop points closer than `minDist` (normalized) to the previously kept one, so
- * a high-frequency pointer trail becomes a compact polygon the clip can sweep
- * cheaply. The first and last points are always kept.
- */
-const simplifyPolygon = (pts, minDist = 0.01) => {
-  if (pts.length <= 3) return pts.slice()
-  const out = [pts[0]]
-  const minSq = minDist * minDist
-  for (let i = 1; i < pts.length - 1; i++) {
-    const last = out[out.length - 1]
-    const dx = pts[i].x - last.x
-    const dy = pts[i].y - last.y
-    if (dx * dx + dy * dy >= minSq) out.push(pts[i])
-  }
-  out.push(pts[pts.length - 1])
-  return out
-}
-
-const getActiveImage = (canvas) => {
-  if (!canvas) return null
-  const active = canvas.getActiveObject?.()
-  if (isImageObject(active) && active.visible !== false) return active
-  const images = (canvas.getObjects?.() || []).filter((o) => isImageObject(o) && o.visible !== false)
-  return images.at(-1) || null
-}
-
-// Subject detection never needs more than this on its long edge.
-const SUBJECT_DETECT_MAX_DIM = 1024
-
-const MAX_PREVIEW_DIM = 1500
-const HANDLE = 14
-const MIN_BAND = 0.02
-const SETTLE_MS = 150
-const DIM_BG = 'rgba(4, 6, 10, 0.55)'
-const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)'
-
-const HANDLE_DEFS = [
-  { id: 'tl', cx: 0, cy: 0, cur: 'nwse-resize' },
-  { id: 'tr', cx: 1, cy: 0, cur: 'nesw-resize' },
-  { id: 'bl', cx: 0, cy: 1, cur: 'nesw-resize' },
-  { id: 'br', cx: 1, cy: 1, cur: 'nwse-resize' },
-  { id: 't', cx: 0.5, cy: 0, cur: 'ns-resize' },
-  { id: 'b', cx: 0.5, cy: 1, cur: 'ns-resize' },
-  { id: 'l', cx: 0, cy: 0.5, cur: 'ew-resize' },
-  { id: 'r', cx: 1, cy: 0.5, cur: 'ew-resize' },
-]
+import { useCanvas } from '../../../../../../../context/context'
+import { canvasToScreen, getActiveImage, getImageCanvasBounds, isImageObject, polygonArea, simplifyPolygon } from './stretch/canvas-geometry'
+import { DIM_BG, EASE, HANDLE, HANDLE_DEFS, MAX_PREVIEW_DIM, MIN_BAND, SETTLE_MS, SUBJECT_DETECT_MAX_DIM } from './stretch/constants'
+import SelectionCard from './stretch/selection-card'
+import PlacementCard from './stretch/placement-card'
+import ModeCard from './stretch/mode-card'
+import RibbonShapeSliders from './stretch/ribbon-shape-sliders'
+import RefineSliders from './stretch/refine-sliders'
 
 let uidCounter = 0
 
@@ -1996,275 +1876,60 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       {overlay}
 
       {/* Region selection — pick a tool, draw, confirm */}
-      <div className="panel-card" style={{ ...cardStyle, borderColor: `${accent}30` }}>
-        <label className="panel-label">Selection Tool</label>
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          {[
-            { id: 'lasso', label: 'Lasso', Icon: Lasso },
-            { id: 'rect', label: 'Rectangle', Icon: Square },
-          ].map(({ id, label, Icon }) => {
-            const on = selectionMode === id
-            return (
-              <button
-                key={id}
-                type="button"
-                disabled={phase === 'stretch'}
-                onClick={() => changeMode(id)}
-                className={`flex h-9 items-center justify-center gap-2 rounded-lg text-xs font-medium editor-interactive disabled:opacity-40 ${tapClass}`}
-                style={{ background: on ? accent : 'var(--bg-elevated)', color: on ? onAccent : 'var(--text-secondary)', border: on ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-              >
-                <Icon className="h-4 w-4" />
-                {label}
-              </button>
-            )
-          })}
-        </div>
-
-        {phase === 'select' ? (
-          <>
-            <p className="mt-2.5 text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              {selectionMode === 'lasso' ? (
-                <><span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Draw a freeform shape</span> around the area you want to smear, then confirm to stretch it.</>
-              ) : (
-                <><span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Drag a rectangle</span> over the area you want to smear, then confirm to stretch it.</>
-              )}
-            </p>
-            <div className="mt-2.5 flex gap-2">
-              {selectionMode === 'lasso' && (
-                <button
-                  type="button"
-                  onClick={() => { lassoPtsRef.current = []; setRegionReady(false); scheduleFrame() }}
-                  className={`flex h-10 flex-1 items-center justify-center gap-2 rounded-xl text-xs font-semibold editor-interactive ${tapClass}`}
-                  style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  Clear
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={confirmRegion}
-                disabled={!regionReady}
-                className={`flex h-10 flex-[2] items-center justify-center whitespace-nowrap gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-40 ${tapClass}`}
-                style={{ background: accent, color: onAccent, border: 'none', boxShadow: `0 0 28px ${accent}45`, transition: `all 0.25s ${EASE}` }}
-              >
-                <Check className="h-3.5 w-3.5" />
-                Confirm Region
-              </button>
-            </div>
-
-            {/* The scanline smear reads the whole frame, so it must not be locked
-                behind a selection the user does not need to make. */}
-            <button
-              type="button"
-              onClick={() => { setPhase('stretch'); setStretchMode('scan') }}
-              className={`mt-2 flex h-9 w-full items-center justify-center gap-2 rounded-xl text-[11px] font-medium editor-interactive ${tapClass}`}
-              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-            >
-              <AudioLines className="h-3.5 w-3.5" />
-              Skip — smear the whole photo (Scanline)
-            </button>
-
-            {/* ── Use the subject's shape as the SOURCE region (on-device SAM) ── */}
-            <div style={{
-              marginTop: 12, padding: '10px 12px', borderRadius: 12,
-              background: 'linear-gradient(135deg, rgba(16,185,129,0.12), rgba(6,182,212,0.12))',
-              border: '1px solid rgba(16,185,129,0.25)',
-            }}>
-              <div className="flex items-center gap-2 mb-2">
-                <ScanSearch className="h-3.5 w-3.5" style={{ color: '#34d399' }} />
-                <span className="text-[11px] font-semibold" style={{ color: '#34d399' }}>Stretch the subject’s shape</span>
-              </div>
-              <p className="text-[10.5px] leading-relaxed mb-2.5" style={{ color: 'var(--text-muted)' }}>
-                Detects the main subject on-device (no API calls) and uses its outline as the region to smear. To put streaks <em>behind</em> a subject instead, set that in <strong style={{ color: 'var(--text-secondary)' }}>Placement</strong> after confirming.
-              </p>
-              <button
-                type="button"
-                onClick={autoDetectSubject}
-                disabled={samLoading || applying}
-                className={`flex h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-50 ${tapClass}`}
-                style={{
-                  background: samLoading ? 'rgba(16,185,129,0.2)' : 'linear-gradient(135deg, #10b981, #06b6d4)',
-                  color: '#fff', border: 'none',
-                  boxShadow: samLoading ? 'none' : '0 0 24px rgba(16,185,129,0.35), 0 2px 8px rgba(0,0,0,0.3)',
-                  transition: `all 0.3s ${EASE}`,
-                }}
-              >
-                {samLoading ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Detecting…
-                  </>
-                ) : (
-                  <>
-                    <ScanSearch className="h-3.5 w-3.5" />
-                    Detect Subject
-                  </>
-                )}
-              </button>
-            </div>
-
-            {/* ── AI Auto Stretch ─────────────────────────────────────────── */}
-            <div style={{
-              marginTop: 12, padding: '10px 12px', borderRadius: 12,
-              background: 'linear-gradient(135deg, rgba(139,92,246,0.12), rgba(59,130,246,0.12))',
-              border: '1px solid rgba(139,92,246,0.25)',
-            }}>
-              <div className="flex items-center gap-2 mb-2">
-                <BrainCircuit className="h-3.5 w-3.5" style={{ color: '#a78bfa' }} />
-                <span className="text-[11px] font-semibold" style={{ color: '#a78bfa' }}>AI Auto Stretch</span>
-              </div>
-              <p className="text-[10.5px] leading-relaxed mb-2.5" style={{ color: 'var(--text-muted)' }}>
-                Let AI analyze the image and automatically pick the best region, direction, and stretch parameters like a pro editor.
-              </p>
-              <button
-                type="button"
-                onClick={autoStretch}
-                disabled={aiLoading || applying}
-                className={`flex h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-semibold editor-interactive disabled:opacity-50 ${tapClass}`}
-                style={{
-                  background: aiLoading ? 'rgba(139,92,246,0.2)' : 'linear-gradient(135deg, #7c3aed, #3b82f6)',
-                  color: '#fff', border: 'none',
-                  boxShadow: aiLoading ? 'none' : '0 0 24px rgba(124,58,237,0.35), 0 2px 8px rgba(0,0,0,0.3)',
-                  transition: `all 0.3s ${EASE}`,
-                }}
-              >
-                {aiLoading ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Analyzing…
-                  </>
-                ) : (
-                  <>
-                    <Zap className="h-3.5 w-3.5" />
-                    Auto Stretch with AI
-                  </>
-                )}
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="mt-2.5 flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: accentText }}>
-              <Check className="h-3.5 w-3.5" /> Region confirmed
-            </span>
-            <button
-              type="button"
-              onClick={reselect}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium editor-interactive ${tapClass}`}
-              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-            >
-              <Pencil className="h-3 w-3" /> Edit region
-            </button>
-          </div>
-        )}
-      </div>
+      <SelectionCard
+          accent={accent}
+          accentText={accentText}
+          aiLoading={aiLoading}
+          applying={applying}
+          autoDetectSubject={autoDetectSubject}
+          autoStretch={autoStretch}
+          cardStyle={cardStyle}
+          changeMode={changeMode}
+          confirmRegion={confirmRegion}
+          lassoPtsRef={lassoPtsRef}
+          onAccent={onAccent}
+          phase={phase}
+          regionReady={regionReady}
+          reselect={reselect}
+          samLoading={samLoading}
+          scheduleFrame={scheduleFrame}
+          selectionMode={selectionMode}
+          setPhase={setPhase}
+          setRegionReady={setRegionReady}
+          setStretchMode={setStretchMode}
+          tapClass={tapClass}
+      />
 
       {phase === 'stretch' && (<>
 
       {/* ── Placement: the stretch is its OWN layer; choose how it sits vs. the subject ── */}
-      <div className="panel-card" style={{ ...cardStyle, borderColor: `${accent}30` }}>
-        <div className="flex items-center justify-between">
-          <label className="panel-label inline-flex items-center gap-1.5"><Layers className="h-3 w-3" /> Placement</label>
-          {isEditingLayer && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-semibold" style={{ color: accentText }}>
-              <Check className="h-3 w-3" /> Editing layer
-            </span>
-          )}
-        </div>
-        <p className="mt-1.5 text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-          The stretch is its own layer — crop, colour-grade or move it like any image, and it stays even if you <strong style={{ color: 'var(--text-secondary)' }}>delete the photo</strong>. Pick how it sits relative to the subject:
-        </p>
-        <div className="mt-2 grid grid-cols-3 gap-2">
-          {[
-            { id: 'above', label: 'Above', v: 0, hint: 'Streaks on top of the subject' },
-            { id: 'partial', label: 'Partial', v: 0.5, hint: 'Streaks partly over the subject' },
-            { id: 'below', label: 'Behind', v: 1, hint: 'Subject in front of the streaks' },
-          ].map(({ id, label, v, hint }) => {
-            const cur = coverage <= 0.05 ? 'above' : coverage >= 0.95 ? 'below' : 'partial'
-            const on = cur === id
-            return (
-              <button
-                key={id} type="button" title={hint} onClick={() => setCoverageMode(v)}
-                className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
-                style={{ background: on ? accent : 'var(--bg-elevated)', color: on ? onAccent : 'var(--text-secondary)', border: on ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-              >
-                {label}
-              </button>
-            )
-          })}
-        </div>
-        {coverage > 0 && (
-          <div className="mt-3 space-y-3">
-            {/* What stays in front — the selection by default, or a detected /
-                traced subject when the user asks for one */}
-            <div>
-              <span className="panel-label">What stays in front?</span>
-              <button
-                type="button"
-                onClick={() => {
-                  subjectMaskKindRef.current = 'selection'
-                  setSubjectMaskKind('selection')
-                  matteIsManualRef.current = false
-                  subjectRawMatteRef.current = null
-                  subjectCutoutRef.current = null
-                  ensureMatteRef.current?.()
-                  scheduleFrameRef.current?.()
-                }}
-                className={`mt-1.5 flex h-9 w-full items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
-                style={{ background: subjectMaskKind === 'selection' ? accent : 'var(--bg-elevated)', color: subjectMaskKind === 'selection' ? onAccent : 'var(--text-secondary)', border: subjectMaskKind === 'selection' ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-              >
-                <Square className="h-3.5 w-3.5" />
-                My selection
-              </button>
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={forceAutoDetect}
-                  disabled={matteStatus === 'loading'}
-                  className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive disabled:opacity-50 ${tapClass}`}
-                  style={{ background: subjectMaskKind === 'auto' ? accent : 'var(--bg-elevated)', color: subjectMaskKind === 'auto' ? onAccent : 'var(--text-secondary)', border: subjectMaskKind === 'auto' ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-                >
-                  {matteStatus === 'loading' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
-                  Auto-detect
-                </button>
-                <button
-                  type="button"
-                  onClick={() => (subjectPicking ? cancelSubjectPick() : beginSubjectPick())}
-                  className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
-                  style={{ background: subjectPicking ? '#f59e0b' : subjectMaskKind === 'manual' ? accent : 'var(--bg-elevated)', color: subjectPicking || subjectMaskKind === 'manual' ? '#0b0e14' : 'var(--text-secondary)', border: subjectPicking || subjectMaskKind === 'manual' ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-                >
-                  {subjectPicking ? <X className="h-3.5 w-3.5" /> : <Lasso className="h-3.5 w-3.5" />}
-                  {subjectPicking ? 'Cancel' : subjectMaskKind === 'manual' ? 'Re-draw subject' : 'Draw subject'}
-                </button>
-              </div>
-              <div className="mt-2 text-[10px] leading-relaxed">
-                {subjectPicking && <span style={{ color: '#f59e0b' }}>✏️ Trace around the subject on the photo, then release to set it.</span>}
-                {!subjectPicking && matteStatus === 'loading' && <span className="inline-flex items-center gap-1" style={{ color: 'var(--text-muted)' }}><Loader2 className="h-3 w-3 animate-spin" /> Detecting subject on-device…</span>}
-                {!subjectPicking && subjectMaskKind === 'selection' && <span style={{ color: '#34d399' }}>✓ Streaks sit behind the area you selected — no AI, no extra memory.</span>}
-                {!subjectPicking && subjectMaskKind === 'auto' && <span style={{ color: '#34d399' }}>✓ Subject auto-detected — streaks sit behind it.</span>}
-                {!subjectPicking && subjectMaskKind === 'manual' && <span style={{ color: '#34d399' }}>✓ Using your traced region as the subject.</span>}
-                {!subjectPicking && matteStatus === 'none' && subjectMaskKind === 'none' && <span style={{ color: '#f59e0b' }}>No subject auto-detected — tap “Draw subject” to mark it by hand.</span>}
-              </div>
-            </div>
-
-            <ProRulerSlider
-              variant="instrument" label="Subject Coverage" suffix="%"
-              value={Math.round(coverage * 100)} min={0} max={100} step={1}
-              onPreview={(v) => { coverageRef.current = v / 100; scheduleFrame() }}
-              onCommit={(v) => setCoverageMode(v / 100)}
-              visual={sliderVisual}
-            />
-            <ProRulerSlider
-              variant="instrument" label="Edge Feather" suffix=""
-              value={Math.round((featherRef.current || 0.006) * 1000)} min={0} max={30} step={1}
-              onPreview={(v) => { featherRef.current = v / 1000; subjectCutoutRef.current = null; scheduleFrame() }}
-              onCommit={(v) => { featherRef.current = v / 1000; subjectCutoutRef.current = null; scheduleFrame() }}
-              visual={sliderVisual}
-            />
-          </div>
-        )}
-      </div>
+      <PlacementCard
+          accent={accent}
+          accentText={accentText}
+          beginSubjectPick={beginSubjectPick}
+          cancelSubjectPick={cancelSubjectPick}
+          cardStyle={cardStyle}
+          coverage={coverage}
+          coverageRef={coverageRef}
+          ensureMatteRef={ensureMatteRef}
+          featherRef={featherRef}
+          forceAutoDetect={forceAutoDetect}
+          isEditingLayer={isEditingLayer}
+          matteIsManualRef={matteIsManualRef}
+          matteStatus={matteStatus}
+          onAccent={onAccent}
+          scheduleFrame={scheduleFrame}
+          scheduleFrameRef={scheduleFrameRef}
+          setCoverageMode={setCoverageMode}
+          setSubjectMaskKind={setSubjectMaskKind}
+          sliderVisual={sliderVisual}
+          subjectCutoutRef={subjectCutoutRef}
+          subjectMaskKind={subjectMaskKind}
+          subjectMaskKindRef={subjectMaskKindRef}
+          subjectPicking={subjectPicking}
+          subjectRawMatteRef={subjectRawMatteRef}
+          tapClass={tapClass}
+      />
 
       {/* Direction / axis — Simple mode only; Flow/Mesh own their own shape */}
       {!warpMode && !flowMode && (
@@ -2303,262 +1968,34 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       )}
 
       {/* ── Mode (Simple sliders · Flow Path spline · Warp mesh) ─────────── */}
-      <div className="panel-card" style={cardStyle}>
-        <label className="panel-label">Mode</label>
-        <div className="mt-2 grid grid-cols-4 gap-2">
-          {[
-            { id: 'mesh', label: 'Warp', Icon: Grid3X3 },
-            { id: 'flow', label: 'Flow Path', Icon: Waypoints },
-            { id: 'simple', label: 'Simple', Icon: Wand2 },
-            { id: 'scan', label: 'Scanline', Icon: AudioLines },
-          ].map(({ id, label, Icon }) => {
-            const curMode = scanMode ? 'scan' : warpMode ? 'mesh' : flowMode ? 'flow' : 'simple'
-            const on = curMode === id
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setStretchMode(id)}
-                className={`flex h-12 flex-col items-center justify-center gap-1 rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
-                style={{ background: on ? accent : 'var(--bg-elevated)', color: on ? onAccent : 'var(--text-secondary)', border: on ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-              >
-                <Icon className="h-4 w-4" />
-                {label}
-              </button>
-            )
-          })}
-        </div>
-        {scanMode && (
-          <div className="mt-3 space-y-3">
-            <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              No selection: every row (or column) keeps the pixels that pass the threshold and drags the last one across the rest. Raise <strong>Threshold</strong> until only the shapes you want to smear survive.
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { id: 'horizontal', label: 'Rows', Icon: Rows3 },
-                { id: 'vertical', label: 'Columns', Icon: Columns3 },
-              ].map(({ id, label, Icon }) => {
-                const on = (params.scan?.axis || 'horizontal') === id
-                return (
-                  <button
-                    key={id} type="button"
-                    onClick={() => patchScan({ axis: id })}
-                    className={`flex h-10 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
-                    style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
-                  >
-                    <Icon className="h-3.5 w-3.5" />{label}
-                  </button>
-                )
-              })}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { id: 'dark', label: 'Smear over dark' },
-                { id: 'light', label: 'Smear over light' },
-              ].map(({ id, label }) => {
-                const on = (params.scan?.mode || 'dark') === id
-                return (
-                  <button
-                    key={id} type="button"
-                    onClick={() => patchScan({ mode: id })}
-                    className={`flex h-9 items-center justify-center rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
-                    style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
-                  >
-                    {label}
-                  </button>
-                )
-              })}
-            </div>
-            <button
-              type="button"
-              onClick={() => patchScan({ direction: (params.scan?.direction ?? 1) > 0 ? -1 : 1 })}
-              className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
-              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
-            >
-              <FlipHorizontal2 className="h-3.5 w-3.5" />
-              {(params.scan?.direction ?? 1) > 0
-                ? ((params.scan?.axis || 'horizontal') === 'vertical' ? 'Smearing downward' : 'Smearing right')
-                : ((params.scan?.axis || 'horizontal') === 'vertical' ? 'Smearing upward' : 'Smearing left')}
-            </button>
-            <ProRulerSlider
-              variant="instrument" label="Threshold" suffix="%"
-              value={Math.round((params.scan?.threshold ?? DEFAULT_SCANLINE.threshold) * 100)} min={0} max={100} step={1}
-              onPreview={(v) => patchScan({ threshold: v / 100 }, true)}
-              onCommit={(v) => patchScan({ threshold: v / 100 })}
-              visual={sliderVisual}
-            />
-            <ProRulerSlider
-              variant="instrument" label="Smear length" suffix="%"
-              value={Math.round((params.scan?.length ?? DEFAULT_SCANLINE.length) * 100)} min={1} max={100} step={1}
-              onPreview={(v) => patchScan({ length: v / 100 }, true)}
-              onCommit={(v) => patchScan({ length: v / 100 })}
-              visual={sliderVisual}
-            />
-            <ProRulerSlider
-              variant="instrument" label="Fade to black" suffix="%"
-              value={Math.round((params.scan?.fade ?? 0) * 100)} min={0} max={100} step={1}
-              onPreview={(v) => patchScan({ fade: v / 100 }, true)}
-              onCommit={(v) => patchScan({ fade: v / 100 })}
-              visual={sliderVisual}
-            />
-            <ProRulerSlider
-              variant="instrument" label="Strength" suffix="%"
-              value={Math.round((params.scan?.opacity ?? 1) * 100)} min={0} max={100} step={1}
-              onPreview={(v) => patchScan({ opacity: v / 100 }, true)}
-              onCommit={(v) => patchScan({ opacity: v / 100 })}
-              visual={sliderVisual}
-            />
-          </div>
-        )}
-        {warpMode && params.warpGrid && (
-          <div className="mt-3 space-y-3">
-            <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              Drag a <strong style={{ color: 'rgba(90, 170, 255, 1)' }}>■ anchor</strong> to move the sheet, a <strong style={{ color: 'rgba(120, 190, 255, 1)' }}>● handle</strong> to bend the curve through it (the tangent line shows the direction), or an interior dot to push the patch. Split to sculpt more curves — exactly like the Photoshop Warp transform.
-            </p>
-
-            {/* Warp shape presets */}
-            <div>
-              <span className="panel-label inline-flex items-center gap-1.5"><Spline className="h-3 w-3" /> Warp Shape</span>
-              <div className="mt-1.5 grid grid-cols-4 gap-1.5">
-                {WARP_PRESETS.map((wp) => {
-                  const on = warpPresetId === wp.id
-                  return (
-                    <button
-                      key={wp.id} type="button" title={wp.hint}
-                      onClick={() => applyWarp(wp.id, wp.id === 'flat' ? 1 : warpStrength)}
-                      className={`flex h-9 items-center justify-center rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
-                      style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
-                    >
-                      {wp.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Preset strength — re-applies the active shape live */}
-            {warpPresetId && warpPresetId !== 'flat' && (
-              <ProRulerSlider
-                variant="instrument" label="Warp Strength" suffix="%"
-                value={Math.round(warpStrength * 100)} min={0} max={150} step={5}
-                onPreview={(v) => { const r = applyWarpPreset(paramsRef.current, warpPresetId, v / 100); livePatch({ warpGrid: r.grid, warpRest: r.rest }) }}
-                onCommit={(v) => applyWarp(warpPresetId, v / 100)}
-                visual={sliderVisual}
-              />
-            )}
-
-            {/* Grid density / split-warp */}
-            <div>
-              <div className="flex items-center justify-between">
-                <span className="panel-label">Mesh Density</span>
-                <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
-                  {(params.warpGrid.length - 1) / 3}×{(params.warpGrid[0].length - 1) / 3} patches
-                </span>
-              </div>
-              <div className="mt-1.5 grid grid-cols-2 gap-2">
-                <button
-                  type="button" onClick={() => splitWarp('row')} disabled={params.warpGrid.length >= WARP_MAX_DIM}
-                  title="Split every patch horizontally (adds control points)"
-                  className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive disabled:opacity-40 ${tapClass}`}
-                  style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-                >
-                  <Rows3 className="h-3.5 w-3.5" /> Split Rows
-                </button>
-                <button
-                  type="button" onClick={() => splitWarp('col')} disabled={params.warpGrid[0].length >= WARP_MAX_DIM}
-                  title="Split every patch vertically (adds control points)"
-                  className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive disabled:opacity-40 ${tapClass}`}
-                  style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-                >
-                  <Columns3 className="h-3.5 w-3.5" /> Split Cols
-                </button>
-              </div>
-            </div>
-
-            <button
-              type="button" onClick={resetWarpGrid}
-              className={`flex w-full items-center justify-center gap-2 rounded-lg py-2 text-[11px] font-medium editor-interactive ${tapClass}`}
-              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-            >
-              <RotateCcw className="h-3 w-3" />
-              Reset Grid
-            </button>
-          </div>
-        )}
-
-        {flowMode && params.flowPath && (
-          <div className="mt-3 space-y-3">
-            <p className="text-[10.5px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              Drag the <strong style={{ color: 'rgba(40, 130, 255, 1)' }}>■ anchors</strong> to route the smear and the <strong style={{ color: 'rgba(120, 190, 255, 1)' }}>● handles</strong> to bend each segment. <strong style={{ color: 'var(--text-secondary)' }}>Click the line</strong> to add a point · <strong style={{ color: 'var(--text-secondary)' }}>double-click</strong> a point to remove it.
-            </p>
-
-            {/* Flow shape presets */}
-            <div>
-              <span className="panel-label inline-flex items-center gap-1.5"><Route className="h-3 w-3" /> Flow Shape</span>
-              <div className="mt-1.5 grid grid-cols-4 gap-1.5">
-                {FLOW_PRESETS.map((fpz) => {
-                  const on = flowPresetId === fpz.id
-                  return (
-                    <button
-                      key={fpz.id} type="button" title={fpz.hint}
-                      onClick={() => applyFlowPresetUI(fpz.id)}
-                      className={`flex h-9 items-center justify-center rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
-                      style={{ background: on ? `${accent}22` : 'var(--bg-elevated)', border: on ? `1.5px solid ${accent}` : '1px solid var(--border-subtle)', color: on ? accent : 'var(--text-secondary)', transition: `all 0.2s ${EASE}` }}
-                    >
-                      {fpz.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Ribbon width along the path */}
-            <ProRulerSlider
-              variant="instrument" label="Ribbon Width" suffix="%"
-              value={Math.round((params.flowPath.width || 0.18) * 100)} min={2} max={80} step={1}
-              onPreview={(v) => setFlowWidthLive(v / 100)}
-              onCommit={(v) => setFlowWidthCommit(v / 100)}
-              visual={sliderVisual}
-            />
-
-            {/* Anchor count + edit actions */}
-            <div className="flex items-center justify-between">
-              <span className="panel-label">Anchors</span>
-              <span className="text-[10px] font-mono" style={{ color: 'var(--text-muted)' }}>
-                {flowAnchorCount} points
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button" onClick={smoothFlow}
-                title="Re-smooth every anchor (Catmull-Rom tangents)"
-                className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive ${tapClass}`}
-                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-              >
-                <Spline className="h-3.5 w-3.5" /> Smooth
-              </button>
-              <button
-                type="button" onClick={() => removeFlowPointAt(params.flowPath.anchors.length - 1)}
-                disabled={params.flowPath.anchors.length <= FLOW_MIN_ANCHORS}
-                title="Remove the last anchor"
-                className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[11px] font-medium editor-interactive disabled:opacity-40 ${tapClass}`}
-                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-              >
-                <Minus className="h-3.5 w-3.5" /> Remove Point
-              </button>
-            </div>
-
-            <button
-              type="button" onClick={resetFlow}
-              className={`flex w-full items-center justify-center gap-2 rounded-lg py-2 text-[11px] font-medium editor-interactive ${tapClass}`}
-              style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-            >
-              <RotateCcw className="h-3 w-3" />
-              Reset Path
-            </button>
-          </div>
-        )}
-      </div>
+      <ModeCard
+          accent={accent}
+          applyFlowPresetUI={applyFlowPresetUI}
+          applyWarp={applyWarp}
+          cardStyle={cardStyle}
+          flowAnchorCount={flowAnchorCount}
+          flowMode={flowMode}
+          flowPresetId={flowPresetId}
+          livePatch={livePatch}
+          onAccent={onAccent}
+          params={params}
+          paramsRef={paramsRef}
+          patchScan={patchScan}
+          removeFlowPointAt={removeFlowPointAt}
+          resetFlow={resetFlow}
+          resetWarpGrid={resetWarpGrid}
+          scanMode={scanMode}
+          setFlowWidthCommit={setFlowWidthCommit}
+          setFlowWidthLive={setFlowWidthLive}
+          setStretchMode={setStretchMode}
+          sliderVisual={sliderVisual}
+          smoothFlow={smoothFlow}
+          splitWarp={splitWarp}
+          tapClass={tapClass}
+          warpMode={warpMode}
+          warpPresetId={warpPresetId}
+          warpStrength={warpStrength}
+      />
 
       {/* Presets + Length/Bend/Source — Simple mode only (Flow/Mesh have their own shape controls) */}
       {!warpMode && !flowMode && (<>
@@ -2590,80 +2027,19 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       </div>
 
       {/* Primary sliders */}
-      <div className="space-y-3">
-        {/* Shown as travel across the FRAME, not as a multiple of the slice: a
-            multiple is meaningless to the eye when the slice is 2% tall, and it
-            is exactly the control the reference workflow needs (drag the streaks
-            past the top of the picture). Stored as the multiple. */}
-        <ProRulerSlider
-          variant="instrument" label="Length" suffix="% of frame"
-          value={Math.round(params.length * bandExtent * 100)}
-          min={Math.max(1, Math.round(bandExtent * 100))} max={250} step={1}
-          onPreview={(v) => livePatch({ length: Math.max(1, v / 100 / bandExtent) })}
-          onCommit={(v) => sliderCommit('length', Math.max(100, (v / bandExtent)))}
-          visual={sliderVisual}
-        />
-        <ProRulerSlider
-          variant="instrument" label="Bend" suffix="%"
-          value={pct(params.bend)} min={-100} max={100} step={1}
-          onPreview={(v) => livePatch({ bend: v / 100 })}
-          onCommit={(v) => sliderCommit('bend', v)}
-          visual={sliderVisual}
-        />
-        {/* Next to Bend rather than buried under Refine: with Length this is what
-            turns a slice into the reference fan. 0% narrows to a point, 100% is
-            parallel, and past that it splays — the old control stopped at 200%,
-            which could not open a fan at all. */}
-        <ProRulerSlider
-          variant="instrument" label="Tip width" suffix="%"
-          value={Math.round((1 - params.taper) * 100)} min={0} max={1300} step={5}
-          onPreview={(v) => livePatch({ taper: 1 - v / 100 })}
-          onCommit={(v) => { setActivePresetId(null); commit({ taper: 1 - v / 100 }) }}
-          visual={sliderVisual}
-        />
-
-        {/* The physical twist: the ribbon pinches and, past half depth, turns
-            over so its two sides swap — the flip seen in the reference clips. */}
-        <ProRulerSlider
-          variant="instrument" label="Ribbon twist" suffix=" half-turns"
-          value={Math.round(params.twistTurns * 10) / 10} min={0} max={3} step={0.1}
-          onPreview={(v) => livePatch({ twistTurns: v })}
-          onCommit={(v) => { setActivePresetId(null); commit({ twistTurns: v }) }}
-          visual={sliderVisual}
-        />
-        {params.twistTurns > 0 && (
-          <ProRulerSlider
-            variant="instrument" label="Twist depth" suffix="%"
-            value={Math.round((params.twistDepth ?? 1) * 100)} min={0} max={100} step={1}
-            onPreview={(v) => livePatch({ twistDepth: v / 100 })}
-            onCommit={(v) => { setActivePresetId(null); commit({ twistDepth: v / 100 }) }}
-            visual={sliderVisual}
-          />
-        )}
-        <ProRulerSlider
-          variant="instrument" label="Seed Line" suffix="%"
-          value={pct(params.seed)} min={0} max={100} step={1}
-          onPreview={(v) => livePatch({ seed: v / 100 })}
-          onCommit={(v) => sliderCommit('seed', v)}
-          visual={sliderVisual}
-        />
-        <button
-          type="button"
-          onClick={() => {
-            const smp = getSample()
-            const best = smp?.canvas ? bestSeedInBand(smp.canvas, paramsRef.current.band, paramsRef.current.axis) : null
-            if (!best) { toast.error('Could not read this region'); return }
-            setActivePresetId(null)
-            commit({ seed: best.seed })
-            toast.success('Seeded on the most colourful line in the region')
-          }}
-          className={`mt-1 flex h-8 w-full items-center justify-center gap-1.5 rounded-lg text-[10.5px] font-medium editor-interactive ${tapClass}`}
-          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', transition: `all 0.25s ${EASE}` }}
-        >
-          <Sparkles className="h-3 w-3" />
-          Find the most colourful line
-        </button>
-      </div>
+      <RibbonShapeSliders
+          bandExtent={bandExtent}
+          commit={commit}
+          getSample={getSample}
+          livePatch={livePatch}
+          params={params}
+          paramsRef={paramsRef}
+          pct={pct}
+          setActivePresetId={setActivePresetId}
+          sliderCommit={sliderCommit}
+          sliderVisual={sliderVisual}
+          tapClass={tapClass}
+      />
       </>)}
 
       {/* Refine (collapsible) */}
@@ -2678,49 +2054,20 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         <ChevronDown className="h-3.5 w-3.5" style={{ transform: showAdvanced ? 'rotate(180deg)' : 'none', transition: `transform 0.3s ${EASE}` }} />
       </button>
       {showAdvanced && (
-        <div className="space-y-3">
-          {!warpMode && !flowMode && (
-            <ProRulerSlider
-              variant="instrument" label="Twist (S-curve)" suffix="%"
-              value={pct(params.twist)} min={-100} max={100} step={1}
-              onPreview={(v) => livePatch({ twist: v / 100 })}
-              onCommit={(v) => sliderCommit('twist', v)}
-              visual={sliderVisual}
-            />
-          )}
-          <ProRulerSlider
-            variant="instrument" label="Fade (tips)" suffix="%"
-            value={pct(params.fade)} min={0} max={100} step={1}
-            onPreview={(v) => livePatch({ fade: v / 100 })}
-            onCommit={(v) => sliderCommit('fade', v)}
-            visual={sliderVisual}
-          />
-          <ProRulerSlider
-            variant="instrument" label="Fade in (root)" suffix="%"
-            value={pct(params.fadeIn)} min={0} max={100} step={1}
-            onPreview={(v) => livePatch({ fadeIn: v / 100 })}
-            onCommit={(v) => sliderCommit('fadeIn', v)}
-            visual={sliderVisual}
-          />
-          <ProRulerSlider
-            variant="instrument" label="Strength" suffix="%"
-            value={pct(params.opacity)} min={0} max={100} step={1}
-            onPreview={(v) => livePatch({ opacity: v / 100 })}
-            onCommit={(v) => sliderCommit('opacity', v)}
-            visual={sliderVisual}
-          />
-          {!flowMode && (
-          <button
-            type="button"
-            onClick={() => { setActivePresetId(null); commit({ mirror: !params.mirror }) }}
-            className={`flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-[11px] font-medium editor-interactive ${tapClass}`}
-            style={{ background: params.mirror ? accent : 'var(--bg-elevated)', color: params.mirror ? onAccent : 'var(--text-secondary)', border: params.mirror ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
-          >
-            Mirror (symmetric arc)
-            <span>{params.mirror ? 'On' : 'Off'}</span>
-          </button>
-          )}
-        </div>
+        <RefineSliders
+            accent={accent}
+            commit={commit}
+            flowMode={flowMode}
+            livePatch={livePatch}
+            onAccent={onAccent}
+            params={params}
+            pct={pct}
+            setActivePresetId={setActivePresetId}
+            sliderCommit={sliderCommit}
+            sliderVisual={sliderVisual}
+            tapClass={tapClass}
+            warpMode={warpMode}
+        />
       )}
 
       {/* Actions */}
