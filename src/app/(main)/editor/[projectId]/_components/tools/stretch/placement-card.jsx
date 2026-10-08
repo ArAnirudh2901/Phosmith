@@ -22,7 +22,10 @@ export default function PlacementCard({
     scheduleFrame,
     scheduleFrameRef,
     setCoverageMode,
+    setPlacementMode,
     setSubjectMaskKind,
+    setWrapCommit,
+    setWrapLive,
     sliderVisual,
     subjectCutoutRef,
     subjectMaskKind,
@@ -30,6 +33,8 @@ export default function PlacementCard({
     subjectPicking,
     subjectRawMatteRef,
     tapClass,
+    wrapAt,
+    wrapRecross,
 }) {
   // Uncompiled, like the panel it was cut from: it reads live objects and refs in render.
   'use no memo'
@@ -48,15 +53,15 @@ export default function PlacementCard({
       </p>
       <div className="mt-2 grid grid-cols-3 gap-2">
         {[
-          { id: 'above', label: 'Above', v: 0, hint: 'Streaks on top of the subject' },
-          { id: 'partial', label: 'Partial', v: 0.5, hint: 'Streaks partly over the subject' },
-          { id: 'below', label: 'Behind', v: 1, hint: 'Subject in front of the streaks' },
-        ].map(({ id, label, v, hint }) => {
-          const cur = coverage <= 0.05 ? 'above' : coverage >= 0.95 ? 'below' : 'partial'
+          { id: 'above', label: 'Above', hint: 'Streaks on top of the subject' },
+          { id: 'partial', label: 'Partial', hint: 'Out from behind the subject, then across it in front' },
+          { id: 'below', label: 'Behind', hint: 'Subject in front of the streaks' },
+        ].map(({ id, label, hint }) => {
+          const cur = wrapAt != null && coverage > 0 ? 'partial' : coverage <= 0.05 ? 'above' : 'below'
           const on = cur === id
           return (
             <button
-              key={id} type="button" title={hint} onClick={() => setCoverageMode(v)}
+              key={id} type="button" title={hint} onClick={() => setPlacementMode(id === 'below' ? 'behind' : id)}
               className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg text-[10px] font-medium editor-interactive ${tapClass}`}
               style={{ background: on ? accent : 'var(--bg-elevated)', color: on ? onAccent : 'var(--text-secondary)', border: on ? 'none' : '1px solid var(--border-subtle)', transition: `all 0.25s ${EASE}` }}
             >
@@ -118,6 +123,23 @@ export default function PlacementCard({
               {!subjectPicking && matteStatus === 'none' && subjectMaskKind === 'none' && <span style={{ color: '#f59e0b' }}>No subject auto-detected — tap “Draw subject” to mark it by hand.</span>}
             </div>
           </div>
+
+          {wrapAt != null && (
+            <div className="space-y-1.5">
+              <ProRulerSlider
+                variant="instrument" label="In front from" suffix="%"
+                value={Math.round(wrapAt * 100)} min={0} max={100} step={1}
+                onPreview={(v) => setWrapLive(v / 100)}
+                onCommit={(v) => setWrapCommit(v / 100)}
+                visual={sliderVisual}
+              />
+              <p className="text-[10px] leading-relaxed" style={{ color: wrapRecross ? 'var(--text-muted)' : '#f59e0b' }}>
+                {wrapRecross
+                  ? 'Behind the subject up to this point along the ribbon, in front after it — set where it comes back over the subject.'
+                  : 'The ribbon rises out of the subject and covers it from this point along — slide to choose how much of the subject it overlaps.'}
+              </p>
+            </div>
+          )}
 
           <ProRulerSlider
             variant="instrument" label="Subject Coverage" suffix="%"

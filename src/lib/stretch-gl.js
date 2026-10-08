@@ -32,12 +32,14 @@ precision highp float;
 uniform sampler2D uTex;
 uniform float uFade;
 uniform float uFadeIn;
+uniform vec2 uSoft;
 in vec2 vUV;
 in float vT;
 out vec4 outColor;
 void main() {
   float ramp = max(0.02, uFadeIn * 0.6);
   float a = clamp((1.0 - uFadeIn * (1.0 - min(1.0, vT / ramp))) * (1.0 - uFade * vT), 0.0, 1.0);
+  if (uSoft.y > 0.0) a *= smoothstep(uSoft.x, uSoft.x + uSoft.y, vT);
   outColor = texture(uTex, vUV) * a;
 }`
 
@@ -89,6 +91,7 @@ function init() {
       uTex: gl.getUniformLocation(prog, 'uTex'),
       uFade: gl.getUniformLocation(prog, 'uFade'),
       uFadeIn: gl.getUniformLocation(prog, 'uFadeIn'),
+      uSoft: gl.getUniformLocation(prog, 'uSoft'),
     },
     vao: gl.createVertexArray(),
     bufs: { pos: gl.createBuffer(), uv: gl.createBuffer(), t: gl.createBuffer(), idx: gl.createBuffer() },
@@ -149,12 +152,13 @@ function uploadTexture(s, source, key) {
  * A mesh is a cols×rows vertex grid, row-major: `pos` (x, y in px), `uv`
  * (texture coords 0..1) and `t` (0 at the ribbon's root, 1 at its tip, for the
  * fades). Rows draw in order, so later rows land on top where the sheet folds
- * over itself — Photoshop's warp does the same.
+ * over itself — Photoshop's warp does the same. `soft` [t0, len] fades the
+ * ribbon in from t0 over len (where a wrap brings it in front of the subject).
  *
  * @returns {HTMLCanvasElement|OffscreenCanvas|null} the GL canvas; draw it
  *   straight away (the next call reuses it), or null to fall back to Canvas2D.
  */
-export function renderMeshGL({ source, sourceKey, meshes, W, H, fade = 0, fadeIn = 0 }) {
+export function renderMeshGL({ source, sourceKey, meshes, W, H, fade = 0, fadeIn = 0, soft = null }) {
   // A/B switch for the preview harness: force the Canvas2D path.
   if (globalThis.__phosmithStretchNoGL) return null
   const s = init()
@@ -177,6 +181,7 @@ export function renderMeshGL({ source, sourceKey, meshes, W, H, fade = 0, fadeIn
     gl.uniform1i(loc.uTex, 0)
     gl.uniform1f(loc.uFade, fade)
     gl.uniform1f(loc.uFadeIn, fadeIn)
+    gl.uniform2f(loc.uSoft, soft ? soft[0] : 0, soft ? soft[1] : 0)
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
     gl.bindVertexArray(s.vao)

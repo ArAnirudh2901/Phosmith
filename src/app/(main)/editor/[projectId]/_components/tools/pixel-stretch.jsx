@@ -7,7 +7,7 @@ import { isTaintError } from '@/lib/canvas-snapshot'
 import { toast } from 'sonner'
 import { adaptiveTextColor } from '@/lib/color-extraction'
 import { AudioLines, Check, ChevronDown, FlipHorizontal2, Layers, Loader2, RotateCcw, Sparkles, StretchHorizontal, StretchVertical, Wand2 } from 'lucide-react'
-import { DEFAULT_STRETCH, clampStretchParams, migrateStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, analyzeStretchPlan, bestSeedInBand, createDefaultFlowPath, createFlowPathFromPoints, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, snapMatteToEdges, buildSubjectCutout, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
+import { DEFAULT_STRETCH, clampStretchParams, migrateStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, analyzeStretchPlan, bestSeedInBand, createDefaultFlowPath, createFlowPathFromPoints, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, snapMatteToEdges, renderStretchLayer, suggestWrapAt, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
 import {
   MAX_BAKE_DIM,
   getSourceElement,
@@ -79,9 +79,13 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   // ── Layer placement: the stretch commits as its OWN layer over the photo, and
   // `coverage` controls how much of the detected subject sits OVER the ribbons —
   // 0 = ribbons fully on top ("above the subject"), 1 = subject fully on top
-  // ("below the subject"), ~0.5 = "partially on the subject". Driven by the
-  // on-device subject matte, so the layer reads as motion behind the subject.
+  // ("below the subject"). Driven by the front matte, so the layer reads as
+  // motion behind the subject. `wrapAt` (Partial) brings the ribbon back in
+  // front from that point along it: out from behind, then across the subject.
   const [coverage, setCoverage] = useState(0)
+  const [wrapAt, setWrapAt] = useState(null)
+  const wrapAtRef = useRef(null)
+  const [wrapRecross, setWrapRecross] = useState(true)
   const [matteStatus, setMatteStatus] = useState('idle')   // 'idle'|'loading'|'ready'|'none'
   const [isEditingLayer, setIsEditingLayer] = useState(false) // re-editing an existing stretch layer
   // What stays IN FRONT of the streaks: 'auto' (on-device subject detect) or
@@ -209,6 +213,21 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     return sampleRef.current
   }, [])
 
+  // The stretch layer on its own (transparent), composed over the photo copy.
+  const layerBufRef = useRef(null)
+  const getLayerBuf = useCallback((w, h) => {
+    let l = layerBufRef.current
+    if (!l) {
+      const c = createStretchBuffer(w, h)
+      l = { canvas: c, ctx: c.getContext('2d') }
+      layerBufRef.current = l
+    } else if (l.canvas.width !== w || l.canvas.height !== h) {
+      l.canvas.width = w
+      l.canvas.height = h
+    }
+    return l
+  }, [])
+
   // ── Reusable offscreen ribbon buffer ─────────────────────────────────────────
   const getOffscreen = useCallback((w, h) => {
     let o = offscreenRef.current
@@ -223,18 +242,18 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     return o
   }, [])
 
-  // ── Subject cutout (cached) for preview compositing ──────────────────────────
-  // Builds the detected-subject pixels (transparent elsewhere) at the sample
-  // resolution, rebuilt only when the size / matte / feather change — so dragging
-  // the Coverage slider stays cheap (only the draw alpha changes).
-  const getSubjectCutout = useCallback((sampleCanvas, w, h) => {
+  // ── Front matte as alpha (cached) for preview compositing ────────────────────
+  // At the sample resolution, rebuilt only when the size / matte / feather change,
+  // so dragging Coverage or the wrap point stays cheap. Feather is a fraction of
+  // the short side, as in the bake — the preview used to blur by that fraction in
+  // PIXELS, so it showed a hard edge the committed layer did not have.
+  const getSubjectAlpha = useCallback((w, h) => {
     if (coverageRef.current <= 0 || !subjectRawMatteRef.current) return null
     const key = `${w}x${h}:${subjectMatteSigRef.current}:${featherRef.current}`
     if (subjectCutoutRef.current?.key === key) return subjectCutoutRef.current.canvas
-    const alpha = matteToAlphaCanvas(subjectRawMatteRef.current, w, h, featherRef.current)
-    const cutout = buildSubjectCutout(sampleCanvas, alpha, w, h)
-    subjectCutoutRef.current = { key, canvas: cutout }
-    return cutout
+    const alpha = matteToAlphaCanvas(subjectRawMatteRef.current, w, h, featherRef.current * Math.min(w, h))
+    subjectCutoutRef.current = { key, canvas: alpha }
+    return alpha
   }, [])
 
   // ── On-device subject matte (cached per source) — drives layer placement ─────
@@ -529,23 +548,23 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     const o = getOffscreen(sample.w, sample.h)
     o.ctx.setTransform(1, 0, 0, 1, 0, 0)
     o.ctx.clearRect(0, 0, sample.w, sample.h)
-    // Simulate the final LAYER STACK so the preview matches what's committed:
-    //   base photo (the layer below)  →  stretch ribbons (the new layer)  →
-    //   detected subject re-composited on top by `coverage` (so the streaks read
-    //   as motion behind the subject for "partially / below the subject").
+    // The final LAYER STACK, built the way the bake builds it so the preview is
+    // what gets committed: base photo (the layer below), then the stretch layer
+    // with the front subject knocked out and, for a wrap, the ribbon's later part
+    // drawn back over it.
     o.ctx.drawImage(sample.canvas, 0, 0, sample.w, sample.h)
     const quality = interactingRef.current ? 'low' : 'high'
-    const drew = renderPixelStretch(o.ctx, sample.canvas, paramsRef.current, sample.w, sample.h, { quality })
-    if (drew && coverageRef.current > 0) {
-      const cutout = getSubjectCutout(sample.canvas, sample.w, sample.h)
-      if (cutout) {
-        o.ctx.save()
-        o.ctx.globalAlpha = Math.min(1, Math.max(0, coverageRef.current))
-        o.ctx.drawImage(cutout, 0, 0, sample.w, sample.h)
-        o.ctx.restore()
-      }
-    }
+    const layer = getLayerBuf(sample.w, sample.h)
+    layer.ctx.setTransform(1, 0, 0, 1, 0, 0)
+    layer.ctx.clearRect(0, 0, sample.w, sample.h)
+    const drew = renderStretchLayer(layer.ctx, sample.canvas, paramsRef.current, sample.w, sample.h, {
+      quality,
+      alpha: getSubjectAlpha(sample.w, sample.h),
+      coverage: coverageRef.current,
+      wrapAt: wrapAtRef.current,
+    })
     if (!drew) return
+    o.ctx.drawImage(layer.canvas, 0, 0)
 
     const tl = canvasToScreen(editor, bounds.left, bounds.top)
     const zX = editor.viewportTransform?.[0] || 1
@@ -698,7 +717,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     if (subjectPickRef.current && lassoPtsRef.current.length >= 2) {
       drawLasso(lassoPtsRef.current, !lassoDrawingRef.current && lassoPtsRef.current.length >= 3)
     }
-  }, [getSample, getOffscreen, getSubjectCutout, accent])
+  }, [getSample, getOffscreen, getLayerBuf, getSubjectAlpha, accent])
 
   // ── Position the overlay (draw surface, dim, band, handles) imperatively ─────
   const layoutOverlay = useCallback(() => {
@@ -1191,6 +1210,27 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     }
   }, [ensureSubjectMatte, scheduleFrame, matteStatus])
 
+  // Above / Partial / Behind. Partial is a wrap: behind the subject at the root,
+  // in front from where the ribbon comes back over it. It uses the same front
+  // matte as Behind — the selection unless the user asked for detection.
+  const setPlacementMode = useCallback(async (mode) => {
+    if (mode !== 'partial') {
+      wrapAtRef.current = null
+      setWrapAt(null)
+      return setCoverageMode(mode === 'above' ? 0 : 1)
+    }
+    if (wrapAtRef.current == null) { wrapAtRef.current = 0.5; setWrapAt(0.5) }
+    await setCoverageMode(1)
+    const s = suggestWrapAt(paramsRef.current, subjectRawMatteRef.current, ...frameWH())
+    wrapAtRef.current = s.wrapAt
+    setWrapAt(s.wrapAt)
+    setWrapRecross(s.recross)
+    scheduleFrame()
+  }, [setCoverageMode, scheduleFrame, frameWH])
+
+  const setWrapLive = useCallback((v) => { wrapAtRef.current = v; scheduleFrame() }, [scheduleFrame])
+  const setWrapCommit = useCallback((v) => { wrapAtRef.current = v; setWrapAt(v); scheduleFrame() }, [scheduleFrame])
+
   // ── AI Auto Stretch ─────────────────────────────────────────────────────────
   const autoStretch = useCallback(async () => {
     const img = selectedImageRef.current
@@ -1331,6 +1371,8 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       setWarpStrength(paramsRef.current.warpLook?.amount ?? 1)
       const cov = Math.min(1, Math.max(0, editMeta.coverage || 0))
       setCoverage(cov); coverageRef.current = cov
+      const wrap = Number.isFinite(editMeta.wrapAt) ? Math.min(1, Math.max(0, editMeta.wrapAt)) : null
+      wrapAtRef.current = wrap; setWrapAt(wrap)
       featherRef.current = editMeta.feather || 0.006
       setIsEditingLayer(true)
       setWarpMode(!!paramsRef.current.warpGrid)
@@ -1359,6 +1401,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       paramsRef.current = clampStretchParams(DEFAULT_STRETCH)
       setParams(paramsRef.current)
       setCoverage(0); coverageRef.current = 0
+      wrapAtRef.current = null; setWrapAt(null)
       featherRef.current = 0.006
       setIsEditingLayer(false)
       setWarpMode(false)
@@ -1740,7 +1783,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         // canvases back afterwards.
         const out = bakeStretchBuffer({
           srcEl, params: p, W, H, flipX, flipY,
-          matte, coverage: cov, feather: featherRef.current,
+          matte, coverage: cov, feather: featherRef.current, wrapAt: wrapAtRef.current,
         })
         if (!out) throw new Error('Nothing to stretch yet — set a region or shape first')
 
@@ -1772,6 +1815,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
         params: p,
         coverage: cov,
         feather: featherRef.current,
+        wrapAt: wrapAtRef.current,
         sourceSrc: durableSrc,
         sourceW: natW, sourceH: natH,
         sourceFlipX: flipX, sourceFlipY: flipY,
@@ -2011,7 +2055,12 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
           scheduleFrame={scheduleFrame}
           scheduleFrameRef={scheduleFrameRef}
           setCoverageMode={setCoverageMode}
+          setPlacementMode={setPlacementMode}
           setSubjectMaskKind={setSubjectMaskKind}
+          setWrapCommit={setWrapCommit}
+          setWrapLive={setWrapLive}
+          wrapAt={wrapAt}
+          wrapRecross={wrapRecross}
           sliderVisual={sliderVisual}
           subjectCutoutRef={subjectCutoutRef}
           subjectMaskKind={subjectMaskKind}

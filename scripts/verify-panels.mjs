@@ -114,6 +114,14 @@ const boundaryErrors = (page) => page.evaluate(() => window.__errors.slice())
   if (process.env.PANELS_SHOT) await page.screenshot({ path: path.join(OUT, 'stretch-warp.png') })
   check(applied === looks.length && (await flip.count()) > 0, `Pixel Stretch: a confirmed region offers every look (${applied}/${looks.length}) and flips it`)
 
+  // Partial is a wrap over the user's own selection: it must never start subject
+  // detection (SlimSAM), only show where the ribbon comes in front.
+  const partial = page.locator('#panel button', { hasText: /^\s*Partial\s*$/ })
+  if (await partial.count()) { await click(partial.first()); await page.waitForTimeout(800) }
+  const panelText = await page.locator('#panel').innerText()
+  check(/In front from/.test(panelText) && /no AI, no extra memory/.test(panelText) && !/Detecting subject/.test(panelText),
+    'Pixel Stretch: Partial wraps over the selection without running subject detection')
+
   await mount('adjust')
   const tabs = page.locator('.adjust-tabs button')
   const tabCount = await tabs.count()

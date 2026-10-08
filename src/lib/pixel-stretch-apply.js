@@ -13,9 +13,8 @@ import { runHeavy } from './heavy-job-queue'
 import {
     clampStretchParams,
     createStretchBuffer,
-    renderPixelStretch,
+    renderStretchLayer,
     matteToAlphaCanvas,
-    applySubjectKnockout,
     releaseStretchScratch,
 } from './pixel-stretch'
 
@@ -101,9 +100,10 @@ export const bakeSizeOf = (srcEl) => {
  * Render the ribbons onto a TRANSPARENT buffer at bake resolution. The photo
  * stays its own layer underneath, so the stretch can be moved, graded or deleted
  * on its own. `matte` (a luminance subject matte) plus `coverage` knocks the
- * subject back out of the ribbon, which is how the streaks pass BEHIND a person.
+ * subject back out of the ribbon, which is how the streaks pass BEHIND a person;
+ * `wrapAt` brings the ribbon back in front from that point along it.
  */
-export const bakeStretchBuffer = ({ srcEl, params, W, H, flipX = false, flipY = false, matte = null, coverage = 0, feather = 0 }) => {
+export const bakeStretchBuffer = ({ srcEl, params, W, H, flipX = false, flipY = false, matte = null, coverage = 0, feather = 0, wrapAt = null }) => {
     // NOTE: intentionally NOT queued here. It is synchronous, and its caller
     // `applyStretchToCanvas` takes the slot around the whole bake-encode-upload
     // sequence — queueing both would deadlock the queue against itself.
@@ -113,11 +113,8 @@ export const bakeStretchBuffer = ({ srcEl, params, W, H, flipX = false, flipY = 
     const octx = out.getContext('2d')
     let drew = false
     try {
-        drew = renderPixelStretch(octx, sample, clampStretchParams(params), W, H, { quality: 'max' })
-        if (drew && coverage > 0 && matte) {
-            const alpha = matteToAlphaCanvas(matte, W, H, feather * Math.min(W, H))
-            if (alpha) applySubjectKnockout(octx, alpha, W, H, coverage)
-        }
+        const alpha = coverage > 0 && matte ? matteToAlphaCanvas(matte, W, H, feather * Math.min(W, H)) : null
+        drew = renderStretchLayer(octx, sample, clampStretchParams(params), W, H, { quality: 'max', alpha, coverage, wrapAt })
     } finally {
         // A bake sizes the shared scratch canvases to the FULL image and they are
         // kept between frames by design; at 4096px that is tens of MB each, so the
@@ -195,6 +192,7 @@ const applyStretchInner = async ({
     existingLayer = null,
     durableSrc = null,
     blend = 'source-over',
+    wrapAt = null,
 }) => {
     const srcEl = getSourceElement(frameObj)
     if (!isSourceReady(srcEl)) throw new Error('Image is still loading')
@@ -202,7 +200,7 @@ const applyStretchInner = async ({
     const flipX = !!frameObj.flipX
     const flipY = !!frameObj.flipY
 
-    const out = bakeStretchBuffer({ srcEl, params, W, H, flipX, flipY, matte, coverage, feather })
+    const out = bakeStretchBuffer({ srcEl, params, W, H, flipX, flipY, matte, coverage, feather, wrapAt })
     if (!out) throw new Error('Nothing to stretch — set a region, a flow path or a scanline threshold first')
     const url = await uploadStretchBlob(await encodeToPngBlob(out), W, H)
 
@@ -218,6 +216,7 @@ const applyStretchInner = async ({
         params: clampStretchParams(params),
         coverage,
         feather,
+        wrapAt: Number.isFinite(wrapAt) ? wrapAt : null,
         sourceSrc: src,
         sourceW: natW, sourceH: natH,
         sourceFlipX: flipX, sourceFlipY: flipY,

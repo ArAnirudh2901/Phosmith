@@ -16,8 +16,9 @@ import {
     createFlowPathFromPoints,
     createStretchBuffer,
     matteToAlphaCanvas,
-    applySubjectKnockout,
     snapMatteToEdges,
+    renderStretchLayer,
+    suggestWrapAt,
 } from '../../src/lib/pixel-stretch.js'
 
 import { isRawFile, resolveSourceFile } from '../../src/lib/raw-preview.js'
@@ -100,10 +101,10 @@ const shot = async (spec) => {
     const t0 = performance.now()
     let ok
     if (spec.behind && p.polygon) {
-        // Same as the bake: ribbon on its own layer, the lasso knocked back out.
+        // Same as the bake: ribbon on its own layer, the lasso knocked back out,
+        // and for a wrap the later part of the ribbon drawn back over it.
         const layer = createStretchBuffer(W, H)
         const lctx = layer.getContext('2d')
-        ok = renderPixelStretch(lctx, sample, p, W, H, { quality: spec.quality || 'max' })
         const matte = createStretchBuffer(W, H)
         const m = matte.getContext('2d')
         m.fillStyle = '#000'; m.fillRect(0, 0, W, H); m.fillStyle = '#fff'
@@ -111,7 +112,14 @@ const shot = async (spec) => {
         p.polygon.forEach((pt, i) => (i ? m.lineTo(pt.x * W, pt.y * H) : m.moveTo(pt.x * W, pt.y * H)))
         m.closePath(); m.fill()
         if (spec.snap) snapMatteToEdges(matte, sample)
-        applySubjectKnockout(lctx, matteToAlphaCanvas(matte, W, H, 0.006 * Math.min(W, H)), W, H, 1)
+        const wrapAt = spec.wrap === 'auto' ? suggestWrapAt(p, matte, W, H).wrapAt : (Number.isFinite(spec.wrap) ? spec.wrap : null)
+        ok = renderStretchLayer(lctx, sample, p, W, H, {
+            quality: spec.quality || 'max',
+            alpha: matteToAlphaCanvas(matte, W, H, 0.006 * Math.min(W, H)),
+            coverage: spec.coverage ?? 1,
+            wrapAt,
+        })
+        lastPlan = { wrapAt }
         ctx.drawImage(layer, 0, 0)
     } else ok = renderPixelStretch(ctx, sample, p, W, H, { quality: spec.quality || 'max' })
     if (spec.subjectOverlay) renderSubjectOverlay(ctx, sample, p, W, H)

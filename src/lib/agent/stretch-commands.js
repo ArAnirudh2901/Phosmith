@@ -273,19 +273,21 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
         return c
     }
 
-    const placementFor = async (el, behind, blend, resolved, useSubject) => {
-        const out = isStretchBlend(blend) ? { blend } : {}
+    const placementFor = async (el, behind, blend, resolved, useSubject, inFrontFrom) => {
+        const base = isStretchBlend(blend) ? { blend } : {}
         const cov = clamp(behind, 0, 100, 0) / 100
-        if (cov <= 0) return out
+        if (cov <= 0) return base
+        // A wrap: behind the subject up to this point along the ribbon, in front after.
+        const out = Number.isFinite(Number(inFrontFrom)) ? { ...base, wrapAt: clamp(inFrontFrom, 0, 100, 50) / 100 } : base
         // Default: the ribbon passes behind the SLICE the user chose. Subject
         // detection is opt-in because it downloads and runs SlimSAM, which is
         // expensive on a small machine and is not what "behind" usually means.
         if (!useSubject) {
             const matte = selectionMatte(resolved)
-            return matte ? { ...out, matte, coverage: cov, feather: 0.004 } : out
+            return matte ? { ...out, matte, coverage: cov, feather: 0.004 } : base
         }
         const box = await subjectBox(el)
-        if (!box?.mask) return out
+        if (!box?.mask) return base
         return { ...out, matte: box.mask, coverage: cov, feather: 0.004 }
     }
 
@@ -340,9 +342,10 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 opacity: '0..100 (default 100)',
                 behind: '0..100 — how much of the SELECTED SLICE the ribbon passes behind (default 0)',
                 behindSubject: 'true to detect the subject and pass behind that instead — downloads and runs SlimSAM',
+                inFrontFrom: '0..100 — with behind: the ribbon stays behind the subject up to this point along its length and crosses IN FRONT after it (a wrap; arch, fold and swoosh show it best)',
                 blend: `layer blend mode: ${STRETCH_BLEND_MODES.map((b) => b.id).join(', ')}`,
             },
-            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject, twistTurns, twistDepth, tipWidth } = {}) => {
+            run: async ({ from, band, axis, direction, preset, seed, length, bend, twist, taper, fade, fadeIn, mirror, opacity, behind, blend, behindSubject, inFrontFrom, twistTurns, twistDepth, tipWidth } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const fromPreset = preset && PIXEL_STRETCH_PRESETS.find((p) => p.id === preset)?.params
@@ -375,9 +378,9 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                     mirror: mirror === undefined ? !!fromPreset?.mirror : !!mirror,
                     opacity: clamp(opacity, 0, 100, 100) / 100,
                 })
-                const placement = await placementFor(el, behind, blend, resolved, behindSubject)
+                const placement = await placementFor(el, behind, blend, resolved, behindSubject, inFrontFrom)
                 await commit(image, params, 'Pixel stretch', placement)
-                return { applied: 'ribbon', from: resolved.from, axis: params.axis, direction: params.direction, band: params.band, seed: Math.round(params.seed * 100), tipWidth: Math.round((1 - params.taper) * 100), twistTurns: params.twistTurns, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
+                return { applied: 'ribbon', from: resolved.from, axis: params.axis, direction: params.direction, band: params.band, seed: Math.round(params.seed * 100), tipWidth: Math.round((1 - params.taper) * 100), twistTurns: params.twistTurns, behind: Math.round((placement.coverage || 0) * 100), inFrontFrom: placement.wrapAt != null ? Math.round(placement.wrapAt * 100) : null, blend: placement.blend || 'source-over' }
             },
         },
 
@@ -390,9 +393,10 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 band: 'exact source slice { x, y, w, h }',
                 behind: '0..100 — how much of the selected slice the ribbon passes behind',
                 behindSubject: 'true to use subject detection instead (see `ribbon`)',
+                inFrontFrom: '0..100 — wrap point along the ribbon (see `ribbon`)',
                 blend: 'layer blend mode (see `ribbon`)',
             },
-            run: async ({ preset = 'arch', amount = 100, from, band, axis, direction, seed, length, behind, blend, behindSubject } = {}) => {
+            run: async ({ preset = 'arch', amount = 100, from, band, axis, direction, seed, length, behind, blend, behindSubject, inFrontFrom } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const id = WARP_IDS.includes(preset) ? preset : 'arch'
@@ -400,9 +404,9 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 // Built in pixels: the frame's real aspect keeps arcs round.
                 const W = el.naturalWidth || el.width || 1, H = el.naturalHeight || el.height || 1
                 const { grid, rest, look } = applyWarpPreset(flat, id, clamp(amount, -200, 200, 100) / 100, W, H)
-                const placement = await placementFor(el, behind, blend, resolved, behindSubject)
+                const placement = await placementFor(el, behind, blend, resolved, behindSubject, inFrontFrom)
                 await commit(image, { ...flat, warpGrid: grid, warpRest: rest, warpLook: look, warpModel: 'stretch', anchor: 'seed' }, `Pixel stretch warp (${id})`, placement)
-                return { applied: 'warp', preset: id, from: resolved.from, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
+                return { applied: 'warp', preset: id, from: resolved.from, behind: Math.round((placement.coverage || 0) * 100), inFrontFrom: placement.wrapAt != null ? Math.round(placement.wrapAt * 100) : null, blend: placement.blend || 'source-over' }
             },
         },
 
@@ -415,9 +419,10 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 from: 'same slice words as `ribbon`',
                 behind: '0..100 — how much of the selected slice the ribbon passes behind',
                 behindSubject: 'true to use subject detection instead (see `ribbon`)',
+                inFrontFrom: '0..100 — wrap point along the ribbon (see `ribbon`)',
                 blend: 'layer blend mode (see `ribbon`)',
             },
-            run: async ({ preset = 'ribbon', points, width, from, band, axis, direction, seed, behind, blend, behindSubject } = {}) => {
+            run: async ({ preset = 'ribbon', points, width, from, band, axis, direction, seed, behind, blend, behindSubject, inFrontFrom } = {}) => {
                 const { image, el } = requireImage()
                 const resolved = await resolveBand(el, { from, band, axis, direction })
                 const flat = baseParams(resolved, { seed: seedFor(el, resolved, seed), length: Math.min(200, Math.max(1, 0.9 / Math.max(0.02, resolved.axis === 'vertical' ? resolved.band.h : resolved.band.w))), taper: 0.05 })
@@ -426,9 +431,9 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 const flowPath = usable
                     ? createFlowPathFromPoints(points, width ? { width: clamp(width, 0.05, 0.6, 0.18) } : {})
                     : applyFlowPreset(flat, FLOW_IDS.includes(preset) ? preset : 'ribbon')
-                const placement = await placementFor(el, behind, blend, resolved, behindSubject)
+                const placement = await placementFor(el, behind, blend, resolved, behindSubject, inFrontFrom)
                 await commit(image, { ...flat, flowPath }, 'Pixel stretch flow', placement)
-                return { applied: 'flow', preset: usable ? 'custom' : preset, anchors: flowPath?.anchors?.length || 0, behind: Math.round((placement.coverage || 0) * 100), blend: placement.blend || 'source-over' }
+                return { applied: 'flow', preset: usable ? 'custom' : preset, anchors: flowPath?.anchors?.length || 0, behind: Math.round((placement.coverage || 0) * 100), inFrontFrom: placement.wrapAt != null ? Math.round(placement.wrapAt * 100) : null, blend: placement.blend || 'source-over' }
             },
         },
 

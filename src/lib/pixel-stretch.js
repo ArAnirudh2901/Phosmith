@@ -624,7 +624,8 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
   const fadeIn = opts.fadeIn || 0
   const seam = opts.quality === 'max' ? 0.7 : opts.quality === 'low' ? 0.5 : 0.6
 
-  const gpu = renderMeshGL({ source: strip, meshes: [sectionsToMesh(sections)], W, H, fade, fadeIn })
+  const soft = opts.soft || null
+  const gpu = renderMeshGL({ source: strip, meshes: [sectionsToMesh(sections)], W, H, fade, fadeIn, soft })
   if (gpu) {
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -654,7 +655,7 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
     drawTexturedTriangle(b, strip, r0x, r0y, r1x, r1y, l1x, l1y, seedLen, v0, seedLen, v1, 0, v1, seam)
   }
 
-  if (fade > 0 || fadeIn > 0) {
+  if (fade > 0 || fadeIn > 0 || soft) {
     // The taper runs along the ribbon's ARC, but a canvas gradient is a straight
     // axis, so each section's alpha is placed at the section's projection onto the
     // start→end chord. On a bend that keeps the fade where the pixels actually are
@@ -664,7 +665,7 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
     const chx = z.cx - a.cx, chy = z.cy - a.cy
     const chLen2 = chx * chx + chy * chy
     const rampIn = Math.max(0.02, fadeIn * 0.6)
-    const alphaAt = (t) => clamp01((1 - fadeIn * (1 - Math.min(1, t / rampIn))) * (1 - fade * t))
+    const alphaAt = (t) => clamp01((1 - fadeIn * (1 - Math.min(1, t / rampIn))) * (1 - fade * t)) * softAt(soft, t)
     const grad = b.createLinearGradient(a.cx, a.cy, z.cx, z.cy)
     if (chLen2 < 1e-6) {
       grad.addColorStop(0, `rgba(0,0,0,${alphaAt(0)})`)
@@ -673,7 +674,7 @@ function sweepStripMesh(ctx, strip, sections, W, H, opts = {}) {
       const last = sections.length - 1
       let prevU = -1
       for (let i = 0; i <= last; i++) {
-        const t = i / last
+        const t = sections[i].t ?? i / last
         const u = clamp01(((sections[i].cx - a.cx) * chx + (sections[i].cy - a.cy) * chy) / chLen2)
         if (u <= prevU) continue          // a hooked ribbon folds back on the chord
         prevU = u
@@ -727,14 +728,47 @@ function extendToEdge(sections, W, H) {
   return out
 }
 
-/** Sweep one ribbon (one direction) onto ctx. */
-function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
+// CPU mirror of the shader's soft ramp: 0 before t0, smoothstep to 1 over len.
+const softAt = (soft, t) => {
+  if (!soft || !(soft[1] > 0)) return 1
+  const x = clamp01((t - soft[0]) / soft[1])
+  return x * x * (3 - 2 * x)
+}
+
+// The part of a ribbon whose t lies in [lo, hi], with its end sections cut
+// exactly where t crosses a bound. A wrap draws the ribbon as two such parts.
+function clipSections(sections, range) {
+  if (!range) return sections
+  const [lo, hi] = range
+  const cut = (a, b, f) => {
+    let nx = a.nx + (b.nx - a.nx) * f, ny = a.ny + (b.ny - a.ny) * f
+    const nl = Math.hypot(nx, ny) || 1
+    nx /= nl; ny /= nl
+    return {
+      cx: a.cx + (b.cx - a.cx) * f, cy: a.cy + (b.cy - a.cy) * f, nx, ny,
+      hw: a.hw + (b.hw - a.hw) * f, t: a.t + (b.t - a.t) * f,
+    }
+  }
+  const out = []
+  for (let i = 0; i < sections.length; i++) {
+    const s = sections[i], prev = sections[i - 1]
+    if (prev && prev.t !== s.t) {
+      const fs = [lo, hi].map((b) => (b - prev.t) / (s.t - prev.t)).filter((f) => f > 0 && f < 1).sort((a, b) => a - b)
+      for (const f of fs) out.push(cut(prev, s, f))
+    }
+    if (s.t >= lo && s.t <= hi) out.push(s)
+  }
+  return out.length >= 2 ? out : []
+}
+
+/** Sweep one ribbon (one direction) onto ctx; `range` keeps only that span of t. */
+function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality, range = null, soft = null) {
   const stripLen = strip.width
   const straight = Math.abs(p.bend) < 0.002 && Math.abs(p.twist) < 0.002
 
   // Fast, perfectly-crisp path for an un-bent ribbon with no taper/fade — a single
   // rotated quad is already gap-free.
-  if (straight && p.fade <= 0 && p.fadeIn <= 0 && Math.abs(p.taper) <= 0.002 && !p.twistTurns) {
+  if (!range && straight && p.fade <= 0 && p.fadeIn <= 0 && Math.abs(p.taper) <= 0.002 && !p.twistTurns) {
     const a = Math.atan2(g.d.y, g.d.x) - Math.PI / 2
     const cos = Math.cos(a), sin = Math.sin(a)
     ctx.globalAlpha = p.opacity
@@ -767,8 +801,8 @@ function sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality) {
     if (p.twistTurns) hw *= twistFactor(p, t)
     sections[i] = { cx: c.x, cy: c.y, nx: tan.y, ny: -tan.x, hw, t }
   }
-  const swept = p.toEdge && p.fade <= 0 ? extendToEdge(sections, W, H) : sections
-  sweepStripMesh(ctx, strip, swept, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality })
+  const swept = clipSections(p.toEdge && p.fade <= 0 ? extendToEdge(sections, W, H) : sections, range)
+  sweepStripMesh(ctx, strip, swept, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality, soft })
 }
 
 /**
@@ -832,13 +866,21 @@ const QUALITY_SLICES = { low: 220, high: 1600, max: 6000 }
  */
 export function renderPixelStretch(ctx, sample, params, W, H, opts = {}) {
   const p = clampStretchParams(params)
+  // `opts.tRange` [lo, hi] draws only that span along the ribbon (0 = root,
+  // 1 = tip). Modes with no notion of t draw whole for a span that starts at the
+  // root and not at all for one that starts later.
+  const range = Array.isArray(opts.tRange) ? opts.tRange : null
+  const whole = !range || range[0] <= 0
   // Mode dispatch (most expressive first): a multi-anchor Flow Path smear, then
   // the Photoshop-style Warp mesh, otherwise the single-arch simple sweep.
-  if (p.scan) return renderScanlineStretch(ctx, sample, p.scan, W, H)
+  if (p.scan) return whole ? renderScanlineStretch(ctx, sample, p.scan, W, H) : false
   if (p.flowPath) return renderFlowStretch(ctx, sample, p, W, H, opts)
-  if (p.warpGrid) return renderWarpMesh(ctx, sample, p, W, H, opts)
+  if (p.warpGrid) {
+    if (p.warpModel !== 'stretch' && !whole) return false
+    return renderWarpMesh(ctx, sample, p, W, H, p.warpModel === 'stretch' ? opts : { ...opts, tRange: null })
+  }
   const maxSlices = opts.maxSlices || QUALITY_SLICES[opts.quality] || QUALITY_SLICES.high
-  return paintSweep(ctx, sample, p, W, H, maxSlices, opts.quality)
+  return paintSweep(ctx, sample, p, W, H, maxSlices, opts.quality, range, opts.soft || null)
 }
 
 /**
@@ -846,7 +888,7 @@ export function renderPixelStretch(ctx, sample, params, W, H, opts = {}) {
  * `p` must already be clamped. Shared by the simple renderer and the warp
  * buffer builder. Returns false for a degenerate band.
  */
-function paintSweep(ctx, sample, p, W, H, maxSlices, quality) {
+function paintSweep(ctx, sample, p, W, H, maxSlices, quality, range = null, soft = null) {
   const g = resolveGeometry(p, W, H)
   if (g.stripLen < 1 || g.total < 1) return false
 
@@ -872,13 +914,13 @@ function paintSweep(ctx, sample, p, W, H, maxSlices, quality) {
     ctx.clip('nonzero')
   }
 
-  sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality)
+  sweepRibbon(ctx, strip, g, p, W, H, maxSlices, quality, range, soft)
 
   if (p.mirror) {
     // Same seed colours, swept the opposite way with the bow mirrored.
     const pm = { ...p, bend: -p.bend }
     const gm = resolveGeometry(pm, W, H, -p.direction)
-    sweepRibbon(ctx, strip, gm, pm, W, H, maxSlices, quality)
+    sweepRibbon(ctx, strip, gm, pm, W, H, maxSlices, quality, range, soft)
   }
 
   if (clipped) ctx.restore()
@@ -1482,12 +1524,16 @@ function renderStretchWarp(ctx, sample, p, W, H, opts) {
   const { pr, pc } = warpPatches(grid)
   const per = opts.quality === 'low' ? 18 : opts.quality === 'max' ? 56 : 32
   const nu = Math.max(4, pc * 6)
-  const nv = Math.max(8, Math.min(320, pr * per))
+  const range = Array.isArray(opts.tRange) ? opts.tRange : null
+  const vLo = range ? clamp01(range[0]) : 0
+  const vHi = range ? clamp01(range[1]) : 1
+  if (vHi - vLo < 1e-4) return false
+  const nv = Math.max(8, Math.min(320, Math.ceil(pr * per * (vHi - vLo))))
   const cells = (nu + 1) * (nv + 1)
   const build = (mirrorAxis) => {
     const m = { cols: nu + 1, rows: nv + 1, pos: new Float32Array(cells * 2), uv: new Float32Array(cells * 2), t: new Float32Array(cells) }
     for (let j = 0; j <= nv; j++) {
-      const v = j / nv
+      const v = vLo + (vHi - vLo) * (j / nv)
       for (let i = 0; i <= nu; i++) {
         const u = i / nu
         const q = evalWarpSurface(grid, u, v)
@@ -1509,7 +1555,8 @@ function renderStretchWarp(ctx, sample, p, W, H, opts) {
   const meshes = [build(false)]
   if (p.mirror) meshes.push(build(true))
 
-  const gpu = renderMeshGL({ source: strip, meshes, W, H, fade: p.fade, fadeIn: p.fadeIn })
+  const soft = opts.soft || null
+  const gpu = renderMeshGL({ source: strip, meshes, W, H, fade: p.fade, fadeIn: p.fadeIn, soft })
   ctx.save()
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.globalAlpha = p.opacity
@@ -1527,12 +1574,12 @@ function renderStretchWarp(ctx, sample, p, W, H, opts) {
   const tctx = tex.getContext('2d')
   tctx.imageSmoothingEnabled = true
   tctx.drawImage(strip, 0, strip.height > 2 ? 1 : 0, strip.width, 1, 0, 0, strip.width, TV)
-  if (p.fade > 0 || p.fadeIn > 0) {
+  if (p.fade > 0 || p.fadeIn > 0 || soft) {
     const ramp = Math.max(0.02, p.fadeIn * 0.6)
     const grad = tctx.createLinearGradient(0, 0, 0, TV)
-    for (let k = 0; k <= 16; k++) {
-      const t = k / 16
-      grad.addColorStop(t, `rgba(0,0,0,${clamp01((1 - p.fadeIn * (1 - Math.min(1, t / ramp))) * (1 - p.fade * t))})`)
+    for (let k = 0; k <= 64; k++) {
+      const t = k / 64
+      grad.addColorStop(t, `rgba(0,0,0,${clamp01((1 - p.fadeIn * (1 - Math.min(1, t / ramp))) * (1 - p.fade * t)) * softAt(soft, t)})`)
     }
     tctx.globalCompositeOperation = 'destination-in'
     tctx.fillStyle = grad
@@ -1748,8 +1795,11 @@ export function renderFlowStretch(ctx, sample, params, W, H, opts = {}) {
     for (const sec of sections) if (sec) sec.hw *= scale
   }
   for (let i = 0; i <= slices; i++) if (sections[i]) sections[i] = { ...sections[i], t: i / slices }
-  const swept = p.toEdge && p.fade <= 0 ? extendToEdge(sections.filter(Boolean), W, H) : sections
-  sweepStripMesh(ctx, strip, swept, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality })
+  const live = sections.filter(Boolean)
+  const range = Array.isArray(opts.tRange) ? opts.tRange : null
+  const swept = clipSections(p.toEdge && p.fade <= 0 ? extendToEdge(live, W, H) : live, range)
+  if (swept.length < 2) return false
+  sweepStripMesh(ctx, strip, swept, W, H, { opacity: p.opacity, fade: p.fade, fadeIn: p.fadeIn, quality: opts.quality, soft: opts.soft || null })
   return true
 }
 
@@ -2159,6 +2209,99 @@ export function applySubjectKnockout(ctx, alphaMatte, W, H, strength = 1) {
   ctx.drawImage(alphaMatte, 0, 0, W, H)
   ctx.globalCompositeOperation = prevOp
   ctx.globalAlpha = prevAlpha
+}
+
+// Length (in t) of the soft hand-off where a wrap brings the ribbon in front —
+// a hard cut across the subject reads as a pasted edge, the way a hard-edged
+// layer mask does in Photoshop.
+const WRAP_SOFT = 0.06
+
+/**
+ * The stretch as its committed layer, drawn onto a TRANSPARENT ctx: the ribbon,
+ * the front subject knocked out of it by `coverage`, and — with `wrapAt` — the
+ * ribbon from that point on drawn back over the subject, so it comes out from
+ * behind and crosses in front (a mask painted over part of the band, in
+ * Photoshop terms). Both parts render at full opacity and the layer's opacity
+ * is applied once, so neither the seam nor a fold over itself doubles up.
+ * `alpha` is from matteToAlphaCanvas at W×H. Returns false when nothing drew.
+ */
+export function renderStretchLayer(ctx, sample, params, W, H, { quality = 'high', alpha = null, coverage = 0, wrapAt = null } = {}) {
+  const p = clampStretchParams(params)
+  const solid = { ...p, opacity: 1 }
+  const knock = Boolean(alpha) && coverage > 0
+  let drew
+  if (knock && Number.isFinite(wrapAt)) {
+    const w = clamp01(wrapAt)
+    // The back part runs on under the whole hand-off, so outside the subject the
+    // ribbon stays solid while the front part fades in over it.
+    drew = renderPixelStretch(ctx, sample, solid, W, H, { quality, tRange: [-Infinity, w + WRAP_SOFT] })
+    if (drew) applySubjectKnockout(ctx, alpha, W, H, coverage)
+    drew = renderPixelStretch(ctx, sample, solid, W, H, { quality, tRange: [w, Infinity], soft: [w, WRAP_SOFT] }) || drew
+  } else {
+    drew = renderPixelStretch(ctx, sample, solid, W, H, { quality })
+    if (drew && knock) applySubjectKnockout(ctx, alpha, W, H, coverage)
+  }
+  if (drew && p.opacity < 1 && !p.scan) {
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.globalCompositeOperation = 'destination-in'
+    ctx.fillStyle = `rgba(0,0,0,${p.opacity})`
+    ctx.fillRect(0, 0, W, H)
+    ctx.restore()
+  }
+  return drew
+}
+
+/** Ribbon centreline as [{ x, y, t }] in pixels, or null for modes without one. */
+function ribbonCentreline(p, W, H, n = 160) {
+  const pts = []
+  if (p.scan) return null
+  if (p.flowPath) {
+    const lut = buildFlowLUT(p.flowPath.anchors, W, H, 24)
+    if (lut.total < 2) return null
+    for (let i = 0; i <= n; i++) { const a = flowAt(lut, (i / n) * lut.total); if (a) pts.push({ x: a.x, y: a.y, t: i / n }) }
+    return pts
+  }
+  if (p.warpGrid) {
+    if (p.warpModel !== 'stretch') return null
+    for (let i = 0; i <= n; i++) { const q = evalWarpSurface(p.warpGrid, 0.5, i / n); pts.push({ x: q.x * W, y: q.y * H, t: i / n }) }
+    return pts
+  }
+  const g = resolveGeometry(p, W, H)
+  for (let i = 0; i <= n; i++) { const c = cubic(g.start, g.c1, g.c2, g.end, i / n); pts.push({ x: c.x, y: c.y, t: i / n }) }
+  return pts
+}
+
+/**
+ * Where a Partial wrap should bring the ribbon in front: just before the point
+ * where it comes back over the subject after leaving it (an arch's far leg, a
+ * fold, a swoosh's curl). A ribbon that never returns (`recross` false) wraps
+ * halfway between its root and where it leaves the subject instead, so it rises
+ * out of the subject and over its upper part — Partial always shows.
+ *
+ * @param {HTMLCanvasElement|OffscreenCanvas} matte  white-on-black front mask
+ * @returns {{ wrapAt: number, recross: boolean }}
+ */
+export function suggestWrapAt(params, matte, W = 1, H = 1) {
+  const fallback = { wrapAt: 0.5, recross: false }
+  if (!matte?.width || !matte?.height) return fallback
+  const p = clampStretchParams(params)
+  const pts = ribbonCentreline(p, W, H)
+  if (!pts?.length) return fallback
+  let data
+  try { data = matte.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, matte.width, matte.height).data } catch { return fallback }
+  const inside = (pt) => {
+    const mx = Math.floor((pt.x / W) * matte.width), my = Math.floor((pt.y / H) * matte.height)
+    if (mx < 0 || my < 0 || mx >= matte.width || my >= matte.height) return false
+    return data[(my * matte.width + mx) * 4] > 127
+  }
+  let exitT = null
+  for (const pt of pts) {
+    const isIn = inside(pt)
+    if (!isIn && exitT == null) exitT = pt.t
+    else if (isIn && exitT != null) return { wrapAt: clamp01(pt.t - 0.03), recross: true }
+  }
+  return exitT != null && exitT > 0 ? { wrapAt: exitT / 2, recross: false } : fallback
 }
 
 /**
