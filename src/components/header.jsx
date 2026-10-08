@@ -32,16 +32,19 @@ function AuthControls() {
 
       <Show when="signed-in">
         <div className="flex items-center gap-3">
-          <NeoButton
-            variant="secondary"
-            size="md"
-            magnetic={false}
-            disabled={isNavigatingToDashboard || isDashboardRoute}
-            onClick={navigateToDashboard}
-          >
-            <LayoutDashboard className="h-4 w-4" strokeWidth={2.5} />
-            {isNavigatingToDashboard ? 'Opening' : 'Dashboard'}
-          </NeoButton>
+          {/* A link to the page you are on is noise. */}
+          {!isDashboardRoute && (
+            <NeoButton
+              variant="secondary"
+              size="md"
+              magnetic={false}
+              disabled={isNavigatingToDashboard}
+              onClick={navigateToDashboard}
+            >
+              <LayoutDashboard className="h-4 w-4" strokeWidth={2.5} />
+              {isNavigatingToDashboard ? 'Opening' : 'Dashboard'}
+            </NeoButton>
+          )}
           <div className="flex items-center gap-2">
             <ProBadge size="sm" />
             <UserButton
