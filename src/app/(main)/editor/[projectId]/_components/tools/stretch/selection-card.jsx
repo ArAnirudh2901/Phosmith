@@ -148,7 +148,7 @@ export default function SelectionCard({
               <span className="text-[11px] font-semibold" style={{ color: '#a78bfa' }}>AI Auto Stretch</span>
             </div>
             <p className="text-[10.5px] leading-relaxed mb-2.5" style={{ color: 'var(--text-muted)' }}>
-              Let AI analyze the image and automatically pick the best region, direction, and stretch parameters like a pro editor.
+              Finds the subject, runs stripes from its most colourful line into the open side of the frame with a look that suits it, and keeps the subject in front — the whole Photoshop sequence in one tap.
             </p>
             <button
               type="button"

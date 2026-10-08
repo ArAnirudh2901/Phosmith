@@ -30,11 +30,20 @@ if (build.exitCode !== 0) die(`bundle failed:\n${build.stderr?.toString().slice(
 await writeFile(path.join(OUT_DIR, 'index.html'),
     '<!doctype html><meta charset="utf-8"><title>stretch preview</title><body style="background:#06080b"><script type="module" src="./entry.js"></script>')
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.jpg': 'image/jpeg', '.png': 'image/png', '.map': 'application/json', '.arw': 'application/octet-stream', '.nef': 'application/octet-stream', '.cr2': 'application/octet-stream', '.dng': 'application/octet-stream' }
+// The on-device models (an `autoPlan` spec runs real SlimSAM) need the
+// version-matched ORT runtime at /ort/, exactly as the app serves it.
+const ORT_DIR = [
+    path.join(ROOT, 'public/ort'),
+    path.join(ROOT, 'node_modules/@huggingface/transformers/node_modules/onnxruntime-web/dist'),
+    path.join(ROOT, 'node_modules/onnxruntime-web/dist'),
+].find((d) => existsSync(d))
+
+const MIME = { '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.html': 'text/html', '.js': 'text/javascript', '.jpg': 'image/jpeg', '.png': 'image/png', '.map': 'application/json', '.arw': 'application/octet-stream', '.nef': 'application/octet-stream', '.cr2': 'application/octet-stream', '.dng': 'application/octet-stream' }
 const server = createServer(async (req, res) => {
     const rel = new URL(req.url, 'http://localhost').pathname
     const file = rel.startsWith('/photos/') ? path.join(PHOTOS, path.basename(rel))
-        : path.join(OUT_DIR, path.normalize(rel === '/' ? '/index.html' : rel))
+        : rel.startsWith('/ort/') && ORT_DIR ? path.join(ORT_DIR, path.basename(rel))
+            : path.join(OUT_DIR, path.normalize(rel === '/' ? '/index.html' : rel))
     if (!existsSync(file)) { res.writeHead(404).end('nf'); return }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' })
     res.end(await readFile(file))
@@ -86,8 +95,13 @@ if (probe) {
     try { ({ chromium } = await import('playwright')) } catch { server.close(); die(`no Chrome on :${DEVTOOLS} and no playwright`) }
     // Headless defaults to SwiftShader; on a Mac ask for the real GPU so timings
     // and the WebGL path are the ones a user gets.
-    const browser = await chromium.launch({ args: process.platform === 'darwin' ? ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist'] : [] })
-    const page = await browser.newPage()
+    // A persistent profile shares verify:client-ai's model cache, so an
+    // autoPlan spec does not download SlimSAM on every run.
+    const browser = await chromium.launchPersistentContext(path.join(ROOT, '.cache', 'playwright-client-ai'), {
+        headless: true,
+        args: process.platform === 'darwin' ? ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu'] : ['--enable-unsafe-webgpu'],
+    })
+    const page = browser.pages()[0] || await browser.newPage()
     await page.goto(BASE)
     console.log('[preview-stretch] no Chrome on :9222 — using Playwright Chromium')
     evaluate = (expression) => page.evaluate(expression)

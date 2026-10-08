@@ -22,6 +22,7 @@ import {
 } from '../../src/lib/pixel-stretch.js'
 
 import { isRawFile, resolveSourceFile } from '../../src/lib/raw-preview.js'
+import { findSubjectMatte, planAutoStretch } from '../../src/lib/stretch-auto.js'
 
 const loadImage = (src) => new Promise((resolve, reject) => {
     const el = new Image()
@@ -100,7 +101,31 @@ const shot = async (spec) => {
     globalThis.__phosmithStretchNoGL = Boolean(spec.noGL)
     const t0 = performance.now()
     let ok
-    if (spec.behind && p.polygon) {
+    if (spec.autoPlan) {
+        // The real Auto Stretch: SlimSAM on a ≤1024px copy, then the shared planner.
+        const s = Math.min(1, 1024 / Math.max(W, H))
+        const small = makeSampleCanvas(img, Math.round(W * s), Math.round(H * s))
+        const matte = spec.noSubject ? null : await findSubjectMatte(small, { hint: spec.hint || null })
+        const plan = planAutoStretch({ sample, matte, hint: spec.hint || null, prefer: spec.prefer || null })
+        const layer = createStretchBuffer(W, H)
+        ok = Boolean(plan) && renderStretchLayer(layer.getContext('2d'), sample, plan.params, W, H, {
+            quality: 'max',
+            alpha: matte && plan.coverage > 0 ? matteToAlphaCanvas(matte, W, H, 0.006 * Math.min(W, H)) : null,
+            coverage: plan?.coverage || 0,
+            wrapAt: plan?.wrapAt ?? null,
+        })
+        ctx.drawImage(layer, 0, 0)
+        if (spec.showMatte && matte) {
+            // Red tint where the detector put the subject, to judge the matte itself.
+            const tint = matteToAlphaCanvas(matte, W, H, 0)
+            const t = tint.getContext('2d')
+            t.globalCompositeOperation = 'source-in'
+            t.fillStyle = 'rgba(255,0,0,0.45)'
+            t.fillRect(0, 0, W, H)
+            ctx.drawImage(tint, 0, 0)
+        }
+        lastPlan = plan && { subject: plan.subject, look: plan.look, edge: plan.edge, amount: +plan.amount.toFixed(2), coverage: plan.coverage, wrapAt: plan.wrapAt, band: plan.params.band, why: plan.reasoning }
+    } else if (spec.behind && p.polygon) {
         // Same as the bake: ribbon on its own layer, the lasso knocked back out,
         // and for a wrap the later part of the ribbon drawn back over it.
         const layer = createStretchBuffer(W, H)

@@ -28,7 +28,10 @@ const html = `<!doctype html><html><head><meta charset="utf-8"><script>window.pr
 const server = Bun.serve({ port: 0, fetch(req) {
   const p = new URL(req.url).pathname
   if (p === '/') return new Response(html, { headers: { 'content-type': 'text/html' } })
-  return new Response(Bun.file(path.join(OUT, p)))
+  // A missing file is a 404, not a thrown ENOENT: Auto Stretch probes /ort/ for
+  // the model runtime, which this harness deliberately does not serve.
+  const file = Bun.file(path.join(OUT, p))
+  return file.exists().then((ok) => (ok ? new Response(file) : new Response('not found', { status: 404 })))
 } })
 
 let browser
@@ -121,6 +124,20 @@ const boundaryErrors = (page) => page.evaluate(() => window.__errors.slice())
   const panelText = await page.locator('#panel').innerText()
   check(/In front from/.test(panelText) && /no AI, no extra memory/.test(panelText) && !/Detecting subject/.test(panelText),
     'Pixel Stretch: Partial wraps over the selection without running subject detection')
+
+  // Auto Stretch lands in the stretch warp with a look chosen, whatever the
+  // models do here (no /api, no model files: it must still finish on its own).
+  await mount('stretch')
+  const auto = page.locator('#panel button', { hasText: /Auto Stretch|Stretch it for me/i })
+  let autoOk = false
+  if (await auto.count()) {
+    await click(auto.last())
+    for (let i = 0; i < 120 && !autoOk; i++) {
+      await page.waitForTimeout(500)
+      autoOk = (await page.locator('#panel button', { hasText: /^\s*Rise\s*$/ }).count()) > 0
+    }
+  }
+  check(autoOk, 'Pixel Stretch: Auto Stretch finishes in the stretch warp even with no service or model')
 
   await mount('adjust')
   const tabs = page.locator('.adjust-tabs button')

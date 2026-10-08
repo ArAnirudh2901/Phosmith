@@ -2295,11 +2295,15 @@ export function suggestWrapAt(params, matte, W = 1, H = 1) {
     if (mx < 0 || my < 0 || mx >= matte.width || my >= matte.height) return false
     return data[(my * matte.width + mx) * 4] > 127
   }
-  let exitT = null
+  // Leaving counts only after the ribbon has been inside: a root that starts
+  // just outside a concave edge and then enters is not coming BACK.
+  let exitT = null, wasIn = false
   for (const pt of pts) {
     const isIn = inside(pt)
-    if (!isIn && exitT == null) exitT = pt.t
-    else if (isIn && exitT != null) return { wrapAt: clamp01(pt.t - 0.03), recross: true }
+    if (isIn && exitT == null) wasIn = true
+    else if (!isIn && wasIn && exitT == null) exitT = pt.t
+    // A real return, not a notch in the outline: some travel outside first.
+    else if (isIn && exitT != null && pt.t - exitT >= 0.15) return { wrapAt: clamp01(pt.t - 0.03), recross: true }
   }
   return exitT != null && exitT > 0 ? { wrapAt: exitT / 2, recross: false } : fallback
 }

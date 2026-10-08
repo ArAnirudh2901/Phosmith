@@ -1,117 +1,26 @@
 // /api/ai/stretch-plan
 //
-// AI Pixel Stretch Planner — uses Gemini vision to analyze an image and recommend
-// the optimal region, direction, and parameters for a pixel stretch effect.
+// The vision read behind Auto Stretch. The reference edits are one Photoshop
+// sequence (sample a line across the subject, stretch it into stripes off the
+// canvas, warp them, keep the subject in front), so the model is not asked for
+// geometry — the client finds the subject (SlimSAM), the line and the warp
+// itself. It is asked only for the creative calls a pixel analysis cannot make:
+// which way the stripes should run, which look suits the subject, and whether
+// they should wrap back in front of it.
 //
-// Flow:
-//   1. Auth (Clerk)
-//   2. Rate limit
-//   3. Accept image as base64 (client captures a small canvas snapshot)
-//   4. Send to Gemini with a system prompt asking it to think like a pro editor
-//   5. Return the plan: { region, axis, direction, params, reasoning }
-//
-// Fallback: if Gemini is unavailable, returns an aspect-ratio-based editorial
-// default. The CLIENT additionally runs a real on-device pixel analyser
-// (analyzeStretchPlan in lib/pixel-stretch.js) when this route is unreachable,
-// so Auto Stretch keeps working — and "thinking" — with no API key at all.
+// Returns { success, hint } where `hint` is null without a key or on failure;
+// the client's planner (src/lib/stretch-auto.js) then decides alone.
 
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
+import { AUTO_HINT_PROMPT, AUTO_HINT_SCHEMA, sanitizeAutoHint } from "@/lib/stretch-auto-hint"
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"
 const GEMINI_ENDPOINT = (model) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`
 const GEMINI_TIMEOUT_MS = 15_000
-
-const STRETCH_SYSTEM_PROMPT = `You are an elite photo editor and digital artist specializing in pixel stretch / glitch art effects. You analyze images and decide WHERE and HOW to create the most visually stunning pixel stretch effect.
-
-Your job: given an image, output a JSON plan for a pixel stretch effect that would look incredible as album art, editorial photography, or social media content.
-
-## How Pixel Stretch Works
-- A "band" region (rectangle) is selected on the image — this is the SOURCE of the pixel colors
-- Pixels from a seed line within that band are stretched along an axis (vertical or horizontal)
-- The stretch can be straight, arched, S-curved, ribbon-like, etc.
-
-## Your Decision Process (think like a pro editor)
-
-### 1. REGION SELECTION (most critical)
-Pick a region that contains the most visually interesting / colorful strip of pixels:
-- For PORTRAITS: stretch through the clothing, hair, or background colors (NOT through the face)
-- For LANDSCAPES: stretch through the sky gradient, horizon line, or most colorful section
-- For ARCHITECTURE: stretch through columns, windows, or facade patterns
-- For ABSTRACT/PATTERNS: stretch through the most color-varied section
-- For GROUP PHOTOS: stretch through the background or between subjects
-
-The seed line (the row/column of pixels that gets smeared) should pass through the area with the BEST color variety and contrast.
-
-### 2. DIRECTION & NEGATIVE SPACE (decide where the streaks GO)
-- vertical: good for portraits, buildings, trees, tall subjects
-- horizontal: good for landscapes, horizons, wide scenes
-- Sweep the streaks INTO the emptiest, least-detailed region (open sky, a plain
-  wall, soft/blurred background) so they read as deliberate motion and have room
-  to breathe — never smear over the focal subject's face or key detail.
-- Set "direction" (1 = forward along the axis, -1 = backward) so the stretch
-  travels toward that open space.
-- Prefer a seed line whose COLORS are vivid and varied — the streaks become the
-  hero of the image, so saturated, harmonious colour beats flat or muddy tones.
-
-### 3. PARAMETERS
-- length (1.0-8.0): how far the pixels stretch. 1.0 = no extension. 2.0-3.5 = editorial. 4.0+ = dramatic
-- bend (-1.0 to 1.0): curve of the stretch. 0 = straight. 0.3-0.7 = elegant arch. negative = opposite curve
-- twist (-1.0 to 1.0): S-curve amount. 0 = uniform. 0.5-1.0 = serpentine
-- fade (0-1.0): how much the stretch fades out. 0.05-0.25 = subtle taper
-- taper (0-1.0): width tapering. 0.1-0.3 = natural look
-- mirror (true/false): symmetric stretch both directions
-- seed (0-1.0): position of the source line within the band (0 = start edge, 0.5 = center, 1 = end edge)
-- opacity (0-1.0): strength of the effect. Usually 1.0
-
-### 4. FLOW PATH (STRONGLY PREFERRED — the best-in-class control)
-Instead of a single bent ribbon, route the smear through a FLOW PATH: an ordered
-list of 3-6 points (normalized 0-1) that the streak travels along, following
-every curve. This is far more expressive than length/bend/twist — it lets the
-streak weave through the composition like a brushstroke.
-
-Rules for a great flow path:
-- The FIRST point sits on the most colourful / highest-contrast seed location
-  (the streak's colours are sampled there).
-- Subsequent points route INTO the emptiest negative space (open sky, plain wall,
-  soft background), curving smoothly — never a straight line, never back over the
-  focal subject's face or key detail.
-- Keep turns gentle and organic (an S, an arc, a gentle spiral) — think of how a
-  ribbon would fall through the scene.
-- "flowWidth" (0.05-0.4) is the ribbon's thickness as a fraction of the image.
-
-Also fill the scalar params (length/bend/twist/…) as a graceful fallback for
-clients that don't support flow paths.
-
-### 5. STYLE GUIDELINES
-- For EDITORIAL/PREMIUM: moderate reach, gentle single arc, light fade
-- For DRAMATIC/ART: long reach, strong curve, with an S-turn
-- For SUBTLE/MINIMAL: short reach, near-straight
-- For FLOWING/ORGANIC: serpentine multi-point flow with taper
-
-Return STRICT JSON only, no prose:
-{
-  "region": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
-  "axis": "vertical" | "horizontal",
-  "direction": 1 | -1,
-  "flowPath": [ { "x": 0.0, "y": 0.0 }, { "x": 0.0, "y": 0.0 }, { "x": 0.0, "y": 0.0 } ],
-  "flowWidth": 0.18,
-  "length": 0.0,
-  "bend": 0.0,
-  "twist": 0.0,
-  "fade": 0.0,
-  "taper": 0.0,
-  "mirror": false,
-  "seed": 0.0,
-  "opacity": 1.0,
-  "reasoning": "<1-2 sentence explanation of your creative choice>"
-}
-
-All coordinates are NORMALIZED (0-1 range relative to image dimensions).
-Pick a flow path + parameters that create the BEST LOOKING result. Be bold and creative.`
 
 export async function POST(request) {
   const { userId } = await auth()
@@ -137,45 +46,33 @@ export async function POST(request) {
     return NextResponse.json({ error: "imageBase64 is required" }, { status: 400 })
   }
 
-  // Try Gemini first, fall back to rule-based analysis
-  let plan = null
+  if (!GEMINI_API_KEY) return NextResponse.json({ success: true, hint: null, source: "none" })
 
-  if (GEMINI_API_KEY) {
-    const callArgs = {
-      apiKey: GEMINI_API_KEY,
-      model: GEMINI_MODEL,
-      imageBase64,
-      mimeType: mimeType || "image/jpeg",
-      width: width || 0,
-      height: height || 0,
-    }
-    try {
-      plan = await callGeminiForStretchPlan(callArgs)
-    } catch (error) {
-      // Retry once after 2s for transient 503 (model overloaded) errors.
-      const is503 = /503|UNAVAILABLE/i.test(error?.message || '')
-      if (is503) {
-        try {
-          await new Promise((r) => setTimeout(r, 2000))
-          plan = await callGeminiForStretchPlan(callArgs)
-        } catch (retryErr) {
-          console.warn("[stretch-plan] Gemini retry also failed, falling back to rule-based:", retryErr?.message)
-        }
-      } else {
-        console.warn("[stretch-plan] Gemini call failed, falling back to rule-based:", error?.message)
+  const callArgs = {
+    apiKey: GEMINI_API_KEY,
+    model: GEMINI_MODEL,
+    imageBase64,
+    mimeType: mimeType || "image/jpeg",
+    width: width || 0,
+    height: height || 0,
+  }
+  let raw = null
+  try {
+    raw = await callGeminiForStretchHint(callArgs)
+  } catch (error) {
+    // Retry once after 2s for transient 503 (model overloaded) errors.
+    if (/503|UNAVAILABLE/i.test(error?.message || "")) {
+      try {
+        await new Promise((r) => setTimeout(r, 2000))
+        raw = await callGeminiForStretchHint(callArgs)
+      } catch (retryErr) {
+        console.warn("[stretch-plan] Gemini retry failed; the client plans alone:", retryErr?.message)
       }
+    } else {
+      console.warn("[stretch-plan] Gemini call failed; the client plans alone:", error?.message)
     }
   }
-
-  if (!plan) {
-    // Rule-based fallback
-    plan = generateFallbackPlan(width || 0, height || 0)
-  }
-
-  // Sanitize the plan
-  plan = sanitizePlan(plan)
-
-  return NextResponse.json({ success: true, plan })
+  return NextResponse.json({ success: true, hint: sanitizeAutoHint(raw), source: raw ? "vision" : "none" })
 }
 
 /**
@@ -250,16 +147,16 @@ function setCachedPlan(key, plan) {
   _planCache.set(key, { plan, ts: Date.now() })
 }
 
-async function callGeminiForStretchPlan({ apiKey, model, imageBase64, mimeType, width, height }) {
+async function callGeminiForStretchHint({ apiKey, model, imageBase64, mimeType, width, height }) {
   // Check cache first
   const cacheKey = getCacheKey(imageBase64, width, height)
   const cached = getCachedPlan(cacheKey)
   if (cached) return cached
 
-  const userText = `Analyze this image (${width}×${height}px) and create a pixel stretch plan that will look AMAZING.`
+  const userText = `Photo ${width}×${height}px. Make the creative calls for its pixel stretch.`
 
   const requestBody = {
-    systemInstruction: { parts: [{ text: STRETCH_SYSTEM_PROMPT }] },
+    systemInstruction: { parts: [{ text: AUTO_HINT_PROMPT }] },
     contents: [
       {
         role: "user",
@@ -270,10 +167,17 @@ async function callGeminiForStretchPlan({ apiKey, model, imageBase64, mimeType, 
       },
     ],
     generationConfig: {
-      temperature: 0.7,  // Some creativity for artistic decisions
-      topP: 0.9,
+      // The same photo should get the same edit when Auto is pressed twice.
+      temperature: 0,
       responseMimeType: "application/json",
-      maxOutputTokens: 512,
+      responseSchema: AUTO_HINT_SCHEMA,
+      // 2.5-series thinking spends from this budget; at 512 the JSON came back
+      // cut off mid-object and every call fell through to the fallback.
+      maxOutputTokens: 2048,
+      // A creative call, not a reasoning task: 2.5 thinking took it from ~5 s to ~9 s.
+      ...(/^gemini-3/i.test(GEMINI_MODEL)
+        ? { thinkingConfig: { thinkingLevel: process.env.GEMINI_THINKING_LEVEL || "low" } }
+        : /^gemini-2\.5/i.test(GEMINI_MODEL) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
     },
   }
 
@@ -305,89 +209,5 @@ async function callGeminiForStretchPlan({ apiKey, model, imageBase64, mimeType, 
     return plan
   } finally {
     clearTimeout(timeout)
-  }
-}
-
-/**
- * Rule-based fallback when Gemini is unavailable.
- * Uses aspect ratio heuristics to pick sensible defaults.
- */
-function generateFallbackPlan(width, height) {
-  const aspect = width && height ? width / height : 1
-  const isLandscape = aspect > 1.2
-  const isPortrait = aspect < 0.8
-
-  // Pick axis based on image orientation
-  const axis = isLandscape ? "horizontal" : "vertical"
-
-  // Default region: a vertical strip through the center-right (interesting area)
-  // or a horizontal strip through the upper third (sky/background)
-  const region = axis === "vertical"
-    ? { x: 0.3, y: 0.1, w: 0.35, h: 0.65 }
-    : { x: 0.1, y: 0.15, w: 0.65, h: 0.35 }
-
-  // Pick a moderate editorial preset
-  return {
-    region,
-    axis,
-    direction: 1,
-    length: 2.4,
-    bend: 0.45,
-    twist: 0,
-    fade: 0.15,
-    taper: 0.12,
-    mirror: false,
-    seed: isPortrait ? 0.3 : 0.5,
-    opacity: 1.0,
-    reasoning: `Auto-selected a ${axis} stretch through the ${axis === "vertical" ? "center" : "upper"} region with an editorial arch look.`,
-  }
-}
-
-function sanitizePlan(raw) {
-  if (!raw || typeof raw !== "object") return generateFallbackPlan(0, 0)
-
-  const clamp = (v, lo, hi) => Math.min(Math.max(Number(v) || 0, lo), hi)
-  const clamp01 = (v) => clamp(v, 0, 1)
-
-  const region = raw.region && typeof raw.region === "object"
-    ? {
-        x: clamp01(raw.region.x),
-        y: clamp01(raw.region.y),
-        w: clamp(raw.region.w, 0.05, 1),
-        h: clamp(raw.region.h, 0.05, 1),
-      }
-    : { x: 0.3, y: 0.1, w: 0.35, h: 0.65 }
-
-  // Ensure region doesn't overflow
-  region.x = Math.min(region.x, 1 - region.w)
-  region.y = Math.min(region.y, 1 - region.h)
-
-  // Flow path — an ordered list of 2..12 normalized points, when the model
-  // provided one. Drop anything malformed; a too-short list degrades to null
-  // (the client then applies the scalar simple sweep).
-  let flowPath = null
-  if (Array.isArray(raw.flowPath)) {
-    const pts = raw.flowPath
-      .filter((p) => p && Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y)))
-      .slice(0, 12)
-      .map((p) => ({ x: clamp01(p.x), y: clamp01(p.y) }))
-    if (pts.length >= 2) flowPath = pts
-  }
-
-  return {
-    region,
-    axis: raw.axis === "horizontal" ? "horizontal" : "vertical",
-    direction: Number(raw.direction) < 0 ? -1 : 1,
-    flowPath,
-    flowWidth: raw.flowWidth != null ? clamp(raw.flowWidth, 0.05, 0.4) : 0.18,
-    length: clamp(raw.length, 1, 8),
-    bend: clamp(raw.bend, -1, 1),
-    twist: clamp(raw.twist, -1, 1),
-    fade: clamp01(raw.fade),
-    taper: clamp01(raw.taper),
-    mirror: Boolean(raw.mirror),
-    seed: clamp01(raw.seed),
-    opacity: clamp(raw.opacity, 0.1, 1),
-    reasoning: String(raw.reasoning || "AI-selected stretch parameters").slice(0, 300),
   }
 }

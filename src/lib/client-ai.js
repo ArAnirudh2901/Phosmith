@@ -792,7 +792,7 @@ const ensureSamImage = async (el, { width, height }) => {
 
 // SAM output → coverage canvas at outW×outH (white = selected); picks the
 // highest-IoU candidate. Ported from the mask-studio testbed.
-const samMaskToCanvas = (maskTensor, iou, outW, outH) => {
+const samMaskToCanvas = (maskTensor, iou, outW, outH, whole = false) => {
     const dims = maskTensor.dims
     const w = dims[dims.length - 1]
     const h = dims[dims.length - 2]
@@ -802,6 +802,19 @@ const samMaskToCanvas = (maskTensor, iou, outW, outH) => {
     let best = -Infinity
     for (let i = 0; i < nMasks; i += 1) { const s = scores[i] ?? 0; if (s > best) { best = s; bi = i } }
     const plane = w * h
+    // SAM answers a prompt with whole / part / sub-part. The best-scored one is
+    // often the part under the prompt point (a motorbike's engine); `whole` takes
+    // the largest of the confident answers instead.
+    if (whole && nMasks > 1) {
+        let bigArea = -1
+        for (let i = 0; i < nMasks; i += 1) {
+            if ((scores[i] ?? 0) < Math.max(0.5, best - 0.25)) continue
+            let a = 0
+            const o = i * plane
+            for (let p = 0; p < plane; p += 1) if (maskTensor.data[o + p]) a += 1
+            if (a > bigArea) { bigArea = a; bi = i }
+        }
+    }
     const off = bi * plane
     const small = document.createElement('canvas')
     small.width = w
@@ -849,7 +862,7 @@ const samClickOnce = async (el, points, labels, dims) => {
     return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
 }
 
-const samBoxOnce = async (el, box, dims, seedPoint = null) => {
+const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false) => {
     const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
     const input_boxes = [[[
         Math.round(box[0] * scale), Math.round(box[1] * scale),
@@ -877,7 +890,7 @@ const samBoxOnce = async (el, box, dims, seedPoint = null) => {
     if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
     const masks = await processor.post_process_masks(outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
     if (!masks?.[0]?.dims) throw new Error(`${engine.label} returned no mask for the box prompt`)
-    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
+    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height, whole)
 }
 
 /**
@@ -888,9 +901,13 @@ const samBoxOnce = async (el, box, dims, seedPoint = null) => {
 export const clientSamClick = (el, points, labels, dims) =>
     withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims)))
 
-/** In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px. */
-export const clientSamBox = (el, box, dims) =>
-    withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims)))
+/**
+ * In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px;
+ * `{ whole: true }` returns the whole object in the box rather than the part
+ * under its centre.
+ */
+export const clientSamBox = (el, box, dims, { whole = false } = {}) =>
+    withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims, null, whole)))
 
 /* ─── On-device subject instances (SlimSAM "everything" mode) ────────────── */
 

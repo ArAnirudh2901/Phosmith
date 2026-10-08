@@ -22,12 +22,12 @@ import {
     clampStretchParams,
     applyWarpPreset,
     applyFlowPreset,
-    analyzeStretchPlan,
     createFlowPathFromPoints,
     makeSampleCanvas,
     bestSeedInBand,
 } from '@/lib/pixel-stretch'
-import { applyStretchToCanvas, getSourceElement, isSourceReady, isStretchBlend, STRETCH_BLEND_MODES } from '@/lib/pixel-stretch-apply'
+import { applyStretchToCanvas, getSourceElement, isSourceReady, isStretchBlend, snapshotSource, STRETCH_BLEND_MODES } from '@/lib/pixel-stretch-apply'
+import { fetchAutoHint, findSubjectMatte, planAutoStretch } from '@/lib/stretch-auto'
 
 const clamp = (v, lo, hi, fallback) => {
     const n = Number(v)
@@ -94,8 +94,6 @@ export const parseStretchPrompt = (text) => {
         }
     }
 
-    if (has(/\b(auto|for me|figure it out|best|suggest)\b/)) return { command: 'auto', params: {} }
-
     const strong = has(/\b(strong|heavy|extreme|dramatic|hard|big)\b/)
     const subtle = has(/\b(subtle|slight|gentle|soft|light touch|barely)\b/)
     const gain = strong ? 1.35 : subtle ? 0.55 : 1
@@ -105,6 +103,32 @@ export const parseStretchPrompt = (text) => {
         || (has(/\bsubject|person|him|her|them|it\b/) && has(/\bfrom\b/) ? 'subject' : null)
 
     const warp = WARP_IDS.find((id) => new RegExp(`\\b${id}\\b`).test(t))
+    const look = warp || (has(/\bcurl/) ? 'swoosh' : has(/\b(arch|bend over)\b/) ? 'arch' : null)
+
+    // Unless the sentence pins the slice to a frame edge or asks for a ribbon
+    // control by name, the whole job is the Photoshop sequence `auto` runs —
+    // subject found, stripes into the open side, subject kept in front.
+    const explicitSlice = Boolean(from) && from !== 'subject'
+    const ribbonPreset = PRESET_IDS.filter((id) => !WARP_IDS.includes(id)).find((id) => new RegExp(`\\b${id}\\b`).test(t))
+    const ribbonControls = Boolean(ribbonPreset) || has(/\b(straight|flat|mirror(ed)?|symmetric|both sides)\b/) || /\b(bend|length|long)\s*-?\d/.test(t)
+    const saysFlowEarly = has(/\b(flow|path|route|serpentine|wind(ing)?)\b/)
+    if (has(/\b(auto|for me|figure it out|best|suggest)\b/) || (!explicitSlice && !ribbonControls && !saysFlowEarly)) {
+        const edge = has(/\b(upward|upwards|into the sky|toward(s)? the top)\b/) ? 'up'
+            : has(/\b(downward|downwards|toward(s)? the bottom)\b/) ? 'down'
+                : has(/\b(to|toward(s)?)\s+the\s+left\b/) ? 'left'
+                    : has(/\b(to|toward(s)?)\s+the\s+right\b/) ? 'right' : null
+        const placement = has(/\b(partial|partly|wrap(s|ped|ping)?|in front)\b/) ? 'partial'
+            : has(/\bbehind\b/) ? 'behind'
+                : has(/\b(on top of|over)\s+(the\s+)?(subject|person|him|her|them)\b/) ? 'above' : null
+        const params = {}
+        if (look) params.look = look
+        if (edge) params.edge = edge
+        else if (has(/\b(horizontal|sideways|across)\b/)) params.axis = 'horizontal'
+        else if (has(/\b(vertical)\b/)) params.axis = 'vertical'
+        if (placement) params.placement = placement
+        if (gain !== 1) params.gain = gain
+        return { command: 'auto', params }
+    }
     // "ribbon" is both a flow preset and the everyday word for the effect itself
     // ("pull a ribbon off the subject"), so it only names the flow mode when the
     // sentence also asks for a path.
@@ -147,15 +171,31 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
         return canvas
     }
 
-    // One matte per image per run: `from: "subject"` and `behind` both want it.
+    // One matte per image: `from: "subject"`, `behind` and `auto` all want it.
+    // Keyed by the element and its flip, since these commands outlive one photo.
     let matteCache = null
 
-    /** Subject matte + bounding box in normalised coords, or null. On-device SlimSAM, as in the Mask tool. */
-    const subjectBox = async (el) => {
-        if (matteCache !== null) return matteCache
-        const dims = { width: el.naturalWidth || el.width, height: el.naturalHeight || el.height }
+    /**
+     * Subject matte + bounding box in normalised coords, or null. On-device
+     * SlimSAM, as in the Mask tool, on a copy bounded to 1024px (at native size a
+     * 45MP frame allocates a full mask per seed) and in the image's DISPLAYED
+     * orientation, since the bake samples the photo with its flip applied.
+     */
+    const subjectBox = async (el, image = getPrimaryImage?.()) => {
+        const key = `${image?.flipX ? 1 : 0}${image?.flipY ? 1 : 0}`
+        if (matteCache && matteCache.el === el && matteCache.key === key) return matteCache.value
+        const natW = el.naturalWidth || el.width, natH = el.naturalHeight || el.height
+        const scale = Math.min(1, 1024 / Math.max(natW, natH))
+        const dims = { width: Math.max(64, Math.round(natW * scale)), height: Math.max(64, Math.round(natH * scale)) }
+        const small = snapshotSource(el, dims.width, dims.height, !!image?.flipX, !!image?.flipY)
         try {
-            const mask = await (await import('@/lib/client-ai')).clientSubjectMask(el, dims)
+            const ai = await import('@/lib/client-ai')
+            let mask
+            try { mask = await ai.clientSubjectMask(small, dims) } finally {
+                small.width = 1
+                small.height = 1
+                ai.releaseClientModels?.()
+            }
             const { bboxOfMaskCanvas } = await import('@/lib/mask-service-client')
             // [x0, y0, x1, y1] in the MASK's own pixels, which need not match
             // the source's — normalise against the mask, not the photo.
@@ -163,18 +203,18 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
             if (box) {
                 const mw = mask.width || dims.width
                 const mh = mask.height || dims.height
-                matteCache = {
+                const value = {
                     x: box[0] / mw, y: box[1] / mh,
                     w: (box[2] - box[0] + 1) / mw, h: (box[3] - box[1] + 1) / mh,
                     side: 'client',
                     mask,
                 }
-                return matteCache
+                matteCache = { el, key, value }
+                return value
             }
         } catch (error) {
             console.warn('[agent.stretch] subject box failed', error)
         }
-        matteCache = null
         return null
     }
 
@@ -467,25 +507,50 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
         },
 
         auto: {
-            description: 'Read the photo and place the stretch itself — picks the most colourful seed line and routes the ribbon through the calmest part of the frame. No API key, no model.',
-            params: {},
-            run: async () => {
+            description: 'The whole Photoshop pixel stretch in one go: find the subject on device, take its most colourful line, run the stripes into the open side of the frame, warp them with the look that suits the subject, and keep the subject in front (wrapping back over it when the look curls round). Every param is optional; omitted ones are decided from the photo.',
+            params: {
+                look: `one of ${WARP_IDS.join(', ')}`,
+                edge: 'up | down | left | right — where the stripes run',
+                axis: 'horizontal | vertical — when only the orientation matters',
+                placement: 'behind (subject in front, default) | partial (out from behind, then across it) | above',
+                amount: '-200..200 — how hard the look bends; negative bends it the other way',
+                gain: '0.3..2 — scales whatever amount the photo calls for (subtle 0.55, strong 1.35)',
+            },
+            run: async ({ look, edge, axis, placement, amount, gain } = {}) => {
                 const { image, el } = requireImage()
-                const dims = { width: el.naturalWidth || el.width, height: el.naturalHeight || el.height }
-                const long = Math.min(1200, Math.max(dims.width, dims.height))
-                const scale = long / Math.max(dims.width, dims.height)
-                const sample = makeSampleCanvas(el, Math.round(dims.width * scale), Math.round(dims.height * scale))
-                const plan = analyzeStretchPlan(sample)
+                const natW = el.naturalWidth || el.width, natH = el.naturalHeight || el.height
+                const s = Math.min(1, 1200 / Math.max(natW, natH))
+                // In the image's displayed orientation, like the bake.
+                const sample = snapshotSource(el, Math.max(1, Math.round(natW * s)), Math.max(1, Math.round(natH * s)), !!image.flipX, !!image.flipY)
+                // The vision read only decides what the caller left open; its
+                // subject box, when there is one, also prompts SlimSAM.
+                const decided = look && (edge || axis)
+                const prefer = { look, edge, axis, placement, gain }
+                if (amount !== undefined && amount !== null) prefer.amount = clamp(amount, -200, 200, 100) / 100
+                const ds = Math.min(1, 1024 / Math.max(natW, natH))
+                const small = snapshotSource(el, Math.max(64, Math.round(natW * ds)), Math.max(64, Math.round(natH * ds)), !!image.flipX, !!image.flipY)
+                let matte = null
+                let vision = null
+                try {
+                    // In parallel; the vision box only re-prompts SlimSAM when
+                    // its own subject search came back empty.
+                    ;[vision, matte] = await Promise.all([decided ? null : fetchAutoHint(sample), findSubjectMatte(small)])
+                    if (!matte && vision?.subject) matte = await findSubjectMatte(small, { hint: vision })
+                } finally { small.width = 1; small.height = 1 }
+                const plan = planAutoStretch({ sample, matte, hint: vision, prefer })
+                sample.width = 1
+                sample.height = 1
                 if (!plan) throw new Error('Could not read a stretch out of this photo — set a slice by hand')
-                const { region, reasoning, flowPath, flowWidth, ...rest } = plan
-                // The planner hands back raw points; the engine wants a flow path
-                // with tangents, the same conversion the panel does.
-                const fp = Array.isArray(flowPath) && flowPath.length >= 2
-                    ? createFlowPathFromPoints(flowPath, flowWidth ? { width: flowWidth } : {})
-                    : null
-                const params = clampStretchParams({ ...DEFAULT_STRETCH, ...rest, band: region, flowPath: fp })
-                await commit(image, params, 'Auto pixel stretch')
-                return { applied: 'auto', reasoning, axis: params.axis, band: params.band, anchors: fp?.anchors?.length || 0 }
+                const placementArgs = plan.coverage > 0 && matte
+                    ? { matte, coverage: plan.coverage, feather: 0.004, wrapAt: plan.wrapAt }
+                    : {}
+                await commit(image, plan.params, `Auto pixel stretch (${plan.look})`, placementArgs)
+                return {
+                    applied: 'auto', look: plan.look, edge: plan.edge, amount: Math.round(plan.amount * 100),
+                    behind: Math.round(plan.coverage * 100),
+                    inFrontFrom: plan.wrapAt != null ? Math.round(plan.wrapAt * 100) : null,
+                    subject: plan.subject ? 'found' : 'none', vision: Boolean(vision), reasoning: plan.reasoning,
+                }
             },
         },
 

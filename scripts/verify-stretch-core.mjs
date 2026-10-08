@@ -24,6 +24,7 @@ import {
     WARP_PRESETS,
 } from '../src/lib/pixel-stretch.js'
 import { parseStretchPrompt } from '../src/lib/agent/stretch-commands.js'
+import { AUTO_LOOKS, sanitizeAutoHint } from '../src/lib/stretch-auto-hint.js'
 
 let checks = 0
 let failures = 0
@@ -229,15 +230,20 @@ section('ribbon twist')
 }
 
 section('natural language parser')
+// A request that pins nothing goes to `auto` — the whole Photoshop sequence with
+// the subject kept in front. Naming a frame edge or a ribbon control keeps the
+// hand-tuned commands.
 const routes = [
-    ['pixel stretch this photo', 'ribbon'],
+    ['pixel stretch this photo', 'auto'],
     ['stretch the pixels from the top', 'ribbon'],
-    ['pull a ribbon off the subject', 'ribbon'],
-    ['smear the pixels across the frame', 'ribbon'],
+    ['pull a ribbon off the subject', 'auto'],
+    ['smear the pixels across the frame', 'auto'],
     ['make a strong pixel stretch from the bottom', 'ribbon'],
-    ['stretch it and arch the streaks over the building', 'warp'],
-    ['warp the stretch into a curl', 'warp'],
-    ['stretch with a fan warp', 'warp'],
+    ['stretch it and arch the streaks over the building', 'auto'],
+    ['warp the stretch into a curl', 'auto'],
+    ['stretch with a fan warp', 'auto'],
+    ['warp the streaks from the top into an arch', 'warp'],
+    ['straight pixel stretch with bend 30', 'ribbon'],
     ['make the streaks flow through the frame', 'flow'],
     ['stretch along a spiral flow', 'flow'],
     ['datamosh it', 'scanline'],
@@ -274,7 +280,7 @@ section('parser detail')
     check(p?.params?.from === 'left', 'a named edge is read out of the sentence', p?.params?.from)
     check(p?.params?.bend < 55, 'a subtle request bends less than the default', String(p?.params?.bend))
     const strong = parseStretchPrompt('strong pixel stretch')
-    check(strong?.params?.bend > 55, 'a strong request bends more', String(strong?.params?.bend))
+    check(strong?.command === 'auto' && strong.params.gain > 1, 'a strong request bends harder', JSON.stringify(strong?.params))
     const flat = parseStretchPrompt('straight pixel stretch, no bend')
     check(flat?.params?.bend === 0, 'a straight request does not bend at all')
     const mir = parseStretchPrompt('mirrored pixel stretch both sides')
@@ -358,8 +364,22 @@ section('stretch warp (Photoshop model)')
     const restNew = getWarpRest(clampStretchParams({ ...bands[0] }))
     check(Math.abs(restNew.y + restNew.h - 0.55) < 1e-9 && restNew.y < 0, 'the stretch rest runs from the sampled line past the frame edge', JSON.stringify(restNew))
 
-    check(parseStretchPrompt('make the streaks curl over')?.params?.preset === 'swoosh', 'a curl asks for the swoosh look')
-    check(parseStretchPrompt('stretch it and fold the stripes over')?.params?.preset === 'fold', 'a fold asks for the fold look')
+    check(parseStretchPrompt('make the streaks curl over')?.params?.look === 'swoosh', 'a curl asks for the swoosh look')
+    check(parseStretchPrompt('stretch it and fold the stripes over')?.params?.look === 'fold', 'a fold asks for the fold look')
+    const full = parseStretchPrompt('pixel stretch the car upwards with a swoosh, partly in front')
+    check(full?.command === 'auto' && full.params.look === 'swoosh' && full.params.edge === 'up' && full.params.placement === 'partial',
+        'look, edge and a wrap are all read out of one sentence', JSON.stringify(full?.params))
+    check(parseStretchPrompt('smear the pixels across the frame')?.params?.axis === 'horizontal', '"across" asks for a sideways run')
+    check(parseStretchPrompt('stretch it behind her')?.params?.placement === 'behind', '"behind" keeps the subject in front')
+
+    check(JSON.stringify(AUTO_LOOKS) === JSON.stringify(WARP_PRESETS.map((p) => p.id)), "the vision route's looks are the engine's looks")
+    const hostile = sanitizeAutoHint({ look: 'explode', edge: 'sideways', placement: 'under', amount: 'lots', subject: { x: -3, y: 2, w: 9, h: NaN } })
+    check(hostile && hostile.look === null && hostile.edge === null && hostile.placement === null && hostile.amount === null && hostile.subject === null,
+        'a hostile vision reply is reduced to "decide yourself"', JSON.stringify(hostile))
+    const box = sanitizeAutoHint({ look: 'fan', edge: 'up', subject: { x: 0.9, y: 0.5, w: 0.5, h: 0.7 } })
+    check(box.look === 'fan' && box.edge === 'up' && box.subject.x + box.subject.w <= 1 + 1e-9 && box.subject.y + box.subject.h <= 1 + 1e-9,
+        'a vision subject box is clamped inside the frame', JSON.stringify(box.subject))
+    check(sanitizeAutoHint(null) === null && sanitizeAutoHint('fan') === null, 'no reply is no hint')
 }
 
 console.log(`\n[verify-stretch-core] ${checks - failures}/${checks} checks passed.`)

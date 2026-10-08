@@ -7,7 +7,7 @@ import { isTaintError } from '@/lib/canvas-snapshot'
 import { toast } from 'sonner'
 import { adaptiveTextColor } from '@/lib/color-extraction'
 import { AudioLines, Check, ChevronDown, FlipHorizontal2, Layers, Loader2, RotateCcw, Sparkles, StretchHorizontal, StretchVertical, Wand2 } from 'lucide-react'
-import { DEFAULT_STRETCH, clampStretchParams, migrateStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, analyzeStretchPlan, bestSeedInBand, createDefaultFlowPath, createFlowPathFromPoints, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, snapMatteToEdges, renderStretchLayer, suggestWrapAt, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
+import { DEFAULT_STRETCH, clampStretchParams, migrateStretchParams, renderPixelStretch, getStretchAnchors, getStretchPath, getPolygonBBox, createStretchBuffer, getWarpGridHandles, getWarpGridCurves, addWarpSplit, applyWarpPreset, bestSeedInBand, createDefaultFlowPath, getFlowPathCurve, getFlowPathHandles, insertFlowAnchor, removeFlowAnchor, smoothFlowPath, applyFlowPreset, matteToAlphaCanvas, snapMatteToEdges, renderStretchLayer, suggestWrapAt, PIXEL_STRETCH_PRESETS, DEFAULT_SCANLINE } from '@/lib/pixel-stretch'
 import {
   MAX_BAKE_DIM,
   getSourceElement,
@@ -22,6 +22,7 @@ import { runHeavy, isSuperseded } from '@/lib/heavy-job-queue'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
 import { toUserMessage } from '@/lib/user-error'
+import { fetchAutoHint, findSubjectMatte, planAutoStretch } from '@/lib/stretch-auto'
 import { canvasToScreen, getActiveImage, getImageCanvasBounds, isImageObject, polygonArea, simplifyPolygon } from './stretch/canvas-geometry'
 import { DIM_BG, EASE, HANDLE, HANDLE_DEFS, MAX_PREVIEW_DIM, MIN_BAND, SETTLE_MS, SUBJECT_DETECT_MAX_DIM } from './stretch/constants'
 import SelectionCard from './stretch/selection-card'
@@ -285,7 +286,11 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       const scale = Math.min(1, SUBJECT_DETECT_MAX_DIM / Math.max(natW, natH))
       const dw = Math.max(64, Math.round(natW * scale))
       const dh = Math.max(64, Math.round(natH * scale))
-      const small = scale < 1 ? snapshotSource(srcEl, dw, dh, false, false) : srcEl
+      // In the displayed orientation: the preview and the bake both sample the
+      // photo with its flip applied, so an unflipped matte lands mirrored.
+      const fx = sampleElRef.current ? sampleFlipRef.current.x : !!selectedImageRef.current?.flipX
+      const fy = sampleElRef.current ? sampleFlipRef.current.y : !!selectedImageRef.current?.flipY
+      const small = scale < 1 || fx || fy ? snapshotSource(srcEl, dw, dh, fx, fy) : srcEl
       let matte
       try {
         matte = await clientSubjectMask(small, { width: dw, height: dh })
@@ -1232,96 +1237,71 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   const setWrapCommit = useCallback((v) => { wrapAtRef.current = v; setWrapAt(v); scheduleFrame() }, [scheduleFrame])
 
   // ── AI Auto Stretch ─────────────────────────────────────────────────────────
+  // One tap, the Photoshop sequence: subject found on device, stripes from its
+  // most colourful line into the open side, a look that suits its shape, the
+  // subject kept in front. Same planner as the agent's stretch.auto, so both make
+  // the same layer. The only place subject detection runs without being asked —
+  // "auto" is the request for it.
   const autoStretch = useCallback(async () => {
     const img = selectedImageRef.current
     const editor = editorRef.current
     if (!img || !editor) { toast.error('Select an image layer first'); return }
-    const srcEl = getSourceElement(img)
-    if (!isSourceReady(srcEl)) { toast.error('Image is still loading'); return }
+    const sample = getSample()
+    if (!sample?.canvas) { toast.error('Image is still loading'); return }
 
     setAiLoading(true)
-    const toastId = toast.loading('AI is analyzing the image…')
+    const toastId = toast.loading('Finding the subject and reading the photo…')
     try {
-      // Capture a small snapshot for the API (512px max edge, JPEG)
-      const natW = srcEl.naturalWidth || srcEl.videoWidth || srcEl.width || 512
-      const natH = srcEl.naturalHeight || srcEl.videoHeight || srcEl.height || 512
-      const scale = Math.min(1, 512 / Math.max(natW, natH))
-      const snapW = Math.max(1, Math.round(natW * scale))
-      const snapH = Math.max(1, Math.round(natH * scale))
-
-      const snapCanvas = document.createElement('canvas')
-      snapCanvas.width = snapW
-      snapCanvas.height = snapH
-      const sctx = snapCanvas.getContext('2d')
-      sctx.drawImage(srcEl, 0, 0, snapW, snapH)
-
-      let base64
+      const srcEl = sampleElRef.current || getSourceElement(img)
+      const natW = srcEl.naturalWidth || srcEl.videoWidth || srcEl.width || sample.w
+      const natH = srcEl.naturalHeight || srcEl.videoHeight || srcEl.height || sample.h
+      const ds = Math.min(1, SUBJECT_DETECT_MAX_DIM / Math.max(natW, natH))
+      const fx = sampleElRef.current ? sampleFlipRef.current.x : !!img.flipX
+      const fy = sampleElRef.current ? sampleFlipRef.current.y : !!img.flipY
+      const small = snapshotSource(srcEl, Math.max(64, Math.round(natW * ds)), Math.max(64, Math.round(natH * ds)), fx, fy)
+      let matte = null
+      setMatteStatus('loading')
+      let hint = null
       try {
-        const dataUrl = snapCanvas.toDataURL('image/jpeg', 0.85)
-        base64 = dataUrl.split(',')[1]
-      } catch {
-        throw new Error('Could not capture image snapshot (cross-origin?)')
-      }
+        // In parallel; the vision box only re-prompts SlimSAM when its own
+        // subject search came back empty.
+        ;[hint, matte] = await Promise.all([fetchAutoHint(sample.canvas), findSubjectMatte(small)])
+        if (!matte && hint?.subject) matte = await findSubjectMatte(small, { hint })
+      } finally { small.width = 1; small.height = 1 }
+      matteIsManualRef.current = false
+      subjectCutoutRef.current = null
+      subjectRawMatteRef.current = matte
+      subjectMatteSigRef.current = sourceMetaRef.current?.src || String(img.__stretchUid ?? '')
+      subjectMaskKindRef.current = matte ? 'auto' : 'selection'
+      setSubjectMaskKind(matte ? 'auto' : 'selection')
+      setMatteStatus(matte ? 'ready' : 'none')
+      const plan = planAutoStretch({ sample: sample.canvas, matte, hint })
+      if (!plan) throw new Error('Could not read a stretch out of this photo — select a region by hand')
 
-      // Try the AI planner; if the route/model is unavailable, fall back to the
-      // on-device heuristic analyser so Auto Stretch always works.
-      let plan = null
-      let offline = false
-      try {
-        const response = await fetch('/api/ai/stretch-plan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: base64, mimeType: 'image/jpeg', width: natW, height: natH }),
-        })
-        const data = await response.json().catch(() => null)
-        if (response.ok && data?.success && data?.plan) plan = data.plan
-        else throw new Error(data?.error || `stretch-plan ${response.status}`)
-      } catch (apiErr) {
-        console.warn('[PixelStretch] AI route unavailable — using on-device planner:', apiErr?.message)
-        plan = analyzeStretchPlan(snapCanvas)
-        offline = true
-      }
-      if (!plan) throw new Error('Could not analyze this image')
-
-      // Prefer the AI/heuristic FLOW PATH when present (best-in-class control —
-      // the streak follows a routed multi-anchor spline); otherwise fall back to
-      // the classic simple sweep. Either way we land in the 'stretch' phase.
-      const planPoints = Array.isArray(plan.flowPath) ? plan.flowPath : null
-      const flow = planPoints && planPoints.length >= 2
-        ? createFlowPathFromPoints(planPoints, plan.flowWidth ? { width: plan.flowWidth } : {})
-        : null
-      if (flow) {
-        commit({
-          band: plan.region, axis: plan.axis, direction: plan.direction,
-          fade: plan.fade, taper: plan.taper, opacity: plan.opacity,
-          polygon: null, warpGrid: null, warpRest: null, flowPath: flow,
-        })
-        setFlowMode(true)
-        setFlowPresetId(null)
-        setFlowAnchorCount(flow.anchors.length)
-        setWarpMode(false)
-      } else {
-        commit({
-          band: plan.region, axis: plan.axis, direction: plan.direction,
-          length: plan.length, bend: plan.bend, twist: plan.twist,
-          fade: plan.fade, taper: plan.taper, mirror: plan.mirror,
-          seed: plan.seed, opacity: plan.opacity,
-          polygon: null, warpGrid: null, warpRest: null, flowPath: null,
-        })
-        setWarpMode(false)
-        setFlowMode(false)
-      }
-      setActivePresetId(null)
+      lassoPtsRef.current = []
+      selModeRef.current = 'rect'
+      setSelectionMode('rect')
+      setScanMode(false); setFlowMode(false); setFlowPresetId(null); setActivePresetId(null)
+      setWarpMode(true)
+      setWarpPresetId(plan.look)
+      setWarpStrength(plan.amount)
+      commit({ ...plan.params, scan: null, flowPath: null })
+      coverageRef.current = plan.coverage
+      setCoverage(plan.coverage)
+      wrapAtRef.current = plan.wrapAt
+      setWrapAt(plan.wrapAt)
+      setWrapRecross(plan.wrapAt != null)
+      setRegionReady(true)
       setPhase('stretch')
-
-      toast.success(`${offline ? 'On-device · ' : ''}${plan.reasoning || 'AI stretch plan applied'}`, { id: toastId, duration: 4500 })
+      scheduleFrame()
+      toast.success(`${hint ? '' : 'On-device · '}${plan.reasoning}`, { id: toastId, duration: 4500 })
     } catch (error) {
-      console.error('[PixelStretch] AI auto-stretch failed:', error)
-      toast.error(toUserMessage(error, 'AI analysis failed'), { id: toastId })
+      console.error('[PixelStretch] auto stretch failed:', error)
+      toast.error(toUserMessage(error, 'Auto stretch failed'), { id: toastId })
     } finally {
       setAiLoading(false)
     }
-  }, [commit])
+  }, [commit, getSample, scheduleFrame])
 
   // ── Enter / exit the tool ────────────────────────────────────────────────────
   useEffect(() => {
