@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
 import UpgradeModel from '@/components/upgradeModel'
 import { stripImageMetadata } from '@/lib/strip-metadata'
+import { uploadToImageKit } from '@/lib/imagekit-upload'
 import { IMAGE_UPLOAD_ACCEPT, isRawFile, resolveSourceFile } from '@/lib/raw-preview'
 import { clampToCanvasLimits, IMAGEKIT_MAX_EDGE, IMAGEKIT_MAX_MP } from '@/lib/canvas-limits'
 
@@ -316,8 +317,10 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
         setIsUploading(true)
 
         try {
-            const formData = new FormData()
-            formData.append("fileName", selectedFile.name)
+            let uploadFile = null
+            let uploadName = selectedFile.name
+            let rasterWidth = 0
+            let rasterHeight = 0
 
             // Standard raster formats (JPEG, PNG, WebP, AVIF) can skip the
             // canvas rasterisation step — UNLESS the resolution exceeds
@@ -348,52 +351,35 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
 
             if (canSkipRaster) {
                 // Strip EXIF, GPS, XMP, IPTC, comments — binary-level, no re-encoding
-                const cleanFile = await stripImageMetadata(selectedFile)
-                formData.append("file", cleanFile)
-                formData.append("rasterWidth",  String(origW || 0))
-                formData.append("rasterHeight", String(origH || 0))
-                formData.append("sourceMetadata", JSON.stringify({
-                    originalName: selectedFile.name,
-                    originalType: selectedFile.type,
-                    originalSize: selectedFile.size,
-                    originalLastModified: selectedFile.lastModified,
-                }))
+                uploadFile = await stripImageMetadata(selectedFile)
+                rasterWidth = origW
+                rasterHeight = origH
             } else {
                 const rasterizedImage = await rasterizeSelectedImage(selectedFile, previewUrl)
-                formData.append("rasterFile", rasterizedImage.file)
-                formData.append("rasterFileName", rasterizedImage.rasterFileName)
-                formData.append("rasterWidth", String(rasterizedImage.width))
-                formData.append("rasterHeight", String(rasterizedImage.height))
-                formData.append("sourceMetadata", JSON.stringify({
-                    originalName: selectedFile.name,
-                    originalType: selectedFile.type,
-                    originalSize: selectedFile.size,
-                    originalLastModified: selectedFile.lastModified,
-                    rasterizedType: rasterizedImage.file.type,
-                    rasterizedSize: rasterizedImage.file.size,
-                }))
+                uploadFile = rasterizedImage.file
+                uploadName = rasterizedImage.rasterFileName
+                rasterWidth = rasterizedImage.width
+                rasterHeight = rasterizedImage.height
             }
 
-            const uploadResponse = await fetch("/api/imagekit/upload", {
-                method: "POST",
-                body: formData
-            })
-
-            // 401/403 = the Clerk session is missing or expired for this request
-            // (common after a dev session times out, or when the app is opened on
-            // a different host than the one you signed in on — Clerk's session
-            // cookie is host-scoped). Guide the user back to sign in instead of
-            // surfacing a raw "Unauthorised" error.
-            if (uploadResponse.status === 401 || uploadResponse.status === 403) {
-                toast.error("Your session has expired. Please sign in again.")
-                router.push("/sign-in")
-                return
+            // Straight to ImageKit (our route only signs): a DSLR original is
+            // well over the 4.5 MB request limit a serverless host allows.
+            let uploadData
+            try {
+                uploadData = await uploadToImageKit(uploadFile, { fileName: uploadName })
+            } catch (error) {
+                // 401/403 = the Clerk session is missing or expired for this request
+                // (common after a dev session times out, or when the app is opened on
+                // a different host than the one you signed in on — Clerk's session
+                // cookie is host-scoped). Guide the user back to sign in instead of
+                // surfacing a raw "Unauthorised" error.
+                if (error?.stage === 'auth' && (error.status === 401 || error.status === 403)) {
+                    toast.error("Your session has expired. Please sign in again.")
+                    router.push("/sign-in")
+                    return
+                }
+                throw error
             }
-
-            const uploadData = await uploadResponse.json().catch(() => ({}))
-
-            if (!uploadResponse.ok || !uploadData.success)
-                throw new Error(uploadData.error || "Failed to upload the image")
 
             // Creating a project in Neon
             const projectId = await createProject({
@@ -401,8 +387,8 @@ const NewProjectModel = ({ isOpen, onClose, currentProjectCount = 0 }) => {
                 originalImageUrl: uploadData.url,
                 currentImageUrl: uploadData.url,
                 thumbnailUrl: uploadData.thumbnailUrl,
-                width: uploadData.width || 800,
-                height: uploadData.height || 600,
+                width: uploadData.width || rasterWidth || 800,
+                height: uploadData.height || rasterHeight || 600,
                 canvasState: null,
             })
 

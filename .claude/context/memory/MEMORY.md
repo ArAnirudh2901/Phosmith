@@ -13,3 +13,4 @@
 - [CleanMyMac cleanup](cleanmymac-wipes-caches.md) — user ran one by hand 2026-10-08; it removed ms-playwright + repo .cache; how to restore
 - [Gemini free-tier quota](gemini-free-tier-quota.md) — 20 req/day on 2.5-flash, shared app-wide; tests burn it — few live calls, reuse replies
 - [Fluid interaction bar](fluid-interaction-bar.md) — drags/paint must feel like Apple Photos; measure frames + long tasks on a 24 MP photo
+- [No fallbacks](no-fallbacks.md) — chosen engine or a clear failure, canvas untouched; ask before adding any stand-in path

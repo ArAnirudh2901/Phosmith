@@ -93,7 +93,8 @@ export const AI_CAPABILITIES = {
         // "client" here means the LOCAL mask service's LaMa (on this machine),
         // not in-browser — the closest thing to on-device inpainting we have.
         // The /api/ai/inpaint route maps the preference to its backend param:
-        // client → lama, server → hf, auto → lama-first with HF fallback.
+        // server → hf, otherwise lama. No fall-through between them: one fill,
+        // one engine — the one chosen.
         client: true,
         server: true,
         clientImpl: 'LaMa (local mask service)',

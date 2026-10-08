@@ -10,6 +10,7 @@
 
 import { FabricImage } from 'fabric'
 import { runHeavy } from './heavy-job-queue'
+import { uploadToImageKit } from './imagekit-upload'
 import {
     clampStretchParams,
     createStretchBuffer,
@@ -71,20 +72,9 @@ export const encodeToPngBlob = async (canvas) => {
     })
 }
 
-export const uploadStretchBlob = async (blob, w, h) => {
-    const fileName = `stretch-${Date.now()}.png`
-    const formData = new FormData()
-    formData.append('fileName', fileName)
-    formData.append('rasterFile', blob, fileName)
-    formData.append('rasterFileName', fileName)
-    formData.append('rasterWidth', String(w))
-    formData.append('rasterHeight', String(h))
-    const response = await fetch('/api/imagekit/upload', { method: 'POST', body: formData })
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.success || !data?.url) {
-        throw new Error(data?.error || 'Could not upload stretched image')
-    }
-    return data.url
+export const uploadStretchBlob = async (blob) => {
+    const { url } = await uploadToImageKit(blob, { fileName: `stretch-${Date.now()}.png` })
+    return url
 }
 
 /** Bake dimensions for a source element, capped at MAX_BAKE_DIM on the long edge. */

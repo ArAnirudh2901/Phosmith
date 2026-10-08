@@ -9,6 +9,7 @@ import { createPortal } from 'react-dom'
 import { adaptiveTextColor } from '@/lib/color-extraction'
 import { runAutoCropEngine } from '@/lib/auto-crop-client'
 import { toUserMessage } from '@/lib/user-error'
+import { uploadToImageKit } from '@/lib/imagekit-upload'
 
 const AUTO_CROP_STAGE_TEXT = {
     reading: 'Reading the photo…',
@@ -193,23 +194,8 @@ const canvasToPngBlob = (canvas) =>
 
 const uploadCroppedCanvas = async (canvas) => {
     const blob = await canvasToPngBlob(canvas)
-    const fileName = `crop-${Date.now()}.png`
-    const formData = new FormData()
-    formData.append('fileName', fileName)
-    formData.append('rasterFile', blob, fileName)
-    formData.append('rasterFileName', fileName)
-    formData.append('rasterWidth', String(canvas.width))
-    formData.append('rasterHeight', String(canvas.height))
-
-    const response = await fetch('/api/imagekit/upload', {
-        method: 'POST',
-        body: formData,
-    })
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.success || !data?.url) {
-        throw new Error(data?.error || 'Could not upload cropped image')
-    }
-    return data.url
+    const { url } = await uploadToImageKit(blob, { fileName: `crop-${Date.now()}.png` })
+    return url
 }
 
 // ─── Crop Overlay ────────────────────────────────────────────────────────────

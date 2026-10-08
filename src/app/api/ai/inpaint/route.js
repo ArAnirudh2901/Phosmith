@@ -2,9 +2,11 @@
 import { isServiceOffline, serviceOfflineResponse } from '@/lib/service-availability'
 // ================
 // Backend-selectable AI inpainting route. Supports two backends:
-//   - "lama"  → proxy to the local Python mask service (LaMa, fast, free)
+//   - "lama"  → proxy to the local Python mask service (LaMa, fast, free) — default
 //   - "hf"    → Hugging Face Stable Diffusion inpainting (slower, creative)
-//   - "auto"  → try LaMa first, fall back to HF SD on failure (default)
+// One engine per request, no fall-through: a fill that silently came from a
+// different engine than the one chosen is not the result the user asked for.
+// ("auto" from older clients means LaMa.)
 //
 // The client sends an image + mask (white = inpaint region) as multipart.
 // Returns the composited result as PNG.
@@ -352,38 +354,28 @@ export async function POST(request) {
       formData.get('prompt') ||
         'remove the selected object and naturally continue the surrounding background texture, realistic photo cleanup'
     )
-    const requestedBackend = String(formData.get('backend') || 'auto').toLowerCase()
+    const requestedBackend = String(formData.get('backend') || 'lama').toLowerCase()
 
     const bounds = await getMaskBounds(maskBuffer)
     if (!bounds) {
       return NextResponse.json({ error: 'No selected pixels found' }, { status: 400 })
     }
 
+    const backend = requestedBackend === 'hf' ? 'hf' : 'lama'
     let finalBuffer = null
-    let usedBackend = null
 
-    // ── LaMa path (local mask service) ──
-    const tryLama = requestedBackend === 'lama' || requestedBackend === 'auto'
-    if (tryLama) {
+    if (backend === 'lama') {
       try {
-        const lamaResult = await callLamaInpaint(imageBuffer, maskBuffer, bounds)
-        finalBuffer = lamaResult
-        usedBackend = 'lama'
+        finalBuffer = await callLamaInpaint(imageBuffer, maskBuffer, bounds)
       } catch (lamaErr) {
         console.warn('[ai-inpaint] LaMa failed:', lamaErr?.message)
-        if (requestedBackend === 'lama') {
-          // Explicit LaMa request — don't fall back
-          return NextResponse.json(
-            { error: `LaMa inpaint failed: ${lamaErr?.message}` },
-            { status: 502 }
-          )
-        }
-        // Auto mode — fall through to HF
+        const down = /not configured|unreachable|fetch failed|ECONNREFUSED/i.test(lamaErr?.message || '')
+        return NextResponse.json(
+          { error: down ? 'The AI fill service (LaMa) is not running' : `LaMa inpaint failed: ${lamaErr?.message}` },
+          { status: down ? 503 : 502 }
+        )
       }
-    }
-
-    // ── HF SD path (Hugging Face Stable Diffusion) ──
-    if (!finalBuffer) {
+    } else {
       try {
         const normalized = await normalizeForModel(imageBuffer, maskBuffer, bounds)
         const generated = await callHuggingFaceInpaint({
@@ -394,7 +386,6 @@ export async function POST(request) {
           height: normalized.modelHeight,
         })
         finalBuffer = await compositePatch(imageBuffer, maskBuffer, generated, bounds)
-        usedBackend = 'hf'
       } catch (hfErr) {
         console.error('[ai-inpaint] HF SD failed:', hfErr?.message)
         return NextResponse.json(
@@ -409,7 +400,7 @@ export async function POST(request) {
       headers: {
         'Content-Type': 'image/png',
         'Cache-Control': 'no-store',
-        'X-Inpaint-Backend': usedBackend,
+        'X-Inpaint-Backend': backend,
       },
     })
   } catch (error) {

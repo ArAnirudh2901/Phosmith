@@ -1,5 +1,5 @@
 import { getRoutingMode } from '@/lib/ai-routing'
-import { patchInpaint } from '@/lib/cv/patch-inpaint'
+import { uploadToImageKit } from '@/lib/imagekit-upload'
 
 export const INPAINT_UPLOAD_MAX_SIDE = 1536
 export const INPAINT_MASK_THRESHOLD = 16
@@ -17,44 +17,20 @@ export const INPAINT_IMAGE_QUALITY = 0.88
  * Turn an AI-result blob into a URL that SURVIVES — undo/redo recreates Fabric
  * images from their serialized `src` (loadFromJSON), and the canvas state is
  * persisted to Neon, so a `blob:` URL (revoked, page-scoped) would break both.
- * Primary: upload to ImageKit (same pattern as the Crop tool) → permanent
- * remote URL. Fallback (offline / upload failed): a `data:` URL — in-session
- * undo/redo keeps working, and canvas-state.js already knows how to handle
- * oversized data: srcs at save time.
+ * Uploaded straight to ImageKit; there is no data: URL fallback — a result that
+ * cannot be stored is not applied (the save would drop an oversized data: src,
+ * so it would vanish on reload).
  */
-export const blobToDataUrl = (blob) =>
-    new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(String(reader.result))
-        reader.onerror = () => reject(new Error('could not read result blob'))
-        reader.readAsDataURL(blob)
-    })
-
 export const persistResultBlob = async (blob, { signal, label = 'inpaint' } = {}) => {
-    try {
-        const fileName = `${label}-${Date.now()}.${blob.type === 'image/jpeg' ? 'jpg' : 'png'}`
-        const form = new FormData()
-        form.append('fileName', fileName)
-        form.append('rasterFile', blob, fileName)
-        form.append('rasterFileName', fileName)
-        const resp = await fetch('/api/imagekit/upload', { method: 'POST', body: form, signal })
-        const data = await resp.json().catch(() => null)
-        if (resp.ok && data?.success && data?.url) return data.url
-        console.warn('[pixel-tool] result upload failed, falling back to data URL:', data?.error || resp.status)
-    } catch (err) {
-        if (err?.name === 'AbortError') throw err
-        console.warn('[pixel-tool] result upload failed, falling back to data URL:', err?.message)
-    }
-    return blobToDataUrl(blob)
+    const { url } = await uploadToImageKit(blob, {
+        fileName: `${label}-${Date.now()}.${blob.type === 'image/jpeg' ? 'jpg' : 'png'}`,
+        signal,
+    })
+    return url
 }
 
-/** The /api/ai/inpaint backend for the user's `inpaint` routing preference. */
-export const inpaintBackendFromRouting = () => {
-    const mode = getRoutingMode('inpaint')
-    if (mode === 'client') return 'lama'
-    if (mode === 'server') return 'hf'
-    return 'auto'
-}
+/** The /api/ai/inpaint backend for the user's choice: Stable Diffusion when they picked Cloud, else LaMa. */
+export const inpaintBackendFromRouting = () => (getRoutingMode('inpaint') === 'server' ? 'hf' : 'lama')
 
 export const sampleMaskCoverage = (imageEl) => {
     const cap = 128
@@ -152,10 +128,6 @@ export const findInpaintMaskBounds = (maskCanvas, { pad: withPad = true } = {}) 
     }
 }
 
-// Largest side the on-device fill works at; bigger crops are filled smaller and
-// only the fill itself is scaled back (see composeFill).
-const DEVICE_MAX_SIDE = 1024
-
 const cropTo = (source, bounds, w, h, smooth) => {
     const c = document.createElement('canvas')
     c.width = w
@@ -196,13 +168,7 @@ const growMask = (mask, px) => {
     return on
 }
 
-// After the server says no fill service is there (501/502/503), skip it for a
-// minute: every fill would otherwise encode its crop and wait on the refusal.
-const SERVER_COOLDOWN_MS = 60_000
-let serverDownUntil = 0
-
 async function serverInpaint(imageCrop, maskCrop, signal) {
-    if (Date.now() < serverDownUntil) throw Object.assign(new Error('The AI fill service is not running'), { status: 503 })
     const [imageBlob, maskBlob] = await Promise.all([
         canvasToBlob(imageCrop, 'image/jpeg', INPAINT_IMAGE_QUALITY),
         canvasToBlob(maskCrop, 'image/png'),
@@ -214,32 +180,13 @@ async function serverInpaint(imageCrop, maskCrop, signal) {
     const resp = await fetch('/api/ai/inpaint', { method: 'POST', body: form, signal })
     if (!resp.ok) {
         const data = await resp.json().catch(() => ({}))
-        if ([501, 502, 503].includes(resp.status)) serverDownUntil = Date.now() + SERVER_COOLDOWN_MS
-        throw Object.assign(new Error(data.error || `Inpaint failed (${resp.status})`), { status: resp.status })
+        // The route's own messages are written for the user ("…is not running");
+        // a status is attached only when there is none, so toUserMessage words it.
+        if (data.error) throw new Error(data.error)
+        throw Object.assign(new Error(`Inpaint failed (${resp.status})`), { status: resp.status })
     }
     const engine = resp.headers.get('X-Inpaint-Backend') || 'server'
     return { image: await decodeBlobImage(await resp.blob()), engine }
-}
-
-async function deviceInpaint(imageCrop, maskCrop, signal) {
-    const { width: w, height: h } = imageCrop
-    const s = Math.min(1, DEVICE_MAX_SIDE / Math.max(w, h))
-    const dw = Math.max(8, Math.round(w * s))
-    const dh = Math.max(8, Math.round(h * s))
-    const full = { left: 0, top: 0, width: w, height: h }
-    const img = s < 1 ? cropTo(imageCrop, full, dw, dh, true) : imageCrop
-    const msk = s < 1 ? cropTo(maskCrop, full, dw, dh, true) : maskCrop
-    const rgba = img.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, dw, dh)
-    const m = msk.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, dw, dh).data
-    const hole = new Uint8Array(dw * dh)
-    for (let p = 0; p < dw * dh; p += 1) hole[p] = m[p * 4] > 127 ? 1 : 0
-    const filled = await patchInpaint(rgba.data, dw, dh, hole, { signal })
-    if (!filled) throw new Error('Not enough picture around the selection to fill it from')
-    const out = document.createElement('canvas')
-    out.width = dw
-    out.height = dh
-    out.getContext('2d').putImageData(new ImageData(filled, dw, dh), 0, 0)
-    return out
 }
 
 // Box of the white area of a mask, padded for context, in bitmap px. The mask
@@ -261,21 +208,21 @@ const fillBounds = (mask, { x = 0, y = 0, scale = 1, bitmapW, bitmapH }) => {
 }
 
 /**
- * Regenerate the white area of `fillMask` in the image. The server (LaMa, or
- * Stable Diffusion) goes first; when it is not running, or fails, the fill is
- * computed on this device instead — so the remover fills rather than leaving a
- * hole. Only the region around the mask is ever read or copied: a 24 MP frame
- * used to be copied and scanned whole before the request even left.
+ * Regenerate the white area of `fillMask` in the image with the fill service
+ * (LaMa, or Stable Diffusion when chosen). No fallback: if the service cannot
+ * fill it, this throws and nothing changes. Only the region around the mask is
+ * ever read or copied: a 24 MP frame used to be copied and scanned whole before
+ * the request even left.
  *
  * @param {object} o
  * @param {CanvasImageSource} o.sourceEl  the image's full source
  * @param {number} o.cropX, o.cropY        where bitmap space starts in the source
  * @param {number} o.bitmapW, o.bitmapH    bitmap size
  * @param {HTMLCanvasElement} o.fillMask   white = fill; at (maskX, maskY), maskScale bitmap px per pixel
- * @returns {Promise<{ patch, mask, bounds, engine, serverError } | null>} `patch`
+ * @returns {Promise<{ patch, mask, bounds, engine } | null>} `patch`
  *   drawable at `bounds` (bitmap px); `mask` the grown white-on-black fill area at its size.
  */
-export async function inpaintRegion({ sourceEl, cropX = 0, cropY = 0, bitmapW, bitmapH, fillMask, maskX = 0, maskY = 0, maskScale = 1, signal, grow = 0, deviceOnly = false }) {
+export async function inpaintRegion({ sourceEl, cropX = 0, cropY = 0, bitmapW, bitmapH, fillMask, maskX = 0, maskY = 0, maskScale = 1, signal, grow = 0 }) {
     const bounds = fillBounds(fillMask, { x: maskX, y: maskY, scale: maskScale, bitmapW, bitmapH })
     if (!bounds || bounds.width < 2 || bounds.height < 2) return null
     const scale = Math.min(1, INPAINT_UPLOAD_MAX_SIDE / Math.max(bounds.width, bounds.height))
@@ -290,24 +237,14 @@ export async function inpaintRegion({ sourceEl, cropX = 0, cropY = 0, bitmapW, b
     }, w, h, maskScale > 1)
     if (!growMask(maskCrop, Math.round(grow * scale))) return null
 
-    let serverError = null
-    if (!deviceOnly) {
-        try {
-            const { image, engine } = await serverInpaint(imageCrop, maskCrop, signal)
-            return { patch: image, mask: maskCrop, bounds, engine, serverError: null }
-        } catch (err) {
-            if (err?.name === 'AbortError') throw err
-            serverError = err
-        }
-    }
-    const patch = await deviceInpaint(imageCrop, maskCrop, signal)
-    return { patch, mask: maskCrop, bounds, engine: 'device', serverError }
+    const { image, engine } = await serverInpaint(imageCrop, maskCrop, signal)
+    return { patch: image, mask: maskCrop, bounds, engine }
 }
 
 /**
  * The full source with a fill blended in through its own feathered mask. Only
  * the filled area changes: the patch is drawn through the mask, so a crop the
- * server or device worked on at reduced size never softens the pixels around it.
+ * server worked on at reduced size never softens the pixels around it.
  * (cropX, cropY) places bitmap space in the source, so a cropped image keeps
  * its crop and the rest of its source.
  */
@@ -347,7 +284,6 @@ export function composeFill(sourceEl, region, cropX = 0, cropY = 0) {
 export const engineLabel = (engine) => ({
     lama: 'LaMa',
     hf: 'Stable Diffusion',
-    device: 'on this device',
 })[engine] || 'AI'
 
 // Opaque photos are stored as JPEG at 0.95 — a fifth of the PNG's bytes for the
@@ -377,42 +313,24 @@ onmessage = async (e) => {
 }`
 let encoder = null
 
-const encodeOffThread = async (canvas) => {
-    if (typeof OffscreenCanvas === 'undefined' || typeof Worker === 'undefined' || typeof createImageBitmap !== 'function') return null
-    try {
-        if (!encoder) {
-            encoder = { worker: new Worker(URL.createObjectURL(new Blob([ENCODER_SRC], { type: 'text/javascript' }))), next: 0, waiting: new Map() }
-            encoder.worker.onmessage = (e) => {
-                const done = encoder.waiting.get(e.data.id)
-                encoder.waiting.delete(e.data.id)
-                done?.(e.data.blob || null)
-            }
+export const encodeResult = async (canvas) => {
+    if (!encoder) {
+        encoder = { worker: new Worker(URL.createObjectURL(new Blob([ENCODER_SRC], { type: 'text/javascript' }))), next: 0, waiting: new Map() }
+        encoder.worker.onmessage = (e) => {
+            const done = encoder.waiting.get(e.data.id)
+            encoder.waiting.delete(e.data.id)
+            done?.(e.data)
         }
-        const bitmap = await createImageBitmap(canvas)
-        const id = ++encoder.next
-        return await new Promise((resolve) => {
-            encoder.waiting.set(id, resolve)
-            encoder.worker.postMessage({ id, bitmap }, [bitmap])
-        })
-    } catch {
-        return null
     }
+    const bitmap = await createImageBitmap(canvas)
+    const id = ++encoder.next
+    const { blob, error } = await new Promise((resolve) => {
+        encoder.waiting.set(id, resolve)
+        encoder.worker.postMessage({ id, bitmap }, [bitmap])
+    })
+    if (!blob) throw new Error(`Could not encode the result: ${error || 'unknown error'}`)
+    return blob
 }
-
-const encodeOnThread = (canvas) => {
-    const probe = document.createElement('canvas')
-    const s = Math.min(1, 256 / Math.max(canvas.width, canvas.height))
-    probe.width = Math.max(1, Math.round(canvas.width * s))
-    probe.height = Math.max(1, Math.round(canvas.height * s))
-    const pctx = probe.getContext('2d', { willReadFrequently: true })
-    pctx.drawImage(canvas, 0, 0, probe.width, probe.height)
-    const d = pctx.getImageData(0, 0, probe.width, probe.height).data
-    let opaque = true
-    for (let i = 3; i < d.length; i += 4) if (d[i] < 255) { opaque = false; break }
-    return opaque ? canvasToBlob(canvas, 'image/jpeg', 0.95) : canvasToBlob(canvas, 'image/png')
-}
-
-export const encodeResult = async (canvas) => (await encodeOffThread(canvas)) || encodeOnThread(canvas)
 
 /** An <img> for `url`, decoded off the main thread before it is drawn. */
 export async function loadDecodedImage(url) {

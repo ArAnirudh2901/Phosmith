@@ -21,11 +21,6 @@ export const MASK_EMPTY_THRESHOLD = 250
 const MAX_HISTORY = 40
 // Stroke undo tiles are raw grey bytes; cap what the stack may hold.
 const MAX_UNDO_BYTES = 192 * 1024 * 1024
-
-// Toast text naming what filled it — and why, when it was not the server.
-const fillMessage = (what, { engine, serverError }) => engine === 'device'
-    ? `${what} — filled on this device${serverError ? ' (the AI fill service is not running)' : ''}`
-    : `${what} with ${engineLabel(engine)}`
 const BRACKET_STEP = 4
 const DEFERRED_REGION_PREVIEW_MS = 90
 /**
@@ -1188,9 +1183,9 @@ export default function usePixelMaskTool({
     }, [liveSync])
 
     /* ─── fill: regenerate an area ───
-     * Server (LaMa / Stable Diffusion) first, this device when it is not there,
-     * so the remover always fills instead of leaving a hole. The area shimmers
-     * while it works and the result dissolves in. */
+     * The fill service (LaMa, or Stable Diffusion when chosen) regenerates it;
+     * nothing else stands in when that fails. The area shimmers while it works
+     * and the result dissolves in. */
     const runFill = useCallback(async ({ img, sourceEl, fill, controller, grow = 0, label, restoreTiles = null }) => {
         const { width: bw, height: bh } = getImageBitmapSize(img)
         const cropX = img.cropX || 0
@@ -1220,7 +1215,7 @@ export default function usePixelMaskTool({
                 restoreTiles,
                 label: label === 'gen-fill' ? 'Generative fill' : 'Removed object',
             }))
-            return { status: committed ? 'done' : 'failed', engine: region.engine, serverError: region.serverError }
+            return { status: committed ? 'done' : 'failed', engine: region.engine }
         } finally {
             shimmer.dispose()
         }
@@ -1374,7 +1369,7 @@ export default function usePixelMaskTool({
 
             // ── Inpaint path: fill the erased region with AI-generated background ──
             // Only for erase mode — restore mode still uses the alpha-mask path.
-            let fillFailed = null
+            // No fallback: if the fill service cannot fill it, nothing changes.
             if (effectiveMode() === 'erase') {
                 setObjectPhase?.('filling')
                 const { width: bw, height: bh } = getImageBitmapSize(img)
@@ -1398,25 +1393,22 @@ export default function usePixelMaskTool({
                         label: 'object-remove',
                     })
                     if (result.status === 'aborted') return
-                    if (result.status === 'done') {
-                        if (matteFraction > 0.97) {
-                            toast('That removed almost the entire image — press undo if it wasn\u2019t what you meant',
-                                { icon: '⚠️', duration: 6000 })
-                        } else {
-                            toast.success(fillMessage('Object removed', result))
-                        }
-                        return
+                    if (result.status !== 'done') throw new Error('The fill could not be applied')
+                    if (matteFraction > 0.97) {
+                        toast('That removed almost the entire image — press undo if it wasn\u2019t what you meant',
+                            { icon: '⚠️', duration: 6000 })
+                    } else {
+                        toast.success(`Object removed with ${engineLabel(result.engine)}`)
                     }
-                    fillFailed = new Error('The fill could not be applied')
                 } catch (inpaintErr) {
                     if (inpaintErr?.name === 'AbortError') throw inpaintErr
-                    console.warn('[object-eraser] fill failed, falling back to alpha erase:', inpaintErr?.message)
-                    fillFailed = inpaintErr
+                    console.warn('[object-eraser] fill failed:', inpaintErr?.message)
+                    toast.error(`${toUserMessage(inpaintErr, 'Could not remove the object')} — nothing was changed`)
                 }
-                // Fallback: no fill — cut the object out instead, and say so.
+                return
             }
 
-            // ── Alpha-mask path (restore mode, or inpaint fallback) ──
+            // ── Alpha-mask path (restore mode) ──
             if (deferApplyRef.current && !preCommitSnapshotRef.current) {
                 preCommitSnapshotRef.current = snapshot()
                 preCommitUndoDepthRef.current = undoStackRef.current.length
@@ -1459,8 +1451,7 @@ export default function usePixelMaskTool({
                     : 'That restored almost the entire image — press undo if it wasn\u2019t what you meant',
                     { icon: '⚠️', duration: 6000 })
             } else {
-                if (fillFailed) toast.error(`${toUserMessage(fillFailed, 'Could not fill the background')} — cut the object out instead`)
-                else toast.success(effectiveMode() === 'erase' ? 'Object erased — click another to remove more' : 'Object restored')
+                toast.success(effectiveMode() === 'erase' ? 'Object erased — click another to remove more' : 'Object restored')
             }
         } catch (err) {
             if (err?.name !== 'AbortError') {
@@ -1548,12 +1539,12 @@ export default function usePixelMaskTool({
             setUndoDepth(0)
             setRedoDepth(0)
             resetFillBase()
-            toast.success(fillMessage('Generative fill applied', result))
+            toast.success(`Generative fill applied with ${engineLabel(result.engine)}`)
         } catch (err) {
             if (err?.name === 'AbortError') return
             console.warn('[gen-fill] failed:', err?.message)
-            // The painted area stays as it was (erased, or still selected).
-            toast.error(toUserMessage(err, 'Generative fill failed'))
+            // No fallback: the painted area stays as it was (erased, or still selected).
+            toast.error(`${toUserMessage(err, 'Generative fill failed')} — nothing was filled`)
         } finally {
             if (objectAbortRef.current === controller) {
                 objectAbortRef.current = null

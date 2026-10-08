@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { stripImageMetadata } from '@/lib/strip-metadata'
 import { flattenOrientation, isRawFile, readImageMeta, resolveSourceFile } from '@/lib/raw-preview'
 import { IMAGEKIT_MAX_EDGE, IMAGEKIT_MAX_MP } from '@/lib/canvas-limits'
+import { uploadToImageKit } from '@/lib/imagekit-upload'
 
 const CASCADE_OFFSET = 32
 
@@ -140,29 +141,16 @@ export const workingEdgeForProject = (project) => {
   return Math.max(1024, Math.min(IMAGEKIT_MAX_EDGE, Math.ceil(long * 3)))
 }
 
-// Uploads to our /api/imagekit/upload endpoint (auth-gated) and returns the CDN URL.
-// This is the path that keeps saved canvas state small enough for Neon's per-doc
-// size limit when users add several photos to one project.
+// Uploads to ImageKit (signed by our auth-gated /api/imagekit/upload) and returns
+// the CDN URL. This is the path that keeps saved canvas state small enough for
+// Neon's per-doc size limit when users add several photos to one project.
 const uploadFileToImageKit = async (file) => {
   // Strip EXIF, GPS, XMP, IPTC — binary-level, no re-encoding
   const cleanFile = await stripImageMetadata(file)
   // Downscale if the image exceeds ImageKit's 25 MP serving limit
   const readyFile = await downscaleIfNeeded(cleanFile)
-  const formData = new FormData()
-  formData.append('file', readyFile)
-  formData.append('fileName', file.name || 'upload')
-  const response = await fetch('/api/imagekit/upload', {
-    method: 'POST',
-    body: formData,
-  })
-  if (!response.ok) {
-    throw new Error(`ImageKit upload failed: ${response.status}`)
-  }
-  const data = await response.json()
-  if (!data?.success || !data?.url) {
-    throw new Error(data?.error || 'ImageKit upload returned no URL')
-  }
-  return data.url
+  const { url } = await uploadToImageKit(readyFile, { fileName: file.name || 'upload' })
+  return url
 }
 
 // Uploads a raw image Blob (e.g. a flattened merge) to ImageKit and returns the
@@ -172,14 +160,8 @@ export const uploadImageBlobToImageKit = async (blob, fileName = 'image.png') =>
   // Strip any metadata the browser may have embedded
   const blobFile = blob instanceof File ? blob : new File([blob], fileName, { type: blob.type })
   const cleanBlob = await stripImageMetadata(blobFile)
-  const formData = new FormData()
-  formData.append('file', cleanBlob, fileName)
-  formData.append('fileName', fileName)
-  const response = await fetch('/api/imagekit/upload', { method: 'POST', body: formData })
-  if (!response.ok) throw new Error(`ImageKit upload failed: ${response.status}`)
-  const data = await response.json()
-  if (!data?.success || !data?.url) throw new Error(data?.error || 'ImageKit upload returned no URL')
-  return data.url
+  const { url } = await uploadToImageKit(cleanBlob, { fileName })
+  return url
 }
 
 // Builds a Fabric image from a URL with an OFF-MAIN-THREAD decode. Fabric's own

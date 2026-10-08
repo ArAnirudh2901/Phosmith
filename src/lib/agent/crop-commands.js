@@ -30,6 +30,7 @@
 
 import { FabricImage } from 'fabric'
 import { runAutoCropEngine } from '../auto-crop-client'
+import { uploadToImageKit } from '../imagekit-upload'
 
 const UPLOAD_MAX_SIDE = 2048
 
@@ -75,23 +76,8 @@ const canvasToPngBlob = (canvas) =>
 
 const uploadCroppedCanvas = async (canvas) => {
     const blob = await canvasToPngBlob(canvas)
-    const fileName = `agent-crop-${Date.now()}.png`
-    const formData = new FormData()
-    formData.append('fileName', fileName)
-    formData.append('rasterFile', blob, fileName)
-    formData.append('rasterFileName', fileName)
-    formData.append('rasterWidth', String(canvas.width))
-    formData.append('rasterHeight', String(canvas.height))
-
-    const response = await fetch('/api/imagekit/upload', {
-        method: 'POST',
-        body: formData,
-    })
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.success || !data?.url) {
-        throw new Error(data?.error || '[agent.crop] cropped image upload failed')
-    }
-    return data.url
+    const { url } = await uploadToImageKit(blob, { fileName: `agent-crop-${Date.now()}.png` })
+    return url
 }
 
 const getImageCanvasBounds = (image) => {
@@ -159,7 +145,7 @@ const extractCropToCanvas = (image, [x, y, w, h]) => {
 /**
  * Apply a validated [x,y,w,h] image-pixel box to the given Fabric image:
  *  - extract pixels to an offscreen canvas
- *  - upload via /api/imagekit/upload
+ *  - upload to ImageKit (signed by /api/imagekit/upload)
  *  - swap in a fresh FabricImage that preserves filters, locks and z-index,
  *    positioned to occupy the same canvas-space region as the source crop
  *

@@ -327,26 +327,27 @@ const EraseControls = ({ project, dominantColor }) => {
             </div>
 
             {/* AI object eraser — SlimSAM on device: click an object, the model
-                segments the WHOLE object under the pointer, then it is filled
-                (LaMa when the service runs, this device otherwise). Click more
-                objects to remove each. */}
+                segments the WHOLE object under the pointer, then the fill
+                service fills it. Click more objects to remove each. */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
                     <label className="panel-label whitespace-nowrap" style={{ margin: 0 }}>AI Object Remover</label>
                     <div className="mask-fill-modes" style={{ marginTop: 0 }}>
-                        {(['auto', 'client', 'server']).map((mode) => (
-                            <button
-                                key={mode}
-                                type="button"
-                                onClick={() => setRoutingMode('inpaint', mode)}
-                                className={`mask-fill-mode-btn ${inpaintMode === mode ? 'mask-fill-mode-btn--active' : ''}`}
-                                title={mode === 'client' ? 'LaMa (local mask service)'
-                                    : mode === 'server' ? 'Stable Diffusion (Hugging Face)'
-                                    : 'LaMa first, SD fallback'}
-                            >
-                                {mode === 'auto' ? 'Auto' : mode === 'client' ? 'Local' : 'Cloud'}
-                            </button>
-                        ))}
+                        {/* One engine per fill, the one picked here — no fall-through. */}
+                        {(['client', 'server']).map((mode) => {
+                            const active = mode === 'server' ? inpaintMode === 'server' : inpaintMode !== 'server'
+                            return (
+                                <button
+                                    key={mode}
+                                    type="button"
+                                    onClick={() => setRoutingMode('inpaint', mode)}
+                                    className={`mask-fill-mode-btn ${active ? 'mask-fill-mode-btn--active' : ''}`}
+                                    title={mode === 'client' ? 'LaMa (local mask service)' : 'Stable Diffusion (Hugging Face)'}
+                                >
+                                    {mode === 'client' ? 'LaMa' : 'Cloud'}
+                                </button>
+                            )
+                        })}
                     </div>
                 </div>
 
@@ -366,8 +367,8 @@ const EraseControls = ({ project, dominantColor }) => {
                 )}
                 {maskServiceStatus === 'unavailable' && (
                     <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[10px]"
-                        style={{ background: 'rgba(251, 191, 36, 0.06)', border: '1px solid rgba(251,191,36,0.15)', color: 'rgba(251,191,36,0.75)' }}>
-                        AI fill service not connected — removals are filled on this device instead
+                        style={{ background: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239,68,68,0.15)', color: 'rgba(239,68,68,0.75)' }}>
+                        AI fill service not connected — object removal and Generative Fill need it running
                     </div>
                 )}
 

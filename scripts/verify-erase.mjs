@@ -46,12 +46,18 @@ await writeFile(path.join(OUT, 'app.css'), css.css)
 // A real photo scaled up, so texture (not a flat fill) is what gets painted on.
 const photo = await sharp(path.join(ROOT, '.cache/preview-photos/moto.jpg')).resize(W, H, { fit: 'fill', kernel: 'lanczos3' }).jpeg({ quality: 88 }).toBuffer()
 
+const uploads = new Map()
 const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/app.css"><script>window.process = { env: { NODE_ENV: 'production' } }</script></head>
 <body class="dark" style="margin:0;background:#0b0d12"><div id="root"></div><script type="module" src="/entry.js"></script></body></html>`
 const server = Bun.serve({ port: 0, fetch(req) {
   const p = new URL(req.url).pathname
   if (p === '/') return new Response(html, { headers: { 'content-type': 'text/html' } })
   if (p === '/photo.jpg') return new Response(photo, { headers: { 'content-type': 'image/jpeg', 'access-control-allow-origin': '*' } })
+  // What the page uploaded to "ImageKit", served back as the CDN would.
+  if (p.startsWith('/uploaded/') && uploads.has(p)) {
+    const u = uploads.get(p)
+    return new Response(u.bytes, { headers: { 'content-type': u.type, 'access-control-allow-origin': '*' } })
+  }
   // The model runtime, for --sam (onnxruntime-web's files, as the app serves them).
   if (p.startsWith('/ort/')) {
     const f = Bun.file(path.join(ROOT, 'public', p))
@@ -89,13 +95,32 @@ let inpaintResponder = null
 await page.route(/\/api\//, async (route) => {
   const req = route.request()
   const url = new URL(req.url()).pathname
-  apiCalls.push(url)
+  apiCalls.push(`${req.method()} ${url}`)
   if (req.method() !== 'GET' && url !== '/api/ai/inpaint' && url !== '/api/imagekit/upload') writes.push({ url, body: req.postData() || '' })
-  if (url === '/api/ai/inpaint' && inpaintResponder) return inpaintResponder(route)
+  if (url === '/api/ai/inpaint') {
+    if (inpaintResponder) return inpaintResponder(route)
+    // What the real route answers when LaMa is not running.
+    return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"The AI fill service (LaMa) is not running"}' })
+  }
+  // The signing endpoint: uploads go to ImageKit directly.
+  if (url === '/api/imagekit/upload' && req.method() === 'GET') {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ token: 't', expire: 9999999999, signature: 's', publicKey: 'public_harness', folder: '/yt-projects', namePrefix: 'harness/1_' }) })
+  }
   if (req.method() === 'GET' && url.includes('/api/canvas/snapshot')) {
     return route.fulfill({ status: 200, contentType: 'application/json', body: '{"snapshot":null}' })
   }
   return route.fulfill({ status: 501, contentType: 'application/json', body: '{"error":"harness"}' })
+})
+// ImageKit's upload API: keep the file, answer with a URL that serves it.
+const directUploads = []
+await page.route('https://upload.imagekit.io/**', async (route) => {
+  const req = route.request()
+  const form = await new Request('http://x/', { method: 'POST', headers: { 'content-type': req.headers()['content-type'] }, body: req.postDataBuffer() }).formData()
+  const file = form.get('file')
+  const key = `/uploaded/${uploads.size + 1}`
+  uploads.set(key, { bytes: new Uint8Array(await file.arrayBuffer()), type: file.type || 'application/octet-stream' })
+  directUploads.push({ fileName: form.get('fileName'), signed: form.get('signature') === 's' && form.get('token') === 't', type: file.type, size: file.size })
+  return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify({ url: `http://localhost:${server.port}${key}`, fileId: key, width: W, height: H }) })
 })
 await page.goto(`http://localhost:${server.port}/`)
 await page.waitForFunction(() => typeof window.__run === 'function', null, { timeout: 30_000 })
@@ -255,42 +280,35 @@ try {
     check(!near(await seen(r1.screen[0]), before) && (await maskAt(...target)) < 50, 'redo erases the first stroke again')
     await undo(); await page.waitForTimeout(150)
 
-    console.log('generative fill (service answers)')
+    const remount = async () => {
+      await page.evaluate(() => window.__showPanel(false)); await page.waitForTimeout(300)
+      await page.evaluate(() => window.__showPanel(true)); await page.waitForSelector('text=Click-to-remove'); await page.waitForTimeout(500)
+      await page.evaluate(() => document.activeElement?.blur?.()); await page.keyboard.type('}'.repeat(17))
+    }
+    const toasts = () => page.evaluate(() => [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.innerText).join(' | '))
+    const clearToasts = () => page.evaluate(() => document.querySelectorAll('[data-sonner-toast]').forEach((t) => t.remove()))
+    const imgSrc = () => page.evaluate(() => window.__canvas.getObjects().find((o) => o.type?.toLowerCase() === 'image').getSrc())
+
+    console.log('generative fill (LaMa answers)')
     inpaintResponder = async (route) => {
       const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#ff00ff' } }).png().toBuffer()
       return route.fulfill({ status: 200, contentType: 'image/png', headers: { 'X-Inpaint-Backend': 'lama' }, body: png })
     }
-    const V = [W * 0.5, H * 0.75]
-    // Its own baseline: only this stroke is new.
-    await page.evaluate(() => window.__showPanel(false)); await page.waitForTimeout(300)
-    await page.evaluate(() => window.__showPanel(true)); await page.waitForSelector('text=Click-to-remove'); await page.waitForTimeout(500)
-    await page.evaluate(() => document.activeElement?.blur?.()); await page.keyboard.type('}'.repeat(17))
-    const outside = await seen(await toScreen(V[0], V[1] - 400))
-    await stroke([[V[0] - 100, V[1]], [V[0] + 100, V[1]]])
-    await page.getByRole('button', { name: /Generative Fill/ }).click()
-    await page.waitForFunction(() => /Generative fill applied with LaMa/.test(document.body.innerText), null, { timeout: 30_000 })
-    await page.waitForTimeout(800)
-    check(near(await seen(await toScreen(...V)), [255, 0, 255], 40), 'the server fill lands exactly on the painted area')
-    check(near(await seen(await toScreen(V[0], V[1] - 400)), outside, 6), 'pixels outside the fill are untouched')
-    inpaintResponder = null
-
-    console.log('generative fill (no service: filled on this device)')
     const Y = [W * 0.15, H * 0.80], Z = [W * 0.80, H * 0.80]
     await stroke([[Y[0] - 120, Y[1]], [Y[0] + 120, Y[1]]])
     // Remount: the fill baseline restarts, so Y is an erasure made before it.
-    await page.evaluate(() => window.__showPanel(false)); await page.waitForTimeout(300)
-    await page.evaluate(() => window.__showPanel(true)); await page.waitForSelector('text=Click-to-remove'); await page.waitForTimeout(500)
-    await page.evaluate(() => document.activeElement?.blur?.()); await page.keyboard.type('}'.repeat(17))
+    await remount()
+    const outside = await seen(await toScreen(Z[0], Z[1] - 400))
     await stroke([[Z[0] - 120, Z[1]], [Z[0] + 120, Z[1]]])
-    const zErased = await seen(await toScreen(...Z))
     await shot('2-before-fill')
+    await clearToasts()
     await startRecording()
     let fcdp = null
     if (args.includes('--cpu-fill')) { fcdp = await ctx.newCDPSession(page); await fcdp.send('Profiler.enable'); await fcdp.send('Profiler.setSamplingInterval', { interval: 500 }); await fcdp.send('Profiler.start') }
     const t0 = Date.now()
     await page.getByRole('button', { name: /Generative Fill/ }).click()
     if (SHOTS) { await page.waitForTimeout(350); await shot('3-shimmer') }
-    await page.waitForFunction(() => /Generative fill applied|fill failed/i.test(document.body.innerText), null, { timeout: 60_000 })
+    await page.waitForFunction(() => /Generative fill applied|nothing was filled/i.test(document.body.innerText), null, { timeout: 60_000 })
     const fillMs = Date.now() - t0
     const fillRec = await stopRecording()
     if (fcdp) {
@@ -300,26 +318,39 @@ try {
       profile.samples.forEach((id, i) => counts.set(id, (counts.get(id) || 0) + (dt[i] || 0)))
       for (const [id, us] of counts) { const n = byId.get(id); const k = `${n.callFrame.functionName || '(anon)'}:${n.callFrame.lineNumber}`; self.set(k, (self.get(k) || 0) + us) }
       log('fill cpu self (ms): ' + [...self].sort((a, b) => b[1] - a[1]).slice(0, 22).map(([k, v]) => `${k}=${(v / 1000).toFixed(0)}`).join(' | '))
-      const parent = new Map(); for (const n of profile.nodes) for (const c of n.children || []) parent.set(c, n.id)
-      const focus = args[args.indexOf('--cpu-fill') + 1]
-      if (focus && !focus.startsWith('--')) {
-        const paths = new Map()
-        for (const [id, us] of counts) { const n = byId.get(id); if (n.callFrame.functionName !== focus) continue; let chain = []; let cur = parent.get(id); for (let k = 0; k < 6 && cur; k++) { const pn = byId.get(cur); chain.push(`${pn.callFrame.functionName || '(anon)'}:${pn.callFrame.lineNumber}`); cur = parent.get(cur) } const key = chain.join(' < '); paths.set(key, (paths.get(key) || 0) + us) }
-        log(`${focus} callers: ` + [...paths].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${(v / 1000).toFixed(0)}ms ${k}`).join('\n    '))
-      }
     }
-    const toastText = await page.evaluate(() => [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.innerText).join(' | '))
+    const fillToast = await toasts()
     await page.waitForTimeout(800)
-    const zAfter = await seen(await toScreen(...Z))
     await shot('4-after-fill')
-    log(`fill ${fillMs} ms · frames p95 ${fillRec.p95.toFixed(0)} max ${fillRec.max.toFixed(0)} · long tasks [${fillRec.longTasks.join(',')}] · toast "${toastText}"`)
-    check(/on this device/.test(toastText), 'with no fill service, the fill runs on this device and says so')
-    check((await maskAt(...Z)) === 255 && !near(zAfter, zErased), 'the painted area is filled with picture, not left erased')
+    log(`fill ${fillMs} ms · frames p95 ${fillRec.p95.toFixed(0)} max ${fillRec.max.toFixed(0)} · long tasks [${fillRec.longTasks.join(',')}] · toast "${fillToast}"`)
+    check(/applied with LaMa/.test(fillToast), 'the fill names the engine that made it')
+    check(near(await seen(await toScreen(...Z)), [255, 0, 255], 40) && (await maskAt(...Z)) === 255, 'the fill lands exactly on the painted area and that area is picture again')
+    check(near(await seen(await toScreen(Z[0], Z[1] - 400)), outside, 6), 'pixels outside the fill are untouched')
     check((await maskAt(...Y)) < 50, 'an erasure made before the fill stays erased (it used to be wiped)')
+    const up = directUploads.at(-1)
+    check(up?.signed && /^harness\/1_gen-fill-\d+\.jpg$/.test(up.fileName) && up.type === 'image/jpeg' && /\/uploaded\//.test(await imgSrc()),
+      `the result goes straight to ImageKit, signed, as JPEG, and the image points at it (${up?.fileName}, ${((up?.size || 0) / 1e6).toFixed(1)} MB)`)
+    check(apiCalls.includes('GET /api/imagekit/upload') && !apiCalls.includes('POST /api/imagekit/upload'), 'our server only signs: nothing is uploaded through it')
     // The shimmer and the dissolve run on the compositor; what the main thread
     // owes is never to stall input for long.
     check(Math.max(0, ...fillRec.longTasks) <= 150, `the fill never blocks the page for more than 150 ms at a time (longest ${Math.max(0, ...fillRec.longTasks)} ms)`)
-    check(fillMs <= 4000, `a 24 MP fill on this device finishes in under 4 s (${fillMs} ms)`)
+    check(fillMs <= 4000, `a 24 MP fill finishes in under 4 s, upload and swap included (${fillMs} ms)`)
+    inpaintResponder = null
+
+    console.log('generative fill (LaMa not running)')
+    await remount()
+    const V = [W * 0.5, H * 0.75]
+    await stroke([[V[0] - 100, V[1]], [V[0] + 100, V[1]]])
+    const srcBefore = await imgSrc()
+    const uploadsBefore = directUploads.length
+    await clearToasts()
+    await page.getByRole('button', { name: /Generative Fill/ }).click()
+    await page.waitForFunction(() => /nothing was filled|Generative fill applied/i.test(document.body.innerText), null, { timeout: 30_000 })
+    await page.waitForTimeout(500)
+    const noServiceToast = await toasts()
+    check(/LaMa\) is not running — nothing was filled/.test(noServiceToast), `no stand-in fill: the message says the service is not running ("${noServiceToast.slice(0, 90)}")`)
+    const srcAfter = await imgSrc(), vMask = await maskAt(...V)
+    check(srcAfter === srcBefore && directUploads.length === uploadsBefore && vMask < 50, `and nothing changed: same image, no upload, the stroke still erased${srcAfter === srcBefore ? '' : ' (src changed)'}${directUploads.length === uploadsBefore ? '' : ' (uploaded)'}${vMask < 50 ? '' : ` (mask ${vMask})`}`)
 
     console.log('feathered brush')
     const slider = page.getByRole('slider', { name: 'Edge Feather' })
@@ -358,7 +389,11 @@ try {
     await page.getByRole('button', { name: /Circle to Remove/ }).click()
 
     if (SAM) {
-      console.log('object remover (real SlimSAM, no fill service)')
+      console.log('object remover (real SlimSAM)')
+      inpaintResponder = async (route) => {
+        const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#ff00ff' } }).png().toBuffer()
+        return route.fulfill({ status: 200, contentType: 'image/png', headers: { 'X-Inpaint-Backend': 'lama' }, body: png })
+      }
       await page.getByRole('button', { name: /Click-to-remove/ }).click()
       // The front headlight.
       const head = [W * 0.725, H * 0.31]
@@ -368,14 +403,15 @@ try {
       await page.evaluate(() => document.querySelectorAll('[data-sonner-toast]').forEach((t) => t.remove()))
       const t0 = Date.now()
       await page.mouse.click(hp.x, hp.y)
-      await page.waitForFunction(() => /Object removed|cut the object out|No object found|failed/i.test(document.body.innerText), null, { timeout: 240_000 })
+      await page.waitForFunction(() => /Object removed|nothing was changed|No object found|failed/i.test(document.body.innerText), null, { timeout: 240_000 })
       const removeMs = Date.now() - t0
       await page.waitForTimeout(800)
       const toast = await page.evaluate(() => [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.innerText).join(' | '))
       await shot('6-object-removed')
       log(`object removal ${removeMs} ms · "${toast}"`)
-      check(/Object removed/.test(toast) && !near(await seen(hp), headBefore, 25), 'clicking an object removes it and fills the background')
+      check(/Object removed with LaMa/.test(toast) && near(await seen(hp), [255, 0, 255], 40), 'clicking an object sends SlimSAM\'s outline to the fill and puts the fill exactly there')
       await page.getByRole('button', { name: /Click-to-remove/ }).click()
+      inpaintResponder = null
     }
 
     if (!SAM) {

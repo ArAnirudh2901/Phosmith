@@ -14,7 +14,6 @@ import { defocusCoverage, defocusMap, gradientMagnitude, sparseDefocus } from '.
 import { combine, fromDefocus, fromDepth, fromGroundPlane, fromLinear, fromMatte, fromRadial, refocus } from '../src/lib/cv/coc.js'
 import { lassoColourMatte } from '../src/lib/cv/lasso-matte.js'
 import { colorGuidedFilter, guidedUpsample, lumaPlane, refineSubjectMatte, rgbPlanes } from '../src/lib/cv/matte-refine.js'
-import { patchInpaint } from '../src/lib/cv/patch-inpaint.js'
 
 let failures = 0
 let checks = 0
@@ -527,50 +526,6 @@ const maxAbsDiff = (a, b) => {
     const viaBilinear = upsamplePlane(lowM, W, H)
     check(edgeErr(viaGuide) < 0.6 * edgeErr(viaBilinear), 'guided upsampling keeps the edge a bilinear upscale blurs', `${edgeErr(viaBilinear).toFixed(3)} → ${edgeErr(viaGuide).toFixed(3)}`)
     check(refineSubjectMatte({ width: 3, height: 3, data: new Uint8ClampedArray(36) }, coarse) === coarse, 'a photo of the wrong size is refused')
-}
-
-// ── Exemplar inpainting (PatchMatch) ──────────────────────────────────────────
-{
-    console.log('\npatch inpaint')
-    // A texture with structure in two directions, a hole in the middle.
-    const w = 320, h = 220
-    const rgba = new Uint8ClampedArray(w * h * 4)
-    for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
-        const i = (y * w + x) * 4
-        const stripe = Math.floor((x + y * 0.5) / 12) % 2
-        const dot = ((x % 20) - 10) ** 2 + ((y % 20) - 10) ** 2 < 16
-        rgba[i] = dot ? 240 : stripe ? 200 : 40; rgba[i + 1] = stripe ? 60 : 160; rgba[i + 2] = dot ? 30 : 90; rgba[i + 3] = 255
-    }
-    const hole = new Uint8Array(w * h)
-    for (let y = 60; y < 150; y += 1) for (let x = 110; x < 210; x += 1) hole[y * w + x] = 1
-    const t0 = performance.now()
-    const out = await patchInpaint(rgba, w, h, hole)
-    const ms = performance.now() - t0
-    let err = 0, n = 0, keptExact = true
-    // Diffusion baseline: every hole pixel the mean colour of the rim.
-    let dErr = 0
-    const rim = [0, 0, 0]; let rn = 0
-    for (let y = 59; y <= 150; y += 1) for (const x of [109, 210]) { const i = (y * w + x) * 4; rim[0] += rgba[i]; rim[1] += rgba[i + 1]; rim[2] += rgba[i + 2]; rn += 1 }
-    for (let p = 0; p < w * h; p += 1) {
-        for (let c = 0; c < 3; c += 1) {
-            if (hole[p]) { err += Math.abs(out[p * 4 + c] - rgba[p * 4 + c]); dErr += Math.abs(rim[c] / rn - rgba[p * 4 + c]); n += 1 }
-            else if (out[p * 4 + c] !== rgba[p * 4 + c]) keptExact = false
-        }
-    }
-    check(err / n < 6 && err < dErr / 5, 'a hole in a regular texture is filled with the texture, not a smear', `mean error ${(err / n).toFixed(1)} vs ${(dErr / n).toFixed(1)} for a flat fill, ${ms.toFixed(0)} ms`)
-    check(keptExact, 'pixels outside the hole are copied through untouched')
-    check(out.every((v) => Number.isFinite(v)), 'no NaN reaches the output')
-    const none = await patchInpaint(rgba, w, h, new Uint8Array(w * h))
-    check(none.every((v, i) => v === rgba[i]), 'an empty hole returns the image unchanged')
-    const allHole = await patchInpaint(rgba, w, h, new Uint8Array(w * h).fill(1))
-    check(allHole === null, 'a hole with no picture around it is refused, not invented')
-    // Aborts between slices.
-    const ac = new AbortController()
-    const pending = patchInpaint(rgba, w, h, hole, { signal: ac.signal, sliceMs: 0 })
-    ac.abort()
-    let aborted = false
-    try { await pending } catch (e) { aborted = e?.name === 'AbortError' }
-    check(aborted, 'an abort stops the fill between slices')
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed.`)

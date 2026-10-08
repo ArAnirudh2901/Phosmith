@@ -1,3 +1,5 @@
+import { uploadToImageKit } from './imagekit-upload'
+
 export const isImageKitUrl = (url) => typeof url === 'string' && url.includes('ik.imagekit.io')
 
 /**
@@ -38,20 +40,8 @@ export const ensureCurrentImageKitEndpoint = async (url, { onStatus } = {}) => {
     const urlPath = new URL(url).pathname
     const fileName = urlPath.split('/').pop() || `reupload-${Date.now()}.jpg`
 
-    // Upload to current account via the existing upload API
-    const formData = new FormData()
-    formData.append('file', blob, fileName)
-    formData.append('fileName', fileName)
-
-    const uploadResponse = await fetch('/api/imagekit/upload', {
-        method: 'POST',
-        body: formData,
-    })
-    const data = await uploadResponse.json()
-
-    if (!uploadResponse.ok || !data?.success) {
-        throw new Error(data?.error || 'Failed to re-upload image to current ImageKit account')
-    }
+    // Upload to the current account
+    const data = await uploadToImageKit(blob, { fileName })
 
     console.log('[ImageKit] Re-upload complete', { oldUrl: url, newUrl: data.url })
     return data.url
