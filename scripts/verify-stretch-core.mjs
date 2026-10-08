@@ -24,7 +24,8 @@ import {
     WARP_PRESETS,
 } from '../src/lib/pixel-stretch.js'
 import { parseStretchPrompt } from '../src/lib/agent/stretch-commands.js'
-import { AUTO_LOOKS, sanitizeAutoHint } from '../src/lib/stretch-auto-hint.js'
+import { AUTO_HINT_SCHEMA, AUTO_LOOKS, describeAutoFacts, sanitizeAutoHint } from '../src/lib/stretch-auto-hint.js'
+import { autoHintNote } from '../src/lib/stretch-auto.js'
 
 let checks = 0
 let failures = 0
@@ -380,6 +381,13 @@ section('stretch warp (Photoshop model)')
     check(box.look === 'fan' && box.edge === 'up' && box.subject.x + box.subject.w <= 1 + 1e-9 && box.subject.y + box.subject.h <= 1 + 1e-9,
         'a vision subject box is clamped inside the frame', JSON.stringify(box.subject))
     check(sanitizeAutoHint(null) === null && sanitizeAutoHint('fan') === null, 'no reply is no hint')
+    const full2 = sanitizeAutoHint({ bend: 'left', amount: 9, sample: { x: 0.95, y: 0.2, w: 0.3, h: 0.1 }, points: [{ x: 0.2, y: 2 }, { x: 'a', y: 0 }, ...Array(9).fill({ x: 0.5, y: 0.5 })] })
+    check(full2.bend === 'left' && full2.amount === 2 && full2.sample.x + full2.sample.w <= 1 + 1e-9 && full2.points.length === 5 && full2.points[0].y === 1,
+        "Gemini's bend, amount, sample box and points are clamped, malformed points dropped, at most five kept", JSON.stringify(full2))
+    check(AUTO_HINT_SCHEMA.required.includes('points') && AUTO_HINT_SCHEMA.properties.look.enum.join() === AUTO_LOOKS.join(),
+        'the schema asks Gemini for subject points and only the engine\'s looks')
+    check(describeAutoFacts(null, 10, 10).includes('find it yourself') && /quota/.test(autoHintNote('quota')) && autoHintNote(null) === '',
+        'a missing measurement and a spent quota are both said plainly')
 }
 
 console.log(`\n[verify-stretch-core] ${checks - failures}/${checks} checks passed.`)

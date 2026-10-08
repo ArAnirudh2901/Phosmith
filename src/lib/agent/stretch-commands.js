@@ -27,7 +27,7 @@ import {
     bestSeedInBand,
 } from '@/lib/pixel-stretch'
 import { applyStretchToCanvas, getSourceElement, isSourceReady, isStretchBlend, snapshotSource, STRETCH_BLEND_MODES } from '@/lib/pixel-stretch-apply'
-import { fetchAutoHint, findSubjectMatte, planAutoStretch } from '@/lib/stretch-auto'
+import { autoHintNote, extendMatteToBox, fetchAutoHint, findSubjectMatte, matteFromDecision, planAutoStretch } from '@/lib/stretch-auto'
 
 const clamp = (v, lo, hi, fallback) => {
     const n = Number(v)
@@ -189,12 +189,13 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
         const dims = { width: Math.max(64, Math.round(natW * scale)), height: Math.max(64, Math.round(natH * scale)) }
         const small = snapshotSource(el, dims.width, dims.height, !!image?.flipX, !!image?.flipY)
         try {
-            const ai = await import('@/lib/client-ai')
             let mask
-            try { mask = await ai.clientSubjectMask(small, dims) } finally {
+            try {
+                // The same search Auto Stretch runs: parts retried, edge refined.
+                mask = await findSubjectMatte(small)
+            } finally {
                 small.width = 1
                 small.height = 1
-                ai.releaseClientModels?.()
             }
             const { bboxOfMaskCanvas } = await import('@/lib/mask-service-client')
             // [x0, y0, x1, y1] in the MASK's own pixels, which need not match
@@ -324,11 +325,11 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
         // expensive on a small machine and is not what "behind" usually means.
         if (!useSubject) {
             const matte = selectionMatte(resolved)
-            return matte ? { ...out, matte, coverage: cov, feather: 0.004 } : base
+            return matte ? { ...out, matte, coverage: cov, feather: 0.002 } : base
         }
         const box = await subjectBox(el)
         if (!box?.mask) return base
-        return { ...out, matte: box.mask, coverage: cov, feather: 0.004 }
+        return { ...out, matte: box.mask, coverage: cov, feather: 0.002 }
     }
 
     /**
@@ -524,32 +525,40 @@ export function createStretchCommands({ getPrimaryImage, getCanvas } = {}) {
                 const sample = snapshotSource(el, Math.max(1, Math.round(natW * s)), Math.max(1, Math.round(natH * s)), !!image.flipX, !!image.flipY)
                 // The vision read only decides what the caller left open; its
                 // subject box, when there is one, also prompts SlimSAM.
-                const decided = look && (edge || axis)
                 const prefer = { look, edge, axis, placement, gain }
                 if (amount !== undefined && amount !== null) prefer.amount = clamp(amount, -200, 200, 100) / 100
                 const ds = Math.min(1, 1024 / Math.max(natW, natH))
                 const small = snapshotSource(el, Math.max(64, Math.round(natW * ds)), Math.max(64, Math.round(natH * ds)), !!image.flipX, !!image.flipY)
                 let matte = null
                 let vision = null
+                let visionReason = null
                 try {
-                    // In parallel; the vision box only re-prompts SlimSAM when
-                    // its own subject search came back empty.
-                    ;[vision, matte] = await Promise.all([decided ? null : fetchAutoHint(sample), findSubjectMatte(small)])
-                    if (!matte && vision?.subject) matte = await findSubjectMatte(small, { hint: vision })
+                    // Gemini reads the photo while the device runs its own subject
+                    // search; Gemini's box and points then re-prompt SlimSAM.
+                    let asked
+                    ;[asked, matte] = await Promise.all([fetchAutoHint(sample), findSubjectMatte(small)])
+                    vision = asked.hint
+                    visionReason = asked.reason
+                    // Gemini's box and points re-prompt SlimSAM; its answer wins when it is a
+                    // subject at all, else the device matte is extended to Gemini's box.
+                    const decided = await matteFromDecision(small, vision)
+                    if (decided) matte = decided
+                    else if (vision?.subject) matte = matte ? await extendMatteToBox(small, matte, vision.subject) : await findSubjectMatte(small, { hint: vision })
                 } finally { small.width = 1; small.height = 1 }
                 const plan = planAutoStretch({ sample, matte, hint: vision, prefer })
                 sample.width = 1
                 sample.height = 1
                 if (!plan) throw new Error('Could not read a stretch out of this photo — set a slice by hand')
                 const placementArgs = plan.coverage > 0 && matte
-                    ? { matte, coverage: plan.coverage, feather: 0.004, wrapAt: plan.wrapAt }
+                    ? { matte, coverage: plan.coverage, feather: 0.002, wrapAt: plan.wrapAt }
                     : {}
                 await commit(image, plan.params, `Auto pixel stretch (${plan.look})`, placementArgs)
                 return {
                     applied: 'auto', look: plan.look, edge: plan.edge, amount: Math.round(plan.amount * 100),
                     behind: Math.round(plan.coverage * 100),
                     inFrontFrom: plan.wrapAt != null ? Math.round(plan.wrapAt * 100) : null,
-                    subject: plan.subject ? 'found' : 'none', vision: Boolean(vision), reasoning: plan.reasoning,
+                    subject: plan.subject ? 'found' : 'none', decidedBy: plan.decidedBy, reasoning: plan.reasoning,
+                    ...(vision ? {} : { note: autoHintNote(visionReason) }),
                 }
             },
         },

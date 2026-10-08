@@ -1,20 +1,20 @@
 // /api/ai/stretch-plan
 //
-// The vision read behind Auto Stretch. The reference edits are one Photoshop
+// Gemini's decisions for Auto Stretch. The reference edits are one Photoshop
 // sequence (sample a line across the subject, stretch it into stripes off the
-// canvas, warp them, keep the subject in front), so the model is not asked for
-// geometry — the client finds the subject (SlimSAM), the line and the warp
-// itself. It is asked only for the creative calls a pixel analysis cannot make:
-// which way the stripes should run, which look suits the subject, and whether
-// they should wrap back in front of it.
+// canvas, warp them, keep the subject in front). The client measures first —
+// the subject (SlimSAM) and the room to each frame edge, sent as `facts` — and
+// the model decides with the photo and those numbers: subject box, edge, look,
+// bend, amount, where the colours are sampled, placement. The client then
+// carries the decision out exactly (src/lib/stretch-auto.js).
 //
 // Returns { success, hint } where `hint` is null without a key or on failure;
-// the client's planner (src/lib/stretch-auto.js) then decides alone.
+// the client's shape rules then decide alone.
 
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { enforceRateLimit, rateLimitResponse } from "@/lib/rate-limit"
-import { AUTO_HINT_PROMPT, AUTO_HINT_SCHEMA, sanitizeAutoHint } from "@/lib/stretch-auto-hint"
+import { AUTO_HINT_PROMPT, AUTO_HINT_SCHEMA, describeAutoFacts, sanitizeAutoHint } from "@/lib/stretch-auto-hint"
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"
@@ -40,13 +40,13 @@ export async function POST(request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const { imageBase64, mimeType, width, height } = body || {}
+  const { imageBase64, mimeType, width, height, facts } = body || {}
 
   if (!imageBase64 || typeof imageBase64 !== "string") {
     return NextResponse.json({ error: "imageBase64 is required" }, { status: 400 })
   }
 
-  if (!GEMINI_API_KEY) return NextResponse.json({ success: true, hint: null, source: "none" })
+  if (!GEMINI_API_KEY) return NextResponse.json({ success: true, hint: null, source: "none", reason: "no-key" })
 
   const callArgs = {
     apiKey: GEMINI_API_KEY,
@@ -55,11 +55,17 @@ export async function POST(request) {
     mimeType: mimeType || "image/jpeg",
     width: width || 0,
     height: height || 0,
+    facts: facts && typeof facts === "object" ? facts : null,
   }
   let raw = null
+  let reason = null
   try {
     raw = await callGeminiForStretchHint(callArgs)
   } catch (error) {
+    // The free tier allows 20 requests a day on 2.5 Flash; say so rather than
+    // falling back silently, or Auto just looks worse for no visible reason.
+    if (/\b429\b|RESOURCE_EXHAUSTED|quota/i.test(error?.message || "")) reason = "quota"
+    else reason = "error"
     // Retry once after 2s for transient 503 (model overloaded) errors.
     if (/503|UNAVAILABLE/i.test(error?.message || "")) {
       try {
@@ -72,7 +78,8 @@ export async function POST(request) {
       console.warn("[stretch-plan] Gemini call failed; the client plans alone:", error?.message)
     }
   }
-  return NextResponse.json({ success: true, hint: sanitizeAutoHint(raw), source: raw ? "vision" : "none" })
+  const hint = sanitizeAutoHint(raw)
+  return NextResponse.json({ success: true, hint, source: hint ? "vision" : "none", reason: hint ? null : reason || "error" })
 }
 
 /**
@@ -123,9 +130,9 @@ const _planCache = new Map()
 const CACHE_TTL_MS = 5 * 60 * 1000
 const CACHE_MAX = 20
 
-function getCacheKey(imageBase64, width, height) {
+function getCacheKey(imageBase64, width, height, facts) {
   // Use first 200 chars of base64 + dimensions as a fingerprint
-  return `${(imageBase64 || '').slice(0, 200)}:${width}x${height}`
+  return `${(imageBase64 || '').slice(0, 200)}:${(imageBase64 || '').length}:${width}x${height}:${JSON.stringify(facts || null)}`
 }
 
 function getCachedPlan(key) {
@@ -147,13 +154,13 @@ function setCachedPlan(key, plan) {
   _planCache.set(key, { plan, ts: Date.now() })
 }
 
-async function callGeminiForStretchHint({ apiKey, model, imageBase64, mimeType, width, height }) {
+async function callGeminiForStretchHint({ apiKey, model, imageBase64, mimeType, width, height, facts }) {
   // Check cache first
-  const cacheKey = getCacheKey(imageBase64, width, height)
+  const cacheKey = getCacheKey(imageBase64, width, height, facts)
   const cached = getCachedPlan(cacheKey)
   if (cached) return cached
 
-  const userText = `Photo ${width}×${height}px. Make the creative calls for its pixel stretch.`
+  const userText = describeAutoFacts(facts, width, height)
 
   const requestBody = {
     systemInstruction: { parts: [{ text: AUTO_HINT_PROMPT }] },
@@ -173,11 +180,13 @@ async function callGeminiForStretchHint({ apiKey, model, imageBase64, mimeType, 
       responseSchema: AUTO_HINT_SCHEMA,
       // 2.5-series thinking spends from this budget; at 512 the JSON came back
       // cut off mid-object and every call fell through to the fallback.
-      maxOutputTokens: 2048,
-      // A creative call, not a reasoning task: 2.5 thinking took it from ~5 s to ~9 s.
+      maxOutputTokens: 4096,
+      // The decisions are the model's, so it gets to think (~9 s on 2.5 Flash
+      // against ~5 s without): with thinking off it ignored the measured room
+      // and sent a motorbike's stripes into the floor.
       ...(/^gemini-3/i.test(GEMINI_MODEL)
         ? { thinkingConfig: { thinkingLevel: process.env.GEMINI_THINKING_LEVEL || "low" } }
-        : /^gemini-2\.5/i.test(GEMINI_MODEL) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
+        : /^gemini-2\.5/i.test(GEMINI_MODEL) ? { thinkingConfig: { thinkingBudget: 1024 } } : {}),
     },
   }
 

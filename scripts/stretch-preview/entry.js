@@ -22,7 +22,7 @@ import {
 } from '../../src/lib/pixel-stretch.js'
 
 import { isRawFile, resolveSourceFile } from '../../src/lib/raw-preview.js'
-import { findSubjectMatte, planAutoStretch } from '../../src/lib/stretch-auto.js'
+import { extendMatteToBox, fetchAutoHint, findSubjectMatte, matteFromDecision, planAutoStretch } from '../../src/lib/stretch-auto.js'
 
 const loadImage = (src) => new Promise((resolve, reject) => {
     const el = new Image()
@@ -105,17 +105,41 @@ const shot = async (spec) => {
         // The real Auto Stretch: SlimSAM on a ≤1024px copy, then the shared planner.
         const s = Math.min(1, 1024 / Math.max(W, H))
         const small = makeSampleCanvas(img, Math.round(W * s), Math.round(H * s))
-        const matte = spec.noSubject ? null : await findSubjectMatte(small, { hint: spec.hint || null })
-        const plan = planAutoStretch({ sample, matte, hint: spec.hint || null, prefer: spec.prefer || null })
+        // The callers' order: measure, let Gemini decide, recover what it saw.
+        let matte = spec.noSubject ? null : await findSubjectMatte(small, { hint: spec.hint || null })
+        const coarse = spec.coarse ? await (await import('../../src/lib/client-ai.js')).clientSubjectMask(small, { width: small.width, height: small.height }) : null
+        let hint = spec.hint || null
+        if (spec.gemini) {
+            const asked = await fetchAutoHint(sample)
+            hint = asked.hint
+            if (!hint) console.warn('gemini:', asked.reason)
+            // Gemini's box and points re-prompt SlimSAM; its answer wins when it is a
+        // subject at all, else the device matte is extended to Gemini's box.
+        const decided = await matteFromDecision(small, hint)
+        if (decided) matte = decided
+        else if (hint?.subject) matte = matte ? await extendMatteToBox(small, matte, hint.subject) : await findSubjectMatte(small, { hint: hint })
+        }
+        if (coarse) matte = coarse
+        const plan = planAutoStretch({ sample, matte, hint, prefer: spec.prefer || null })
         const layer = createStretchBuffer(W, H)
         ok = Boolean(plan) && renderStretchLayer(layer.getContext('2d'), sample, plan.params, W, H, {
             quality: 'max',
-            alpha: matte && plan.coverage > 0 ? matteToAlphaCanvas(matte, W, H, 0.006 * Math.min(W, H)) : null,
+            // `coarse` reproduces the old pipeline: raw SlimSAM, 0.6% feather, plain upscale.
+            alpha: matte && plan.coverage > 0
+                ? (spec.coarse ? matteToAlphaCanvas(matte, W, H, 0.006 * Math.min(W, H)) : matteToAlphaCanvas(matte, W, H, 0.002 * Math.min(W, H), sample))
+                : null,
             coverage: plan?.coverage || 0,
             wrapAt: plan?.wrapAt ?? null,
         })
         ctx.drawImage(layer, 0, 0)
-        if (spec.showMatte && matte) {
+        if (spec.matteOnly && matte) {
+            // The matte itself over a dimmed photo: edges compare directly.
+            ctx.globalAlpha = 1
+            ctx.drawImage(sample, 0, 0)
+            ctx.fillStyle = 'rgba(0,0,0,0.6)'
+            ctx.fillRect(0, 0, W, H)
+            ctx.drawImage(matteToAlphaCanvas(matte, W, H, 0), 0, 0)
+        } else if (spec.showMatte && matte) {
             // Red tint where the detector put the subject, to judge the matte itself.
             const tint = matteToAlphaCanvas(matte, W, H, 0)
             const t = tint.getContext('2d')
@@ -124,7 +148,7 @@ const shot = async (spec) => {
             t.fillRect(0, 0, W, H)
             ctx.drawImage(tint, 0, 0)
         }
-        lastPlan = plan && { subject: plan.subject, look: plan.look, edge: plan.edge, amount: +plan.amount.toFixed(2), coverage: plan.coverage, wrapAt: plan.wrapAt, band: plan.params.band, why: plan.reasoning }
+        lastPlan = plan && { by: plan.decidedBy, gemini: hint && { edge: hint.edge, look: hint.look, bend: hint.bend, amount: hint.amount, placement: hint.placement, sample: hint.sample }, subject: plan.subject, look: plan.look, edge: plan.edge, amount: +plan.amount.toFixed(2), coverage: plan.coverage, wrapAt: plan.wrapAt, band: plan.params.band, why: plan.reasoning }
     } else if (spec.behind && p.polygon) {
         // Same as the bake: ribbon on its own layer, the lasso knocked back out,
         // and for a wrap the later part of the ribbon drawn back over it.

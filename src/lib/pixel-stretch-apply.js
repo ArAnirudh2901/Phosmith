@@ -113,7 +113,7 @@ export const bakeStretchBuffer = ({ srcEl, params, W, H, flipX = false, flipY = 
     const octx = out.getContext('2d')
     let drew = false
     try {
-        const alpha = coverage > 0 && matte ? matteToAlphaCanvas(matte, W, H, feather * Math.min(W, H)) : null
+        const alpha = coverage > 0 && matte ? matteToAlphaCanvas(matte, W, H, feather * Math.min(W, H), sample) : null
         drew = renderStretchLayer(octx, sample, clampStretchParams(params), W, H, { quality: 'max', alpha, coverage, wrapAt })
     } finally {
         // A bake sizes the shared scratch canvases to the FULL image and they are

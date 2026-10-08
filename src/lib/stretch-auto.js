@@ -18,6 +18,7 @@ import {
   bestSeedInBand,
   clampStretchParams,
   createStretchBuffer,
+  refineMatteToPhoto,
   suggestWrapAt,
 } from './pixel-stretch.js'
 
@@ -92,7 +93,8 @@ export async function findSubjectMatte(small, { hint = null } = {}) {
       for (const b of boxes) await attempt(() => ai.clientSamBox(small, px(b), dims, { whole: true }))
     }
     const win = best()
-    return win && scoreOf(win) > 0 ? win.m : null
+    // SlimSAM's outline is a 256px blob; put its edge on the photo's edges.
+    return win && scoreOf(win) > 0 ? refineMatteToPhoto(win.m, small) : null
   } finally {
     ai.releaseClientModels?.()
   }
@@ -210,8 +212,9 @@ function solidFrom(matte, band, axis, direction) {
 export function planAutoStretch({ sample, matte = null, hint = null, prefer = null }) {
   const W = sample?.width, H = sample?.height
   if (!W || !H) return null
-  // `hint` is the vision read (advice); `prefer` is what the caller asked for
-  // and always wins.
+  // `hint` is Gemini's decision (it saw the photo and the measurements);
+  // `prefer` is what the caller asked for and wins over it. With neither, the
+  // shape rules below decide.
   const v = sanitizeAutoHint(hint) || {}
   const want = sanitizeAutoHint(prefer) || {}
   const h = { ...v }
@@ -220,11 +223,17 @@ export function planAutoStretch({ sample, matte = null, hint = null, prefer = nu
   // A matte that is the whole frame or a speck did not find a subject.
   const fromMatte = stats && stats.area >= 0.01 && stats.area <= 0.85 && stats.w < 0.98 ? stats : null
   const box = fromMatte || (h.subject && h.subject.w * h.subject.h < 0.85 ? h.subject : null)
-  // A vision edge with far less room than the open side is a misread, not taste
-  // (it sent a motorbike's stripes into the floor).
+  // The edge is the model's call unless it is physically too tight: stripes
+  // need open frame to read, and a side with a sliver of room when another has
+  // plenty only shows a strip (the bike, nose against the right edge).
+  let edgeNote = ''
   if (box && h.edge && !want.edge) {
     const best = pickEdge(box, null, W, H)
-    if (roomOf(box, h.edge) < 0.5 * roomOf(box, best)) h.edge = null
+    if (roomOf(box, h.edge) < 0.03 || (roomOf(box, h.edge) < 0.12 && roomOf(box, best) >= 0.2)) {
+      edgeNote = ` Gemini chose ${h.edge}, but there is only ${Math.round(roomOf(box, h.edge) * 100)}% of the frame that way, so ${best}.`
+      h.edge = best
+      h.bend = null
+    }
   }
 
   if (!box) {
@@ -250,22 +259,50 @@ export function planAutoStretch({ sample, matte = null, hint = null, prefer = nu
     const half = vertical0 ? { x: a, w: b - a, y: box.y, h: box.h } : { y: a, h: b - a, x: box.x, w: box.w }
     return bestSeedInBand(sample, half, axis)?.score ?? 0
   }
-  const { band, fanAmount } = bandFor(box, axis, lookId, (low, high) => (colourOf(high) > colourOf(low) ? 'high' : 'low'))
-  const amount = clamp((h.amount ?? (lookId === 'fan' ? fanAmount : lookId === picked.id ? picked.amount ?? 1 : 1)) * (h.gain ?? 1), -2, 2)
+  // A swoosh is cut from the end opposite the way it bends, so it sweeps back
+  // across the subject; without a bend decided, the more colourful end.
+  const bendLow = h.bend === 'left' || h.bend === 'up'
+  const bendValid = h.bend && (vertical0 ? ['left', 'right'] : ['up', 'down']).includes(h.bend)
+  const { band, fanAmount } = bandFor(box, axis, lookId, (low, high) => (
+    bendValid ? (bendLow ? 'high' : 'low') : colourOf(high) > colourOf(low) ? 'high' : 'low'
+  ))
+  let amount = h.amount ?? (lookId === 'fan' ? fanAmount : lookId === picked.id ? picked.amount ?? 1 : 1)
+  if (v.amount != null && want.amount == null) amount = clamp(Math.abs(amount), 0.2, 1.5)
+  amount = clamp(amount * (h.gain ?? 1), -2, 2)
+  if (bendValid) {
+    // The engine bends toward the larger half of the frame from the band's
+    // centre (right / down when the band sits in the first half); flip the sign
+    // when the decision is the other way.
+    const c = vertical0 ? band.x + band.w / 2 : band.y + band.h / 2
+    const towardPositive = c <= 0.5
+    amount = Math.abs(amount) * ((h.bend === 'right' || h.bend === 'down') === towardPositive ? 1 : -1)
+  }
 
   // The sampled line: the reference edits take it just inside the subject's
   // edge that faces the open space (the gate's lit top, the car's tail), where
   // the line crosses the subject rather than the background around it. So the
   // search starts at the first line the subject fills and covers the next third.
+  // When the decision names where the colours come from (tail lights and paint,
+  // a lit crown), the search is held to that stretch of the band.
   const vertical = axis === 'vertical'
-  const start = matte ? solidFrom(matte, band, axis, direction) : 0.1
-  const depth = 0.35
-  const lo = direction < 0 ? start : Math.max(0, 1 - start - depth)
+  let lo, depth
+  const bandLo = vertical ? band.y : band.x, bandLen = vertical ? band.h : band.w
+  const sampleLo = h.sample ? (vertical ? h.sample.y : h.sample.x) : null
+  const sampleHi = h.sample ? sampleLo + (vertical ? h.sample.h : h.sample.w) : null
+  const a0 = h.sample ? Math.max(bandLo, sampleLo) : 0, a1 = h.sample ? Math.min(bandLo + bandLen, sampleHi) : 0
+  if (h.sample && a1 - a0 >= 0.01 && bandLen > 0) {
+    lo = (a0 - bandLo) / bandLen
+    depth = (a1 - a0) / bandLen
+  } else {
+    const start = matte ? solidFrom(matte, band, axis, direction) : 0.1
+    depth = 0.35
+    lo = direction < 0 ? start : Math.max(0, 1 - start - depth)
+  }
   const sub = vertical
     ? { x: band.x, w: band.w, y: band.y + band.h * lo, h: band.h * depth }
     : { y: band.y, h: band.h, x: band.x + band.w * lo, w: band.w * depth }
   const best = bestSeedInBand(sample, sub, axis)
-  const seed = best ? lo + depth * best.seed : 0.5
+  const seed = best ? lo + depth * best.seed : lo + depth / 2
 
   const base = clampStretchParams({ ...DEFAULT_STRETCH, axis, direction, band, seed, polygon: null, warpModel: 'stretch', anchor: 'seed' })
   const r = applyWarpPreset(base, lookId, amount, W, H)
@@ -281,32 +318,103 @@ export function planAutoStretch({ sample, matte = null, hint = null, prefer = nu
     // ribbon "re-entering" a concave subject (a saucer round a cup) is not that.
     const turns = ['swoosh', 'arch', 'fold'].includes(lookId)
     const s = suggestWrapAt(params, matte, W, H)
-    if (turns && s.recross) wrapAt = s.wrapAt
+    // A decided "behind" is respected even where the ribbon comes back round.
+    if (turns && s.recross && h.placement !== 'behind') wrapAt = s.wrapAt
     // Asked for, with no return found: a turning look comes in front from its
     // apex (out from behind, back across); a straight one over the subject's top.
-    else if (h.placement === 'partial') wrapAt = turns ? 0.5 : s.wrapAt
+    else if (h.placement === 'partial') wrapAt = s.recross ? s.wrapAt : turns ? 0.5 : s.wrapAt
   }
 
   const where = { up: 'up into the open space above', down: 'down into the space below', left: 'left into the open side', right: 'right into the open side' }[edge]
   const lookWhy = lookId === picked.id ? picked.why : `a ${lookId} look`
-  const reasoning = h.reasoning || [
+  const reasoning = h.reasoning ? `${h.reasoning}${edgeNote}` : [
     `Stripes from the subject's most colourful line run ${where}`,
     `${lookWhy}`,
     coverage ? (wrapAt != null ? 'the subject stays in front until the ribbon crosses back over it' : 'the subject stays in front') : 'the stripes sit over the photo',
   ].join('; ') + '.'
 
-  return { params, look: r.look.id, amount: r.look.amount, edge, coverage, wrapAt, subject: box, reasoning }
+  return { params, look: r.look.id, amount: r.look.amount, edge, coverage, wrapAt, subject: box, reasoning, decidedBy: hint ? 'gemini' : 'device' }
 }
 
 /**
- * Ask the vision route for its read of the photo. Optional: no key, quota or a
- * dropped connection returns null and the planner decides alone.
+ * The subject as Gemini sees it: SlimSAM prompted with its box AND the points it
+ * placed on the subject's parts, whole-object answer, edge refined. Null when
+ * there is no decision to use or SAM's answer is not subject-like.
  */
-export async function fetchAutoHint(el, { signal } = {}) {
+export async function matteFromDecision(small, hint) {
+  const box = hint?.subject
+  if (!box || !hint.points?.length) return null
+  const ai = await import('./client-ai.js')
+  try {
+    const W = small.width, H = small.height
+    const m = await ai.clientSamBox(small, [box.x * W, box.y * H, (box.x + box.w) * W, (box.y + box.h) * H], { width: W, height: H },
+      { whole: true, points: hint.points.map((p) => [p.x * W, p.y * H]) })
+    const st = m && matteStats(m)
+    if (!st || st.area < 0.01 || st.area > 0.85 || st.touch >= 3) return null
+    return refineMatteToPhoto(m, small)
+  } catch {
+    return null
+  } finally {
+    ai.releaseClientModels?.()
+  }
+}
+
+/** What the device measured, for the model to decide with. */
+export function autoFacts(matte) {
+  const st = matte ? matteStats(matte) : null
+  if (!st || st.area < 0.01 || st.area > 0.85) return null
+  const box = { x: st.x, y: st.y, w: st.w, h: st.h }
+  return {
+    subject: box,
+    area: st.area,
+    room: { up: roomOf(box, 'up'), down: roomOf(box, 'down'), left: roomOf(box, 'left'), right: roomOf(box, 'right') },
+    aspect: (matte.width * st.w) / Math.max(1, matte.height * st.h),
+  }
+}
+
+/**
+ * Gemini's subject box against the device's matte: when the box holds a lot the
+ * matte left out (the moto's front wheel), SlimSAM is prompted with that box and
+ * the two mattes are merged. Returns the matte to use.
+ */
+export async function extendMatteToBox(small, matte, box) {
+  const st = matte ? matteStats(matte) : null
+  if (!st || !box) return matte
+  const ix = Math.max(0, Math.min(st.x + st.w, box.x + box.w) - Math.max(st.x, box.x))
+  const iy = Math.max(0, Math.min(st.y + st.h, box.y + box.h) - Math.max(st.y, box.y))
+  const boxArea = box.w * box.h
+  // Mostly the same object, but the box reaches well past what was found.
+  if (ix * iy < 0.3 * st.w * st.h || st.w * st.h > 0.75 * boxArea) return matte
+  const ai = await import('./client-ai.js')
+  try {
+    const W = small.width, H = small.height
+    const more = await ai.clientSamBox(small, [box.x * W, box.y * H, (box.x + box.w) * W, (box.y + box.h) * H], { width: W, height: H }, { whole: true })
+    const ms = more && matteStats(more)
+    if (!ms || ms.area > 0.85 || ms.touch >= 3) return matte
+    const merged = createStretchBuffer(W, H)
+    const ctx = merged.getContext('2d')
+    ctx.drawImage(matte, 0, 0, W, H)
+    ctx.globalCompositeOperation = 'lighten'
+    ctx.drawImage(refineMatteToPhoto(more, small), 0, 0, W, H)
+    return merged
+  } catch {
+    return matte
+  } finally {
+    ai.releaseClientModels?.()
+  }
+}
+
+/**
+ * Ask Gemini (through the vision route) to make the decisions. Resolves to
+ * `{ hint, reason }`: `hint` null means the planner's shape rules decide, and
+ * `reason` says why ('no-key' | 'quota' | 'error' | 'offline') so the UI can.
+ */
+export async function fetchAutoHint(el, { facts = null, signal } = {}) {
   try {
     const natW = el.naturalWidth || el.videoWidth || el.width || 512
     const natH = el.naturalHeight || el.videoHeight || el.height || 512
-    const s = Math.min(1, 512 / Math.max(natW, natH))
+    // 768px: enough for the model to place a sample box on tail lights.
+    const s = Math.min(1, 768 / Math.max(natW, natH))
     const c = document.createElement('canvas')
     c.width = Math.max(1, Math.round(natW * s))
     c.height = Math.max(1, Math.round(natH * s))
@@ -315,14 +423,23 @@ export async function fetchAutoHint(el, { signal } = {}) {
     const res = await fetch('/api/ai/stretch-plan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageBase64, mimeType: 'image/jpeg', width: natW, height: natH }),
+      body: JSON.stringify({ imageBase64, mimeType: 'image/jpeg', width: natW, height: natH, facts }),
       signal,
     })
     const data = await res.json().catch(() => null)
-    return res.ok && data?.hint ? sanitizeAutoHint(data.hint) : null
+    const hint = res.ok && data?.hint ? sanitizeAutoHint(data.hint) : null
+    return { hint, reason: hint ? null : data?.reason || (res.status === 429 ? 'quota' : 'error') }
   } catch {
-    return null
+    return { hint: null, reason: 'offline' }
   }
 }
+
+/** One line for the user when Gemini did not decide. */
+export const autoHintNote = (reason) => ({
+  'no-key': 'No Gemini key set, so this was decided on device.',
+  quota: "Gemini's daily quota is used up, so this was decided on device.",
+  offline: 'Gemini could not be reached, so this was decided on device.',
+  error: "Gemini didn't answer, so this was decided on device.",
+}[reason] || '')
 
 export const _test = { pickEdge, pickLook, roomOf }

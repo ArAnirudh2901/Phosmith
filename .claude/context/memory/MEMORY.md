@@ -10,4 +10,5 @@
 - [No git hooks for the context mirror](context-sync-no-git-hooks.md) — auto mode denies creating them; user installs or nobody does
 - [Safari animations need a visible window](safari-hidden-window-animations.md) — occluded tab never starts one; call finish() to verify
 - [Pixel Stretch = Photoshop bar](pixel-stretch-photoshop-bar.md) — judge against the reference clips by contact sheet; tip off frame, root on line, subject in front
-- [CleanMyMac wipes caches](cleanmymac-wipes-caches.md) — deletes ms-playwright + repo .cache mid-session; use PLAYWRIGHT_BROWSERS_PATH=0
+- [CleanMyMac cleanup](cleanmymac-wipes-caches.md) — user ran one by hand 2026-10-08; it removed ms-playwright + repo .cache; how to restore
+- [Gemini free-tier quota](gemini-free-tier-quota.md) — 20 req/day on 2.5-flash, shared app-wide; tests burn it — few live calls, reuse replies

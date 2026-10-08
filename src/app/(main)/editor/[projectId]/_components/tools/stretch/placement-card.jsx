@@ -150,7 +150,7 @@ export default function PlacementCard({
           />
           <ProRulerSlider
             variant="instrument" label="Edge Feather" suffix=""
-            value={Math.round((featherRef.current || 0.006) * 1000)} min={0} max={30} step={1}
+            value={Math.round((featherRef.current ?? 0.002) * 1000)} min={0} max={30} step={1}
             onPreview={(v) => { featherRef.current = v / 1000; subjectCutoutRef.current = null; scheduleFrame() }}
             onCommit={(v) => { featherRef.current = v / 1000; subjectCutoutRef.current = null; scheduleFrame() }}
             visual={sliderVisual}

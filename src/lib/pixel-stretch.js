@@ -29,6 +29,7 @@
 import { releaseStretchGL, renderMeshGL, sectionsToMesh } from './stretch-gl.js'
 import { canvasToPlane } from './cv/plane-image.js'
 import { lassoColourMatte } from './cv/lasso-matte.js'
+import { guidedUpsample, refineSubjectMatte, rgbPlanes } from './cv/matte-refine.js'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
@@ -2139,21 +2140,45 @@ export function renderScanlineStretch(ctx, sample, scan, W, H) {
  * canvas (white fill, alpha = subject coverage) at W×H, with optional edge
  * feather (px blur). Returns null if the matte can't be read (tainted).
  */
-export function matteToAlphaCanvas(matte, W, H, feather = 0) {
+export function matteToAlphaCanvas(matte, W, H, feather = 0, guide = null) {
   if (!matte) return null
   const mw = matte.width, mh = matte.height
   if (!mw || !mh) return null
-  const src = createStretchBuffer(mw, mh)
-  const sctx = src.getContext('2d', { willReadFrequently: true })
-  sctx.drawImage(matte, 0, 0)
-  let img
-  try { img = sctx.getImageData(0, 0, mw, mh) } catch { return null }
-  const d = img.data
-  for (let i = 0; i < d.length; i += 4) {
-    const a = d[i]                       // grayscale → R == coverage
-    d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; d[i + 3] = a
+  // Scaled up a lot, a matte blurs: carry it up along the target frame's own
+  // edges instead (capped at 2048px; the last step to W×H is a plain resample).
+  const lift = guide && guide.width === W && guide.height === H && Math.max(W / mw, H / mh) > 1.4
+  let src
+  if (lift) {
+    const k = Math.min(1, 2048 / Math.max(W, H))
+    const tw = Math.max(1, Math.round(W * k)), th = Math.max(1, Math.round(H * k))
+    try {
+      const g = createStretchBuffer(tw, th)
+      const gctx = g.getContext('2d', { willReadFrequently: true })
+      gctx.imageSmoothingEnabled = true
+      gctx.drawImage(guide, 0, 0, tw, th)
+      const up = guidedUpsample(canvasToPlane(matte, 'red'), rgbPlanes(gctx.getImageData(0, 0, tw, th)))
+      src = createStretchBuffer(tw, th)
+      const sctx = src.getContext('2d')
+      const img = sctx.createImageData(tw, th)
+      for (let p = 0, i = 0; p < up.data.length; p += 1, i += 4) {
+        img.data[i] = 255; img.data[i + 1] = 255; img.data[i + 2] = 255; img.data[i + 3] = Math.round(up.data[p] * 255)
+      }
+      sctx.putImageData(img, 0, 0)
+    } catch { src = null }
   }
-  sctx.putImageData(img, 0, 0)
+  if (!src) {
+    src = createStretchBuffer(mw, mh)
+    const sctx = src.getContext('2d', { willReadFrequently: true })
+    sctx.drawImage(matte, 0, 0)
+    let img
+    try { img = sctx.getImageData(0, 0, mw, mh) } catch { return null }
+    const d = img.data
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i]                       // grayscale → R == coverage
+      d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; d[i + 3] = a
+    }
+    sctx.putImageData(img, 0, 0)
+  }
   const out = createStretchBuffer(W, H)
   const octx = out.getContext('2d')
   octx.imageSmoothingEnabled = true
@@ -2191,6 +2216,38 @@ export function snapMatteToEdges(matte, guide, opts = {}) {
   }
   ctx.putImageData(img, 0, 0)
   return matte
+}
+
+/**
+ * A detector's subject matte (white-on-black, any size) refined against
+ * `photo` — the same frame, same orientation — into a new white-on-black canvas
+ * at the photo's size whose edge lies on the photo's real edges (see
+ * cv/matte-refine.js). A tainted photo returns the matte unchanged.
+ */
+export function refineMatteToPhoto(matte, photo, opts = {}) {
+  const W = photo?.width, H = photo?.height
+  if (!matte?.width || !W || !H) return matte
+  try {
+    const coarse = createStretchBuffer(W, H)
+    const cctx = coarse.getContext('2d', { willReadFrequently: true })
+    cctx.imageSmoothingEnabled = true
+    cctx.drawImage(matte, 0, 0, W, H)
+    const pctx = photo.getContext?.('2d', { willReadFrequently: true })
+    const rgba = pctx ? pctx.getImageData(0, 0, W, H) : null
+    if (!rgba) return matte
+    const refined = refineSubjectMatte(rgba, canvasToPlane(coarse, 'red'), opts)
+    const img = cctx.createImageData(W, H)
+    for (let p = 0, i = 0; p < refined.data.length; p += 1, i += 4) {
+      // A short ramp keeps the edge crisp but anti-aliased.
+      const t = clamp01((refined.data[p] - 0.35) / 0.3)
+      const v = Math.round(t * t * (3 - 2 * t) * 255)
+      img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255
+    }
+    cctx.putImageData(img, 0, 0)
+    return coarse
+  } catch {
+    return matte
+  }
 }
 
 /**

@@ -1,16 +1,15 @@
 ---
 name: cleanmymac-wipes-caches
-description: CleanMyMac 5 on this Mac deletes ~/Library/Caches/ms-playwright and the repo's .cache/ mid-session; browser suites then fail or skip
+description: "The user runs CleanMyMac cleanups by hand; one on 2026-10-08 removed ~/Library/Caches/ms-playwright and the repo's .cache/ mid-session"
 metadata:
+  node_type: memory
   type: reference
+  originSessionId: eebdaeeb-9d07-4851-8205-311aea0469da
+  modified: 2026-10-08T06:00:41.890Z
 ---
 
-On 2026-10-08 CleanMyMac 5 (running in the background) deleted `~/Library/Caches/ms-playwright` twice within minutes and emptied the repo's `.cache/` (preview photos, `playwright-client-ai` model cache, harness bundles).
+On 2026-10-08 the user ran a CleanMyMac 5 cleanup themselves while a session was working. It removed `~/Library/Caches/ms-playwright` and emptied the repo's `.cache/` (preview photos, `playwright-client-ai` model cache, harness bundles). It is not a background job, so no need to warn about it or work around it permanently.
 
-Symptom: `Executable doesn't exist at …/ms-playwright/chromium_headless_shell-1223/…`, or `ENOENT .cache/...` from `preview-stretch.mjs`.
+Symptom after a cleanup: `Executable doesn't exist at …/ms-playwright/chromium_headless_shell-1223/…`, or `ENOENT .cache/...` from `preview-stretch.mjs`.
 
-Workaround that survives it: install the browser inside node_modules and point the run at it —
-`PLAYWRIGHT_BROWSERS_PATH=0 bunx playwright install --only-shell chromium`, then prefix runs with `PLAYWRIGHT_BROWSERS_PATH=0`.
-Preview photos come back from `services/segment/.venv/lib/python3.11/site-packages/skimage/data` (motorcycle_left, astronaut, chelsea, coffee, rocket) via that venv's Python + PIL.
-
-Do not touch CleanMyMac itself; it is the user's tool. Mention it when a suite fails this way. Related: [[verify-by-looking]].
+Recovery: `bunx playwright install chromium` (a copy also lives in `node_modules/playwright-core/.local-browsers`, usable with `PLAYWRIGHT_BROWSERS_PATH=0`). Preview photos come back from `services/segment/.venv/lib/python3.11/site-packages/skimage/data` (motorcycle_left, astronaut, chelsea, coffee, rocket) via that venv's Python + PIL. Related: [[verify-by-looking]].

@@ -862,7 +862,7 @@ const samClickOnce = async (el, points, labels, dims) => {
     return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
 }
 
-const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false) => {
+const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points = null) => {
     const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
     const input_boxes = [[[
         Math.round(box[0] * scale), Math.round(box[1] * scale),
@@ -871,9 +871,11 @@ const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false) => {
     // SlimSAM's prompt encoder always reads point tensors: a box-only prompt
     // throws (`dims` of undefined), so the box centre rides along as a positive
     // point. The box still constrains the result.
-    const seed = seedPoint || [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]
-    const input_points = [[[[Math.round(seed[0] * scale), Math.round(seed[1] * scale)]]]]
-    const input_labels = [[[1]]]
+    // Several positive points (a vision model pointing at the subject's parts)
+    // hold SAM to the whole object far better than one centre point can.
+    const seeds = Array.isArray(points) && points.length ? points : [seedPoint || [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]]
+    const input_points = [[[seeds.map(([x, y]) => [Math.round(x * scale), Math.round(y * scale)])]]]
+    const input_labels = [[seeds.map(() => 1)]]
     const inputs = await processor(rawImage, { input_boxes, input_points: input_points[0], input_labels })
     let outputs
     if (embeddings) {
@@ -904,10 +906,11 @@ export const clientSamClick = (el, points, labels, dims) =>
 /**
  * In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px;
  * `{ whole: true }` returns the whole object in the box rather than the part
- * under its centre.
+ * under its centre; `points` ([[x, y], …] natural px) are positive prompts
+ * used instead of the box centre.
  */
-export const clientSamBox = (el, box, dims, { whole = false } = {}) =>
-    withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims, null, whole)))
+export const clientSamBox = (el, box, dims, { whole = false, points = null } = {}) =>
+    withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims, null, whole, points)))
 
 /* ─── On-device subject instances (SlimSAM "everything" mode) ────────────── */
 

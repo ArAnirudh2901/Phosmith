@@ -22,7 +22,7 @@ import { runHeavy, isSuperseded } from '@/lib/heavy-job-queue'
 import { traceContour } from '@/lib/contour-trace'
 import { clientSubjectMask } from '@/lib/client-ai'
 import { toUserMessage } from '@/lib/user-error'
-import { fetchAutoHint, findSubjectMatte, planAutoStretch } from '@/lib/stretch-auto'
+import { autoHintNote, extendMatteToBox, fetchAutoHint, findSubjectMatte, matteFromDecision, planAutoStretch } from '@/lib/stretch-auto'
 import { canvasToScreen, getActiveImage, getImageCanvasBounds, isImageObject, polygonArea, simplifyPolygon } from './stretch/canvas-geometry'
 import { DIM_BG, EASE, HANDLE, HANDLE_DEFS, MAX_PREVIEW_DIM, MIN_BAND, SETTLE_MS, SUBJECT_DETECT_MAX_DIM } from './stretch/constants'
 import SelectionCard from './stretch/selection-card'
@@ -116,7 +116,9 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
 
   // Layer-placement refs (mutated live, read in render/bake without re-rendering).
   const coverageRef = useRef(0)
-  const featherRef = useRef(0.006)   // subject-edge feather as a FRACTION of min(W,H)
+  // Subject-edge feather as a FRACTION of min(W,H). Small: the refined matte
+  // already has a clean anti-aliased edge, and 0.6% blurred it ~16px on a bake.
+  const featherRef = useRef(0.002)
   const sampleElRef = useRef(null)         // element to SAMPLE from (source); null → selected image's element
   const sampleFlipRef = useRef({ x: false, y: false })
   const editingLayerRef = useRef(null)     // existing stretch layer being re-edited (null = creating new)
@@ -248,11 +250,11 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
   // so dragging Coverage or the wrap point stays cheap. Feather is a fraction of
   // the short side, as in the bake — the preview used to blur by that fraction in
   // PIXELS, so it showed a hard edge the committed layer did not have.
-  const getSubjectAlpha = useCallback((w, h) => {
+  const getSubjectAlpha = useCallback((w, h, guide = null) => {
     if (coverageRef.current <= 0 || !subjectRawMatteRef.current) return null
     const key = `${w}x${h}:${subjectMatteSigRef.current}:${featherRef.current}`
     if (subjectCutoutRef.current?.key === key) return subjectCutoutRef.current.canvas
-    const alpha = matteToAlphaCanvas(subjectRawMatteRef.current, w, h, featherRef.current * Math.min(w, h))
+    const alpha = matteToAlphaCanvas(subjectRawMatteRef.current, w, h, featherRef.current * Math.min(w, h), guide)
     subjectCutoutRef.current = { key, canvas: alpha }
     return alpha
   }, [])
@@ -290,15 +292,16 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       // photo with its flip applied, so an unflipped matte lands mirrored.
       const fx = sampleElRef.current ? sampleFlipRef.current.x : !!selectedImageRef.current?.flipX
       const fy = sampleElRef.current ? sampleFlipRef.current.y : !!selectedImageRef.current?.flipY
-      const small = scale < 1 || fx || fy ? snapshotSource(srcEl, dw, dh, fx, fy) : srcEl
+      const small = snapshotSource(srcEl, dw, dh, fx, fy)
       let matte
       try {
-        matte = await clientSubjectMask(small, { width: dw, height: dh })
+        // The same search Auto Stretch runs: a part found on a busy frame is
+        // retried, and the edge is refined onto the photo's (findSubjectMatte
+        // also hands the ~40MB model back afterwards).
+        matte = await findSubjectMatte(small)
       } finally {
-        if (small !== srcEl) { small.width = 1; small.height = 1 }
-        // Give the ~40MB model and its runtime back rather than holding them for
-        // the session — this tool needs it once, not continuously.
-        import('@/lib/client-ai').then((m) => m.releaseClientModels?.()).catch(() => {})
+        small.width = 1
+        small.height = 1
       }
       if (!matte) throw new Error('No subject matte returned')
       subjectRawMatteRef.current = matte
@@ -564,7 +567,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     layer.ctx.clearRect(0, 0, sample.w, sample.h)
     const drew = renderStretchLayer(layer.ctx, sample.canvas, paramsRef.current, sample.w, sample.h, {
       quality,
-      alpha: getSubjectAlpha(sample.w, sample.h),
+      alpha: getSubjectAlpha(sample.w, sample.h, sample.canvas),
       coverage: coverageRef.current,
       wrapAt: wrapAtRef.current,
     })
@@ -1262,11 +1265,20 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       let matte = null
       setMatteStatus('loading')
       let hint = null
+      let hintReason = null
       try {
-        // In parallel; the vision box only re-prompts SlimSAM when its own
-        // subject search came back empty.
-        ;[hint, matte] = await Promise.all([fetchAutoHint(sample.canvas), findSubjectMatte(small)])
-        if (!matte && hint?.subject) matte = await findSubjectMatte(small, { hint })
+        // Gemini reads the photo while the device runs its own subject search;
+        // Gemini's box and points then re-prompt SlimSAM.
+        toast.loading('Gemini is reading the photo…', { id: toastId })
+        let asked
+        ;[asked, matte] = await Promise.all([fetchAutoHint(sample.canvas), findSubjectMatte(small)])
+        hint = asked.hint
+        hintReason = asked.reason
+        // Gemini's box and points re-prompt SlimSAM; its answer wins when it is a
+        // subject at all, else the device matte is extended to Gemini's box.
+        const decided = await matteFromDecision(small, hint)
+        if (decided) matte = decided
+        else if (hint?.subject) matte = matte ? await extendMatteToBox(small, matte, hint.subject) : await findSubjectMatte(small, { hint: hint })
       } finally { small.width = 1; small.height = 1 }
       matteIsManualRef.current = false
       subjectCutoutRef.current = null
@@ -1294,7 +1306,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       setRegionReady(true)
       setPhase('stretch')
       scheduleFrame()
-      toast.success(`${hint ? '' : 'On-device · '}${plan.reasoning}`, { id: toastId, duration: 4500 })
+      toast.success(hint ? `Gemini · ${plan.reasoning}` : `${plan.reasoning} ${autoHintNote(hintReason)}`, { id: toastId, duration: 6000 })
     } catch (error) {
       console.error('[PixelStretch] auto stretch failed:', error)
       toast.error(toUserMessage(error, 'Auto stretch failed'), { id: toastId })
@@ -1353,7 +1365,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       setCoverage(cov); coverageRef.current = cov
       const wrap = Number.isFinite(editMeta.wrapAt) ? Math.min(1, Math.max(0, editMeta.wrapAt)) : null
       wrapAtRef.current = wrap; setWrapAt(wrap)
-      featherRef.current = editMeta.feather || 0.006
+      featherRef.current = editMeta.feather ?? 0.006
       setIsEditingLayer(true)
       setWarpMode(!!paramsRef.current.warpGrid)
       setFlowMode(!!paramsRef.current.flowPath)
@@ -1382,7 +1394,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       setParams(paramsRef.current)
       setCoverage(0); coverageRef.current = 0
       wrapAtRef.current = null; setWrapAt(null)
-      featherRef.current = 0.006
+      featherRef.current = 0.002
       setIsEditingLayer(false)
       setWarpMode(false)
       setFlowMode(false)

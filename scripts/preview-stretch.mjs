@@ -39,8 +39,40 @@ const ORT_DIR = [
 ].find((d) => existsSync(d))
 
 const MIME = { '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.html': 'text/html', '.js': 'text/javascript', '.jpg': 'image/jpeg', '.png': 'image/png', '.map': 'application/json', '.arw': 'application/octet-stream', '.nef': 'application/octet-stream', '.cr2': 'application/octet-stream', '.dng': 'application/octet-stream' }
+// A local stand-in for /api/ai/stretch-plan (the real route needs a Clerk
+// session): same prompt, schema and generation config, so `gemini: true`
+// specs see the decisions the app gets. Key from .env.local; none → hint null.
+const { AUTO_HINT_PROMPT, AUTO_HINT_SCHEMA, describeAutoFacts, sanitizeAutoHint } = await import('../src/lib/stretch-auto-hint.js')
+const ENV = existsSync(path.join(ROOT, '.env.local')) ? await readFile(path.join(ROOT, '.env.local'), 'utf8') : ''
+const GEMINI_KEY = ENV.match(/^GEMINI_API_KEY=(.*)$/m)?.[1]?.trim().replace(/^["']|["']$/g, '') || ''
+const GEMINI_MODEL = ENV.match(/^GEMINI_MODEL=(.*)$/m)?.[1]?.trim() || 'gemini-2.5-flash'
+const stretchHint = async (body) => {
+    if (!GEMINI_KEY) return null
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            systemInstruction: { parts: [{ text: AUTO_HINT_PROMPT }] },
+            contents: [{ role: 'user', parts: [{ inlineData: { mimeType: body.mimeType || 'image/jpeg', data: body.imageBase64 } }, { text: describeAutoFacts(body.facts, body.width, body.height) }] }],
+            generationConfig: {
+                temperature: 0, responseMimeType: 'application/json', responseSchema: AUTO_HINT_SCHEMA, maxOutputTokens: 4096,
+                ...(/^gemini-2\.5/i.test(GEMINI_MODEL) ? { thinkingConfig: { thinkingBudget: 1024 } } : {}),
+            },
+        }),
+    })
+    const j = await res.json().catch(() => null)
+    const text = j?.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text
+    try { return text ? sanitizeAutoHint(JSON.parse(text)) : null } catch { return null }
+}
+
 const server = createServer(async (req, res) => {
     const rel = new URL(req.url, 'http://localhost').pathname
+    if (rel === '/api/ai/stretch-plan' && req.method === 'POST') {
+        let raw = ''
+        for await (const chunk of req) raw += chunk
+        const hint = await stretchHint(JSON.parse(raw || '{}')).catch(() => null)
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: true, hint, reason: hint ? null : GEMINI_KEY ? 'error' : 'no-key' }))
+        return
+    }
     const file = rel.startsWith('/photos/') ? path.join(PHOTOS, path.basename(rel))
         : rel.startsWith('/ort/') && ORT_DIR ? path.join(ORT_DIR, path.basename(rel))
             : path.join(OUT_DIR, path.normalize(rel === '/' ? '/index.html' : rel))

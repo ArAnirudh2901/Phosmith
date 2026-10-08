@@ -13,6 +13,7 @@ import { distanceRamp, distanceTransform, signedDistanceTransform, squaredDistan
 import { defocusCoverage, defocusMap, gradientMagnitude, sparseDefocus } from '../src/lib/cv/defocus-map.js'
 import { combine, fromDefocus, fromDepth, fromGroundPlane, fromLinear, fromMatte, fromRadial, refocus } from '../src/lib/cv/coc.js'
 import { lassoColourMatte } from '../src/lib/cv/lasso-matte.js'
+import { colorGuidedFilter, guidedUpsample, lumaPlane, refineSubjectMatte, rgbPlanes } from '../src/lib/cv/matte-refine.js'
 
 let failures = 0
 let checks = 0
@@ -463,6 +464,68 @@ const maxAbsDiff = (a, b) => {
     tiny.data[cy * W + cx] = 1
     check(lassoColourMatte(rgba, tiny) === tiny, 'a lasso too small to model is returned unchanged')
     check(lassoColourMatte({ width: 3, height: 3, data: new Uint8ClampedArray(36) }, lasso) === lasso, 'a photo of the wrong size is refused')
+}
+
+// ── Subject matte refinement ───────────────────────────────────────────────
+{
+    // A disc whose true edge the coarse matte misses: SAM-style, decoded small
+    // (32px) and blown up, and shifted 4px so it is wrong on both sides.
+    const W = 256, H = 256, cx = 128, cy = 128, R = 70
+    const rgba = { width: W, height: H, data: new Uint8ClampedArray(W * H * 4) }
+    const truth = makePlane(W, H)
+    for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
+        const p = y * W + x, i = p * 4, on = Math.hypot(x - cx, y - cy) <= R
+        rgba.data[i] = on ? 200 : 40; rgba.data[i + 1] = on ? 60 : 90; rgba.data[i + 2] = on ? 50 : 190; rgba.data[i + 3] = 255
+        truth.data[p] = on ? 1 : 0
+    }
+    const small = makePlane(32, 32)
+    for (let y = 0; y < 32; y += 1) for (let x = 0; x < 32; x += 1) small.data[y * 32 + x] = Math.hypot(x * 8 + 4 - cx - 4, y * 8 + 4 - cy) <= R ? 1 : 0
+    const coarse = upsamplePlane(small, W, H)
+    const iou = (m) => {
+        let i = 0, u = 0
+        for (let k = 0; k < truth.data.length; k += 1) { const a = m.data[k] >= 0.5, b = truth.data[k] >= 0.5; if (a && b) i += 1; if (a || b) u += 1 }
+        return i / u
+    }
+    const edgeErr = (m) => {
+        let e = 0, n = 0
+        for (let k = 0; k < truth.data.length; k += 1) {
+            const y = Math.floor(k / W), x = k % W, r = Math.hypot(x - cx, y - cy)
+            if (Math.abs(r - R) < 6) { e += Math.abs(m.data[k] - truth.data[k]); n += 1 }
+        }
+        return e / n
+    }
+    const refined = refineSubjectMatte(rgba, coarse, { band: 0.04 })
+    check(iou(refined) > iou(coarse) && iou(refined) > 0.97, 'refinement lands a shifted, blocky matte on the real edge', `IoU ${iou(coarse).toFixed(3)} → ${iou(refined).toFixed(3)}`)
+    check(edgeErr(refined) < 0.5 * edgeErr(coarse), 'the error along the edge at least halves', `${edgeErr(coarse).toFixed(3)} → ${edgeErr(refined).toFixed(3)}`)
+    check(refined.data.every((v) => v >= 0 && v <= 1 && Number.isFinite(v)), 'the refined matte is finite and bounded')
+
+    // Same brightness, different hue: only a colour guide can see this edge.
+    const E = 128
+    const iso = { width: E, height: E, data: new Uint8ClampedArray(E * E * 4) }
+    const step = makePlane(E, E)
+    for (let y = 0; y < E; y += 1) for (let x = 0; x < E; x += 1) {
+        const p = y * E + x, i = p * 4, left = x < E / 2
+        // red (200,40,40) and green (40,93,40) at equal Rec.709 luma
+        iso.data[i] = left ? 200 : 40; iso.data[i + 1] = left ? 40 : 93; iso.data[i + 2] = 40; iso.data[i + 3] = 255
+        step.data[p] = left ? 1 : 0
+    }
+    const lumaOf = lumaPlane(iso)
+    const spread = Math.max(...lumaOf.data) - Math.min(...lumaOf.data)
+    const soft = gaussianBlur(step, 4)
+    const byColour = colorGuidedFilter(rgbPlanes(iso), soft, { radius: 6, eps: 1e-4 })
+    const byLuma = guidedFilter(lumaOf, soft, { radius: 6, eps: 1e-4 })
+    const sharpness = (m) => m.data[(E / 2) * E + E / 2 - 3] - m.data[(E / 2) * E + E / 2 + 2]
+    // The filter transfers the guide's structure; the contrast curve applied
+    // after it is what binarises, so the test is how much sharper, not a step.
+    check(spread < 0.02 && sharpness(byColour) > 1.4 * sharpness(byLuma),
+        'the colour guide snaps an edge the luma guide cannot see', `luma spread ${spread.toFixed(3)}, step ${sharpness(byLuma).toFixed(2)} (luma) vs ${sharpness(byColour).toFixed(2)} (colour)`)
+
+    // A 64px matte carried to 256px along the photo's own edge.
+    const lowM = resamplePlane(truth, 64, 64)
+    const viaGuide = guidedUpsample(lowM, rgbPlanes(rgba))
+    const viaBilinear = upsamplePlane(lowM, W, H)
+    check(edgeErr(viaGuide) < 0.6 * edgeErr(viaBilinear), 'guided upsampling keeps the edge a bilinear upscale blurs', `${edgeErr(viaBilinear).toFixed(3)} → ${edgeErr(viaGuide).toFixed(3)}`)
+    check(refineSubjectMatte({ width: 3, height: 3, data: new Uint8ClampedArray(36) }, coarse) === coarse, 'a photo of the wrong size is refused')
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed.`)

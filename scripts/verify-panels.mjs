@@ -49,6 +49,9 @@ const openPage = async () => {
   const state = { writes: [], logs: [], pageErrors: [] }
   page.on('console', (m) => state.logs.push(`${m.type()}: ${m.text()}`))
   page.on('pageerror', (e) => state.pageErrors.push(e.message))
+  // No model downloads: Auto Stretch must finish on its device-only path, and
+  // a slow CDN must not decide whether the gate passes.
+  await page.route(/huggingface\.co|hf\.co|cdn-lfs|xethub/, (route) => route.abort())
   await page.route(/\/api\//, (route) => {
     const req = route.request()
     if (req.method() !== 'GET') state.writes.push({ url: new URL(req.url()).pathname, body: req.postData() || '' })
