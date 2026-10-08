@@ -12,4 +12,6 @@ On 2026-10-08 the user ran a CleanMyMac 5 cleanup themselves while a session was
 
 Symptom after a cleanup: `Executable doesn't exist at …/ms-playwright/chromium_headless_shell-1223/…`, or `ENOENT .cache/...` from `preview-stretch.mjs`.
 
+LaMa's weights were also gone afterwards (`~/.cache/torch/hub/checkpoints` empty, 2026-10-08), so the segment service's first inpaint re-downloads ~200 MB — ask before triggering that.
+
 Recovery: `bunx playwright install chromium` (a copy also lives in `node_modules/playwright-core/.local-browsers`, usable with `PLAYWRIGHT_BROWSERS_PATH=0`). Preview photos come back from `services/segment/.venv/lib/python3.11/site-packages/skimage/data` (motorcycle_left, astronaut, chelsea, coffee, rocket) via that venv's Python + PIL. Related: [[verify-by-looking]].

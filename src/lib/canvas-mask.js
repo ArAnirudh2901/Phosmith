@@ -25,15 +25,6 @@ const base64ToBytes = (value) => {
   return bytes
 }
 
-const writeVarint = (bytes, value) => {
-  let next = Math.max(0, Math.floor(value))
-  while (next > 127) {
-    bytes.push((next & 0x7f) | 0x80)
-    next = Math.floor(next / 128)
-  }
-  bytes.push(next)
-}
-
 const readVarint = (bytes, state) => {
   let value = 0
   let multiplier = 1
@@ -227,39 +218,56 @@ export const maskCanvasFromClipPath = (clipPath, width, height) => {
   }
 }
 
+/**
+ * Copy a rect of the grey mask into an alpha canvas (alpha = luminance, RGB
+ * white). The clip's alpha channel IS the mask: white => visible, black =>
+ * transparent. `rect` null = the whole mask.
+ */
+export const maskRectToAlpha = (maskCanvas, alphaCanvas, rect = null) => {
+  const W = maskCanvas.width
+  const H = maskCanvas.height
+  const x = Math.max(0, Math.floor(rect ? rect.x : 0))
+  const y = Math.max(0, Math.floor(rect ? rect.y : 0))
+  const w = Math.min(W, Math.ceil(rect ? rect.x + rect.w : W)) - x
+  const h = Math.min(H, Math.ceil(rect ? rect.y + rect.h : H)) - y
+  if (w <= 0 || h <= 0) return
+  const image = maskCanvas.getContext('2d').getImageData(x, y, w, h)
+  const d = image.data
+  for (let i = 0; i < d.length; i += 4) {
+    d[i + 3] = d[i]
+    d[i] = 255
+    d[i + 1] = 255
+    d[i + 2] = 255
+  }
+  alphaCanvas.getContext('2d').putImageData(image, x, y)
+}
+
 export const buildMaskClipCanvas = (maskCanvas, { feather = 0 } = {}) => {
-  const ctx = maskCanvas.getContext('2d')
-  const source = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
   const clipCanvas = document.createElement('canvas')
   clipCanvas.width = maskCanvas.width
   clipCanvas.height = maskCanvas.height
-  const clipCtx = clipCanvas.getContext('2d')
-  const clipData = clipCtx.createImageData(maskCanvas.width, maskCanvas.height)
+  maskRectToAlpha(maskCanvas, clipCanvas)
+  return Math.round(feather) > 0 ? featherAlphaCanvas(clipCanvas, feather) : clipCanvas
+}
 
-  // The clip's alpha channel IS the mask luminance (white => fully visible,
-  // black => fully transparent). RGB is irrelevant for an alpha clip.
-  for (let i = 0; i < source.data.length; i += 4) {
-    const lum = source.data[i]
-    clipData.data[i] = 255
-    clipData.data[i + 1] = 255
-    clipData.data[i + 2] = 255
-    clipData.data[i + 3] = lum
+/**
+ * Soft edges: an alpha canvas blurred by `feather` image px, on the GPU (no
+ * readback). The stored mask stays sharp, so feather is a live, lossless
+ * parameter. Writes into `out` when it is the right size. Falls back to a crisp
+ * copy if canvas filter blur is missing.
+ */
+export const featherAlphaCanvas = (crisp, feather, out = null) => {
+  const w = crisp.width
+  const h = crisp.height
+  let clipCanvas = out
+  if (!clipCanvas || clipCanvas.width !== w || clipCanvas.height !== h) {
+    clipCanvas = document.createElement('canvas')
+    clipCanvas.width = w
+    clipCanvas.height = h
   }
-
-  // Soft edges (feather): blur the alpha channel by `feather` image-space px.
-  // We rasterize the crisp alpha first, then redraw it through a Gaussian blur
-  // filter so the stored mask stays sharp and feather remains a live, lossless
-  // parameter. Falls back to the crisp clip if canvas filter blur is missing.
+  const clipCtx = clipCanvas.getContext('2d')
   const featherPx = Math.max(0, Math.round(feather))
   if (featherPx > 0 && typeof clipCtx.filter !== 'undefined') {
-    clipCtx.putImageData(clipData, 0, 0)
-    const w = clipCanvas.width
-    const h = clipCanvas.height
-    const crisp = document.createElement('canvas')
-    crisp.width = w
-    crisp.height = h
-    crisp.getContext('2d').drawImage(clipCanvas, 0, 0)
-
     // Pad by ~3x the feather radius (a CSS blur(N) kernel reaches ~3*N px) and
     // replicate the crisp alpha's edge pixels (clamp-to-edge) into the padding.
     // Without this, the blur near the image border samples the transparent
@@ -304,14 +312,21 @@ export const buildMaskClipCanvas = (maskCanvas, { feather = 0 } = {}) => {
     return clipCanvas
   }
 
-  clipCtx.putImageData(clipData, 0, 0)
+  clipCtx.clearRect(0, 0, w, h)
+  clipCtx.drawImage(crisp, 0, 0)
   return clipCanvas
 }
 
-export const isMaskCanvasEmpty = (maskCanvas, threshold = 250) => {
+/** True when nothing in the mask (or in `rect` of it) is darker than `threshold`. */
+export const isMaskCanvasEmpty = (maskCanvas, threshold = 250, rect = null) => {
   if (!maskCanvas) return true
   const ctx = maskCanvas.getContext('2d')
-  const data = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data
+  const x = rect ? Math.max(0, Math.floor(rect.x)) : 0
+  const y = rect ? Math.max(0, Math.floor(rect.y)) : 0
+  const w = rect ? Math.min(maskCanvas.width, Math.ceil(rect.x + rect.w)) - x : maskCanvas.width
+  const h = rect ? Math.min(maskCanvas.height, Math.ceil(rect.y + rect.h)) - y : maskCanvas.height
+  if (w <= 0 || h <= 0) return true
+  const data = ctx.getImageData(x, y, w, h).data
   for (let i = 0; i < data.length; i += 4) {
     if (data[i] < threshold) return false
   }
@@ -333,43 +348,149 @@ export const createMaskClipPath = (FabricImage, maskCanvas, { feather = 0 } = {}
     _phosmithMaskClipPath: true,
   })
 
+// Runs of the red channel over `n` RGBA pixels: one value byte + a varint
+// length each. Pixels are compared whole; little-endian, so the low byte is red.
+const rleRuns = (pixels, n) => {
+  const px = new Uint32Array(pixels.buffer, pixels.byteOffset, n)
+  let out = new Uint8Array(Math.min(65536, n * 6 + 6))
+  let o = 0
+  let min = 255
+  const push = (value, run) => {
+    if (o + 6 > out.length) {
+      const next = new Uint8Array(out.length * 2)
+      next.set(out)
+      out = next
+    }
+    out[o++] = value
+    let rest = run
+    while (rest > 127) {
+      out[o++] = (rest & 0x7f) | 0x80
+      rest = Math.floor(rest / 128)
+    }
+    out[o++] = rest
+    if (value < min) min = value
+  }
+  let current = px[0]
+  let start = 0
+  for (let p = 1; p < n; p += 1) {
+    if (px[p] === current) continue
+    push(current & 0xff, p - start)
+    current = px[p]
+    start = p
+  }
+  push(current & 0xff, n - start)
+  return { bytes: out.subarray(0, o), min }
+}
+
+const rleRecord = (width, height, bytes) => ({
+  type: MASK_RLE_TYPE,
+  version: MASK_RLE_VERSION,
+  width,
+  height,
+  data: bytesToBase64(bytes),
+})
+
+/**
+ * RLE of the mask's red channel; null when the mask is empty (nothing under
+ * the 250 threshold). One readback — the old version read the mask twice and
+ * grew a JS array per byte (~120 ms at 24 MP).
+ */
 export const encodeMaskCanvas = (maskCanvas) => {
   if (!maskCanvas || typeof btoa !== 'function') return null
-  if (isMaskCanvasEmpty(maskCanvas)) return null
-
   const { width, height } = maskCanvas
-  const ctx = maskCanvas.getContext('2d')
-  const pixels = ctx.getImageData(0, 0, width, height).data
-  const bytes = []
-  let current = pixels[0] ?? 255
-  let runLength = 0
+  if (!width || !height) return null
+  const pixels = maskCanvas.getContext('2d').getImageData(0, 0, width, height).data
+  const { bytes, min } = rleRuns(pixels, width * height)
+  return min >= 250 ? null : rleRecord(width, height, bytes)
+}
 
-  const flush = () => {
-    if (!runLength) return
-    bytes.push(current)
-    writeVarint(bytes, runLength)
-    runLength = 0
+// Tool-owned masks are encoded in bands of rows, each cached until an edit
+// touches its rows, so saving after a stroke re-reads only the stroke's rows.
+// Runs split at band edges still decode: consecutive runs of one value are
+// just written one after the other.
+const BAND_ROWS = 64
+const encodeCache = new WeakMap()
+
+/**
+ * Mark a tool-owned mask as changed — in `rect` only, or everywhere. Every edit
+ * the pixel tools make goes through here (stroke dabs and syncMaskToImage).
+ */
+export const touchMaskCanvas = (maskCanvas, rect = null) => {
+  if (!maskCanvas) return
+  maskCanvas.__phosmithMaskVersion = (maskCanvas.__phosmithMaskVersion || 0) + 1
+  const bands = maskCanvas.__phosmithMaskBands
+  if (!bands) return
+  if (!rect) {
+    bands.runs.fill(null)
+    return
   }
+  const b0 = Math.max(0, Math.floor(rect.y / BAND_ROWS))
+  const b1 = Math.min(bands.runs.length - 1, Math.floor((rect.y + rect.h) / BAND_ROWS))
+  for (let b = b0; b <= b1; b += 1) bands.runs[b] = null
+}
 
-  for (let i = 0; i < pixels.length; i += 4) {
-    const value = pixels[i]
-    if (value === current && runLength < 0x7fffffff) {
-      runLength += 1
-    } else {
-      flush()
-      current = value
-      runLength = 1
+const ensureBands = (maskCanvas) => {
+  const { width, height } = maskCanvas
+  let bands = maskCanvas.__phosmithMaskBands
+  if (!bands || bands.width !== width || bands.height !== height) {
+    bands = { width, height, runs: new Array(Math.ceil(height / BAND_ROWS)).fill(null) }
+    maskCanvas.__phosmithMaskBands = bands
+  }
+  return bands
+}
+
+const encodeBand = (maskCanvas, bands, b) => {
+  const y = b * BAND_ROWS
+  const rows = Math.min(BAND_ROWS, bands.height - y)
+  bands.runs[b] = rleRuns(maskCanvas.getContext('2d').getImageData(0, y, bands.width, rows).data, bands.width * rows)
+}
+
+/**
+ * Encode stale bands while `hasTime()` says so — for an idle callback, so the
+ * first save after opening a tool does not encode the whole mask at once.
+ * Returns true when every band is current.
+ */
+export const warmMaskEncoding = (maskCanvas, hasTime) => {
+  if (!maskCanvas?.width || !maskCanvas?.height || maskCanvas.__phosmithMaskVersion === undefined) return true
+  const bands = ensureBands(maskCanvas)
+  for (let b = 0; b < bands.runs.length; b += 1) {
+    if (bands.runs[b]) continue
+    if (!hasTime()) return false
+    encodeBand(maskCanvas, bands, b)
+  }
+  return true
+}
+
+/** encodeMaskCanvas for tool-owned masks: unchanged bands are reused. Untracked masks always encode. */
+export const encodeMaskCanvasCached = (maskCanvas) => {
+  if (!maskCanvas) return null
+  const version = maskCanvas.__phosmithMaskVersion
+  if (version === undefined) return encodeMaskCanvas(maskCanvas)
+  const hit = encodeCache.get(maskCanvas)
+  if (hit && hit.version === version) return hit.encoded
+  const { width, height } = maskCanvas
+  if (!width || !height || typeof btoa !== 'function') return null
+
+  const bands = ensureBands(maskCanvas)
+  let total = 0
+  let min = 255
+  for (let b = 0; b < bands.runs.length; b += 1) {
+    if (!bands.runs[b]) encodeBand(maskCanvas, bands, b)
+    total += bands.runs[b].bytes.length
+    if (bands.runs[b].min < min) min = bands.runs[b].min
+  }
+  let encoded = null
+  if (min < 250) {
+    const all = new Uint8Array(total)
+    let o = 0
+    for (const band of bands.runs) {
+      all.set(band.bytes, o)
+      o += band.bytes.length
     }
+    encoded = rleRecord(width, height, all)
   }
-  flush()
-
-  return {
-    type: MASK_RLE_TYPE,
-    version: MASK_RLE_VERSION,
-    width,
-    height,
-    data: bytesToBase64(Uint8Array.from(bytes)),
-  }
+  encodeCache.set(maskCanvas, { version, encoded })
+  return encoded
 }
 
 export const decodeMaskCanvas = (encoded) => {
@@ -500,12 +621,16 @@ export const isPointInImage = (point, img) => {
  * Stamp one brush dab onto the mask. `mode` 'erase' paints toward black (hides),
  * 'restore' toward white (reveals). `hardness` (0–1) sets the soft falloff radius
  * and `flow` (0–1) the per-dab strength (build-up brush when < 1).
+ *
+ * `alpha`: ctx is an alpha clip (alpha = mask). Erasing there is destination-out,
+ * which takes alpha·(1−a) exactly as black-over takes grey·(1−a), so the clip
+ * tracks the mask dab for dab without being read back.
  */
-export const stampMask = (ctx, x, y, { radius, hardness = 1, flow = 1, mode = 'erase' }) => {
+export const stampMask = (ctx, x, y, { radius, hardness = 1, flow = 1, mode = 'erase', alpha = false }) => {
   const r = Math.max(0.5, radius)
   const h = Math.max(0, Math.min(1, hardness))
   ctx.save()
-  ctx.globalCompositeOperation = 'source-over'
+  ctx.globalCompositeOperation = alpha && mode === 'erase' ? 'destination-out' : 'source-over'
   ctx.globalAlpha = Math.max(0.02, Math.min(1, flow))
   ctx.beginPath()
   ctx.arc(x, y, r, 0, Math.PI * 2)

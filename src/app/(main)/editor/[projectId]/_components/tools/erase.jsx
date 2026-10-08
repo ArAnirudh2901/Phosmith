@@ -326,9 +326,10 @@ const EraseControls = ({ project, dominantColor }) => {
                 )}
             </div>
 
-            {/* AI object eraser — SAM 3: click an object, the model segments
-                the WHOLE object under the pointer and erases it. Click more
-                objects to erase each (multi-subject by accumulation). */}
+            {/* AI object eraser — SlimSAM on device: click an object, the model
+                segments the WHOLE object under the pointer, then it is filled
+                (LaMa when the service runs, this device otherwise). Click more
+                objects to remove each. */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
                     <label className="panel-label whitespace-nowrap" style={{ margin: 0 }}>AI Object Remover</label>
@@ -365,8 +366,8 @@ const EraseControls = ({ project, dominantColor }) => {
                 )}
                 {maskServiceStatus === 'unavailable' && (
                     <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[10px]"
-                        style={{ background: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239,68,68,0.15)', color: 'rgba(239,68,68,0.7)' }}>
-                        ⚠ AI service not connected — object remover unavailable
+                        style={{ background: 'rgba(251, 191, 36, 0.06)', border: '1px solid rgba(251,191,36,0.15)', color: 'rgba(251,191,36,0.75)' }}>
+                        AI fill service not connected — removals are filled on this device instead
                     </div>
                 )}
 
@@ -400,8 +401,8 @@ const EraseControls = ({ project, dominantColor }) => {
                             {tool.isObjectRunning
                                 ? (tool.objectPhase === 'filling'
                                     ? 'AI is generating the background texture'
-                                    : 'SAM 3 is segmenting the object you clicked')
-                                : 'SAM 3 detects the object, AI fills the background — click each subject to remove'}
+                                    : 'Finding the whole object you clicked')
+                                : 'Click an object: it is found, removed and the background filled in'}
                         </div>
                     </div>
                 </motion.button>

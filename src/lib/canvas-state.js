@@ -1,5 +1,5 @@
 import { isExpansionFrameLike } from './expansion-pipeline'
-import { encodeMaskCanvas, isMaskCanvasEmpty, isPhosmithMaskOverlay, maskCanvasFromClipPath } from './canvas-mask'
+import { PIXEL_MASK_CLIP_NAME, encodeMaskCanvasCached, isPhosmithMaskOverlay, maskCanvasFromClipPath } from './canvas-mask'
 
 const isMaskOverlayLike = (serializedObj, liveObj) =>
     isPhosmithMaskOverlay(serializedObj) || isPhosmithMaskOverlay(liveObj)
@@ -24,7 +24,23 @@ export const getCanvasViewportState = (canvas) => {
 export const serializeCanvasState = (canvas) => {
     if (!canvas) return null
 
-    const json = canvas.toJSON()
+    // Pixel-mask clips are dropped from the JSON below and saved as RLE instead,
+    // so take them off for toJSON: Fabric would PNG-encode the full-res clip
+    // canvas just to have it deleted (~130 ms at 24 MP, on every save).
+    const detached = []
+    for (const obj of canvas.getObjects?.() || []) {
+        const clip = obj.clipPath
+        if (clip && !clip.absolutePositioned && (clip.phosmithMaskClipPath || clip.name === PIXEL_MASK_CLIP_NAME)) {
+            detached.push([obj, clip])
+            obj.clipPath = undefined
+        }
+    }
+    let json
+    try {
+        json = canvas.toJSON()
+    } finally {
+        for (const [obj, clip] of detached) obj.clipPath = clip
+    }
 
     // Strip inline Base64 image data from objects to keep payload under Neon's 1MB limit.
     // Remote URLs (http/https) are preserved as-is.
@@ -128,9 +144,8 @@ export const serializeCanvasState = (canvas) => {
                     (pixelClip
                         ? maskCanvasFromClipPath(matchingObj.clipPath, matchingObj.width || cleaned.width || 1, matchingObj.height || cleaned.height || 1)
                         : null)
-                const encodedMask = maskCanvas && !isMaskCanvasEmpty(maskCanvas)
-                    ? encodeMaskCanvas(maskCanvas)
-                    : null
+                // null for an empty mask, so no separate emptiness scan.
+                const encodedMask = maskCanvas ? encodeMaskCanvasCached(maskCanvas) : null
                 if (encodedMask) {
                     cleaned.phosmithMask = encodedMask
                     cleaned.phosmithHasMask = true

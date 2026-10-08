@@ -76,6 +76,8 @@ export function useHistoryAutosave({
             // object:modified, etc.) but they must NOT push a new history entry —
             // otherwise the redo stack is truncated immediately after an undo.
             if (isRestoringRef.current) return
+            // Mask commits push and save themselves (flushMaskCommit), once.
+            if (event?.phosmithMaskCommit) return
             if (isExpansionFrameLike(event?.target)) return
             if (isPhosmithMaskOverlay(event?.target)) return
             // UI-only objects (tool overlays, gizmos, rubber bands) never persist.
