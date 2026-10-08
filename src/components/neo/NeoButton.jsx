@@ -1,6 +1,7 @@
 "use client"
 
-import React, { forwardRef, useCallback, useRef, useState } from "react"
+import React, { forwardRef, useCallback, useEffect, useRef, useState } from "react"
+import { registerMagnet } from "./magnet"
 import "./neo-button.css"
 
 const VARIANTS = {
@@ -27,19 +28,19 @@ const VARIANTS = {
     },
 }
 
+// pull: the most the magnet moves the face (px); reach: how far from the edge
+// the pointer starts to be felt, so the pull builds up instead of switching on.
 const SIZES = {
-    md: { padding: "11px 20px", fontSize: 12.5, offset: 3 },
-    lg: { padding: "15px 28px", fontSize: 13.5, offset: 4 },
-    xl: { padding: "19px 34px", fontSize: 14.5, offset: 5 },
+    md: { padding: "11px 20px", fontSize: 12.5, offset: 3, pull: 5, reach: 56 },
+    lg: { padding: "15px 28px", fontSize: 13.5, offset: 4, pull: 6, reach: 64 },
+    xl: { padding: "19px 34px", fontSize: 14.5, offset: 5, pull: 7, reach: 72 },
 }
-
-const MAGNET_PX = 6
 
 let rippleId = 0
 
-// Magnet/press/ripple are CSS (neo-button.css), not framer springs: reached from the
-// root layout, so a framer import here lands in every route. Pointer writes
-// --neo-dx/--neo-dy onto the node, so cursor tracking costs no React render.
+// Magnet and press are one shared rAF spring (magnet.js) writing CSS variables,
+// the ripple is CSS: no framer here, since the header reaches this from the root
+// layout. Cursor tracking costs no React render.
 const NeoButton = forwardRef(function NeoButton(
     {
         children,
@@ -64,25 +65,17 @@ const NeoButton = forwardRef(function NeoButton(
 
     const [ripples, setRipples] = useState([])
 
-    const setOffset = (dx, dy) => {
+    // Read by the shared loop every frame, so props stay current without re-registering.
+    const cfgRef = useRef(null)
+    cfgRef.current = { magnetic, disabled, offset: s.offset, pull: s.pull, reach: s.reach }
+    const magnetRef = useRef(null)
+    useEffect(() => {
         const node = innerRef.current
-        if (!node) return
-        node.style.setProperty("--neo-dx", `${dx}px`)
-        node.style.setProperty("--neo-dy", `${dy}px`)
-    }
-
-    const handleMouseMove = (event) => {
-        if (!magnetic || disabled) return
-        const target = innerRef.current
-        if (!target) return
-        const rect = target.getBoundingClientRect()
-        const dx = (event.clientX - (rect.left + rect.width / 2)) / rect.width
-        const dy = (event.clientY - (rect.top + rect.height / 2)) / rect.height
-        const clamp = (value) => Math.max(-MAGNET_PX, Math.min(MAGNET_PX, value * MAGNET_PX * 2))
-        setOffset(clamp(dx), clamp(dy))
-    }
-
-    const handleMouseLeave = () => setOffset(0, 0)
+        if (!node) return undefined
+        const m = registerMagnet(node, () => cfgRef.current)
+        magnetRef.current = m
+        return () => { m.dispose(); magnetRef.current = null }
+    }, [])
 
     const spawnRipple = useCallback((clientX, clientY) => {
         const node = innerRef.current
@@ -105,10 +98,18 @@ const NeoButton = forwardRef(function NeoButton(
         (event) => {
             if (disabled) return
             onPointerDown?.(event)
+            magnetRef.current?.press()
             spawnRipple(event.clientX, event.clientY)
         },
         [disabled, onPointerDown, spawnRipple]
     )
+
+    // The keyboard gets the same press as the pointer.
+    const handleKeyDown = (event) => {
+        if (disabled || event.repeat || (event.key !== " " && event.key !== "Enter")) return
+        magnetRef.current?.press()
+    }
+    const handleKeyUp = () => magnetRef.current?.release()
 
     const handleClick = useCallback(
         (event) => {
@@ -125,9 +126,10 @@ const NeoButton = forwardRef(function NeoButton(
             else if (ref) ref.current = node
         },
         className: className ? `neo-button ${className}` : "neo-button",
-        onMouseMove: magnetic && !disabled ? handleMouseMove : undefined,
-        onMouseLeave: magnetic && !disabled ? handleMouseLeave : undefined,
         onPointerDown: disabled ? undefined : handlePointerDown,
+        onKeyDown: handleKeyDown,
+        onKeyUp: handleKeyUp,
+        onBlur: handleKeyUp,
         onClick: disabled ? undefined : handleClick,
         style: {
             "--neo-offset": `${s.offset}px`,

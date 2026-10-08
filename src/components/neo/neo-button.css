@@ -1,10 +1,13 @@
-/* NeoButton's magnetic hover, press and ripple. CSS rather than framer-motion
-   springs: this button is used by the header, which the root layout renders, so a
-   framer import here lands the whole library in the bundle every route loads.
-   The pointer handler writes --neo-dx/--neo-dy; the transition does the easing. */
+/* NeoButton's magnetic hover, press and ripple. No framer-motion: this button is
+   used by the header, which the root layout renders. magnet.js runs one spring for
+   every button and writes the face offset (--neo-dx/--neo-dy) and the shadow
+   offset (--neo-shx/--neo-shy) each frame, so the transform and shadow carry no
+   CSS transition — a transition restarted every frame is what made it stutter. */
 .neo-button {
     --neo-dx: 0px;
     --neo-dy: 0px;
+    --neo-shx: var(--neo-offset);
+    --neo-shy: var(--neo-offset);
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -18,18 +21,9 @@
     user-select: none;
     overflow: hidden;
     transform: translate3d(var(--neo-dx), var(--neo-dy), 0);
-    box-shadow: calc(var(--neo-offset) - var(--neo-dx) * 0.5) calc(var(--neo-offset) - var(--neo-dy) * 0.5) 0 0
-        var(--neo-shadow-color);
-    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
-        box-shadow 240ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms ease;
-}
-
-/* Pressed: sit into the shadow. :active rather than a React state so the feedback
-   lands on the same frame as the pointer down. */
-.neo-button:not([aria-disabled="true"]):active {
-    transform: translate3d(var(--neo-offset), var(--neo-offset), 0);
-    box-shadow: 0 0 0 0 var(--neo-shadow-color);
-    transition-duration: 50ms;
+    box-shadow: var(--neo-shx) var(--neo-shy) 0 0 var(--neo-shadow-color);
+    transition: background 140ms ease;
+    will-change: transform;
 }
 
 .neo-button__ripple-layer {

@@ -512,6 +512,14 @@ Verified by driving the real signed-in editor in Safari rather than by reading i
 
 Two dead controls went with it: a `Move` button that did nothing and a `Scale` one drawn with a balance-scale glyph. `Lock` set `selectable: false, evented: false`, so a locked object could never be clicked again to unlock it — it now locks movement, rotation and scaling only, keeps the object selectable, and the icon reflects the state. `FloatingToolbar.jsx` (290 lines, imported nowhere) is deleted.
 
+## NeoButton: the magnet
+
+The neo buttons (New Project, the header's Dashboard, Sign In / Get Started) lean toward the pointer. The old magnet listened only while the pointer was ON the button and mapped position linearly from the centre, so the pull was at its strongest the instant the pointer crossed the edge: nothing, then a lurch of ~4.5 px within three frames, and a snap back on the way out. Each `mousemove` also restarted a 240 ms CSS transition, which is a stutter of its own.
+
+`src/components/neo/magnet.js` runs one `requestAnimationFrame` loop for every button (it sleeps when nothing is moving). The pull is a field: zero `reach` px from the edge (56/64/72 for md/lg/xl), rising by smoothstep to full at the edge, with the direction scaled across the whole field so it is continuous over the edge and eases off toward the centre. The offset follows its target through a frame-rate-independent critically damped step (`1 − e^(−dt/τ)`, τ 90 ms), and the press uses the same loop (τ 25 ms down, 110 ms up) because a CSS `:active` transition and a per-frame writer fight over the same `transform`. The loop writes `--neo-dx/--neo-dy` and the shadow's `--neo-shx/--neo-shy`; the CSS has no transform/shadow transition any more. Mouse only (touch and pen do not hover), off under `prefers-reduced-motion`, the rect measured at rest so the button does not chase its own translate, and Space/Enter press it like a pointer.
+
+Measured by sweeping a real `NeoButton` from 140 px out to its centre in headless Chromium, sampling the translate every frame: before, no response until the edge, then 4.3 px, peak 5.1, largest single-frame step 2.24 px; after, the pull starts 48 px out and builds 0.2 → 1.0 → 1.9 → 2.5 → 2.7 px, largest single-frame step 0.46 px, and settles back with no snap. Press sinks to (2.94, 2.94) with the shadow at 0.06 px within 90 ms and is halfway back 60 ms after release.
+
 ## Client diagnostics
 
 Everything known about this app's reliability came from one Chrome on one Mac. `src/lib/client-diagnostics.js` is how a failure on someone else's device becomes visible: `installDiagnostics()` (mounted once by `components/diagnostics-boot.jsx` in the root layout) listens for uncaught errors and unhandled rejections, takes a one-off capability census (WebGL2, OffscreenCanvas), and beacons batches to `/api/diagnostics`. The root error boundary reports and flushes immediately, since a crash that reaches it is the one worth knowing about.
