@@ -792,7 +792,7 @@ const ensureSamImage = async (el, { width, height }) => {
 
 // SAM output → coverage canvas at outW×outH (white = selected); picks the
 // highest-IoU candidate. Ported from the mask-studio testbed.
-const samMaskToCanvas = (maskTensor, iou, outW, outH, whole = false) => {
+const samMaskToCanvas = (maskTensor, iou, outW, outH, whole = false, object = false) => {
     const dims = maskTensor.dims
     const w = dims[dims.length - 1]
     const h = dims[dims.length - 2]
@@ -805,7 +805,21 @@ const samMaskToCanvas = (maskTensor, iou, outW, outH, whole = false) => {
     // SAM answers a prompt with whole / part / sub-part. The best-scored one is
     // often the part under the prompt point (a motorbike's engine); `whole` takes
     // the largest of the confident answers instead.
-    if (whole && nMasks > 1) {
+    // `object` (the remover): the largest answer within 0.1 of the best score —
+    // a click on a headlight's glass gets the headlight (0.895 vs the glass's
+    // 0.926), not the glass that would leave its chrome ring behind, nor the
+    // whole motorbike (0.73).
+    if (object && nMasks > 1) {
+        let bigArea = -1
+        const pick = bi
+        for (let i = 0; i < nMasks; i += 1) {
+            if ((scores[i] ?? 0) < scores[pick] - 0.1) continue
+            let a = 0
+            const o = i * plane
+            for (let p = 0; p < plane; p += 1) if (maskTensor.data[o + p]) a += 1
+            if (a > bigArea) { bigArea = a; bi = i }
+        }
+    } else if (whole && nMasks > 1) {
         let bigArea = -1
         for (let i = 0; i < nMasks; i += 1) {
             if ((scores[i] ?? 0) < Math.max(0.5, best - 0.25)) continue
@@ -841,7 +855,7 @@ const samMaskToCanvas = (maskTensor, iou, outW, outH, whole = false) => {
     return out
 }
 
-const samClickOnce = async (el, points, labels, dims) => {
+const samClickOnce = async (el, points, labels, dims, object = false) => {
     const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
     const input_points = [[points.map(([x, y]) => [Math.round(x * scale), Math.round(y * scale)])]]
     const input_labels = [[labels.map((l) => (l ? 1 : 0))]]
@@ -859,7 +873,7 @@ const samClickOnce = async (el, points, labels, dims) => {
     if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
     const masks = await processor.post_process_masks(outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
     if (!masks?.[0]?.dims) throw new Error(`${engine.label} returned no mask for the point prompt`)
-    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height)
+    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height, false, object)
 }
 
 const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points = null) => {
@@ -899,9 +913,11 @@ const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points
  * In-browser SlimSAM click-select. `points` are [[x, y], ...] and `labels`
  * [1|0, ...] in the image's NATURAL pixel coords; returns a coverage canvas at
  * (width, height). Same timeout + WebGPU→WASM hardening as the rest.
+ * `{ object: true }` returns the whole object under the click rather than the
+ * part SAM scores best (see samMaskToCanvas).
  */
-export const clientSamClick = (el, points, labels, dims) =>
-    withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims)))
+export const clientSamClick = (el, points, labels, dims, { object = false } = {}) =>
+    withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims, object)))
 
 /**
  * In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px;

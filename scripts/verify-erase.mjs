@@ -390,7 +390,24 @@ try {
 
     if (SAM) {
       console.log('object remover (real SlimSAM)')
+      // --lama: the crop goes to the real LaMa service (what /api/ai/inpaint
+      // does after auth); otherwise a magenta patch shows where the fill lands.
+      const LAMA = args.includes('--lama')
       inpaintResponder = async (route) => {
+        if (LAMA) {
+          const req = route.request()
+          const form = await new Request('http://x/', { method: 'POST', headers: { 'content-type': req.headers()['content-type'] }, body: req.postDataBuffer() }).formData()
+          const out = new FormData()
+          out.append('image', form.get('image'), 'image.jpg')
+          out.append('mask', form.get('mask'), 'mask.png')
+          const resp = await fetch(`${process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8001'}/inpaint`, { method: 'POST', body: out })
+          if (process.env.ERASE_DUMP) {
+            await writeFile(path.join(process.env.ERASE_DUMP, 'sent-image.jpg'), Buffer.from(await form.get('image').arrayBuffer()))
+            await writeFile(path.join(process.env.ERASE_DUMP, 'sent-mask.png'), Buffer.from(await form.get('mask').arrayBuffer()))
+            await writeFile(path.join(process.env.ERASE_DUMP, 'lama-out.png'), Buffer.from(await resp.clone().arrayBuffer()))
+          }
+          return route.fulfill({ status: resp.status, contentType: resp.headers.get('content-type') || 'image/png', headers: { 'X-Inpaint-Backend': 'lama' }, body: Buffer.from(await resp.arrayBuffer()) })
+        }
         const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#ff00ff' } }).png().toBuffer()
         return route.fulfill({ status: 200, contentType: 'image/png', headers: { 'X-Inpaint-Backend': 'lama' }, body: png })
       }
@@ -409,7 +426,8 @@ try {
       const toast = await page.evaluate(() => [...document.querySelectorAll('[data-sonner-toast]')].map((t) => t.innerText).join(' | '))
       await shot('6-object-removed')
       log(`object removal ${removeMs} ms · "${toast}"`)
-      check(/Object removed with LaMa/.test(toast) && near(await seen(hp), [255, 0, 255], 40), 'clicking an object sends SlimSAM\'s outline to the fill and puts the fill exactly there')
+      if (LAMA) check(/Object removed with LaMa/.test(toast) && !near(await seen(hp), headBefore, 25), 'clicking an object removes it with the real LaMa fill')
+      else check(/Object removed with LaMa/.test(toast) && near(await seen(hp), [255, 0, 255], 40), 'clicking an object sends SlimSAM\'s outline to the fill and puts the fill exactly there')
       await page.getByRole('button', { name: /Click-to-remove/ }).click()
       inpaintResponder = null
     }

@@ -16,7 +16,10 @@ A small FastAPI service for the editor's AI Object Remover, deployable as a
 
 - **LaMa** (`simple-lama-inpainting`, torch) — `/inpaint` fills the hole left
   when an object is removed. The Next.js `/api/ai/inpaint` route crops to the
-  mask bounds first, so LaMa runs on a patch, not the whole photo.
+  mask bounds first, so LaMa runs on a patch, not the whole photo. A hole
+  longer than `LAMA_WORK_HOLE` px (default 128) is filled at a scale where it
+  is that long and only the fill is scaled back up: LaMa leaves a dark
+  speckled blob in holes of a few hundred pixels, and takes minutes on them.
 
 and one model-free endpoint:
 

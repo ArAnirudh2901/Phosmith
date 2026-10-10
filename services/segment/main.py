@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - optional accel
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, UnidentifiedImageError
 from starlette.concurrency import run_in_threadpool
 
 logging.basicConfig(
@@ -66,6 +66,11 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "24").strip())
 SHAPE_MASK_MAX_SIDE = int(os.getenv("SHAPE_MASK_MAX_SIDE", "2048").strip())
 SHAPE_MASK_MAX_POINTS = int(os.getenv("SHAPE_MASK_MAX_POINTS", "10000").strip())
 # LaMa loads lazily on first use; SEGMENT_EAGER_MODELS=1 preloads it at startup.
+# Longest side, in pixels, of a hole LaMa is given to fill. Measured on one
+# headlight: an 85 px hole comes back clean, 112-160 px hold, 256 px and up turn
+# into a dark speckled blob. Past this the image is filled at a scale where the
+# hole is this size, and only the fill is scaled back up.
+LAMA_WORK_HOLE = int(os.getenv("LAMA_WORK_HOLE", "128").strip())
 SEGMENT_EAGER_MODELS = os.getenv("SEGMENT_EAGER_MODELS", "0").strip() not in ("0", "false", "False", "")
 
 ALLOWED_ORIGINS = [
@@ -360,7 +365,24 @@ async def inpaint(
         msk_np = (msk_np > 16).astype(np.uint8) * 255
         msk = Image.fromarray(msk_np, mode="L")
 
-        result = app.state.lama_model(img, msk)
+        w, h = img.size
+        ys, xs = np.nonzero(msk_np)
+        hole = max(int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)) if xs.size else 0
+        scale = min(1.0, LAMA_WORK_HOLE / hole) if hole else 1.0
+        if scale < 1.0:
+            # Fill at a scale where the hole is LAMA_WORK_HOLE px, then put only
+            # the upscaled fill back; pixels outside the hole stay the original.
+            sw, sh = max(8, round(w * scale)), max(8, round(h * scale))
+            small = img.resize((sw, sh), Image.LANCZOS)
+            # Area-average then any coverage: the small hole covers the whole one.
+            smask = msk.resize((sw, sh), Image.BOX).point(lambda v: 255 if v > 0 else 0)
+            filled = app.state.lama_model(small, smask).crop((0, 0, sw, sh))
+            up = filled.resize((w, h), Image.LANCZOS)
+            alpha = Image.fromarray(msk_np, mode="L").filter(ImageFilter.GaussianBlur(1.2))
+            result = Image.composite(up, img, alpha)
+        else:
+            # SimpleLama returns the mod-8-padded size; the caller expects the input's.
+            result = app.state.lama_model(img, msk).crop((0, 0, w, h))
         buf = io.BytesIO()
         result.save(buf, format="PNG")
         return buf.getvalue()

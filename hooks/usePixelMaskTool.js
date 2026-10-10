@@ -1345,6 +1345,9 @@ export default function usePixelMaskTool({
                     ]],
                     [1],
                     { width: up.width, height: up.height },
+                    // The whole object, not the part SAM scores best: removing
+                    // only a headlight's glass leaves its chrome ring behind.
+                    { object: true },
                 )
             } catch (e) {
                 if (e?.name === 'AbortError') return
