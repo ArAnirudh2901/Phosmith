@@ -11,8 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install deps first so this layer caches unless requirements change.
+# CPU wheels for torch: the Space has no GPU, and the default CUDA build pulls
+# ~4 GB of nvidia-* libraries into the image.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple -r requirements.txt
 
 # ── Model pre-download ────────────────────────────────────────────────────────
 # Both models baked into the image so the container starts with their weights:
