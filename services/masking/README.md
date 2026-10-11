@@ -32,7 +32,9 @@ Set `MASKING_SERVICE_URL=http://127.0.0.1:8002` in the app's `.env.local`.
 
 ## Deploy to a Hugging Face Space
 
-Create a Space with the **Docker** SDK and push this directory (`README.md`,
-`Dockerfile`, `requirements.txt`, `main.py`, `preload_models.py`). The image
-pre-downloads the model at build time and serves on port 7860; point
-`MASKING_SERVICE_URL` at the Space's URL.
+Production runs this service and its sibling in ONE Space (`ArAnirudh/Phosmith`):
+Hugging Face no longer lets a free account create a Docker Space, so
+`services/space/main.py` serves both. Deploy with `bun run space:deploy` from the
+repo root; it assembles the Space from both services and uploads it. On its own,
+this directory still builds as a Space (`Dockerfile` serves on port 7860) — point
+`MASKING_SERVICE_URL` at it.

@@ -51,6 +51,7 @@
     "verify:history": "node scripts/verify-history-journal.mjs",
     "mask:install": "pip install -r services/segment/requirements.txt",
     "mask:dev": "bun scripts/run-service.mjs segment",
+    "space:deploy": "bun scripts/space.mjs deploy",
     "masking:install": "pip install -r services/masking/requirements.txt",
     "masking:dev": "bun scripts/run-service.mjs masking",
     "masking:preload": "python services/masking/preload_local.py",
