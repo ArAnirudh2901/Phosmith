@@ -1033,12 +1033,12 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
     if (!isSourceReady(srcEl)) { toast.error('Image is still loading'); return }
 
     setSamLoading(true)
-    const toastId = toast.loading('Detecting subject on-device…')
+    const toastId = toast.loading('Detecting subject…')
     try {
       const natW = srcEl.naturalWidth || srcEl.width || 512
       const natH = srcEl.naturalHeight || srcEl.height || 512
 
-      // Run RMBG-1.4 on-device (no API call) to get subject mask
+      // SlimSAM (the Selection engine's side) gives the subject mask
       const matteCanvas = await clientSubjectMask(srcEl, { width: natW, height: natH })
       if (!matteCanvas) throw new Error('Subject detection returned empty result')
 
@@ -1208,7 +1208,7 @@ const PixelStretchControls = ({ dominantColor, contrastingColor }) => {
       return
     }
     if (!subjectRawMatteRef.current && matteStatus !== 'loading') {
-      const toastId = toast.loading('Detecting subject on-device…')
+      const toastId = toast.loading('Detecting subject…')
       const m = await ensureSubjectMatte()
       subjectCutoutRef.current = null
       scheduleFrame()

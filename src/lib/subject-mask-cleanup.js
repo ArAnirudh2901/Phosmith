@@ -5,13 +5,13 @@
  * opaque canvas where R=G=B=confidence (0..255, white = subject) — into a clean,
  * solid selection.
  *
- * RMBG-1.4 is tuned for ordinary photos. On stylized / backlit-silhouette art it
+ * Written for RMBG-1.4 (since replaced by SlimSAM, which fragments the same
+ * way on these frames), tuned for ordinary photos. On stylized / backlit-silhouette art it
  * confidently reads bright regions as "background" even when they sit INSIDE the
  * dark subject, so the matte comes back riddled with holes and sprinkled with
  * small spurious fragments over the bright sky. The semantic shader then hard-
- * cuts at 0.5, so every one of those holes shows straight through. This is the
- * on-device fallback path; when the SAM 3.1 mask service is reachable the app
- * prefers that instead.
+ * cuts at 0.5, so every one of those holes shows straight through. Every Select
+ * Subject / Background result goes through it, whichever side SlimSAM ran on.
  *
  * The pipeline composes primitives that already exist in the codebase rather
  * than re-implementing morphology:

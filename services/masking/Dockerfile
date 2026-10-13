@@ -7,11 +7,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Model pre-download ────────────────────────────────────────────────────────
-# Bake Depth into the image so the container starts with its weights.
+# Bake Depth and SlimSAM into the image so the container starts with their weights.
 ARG DEPTH_MODEL_ID=depth-anything/Depth-Anything-V2-Small-hf
+ARG SAM_MODEL_ID=nielsr/slimsam-77-uniform
 
 COPY preload_models.py .
-RUN DEPTH_MODEL_ID=$DEPTH_MODEL_ID python preload_models.py
+RUN DEPTH_MODEL_ID=$DEPTH_MODEL_ID SAM_MODEL_ID=$SAM_MODEL_ID python preload_models.py
 
 # Copy source AFTER the model layer so edits don't bust the cache.
 COPY . .

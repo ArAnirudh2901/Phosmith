@@ -134,23 +134,27 @@ export const analyzeRange = (map) => {
 export const evaluateSelfTest = ({ ground, depth, segment, sam }, disc) => {
     const checks = []
 
-    const gFound = Boolean(ground?.found)
-    checks.push({
-        label: 'Grounding binds "the red circle"',
-        ok: gFound,
-        detail: `score ${ground?.score ?? 'n/a'}`,
-    })
+    // `ground` is optional like depth: the server-selection test skips CLIPSeg,
+    // which is a 150 MB download on exactly the devices that chose the server.
+    if (ground !== undefined) {
+        const gFound = Boolean(ground?.found)
+        checks.push({
+            label: 'Grounding binds "the red circle"',
+            ok: gFound,
+            detail: `score ${ground?.score ?? 'n/a'}`,
+        })
 
-    let centered = false
-    if (gFound && Array.isArray(ground.bbox)) {
-        const [x, y, w, h] = ground.bbox
-        centered = disc.cx >= x && disc.cx <= x + w && disc.cy >= y && disc.cy <= y + h
+        let centered = false
+        if (gFound && Array.isArray(ground.bbox)) {
+            const [x, y, w, h] = ground.bbox
+            centered = disc.cx >= x && disc.cx <= x + w && disc.cy >= y && disc.cy <= y + h
+        }
+        checks.push({
+            label: 'Mask covers the disc center',
+            ok: centered,
+            detail: ground?.bbox ? `bbox ${ground.bbox.join(',')}` : 'no bbox',
+        })
     }
-    checks.push({
-        label: 'Mask covers the disc center',
-        ok: centered,
-        detail: ground?.bbox ? `bbox ${ground.bbox.join(',')}` : 'no bbox',
-    })
 
     // `depth` is optional: depth estimation is a service capability, so the
     // in-browser self-test omits it entirely (undefined = skip, null = failed).

@@ -98,7 +98,7 @@ export default function SelectionCard({
             Skip — smear the whole photo (Scanline)
           </button>
 
-          {/* ── Use the subject's shape as the SOURCE region (on-device SAM) ── */}
+          {/* ── Use the subject's shape as the SOURCE region (SlimSAM) ── */}
           <div style={{
             marginTop: 12, padding: '10px 12px', borderRadius: 12,
             background: 'linear-gradient(135deg, rgba(16,185,129,0.12), rgba(6,182,212,0.12))',
@@ -109,7 +109,7 @@ export default function SelectionCard({
               <span className="text-[11px] font-semibold" style={{ color: '#34d399' }}>Stretch the subject’s shape</span>
             </div>
             <p className="text-[10.5px] leading-relaxed mb-2.5" style={{ color: 'var(--text-muted)' }}>
-              Detects the main subject on-device (no API calls) and uses its outline as the region to smear. To put streaks <em>behind</em> a subject instead, set that in <strong style={{ color: 'var(--text-secondary)' }}>Placement</strong> after confirming.
+              Detects the main subject with SlimSAM and uses its outline as the region to smear. To put streaks <em>behind</em> a subject instead, set that in <strong style={{ color: 'var(--text-secondary)' }}>Placement</strong> after confirming.
             </p>
             <button
               type="button"

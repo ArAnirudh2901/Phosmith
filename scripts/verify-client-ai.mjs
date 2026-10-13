@@ -13,6 +13,11 @@
  *   3. runs runClientAISelfTest() in the browser — the actual models infer
  *      on a synthetic scene with a known answer — and asserts every check.
  *
+ * Before that, when the masking service answers with SlimSAM, the same
+ * self-test runs with `side: 'server'` (the Selection engine's Server): the
+ * page's /api/ai/sam/* and /api/ai/health are proxied to the service the way
+ * the Next routes do, and the browser must never fetch or load SlimSAM.
+ *
  * Caching: a persistent Chromium profile under .cache/playwright-client-ai
  * keeps the downloaded model files (~200 MB) across runs, so only the first
  * run pays the download.
@@ -21,8 +26,9 @@
  * or its Chromium build is not installed:
  *   bun add -d playwright && bunx playwright install chromium
  *
- * Usage: bun scripts/verify-client-ai.mjs
+ * Usage: bun scripts/verify-client-ai.mjs [--server-only]
  *   HARNESS_TIMEOUT_MS=900000  override the self-test budget (default 15 min)
+ *   MASKING_SERVICE_URL        the service for the server pass (default :8002)
  */
 
 import { createServer } from 'node:http'
@@ -34,6 +40,8 @@ const ROOT = path.resolve(import.meta.dir, '..')
 const HARNESS_DIR = path.join(ROOT, '.cache', 'client-ai-harness')
 const PROFILE_DIR = path.join(ROOT, '.cache', 'playwright-client-ai')
 const TIMEOUT_MS = Number(process.env.HARNESS_TIMEOUT_MS || 15 * 60 * 1000)
+const SERVICE = (process.env.MASKING_SERVICE_URL || process.env.MASK_SERVICE_URL || 'http://127.0.0.1:8002').trim().replace(/\/+$/, '')
+const SERVER_ONLY = process.argv.includes('--server-only')
 
 const log = (msg) => console.log(`[verify-client-ai] ${msg}`)
 const die = (msg) => { console.error(`[verify-client-ai] ✗ ${msg}`); process.exit(1) }
@@ -89,9 +97,32 @@ const MIME = {
   '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm',
   '.map': 'application/json',
 }
+// The Next routes' contract, minus Clerk: errors as `{ error }`, status passed through.
+const proxyApi = async (req, res, url) => {
+  const target = url.pathname === '/api/ai/health' ? `${SERVICE}/health` : `${SERVICE}/sam/${url.pathname.split('/').pop()}`
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  try {
+    const upstream = await fetch(target, {
+      method: req.method,
+      headers: req.headers['content-type'] ? { 'content-type': req.headers['content-type'] } : {},
+      body: req.method === 'POST' ? Buffer.concat(chunks) : undefined,
+    })
+    const body = await upstream.json().catch(() => ({}))
+    const out = url.pathname === '/api/ai/health'
+      ? { available: upstream.ok, sam: !!body.sam_available, samLoaded: !!body.sam_loaded, samModel: body.sam_model }
+      : upstream.ok ? body : { error: typeof body.detail === 'string' ? body.detail : 'Invalid selection request' }
+    res.writeHead(url.pathname === '/api/ai/health' ? 200 : upstream.status, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(out))
+  } catch (e) {
+    res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: String(e?.message || e) }))
+  }
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost')
+    if (url.pathname.startsWith('/api/ai/')) return proxyApi(req, res, url)
     const rel = url.pathname === '/' ? '/index.html' : url.pathname
     const file = path.join(HARNESS_DIR, path.normalize(rel))
     if (!file.startsWith(HARNESS_DIR) || !existsSync(file)) {
@@ -140,31 +171,61 @@ try {
 
   await page.goto(`http://127.0.0.1:${port}/`)
   await page.waitForFunction(() => window.__harnessReady === true, null, { timeout: 30_000 })
-  log('harness ready — running self-test (first run downloads the models)…')
 
-  const report = await Promise.race([
-    page.evaluate(() => window.__clientAI.run()),
+  const runSelfTest = (opts) => Promise.race([
+    page.evaluate((o) => window.__clientAI.run(o), opts),
     new Promise((_, reject) => setTimeout(
       () => reject(new Error(`self-test exceeded ${Math.round(TIMEOUT_MS / 1000)}s`)), TIMEOUT_MS)),
   ])
-
-  log(`device=${report.device} total=${(report.totalMs / 1000).toFixed(1)}s`)
-  for (const c of report.checks) {
-    const mark = c.ok ? 'ok' : '✗'
-    console.log(`[verify-client-ai] ${mark} ${c.label} — ${c.detail}`)
-    if (!c.ok) failed = true
+  const report = (r) => {
+    for (const c of r.checks) {
+      console.log(`[verify-client-ai] ${c.ok ? 'ok' : '✗'} ${c.label} — ${c.detail}`)
+      if (!c.ok) failed = true
+    }
   }
-  if (report.ground?.error) log(`ground error: ${report.ground.error}`)
+
+  // Server first, while the page has never loaded SlimSAM.
+  const health = await fetch(`${SERVICE}/health`, { signal: AbortSignal.timeout(5000) }).then((r) => r.json()).catch(() => null)
+  if (health?.sam_available) {
+    log(`server pass — SlimSAM on ${SERVICE}`)
+    const modelFetches = []
+    const onRequest = (r) => { if (/huggingface|hf\.co/.test(r.url())) modelFetches.push(r.url()) }
+    page.on('request', onRequest)
+    const r = await runSelfTest({ side: 'server' })
+    page.off('request', onRequest)
+    log(`server total=${(r.totalMs / 1000).toFixed(1)}s`)
+    report(r)
+    const state = await page.evaluate(() => window.__clientAI.state())
+    const quiet = modelFetches.length === 0 && !state.samReady && !state.groundReady
+    console.log(`[verify-client-ai] ${quiet ? 'ok' : '✗'} the server pass downloaded and loaded no model in the browser — ${modelFetches.length} model requests, samReady ${state.samReady}`)
+    if (!quiet) failed = true
+    const ok = r.checks.length >= 5 && r.device === 'server'
+    console.log(`[verify-client-ai] ${ok ? 'ok' : '✗'} the server pass ran the subject, click and every-subject checks — ${r.checks.length} checks, device ${r.device}`)
+    if (!ok) failed = true
+  } else {
+    log(`server pass: skip — no SlimSAM at ${SERVICE} (bun run masking:dev)`)
+  }
+
+  if (!SERVER_ONLY) {
+    log('device pass — running self-test (first run downloads the models)…')
+    const r = await runSelfTest({})
+    log(`device=${r.device} total=${(r.totalMs / 1000).toFixed(1)}s`)
+    report(r)
+    if (r.ground?.error) log(`ground error: ${r.ground.error}`)
+  }
 } catch (err) {
   console.error(`[verify-client-ai] ✗ ${err?.message || err}`)
   failed = true
 } finally {
   await context.close().catch(() => {})
+  // Keep-alive sockets (the browser's, the proxy's) would hold the process open.
+  server.closeAllConnections?.()
   server.close()
 }
 
 if (failed) {
-  console.error('\n[verify-client-ai] ✗ on-device AI self-test FAILED')
+  console.error('\n[verify-client-ai] ✗ AI self-test FAILED')
   process.exit(1)
 }
-console.log('\n[verify-client-ai] ✓ on-device AI verified in a real browser')
+console.log('\n[verify-client-ai] ✓ selection AI verified in a real browser')
+process.exit(0)

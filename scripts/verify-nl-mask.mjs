@@ -38,6 +38,8 @@ import {
   resolveOrder,
   setRoutingMode,
 } from '../src/lib/ai-routing.js'
+import { assessDevice } from '../src/lib/device-profile.js'
+import { SELECTION_CAPABILITIES, getSelectionMode, selectionSide, setSelectionMode } from '../src/lib/selection-engine.js'
 import {
   analyzeCoverage,
   analyzeRange,
@@ -322,10 +324,36 @@ const check = (label, cond, detail = '') => {
   check('server mode keeps server first',
     resolveOrder('maskPlan')[0] === 'server' && prefersClient('maskPlan') === false)
 
-  // Selection runs on device only: SlimSAM, with CLIPSeg for text.
+  // Text grounding (CLIPSeg) never leaves the browser.
   setRoutingMode('ground', 'server')
-  check('selection capabilities are device-only, whatever the preference',
-    ['sam', 'segment', 'ground', 'subjects'].every((cap) => JSON.stringify(resolveOrder(cap)) === JSON.stringify(['client'])))
+  check('text grounding is device-only, whatever the preference',
+    JSON.stringify(resolveOrder('ground')) === JSON.stringify(['client']))
+
+  // SlimSAM selection: one side, the chosen one, never a fall-through.
+  check('the selection engine covers click/box, subject and every subject',
+    JSON.stringify([...SELECTION_CAPABILITIES].sort()) === JSON.stringify(['sam', 'segment', 'subjects']))
+  check('auto selection on an unknown device runs in the browser alone',
+    SELECTION_CAPABILITIES.every((cap) => JSON.stringify(resolveOrder(cap)) === JSON.stringify(['client'])))
+  setSelectionMode('server')
+  check('Server moves every selection capability, with no device fallback',
+    getSelectionMode() === 'server'
+    && SELECTION_CAPABILITIES.every((cap) => getRoutingMode(cap) === 'server' && JSON.stringify(resolveOrder(cap)) === JSON.stringify(['server'])))
+  setSelectionMode('client')
+  check('This device has no server fallback either',
+    SELECTION_CAPABILITIES.every((cap) => JSON.stringify(resolveOrder(cap)) === JSON.stringify(['client'])) && selectionSide() === 'client')
+  setSelectionMode('auto')
+
+  // What Auto reads: a missing signal is unknown, never "low".
+  const low = (signals) => assessDevice(signals).low
+  check('4 GB of memory is a low device', low({ memoryGb: 4 }) && assessDevice({ memoryGb: 4 }).reasons[0] === '4 GB of memory')
+  check('8 GB with WebGPU is not', !low({ memoryGb: 8, cores: 8, webgpu: true }))
+  check('no WebGPU on 4 cores is low; on 10 cores it is not',
+    low({ webgpu: false, cores: 4 }) && !low({ webgpu: false, cores: 10 }))
+  check('WebGPU on 4 cores is not low', !low({ webgpu: true, cores: 4, memoryGb: 8 }))
+  check('Data Saver asks for the server', low({ saveData: true, memoryGb: 8, webgpu: true }))
+  check('unknown signals (Safari: no deviceMemory) are not low', !low({}) && !low({ memoryGb: null, cores: null, webgpu: null }))
+  check('hostile signals are unknown, not low',
+    [NaN, -1, 0, '2', Infinity].every((v) => !low({ memoryGb: v, cores: v, webgpu: 'no' })))
 
   check('unknown capabilities resolve server-only',
     JSON.stringify(resolveOrder('definitely-not-a-capability')) === JSON.stringify(['server']))

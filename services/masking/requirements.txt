@@ -4,7 +4,7 @@ python-multipart>=0.0.9
 pillow>=10.0.0
 numpy>=1.26
 
-# Depth Anything V2 (/depth) — the one model this service runs. Selection
-# (click, box, subject, text) runs in the browser on SlimSAM + CLIPSeg.
+# Depth Anything V2 (/depth) and SlimSAM (/sam/*, for devices that cannot run
+# selection in the browser). Text grounding (CLIPSeg) stays in the browser.
 torch>=2.1.0
 transformers>=4.45.0

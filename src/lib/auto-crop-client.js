@@ -1,7 +1,8 @@
 // Auto-crop engine shared by the Crop panel and the agent's crop.* commands.
 // Runs without the segmentation service (no SAM): subject-aware crops first
 // READ the photo with Gemini vision (/api/ai/crop-analyze), tighten subject
-// edges with the Mask studio's on-device matte (RMBG-1.4), then compose.
+// edges with the Mask studio's subject matte (SlimSAM, on the Selection
+// engine's side), then compose.
 // Without a vision key it analyses on-device (matte + saliency + horizon).
 // Returns { width, height, aspect, crops, subjects, recommended, source, analysis }.
 

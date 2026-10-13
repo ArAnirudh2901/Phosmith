@@ -5,7 +5,8 @@
  *
  * Calls the Next.js proxy routes (/api/ai/*), NOT the Python service directly,
  * so every request keeps Clerk auth + rate limiting. Selection (click, box,
- * subject, text, every-subject) runs on device in client-ai.js.
+ * subject, text, every-subject) goes through client-ai.js: SlimSAM on device
+ * or on the service's /sam/* (the Selection engine), CLIPSeg on device.
  */
 
 // SAM resizes to ~1024 internally, so uploading the full canvas wastes encode +

@@ -2122,7 +2122,7 @@ const MaskControls = ({ dominantColor }) => {
         return id
     }, [addChainLayer, updateLayer])
 
-    // Matte tuning for the ON-DEVICE subject path (cleanSubjectMatte).
+    // Matte tuning for every Select Subject / Background result (cleanSubjectMatte).
     const [subjectSensitivity, setSubjectSensitivity] = useState(50)
     const [subjectFillHoles, setSubjectFillHoles] = useState(true)
     const subjectSensitivityRef = useRef(50)
@@ -2130,10 +2130,9 @@ const MaskControls = ({ dominantColor }) => {
     const subjectFillHolesRef = useRef(true)
     subjectFillHolesRef.current = subjectFillHoles
 
-    // Subject / Background selection. Routes through the masking service
-    // (SAM 3.1, with a saliency→box-seed upgrade when the service returns a
-    // plain matte) and falls back to on-device RMBG per the 'segment' routing
-    // policy. `invert` flips coverage so the WHOLE background (everything that
+    // Subject / Background selection: SlimSAM over a saliency box
+    // (clientSubjectMask), on the Selection engine's side — device or server,
+    // never both. `invert` flips coverage so the WHOLE background (everything that
     // isn't the subject) is selected — the only reliable "select the sky"
     // because text grounding only binds the bright sky blob.
     const runSubjectSelection = useCallback(async ({ invert = false, label } = {}) => {
@@ -2253,7 +2252,7 @@ const MaskControls = ({ dominantColor }) => {
     }, [conceptPhrase, tool, runSubjectSelection, addChainLayer])
 
     /* ─── Multi-Subject Detection (Detect All Subjects) ──────────────────────
-     * Runs SlimSAM on device (clientSubjectInstances) to enumerate every subject
+     * Runs SlimSAM (clientSubjectInstances, on the Selection engine's side) to enumerate every subject
      * in the image and lets the user mask either the union or a specific instance with one
      * click. Results are cached on the Fabric image (one detection pass per
      * image) so re-clicking individual subjects is free.

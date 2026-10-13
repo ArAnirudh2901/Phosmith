@@ -1,9 +1,10 @@
 import { motion } from 'framer-motion'
 import { Combine, Crosshair, Loader2, MousePointer, Play, Plus, RotateCcw, Square, X } from 'lucide-react'
 import { toast } from 'sonner'
+import { selectionSide } from '@/lib/selection-engine'
 import { Section } from './ui'
 
-// Click / box select (SAM 3.1 on the service, SlimSAM on device).
+// Click / box select: SlimSAM, on device or the server (the Selection engine).
 
 export default function ClickSelectSection({
     activeDraft,
@@ -219,7 +220,9 @@ export default function ClickSelectSection({
                         {isSemanticRunning ? (
                             <>
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                {clientAI.samReady ? 'Running SlimSAM…' : 'Downloading SlimSAM…'}
+                                {selectionSide('sam') === 'server'
+                                    ? 'Running SlimSAM on the server…'
+                                    : clientAI.samReady ? 'Running SlimSAM…' : 'Downloading SlimSAM…'}
                             </>
                         ) : (
                             <>

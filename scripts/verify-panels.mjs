@@ -84,6 +84,26 @@ const boundaryErrors = (page) => page.evaluate(() => window.__errors.slice())
   const open = await page.locator('.mask-section__header[aria-expanded="true"]').count()
   check(sections >= 14 && open === sections, `Mask: all ${sections} sections open (${open} open)`)
 
+  // Selection engine card: Server moves all three selection capabilities, and
+  // "Choose for me" hands them back to Auto. The harness answers /api with 501,
+  // so the server reads as asleep — usable, not "not set up".
+  const card = page.locator('#panel div.rounded-xl', { hasText: 'Selection engine' }).first()
+  const serverTile = card.locator('button[aria-pressed]', { hasText: 'Server' })
+  const policy = () => page.evaluate(() => JSON.parse(localStorage.getItem('phosmith:ai-routing') || '{}'))
+  let engineOk = (await card.count()) > 0 && (await serverTile.count()) > 0
+  if (engineOk) {
+    await click(serverTile); await page.waitForTimeout(300)
+    const p1 = await policy()
+    const pressed = await serverTile.getAttribute('aria-pressed')
+    await click(card.locator('button[role="switch"]')); await page.waitForTimeout(300)
+    const p2 = await policy()
+    const why = await card.innerText()
+    if (process.env.PANELS_SHOT) await card.screenshot({ path: path.join(OUT, 'selection-engine.png') })
+    engineOk = ['sam', 'segment', 'subjects'].every((c) => p1[c] === 'server') && pressed === 'true'
+      && ['sam', 'segment', 'subjects'].every((c) => p2[c] === 'auto') && /Auto chose/.test(why)
+  }
+  check(engineOk, 'Mask: the Selection engine card moves click/box, subject and every-subject together, and back to Auto')
+
   await mount('stretch')
   const skipBtn = page.getByRole('button', { name: /skip/i })
   if (await skipBtn.count()) { await click(skipBtn.first()); await page.waitForTimeout(600) }

@@ -12,8 +12,8 @@ export const dynamic = 'force-dynamic'
  * depth service), falling back to the legacy combined MASK_SERVICE_URL when
  * only that is configured.
  *
- * Response: { available, depth, model } plus the raw service payload. Always
- * 200 so the client can branch on `available`.
+ * Response: { available, depth, model, sam, samLoaded, samModel } plus the raw
+ * service payload. Always 200 so the client can branch on `available`.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 const MASKING_SERVICE_URL =
@@ -42,6 +42,9 @@ export async function GET() {
         available: true,
         depth: !!j.depth_available,
         model: j.depth_model || '',
+        sam: !!j.sam_available,
+        samLoaded: !!j.sam_loaded,
+        samModel: j.sam_model || '',
         service: j,
       },
       { headers: { 'Cache-Control': 'no-store' } },

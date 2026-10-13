@@ -1,4 +1,4 @@
-"""Phosmith's Hugging Face Space: the erase service and the depth service in one app.
+"""Phosmith's Hugging Face Space: the erase service and the depth + selection service in one app.
 
 The two services are meant to deploy to a Space each, but Hugging Face no longer
 lets a free account create a Docker Space (402: "requires a PRO subscription"),
@@ -51,7 +51,7 @@ for module in (segment, depth):
 
 @app.get("/")
 async def root() -> dict:
-    return {"status": "ok", "message": "Phosmith Space: LaMa inpainting, shape fill and depth"}
+    return {"status": "ok", "message": "Phosmith Space: LaMa inpainting, shape fill, depth and SlimSAM selection"}
 
 
 @app.get("/health")

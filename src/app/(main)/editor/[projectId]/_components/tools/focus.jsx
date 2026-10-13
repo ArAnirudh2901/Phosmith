@@ -277,7 +277,7 @@ export default function FocusControls() {
                 })
                 pushLayers(activeImage, [layer], 'Depth of field')
                 setNote(source === 'depth' ? 'Depth from the masking service (thin-lens falloff).'
-                    : source === 'matte' ? 'Subject matte + distance falloff, computed on device.'
+                    : source === 'matte' ? 'Subject matte (SlimSAM) + distance falloff.'
                         : source === 'defocus' ? `Estimated from the photo's own edges (${(coverage * 100).toFixed(1)}% carried an estimate).`
                             : 'No depth evidence found — used a centred focus band.')
             } else {

@@ -114,7 +114,7 @@ export default function SubjectSection({
                 </motion.button>
             </div>
 
-            {/* ── On-device matte tuning (used on the Device fallback) ── */}
+            {/* ── Matte tuning (applied to every Select Subject / Background result) ── */}
             <LabeledSlider
                 label="Sensitivity"
                 value={subjectSensitivity}
@@ -124,7 +124,7 @@ export default function SubjectSection({
                 onChange={setSubjectSensitivity}
                 dominantColor={dominantColor}
             />
-            <label className="mask-toggle" title="On-device Select Subject / Background: fill holes enclosed by the subject">
+            <label className="mask-toggle" title="Select Subject / Background: fill holes enclosed by the subject">
                 <input type="checkbox" checked={subjectFillHoles} onChange={(e) => setSubjectFillHoles(e.target.checked)} />
                 Fill enclosed holes
             </label>

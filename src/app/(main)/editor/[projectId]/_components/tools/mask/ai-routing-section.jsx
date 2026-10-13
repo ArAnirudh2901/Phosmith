@@ -1,6 +1,7 @@
 import { Cpu, FlaskConical, Loader2 } from 'lucide-react'
 import { AI_CAPABILITIES, resetRoutingPolicy, setRoutingMode } from '@/lib/ai-routing'
 import { Section } from './ui'
+import SelectionEngineCard from '../_selection-engine-card'
 
 // AI Processing: where each AI capability runs (device / server / auto).
 
@@ -16,13 +17,15 @@ export default function AiRoutingSection({
     'use no memo'
     return (
         <Section title="AI Processing" icon={Cpu} defaultOpen={false} badge={routingBadge}>
+            {/* Click/box, subject and every-subject move together: one card. */}
+            <SelectionEngineCard />
             <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                Choose where each AI function runs. <strong>Device</strong> keeps
+                Choose where each other AI function runs. <strong>Device</strong> keeps
                 everything in this browser (models download once);{' '}
                 <strong>Server</strong> uses the local AI service / Gemini;{' '}
                 <strong>Auto</strong> prefers the server and falls back to the device.
             </p>
-            {Object.entries(AI_CAPABILITIES).map(([cap, def]) => (
+            {Object.entries(AI_CAPABILITIES).filter(([, def]) => !def.selection).map(([cap, def]) => (
                 <div key={cap} className="space-y-1">
                     {/* flex-wrap: in a narrow sidebar the three-mode pill
                         row drops below the label instead of overlapping it */}

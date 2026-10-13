@@ -15,9 +15,12 @@
  *
  * Models lazy-load on first use and are cached by the browser (HF hub files
  * land in the Cache API), so the download cost is paid once per device.
- * Trade-offs vs the local service: no SAM 3.1 edge refinement and no YOLO
- * instance detection — subject phrases fall back to text grounding, so
- * positional qualifiers ("second from the left") are not separable.
+ *
+ * SlimSAM can also run on the SERVER (the masking service's /sam/*), for
+ * devices too weak to run it here: the Selection engine card
+ * (`selection-engine.js`) picks the side, and every SlimSAM entry point below
+ * (click, box, subject, every subject) runs on that side only. The same
+ * pickers choose among the same three candidates either way.
  *
  * The mode is a user preference persisted in localStorage; the executor also
  * uses this engine as an AUTOMATIC fallback when the server reports 501
@@ -33,6 +36,7 @@ import {
     withTimeout,
 } from './client-ai-core'
 import { runHeavy } from '@/lib/heavy-job-queue'
+import { noteSelectionServer, selectionSide } from '@/lib/selection-engine'
 
 const ENABLED_KEY = 'phosmith:client-ai'
 const CHANGED_EVENT = 'phosmith:client-ai-changed'
@@ -114,10 +118,10 @@ const emitState = () => {
     } catch { /* SSR */ }
 }
 
-const recordDiag = (capability, startedAt, ok, error) => {
+const recordDiag = (capability, startedAt, ok, error, device = state.device) => {
     state.diagnostics.push({
         capability,
-        device: state.device,
+        device,
         ms: Date.now() - startedAt,
         ok,
         ...(error ? { error: String(error?.message || error).slice(0, 160) } : {}),
@@ -392,9 +396,10 @@ const withModelUse = async (name, run) => {
     }
 }
 
-/** Drop every loaded in-browser model now (frees RAM immediately). */
-export const releaseClientModels = async () => {
+/** Drop loaded in-browser models now (frees RAM immediately); all by default. */
+export const releaseClientModels = async (names = Object.keys(MODEL_SLOTS)) => {
     for (const [name, slot] of Object.entries(MODEL_SLOTS)) {
+        if (!names.includes(name)) continue
         const pending = slot.get()
         slot.clear()
         delete slotUse[name]
@@ -709,9 +714,12 @@ export const clientSubjectMask = async (el, dims) =>
     // allocator in the app. Queued so it cannot land on top of a bake or export.
     // No supersede key: two callers wanting mattes for DIFFERENT images are two
     // intents, and dropping the queued one would silently lose a result.
-    runHeavy('subject detection', () => clientSubjectMaskInner(el, dims))
+    // On the server it allocates nothing here, so it does not hold the slot.
+    onServer('segment')
+        ? clientSubjectMaskInner(el, dims, true)
+        : runHeavy('subject detection', () => clientSubjectMaskInner(el, dims, false))
 
-const clientSubjectMaskInner = async (el, dims) => {
+const clientSubjectMaskInner = async (el, dims, server) => {
     const startedAt = Date.now()
     try {
         const width = Number(dims?.width) || el?.naturalWidth || el?.width || 0
@@ -722,14 +730,22 @@ const clientSubjectMaskInner = async (el, dims) => {
         // so try them all and keep the mask that reads as the whole subject.
         let best = null
         let lastErr = null
-        for (const seed of seeds) {
-            try {
-                const candidate = await withModelUse('sam', () =>
-                    withDeviceFallback('sam', () => samBoxOnce(el, box, { width, height }, seed)))
-                const verdict = scoreSubjectMask(candidate, box, width, height)
-                if (!best || verdict.score > best.verdict.score) best = { canvas: candidate, verdict }
-            } catch (err) {
-                lastErr = err
+        const keep = (candidate) => {
+            const verdict = scoreSubjectMask(candidate, box, width, height)
+            if (!best || verdict.score > best.verdict.score) best = { canvas: candidate, verdict }
+        }
+        if (server) {
+            // Every seed in one round trip.
+            const candidates = await withServerUse('sam', () => samBoxServer(el, box, { width, height }, seeds.map((seed) => [seed])))
+            candidates.forEach(keep)
+        } else {
+            for (const seed of seeds) {
+                try {
+                    keep(await withModelUse('sam', () =>
+                        withDeviceFallback('sam', () => samBoxOnce(el, box, { width, height }, seed))))
+                } catch (err) {
+                    lastErr = err
+                }
             }
         }
         if (!best) throw lastErr || new Error('Subject detection failed')
@@ -884,7 +900,9 @@ const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points
     ]]]
     // SlimSAM's prompt encoder always reads point tensors: a box-only prompt
     // throws (`dims` of undefined), so the box centre rides along as a positive
-    // point. The box still constrains the result.
+    // point. The box itself does NOT reach the model: this ONNX export declares
+    // no `input_boxes`, and transformers.js drops inputs a session does not
+    // declare (with a console warning). The points are the whole prompt.
     // Several positive points (a vision model pointing at the subject's parts)
     // hold SAM to the whole object far better than one centre point can.
     const seeds = Array.isArray(points) && points.length ? points : [seedPoint || [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]]
@@ -917,7 +935,9 @@ const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points
  * part SAM scores best (see samMaskToCanvas).
  */
 export const clientSamClick = (el, points, labels, dims, { object = false } = {}) =>
-    withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims, object)))
+    onServer('sam')
+        ? withServerUse('sam', () => samClickServer(el, points, labels, dims, object))
+        : withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims, object)))
 
 /**
  * In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px;
@@ -926,7 +946,162 @@ export const clientSamClick = (el, points, labels, dims, { object = false } = {}
  * used instead of the box centre.
  */
 export const clientSamBox = (el, box, dims, { whole = false, points = null } = {}) =>
-    withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims, null, whole, points)))
+    onServer('sam')
+        ? withServerUse('sam', async () => (await samBoxServer(el, box, dims,
+            [Array.isArray(points) && points.length ? points : [[(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]]], whole))[0])
+        : withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims, null, whole, points)))
+
+/** Is SlimSAM already on this device (loaded, or in transformers.js's cache)? */
+export const isSelectionModelCached = async () => {
+    if (state.samReady) return true
+    try {
+        if (!hasWindow() || !('caches' in window)) return false
+        // `has` first: `open` would create the cache just to look in it.
+        if (!(await caches.has('transformers-cache'))) return false
+        const keys = await (await caches.open('transformers-cache')).keys()
+        return keys.some((req) => req.url.includes(SAM_ENGINE.id) && req.url.endsWith('.onnx'))
+    } catch {
+        return false
+    }
+}
+
+/* ─── SlimSAM on the server (Selection engine: Server) ───────────────────────
+ * The same SlimSAM for devices too weak to run it here. The browser sends its
+ * own model input (the ≤1024 px canvas the device path encodes) once per
+ * image; each click, box or grid is then a small JSON round trip that names
+ * the image by `key`. Masks come back as SlimSAM's three candidates, so the
+ * same pickers (best / whole / object) choose among them as on device.
+ */
+
+// Which side the self-test pins; null follows the Selection engine.
+let sideOverride = null
+const onServer = (capability) => (sideOverride || selectionSide(capability)) === 'server'
+
+let serverSam = null   // { el, w, h, key, scale, width, height, model }
+let serverSamPending = null
+
+const postSelection = async (path, init) => {
+    const res = await fetch(path, init)
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+        const err = new Error(body?.error || `The selection server answered HTTP ${res.status}`)
+        err.status = res.status
+        throw err
+    }
+    return body
+}
+
+const ensureServerSamImage = async (el, { width, height }, { fresh = false } = {}) => {
+    const w0 = Number(width) || el?.naturalWidth || el?.width || 0
+    const h0 = Number(height) || el?.naturalHeight || el?.height || 0
+    const same = (r) => r && r.el === el && r.w === w0 && r.h === h0
+    if (!fresh && same(serverSam)) return serverSam
+    // Two calls on a new image share one upload.
+    if (!fresh && same(serverSamPending)) return serverSamPending.promise
+    const promise = (async () => {
+        const input = toInputCanvas(el, w0, h0)
+        // JPEG: a 1024 px PNG is ~1.5 MB on exactly the connections this mode is for.
+        const blob = await new Promise((res, rej) =>
+            input.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/jpeg', 0.9))
+        const form = new FormData()
+        form.append('image', blob, 'sam-input.jpg')
+        const body = await postSelection('/api/ai/sam/embed', { method: 'POST', body: form })
+        serverSam = { el, w: w0, h: h0, key: body.key, scale: input.width / w0, width: input.width, height: input.height, model: body.model }
+        return serverSam
+    })()
+    serverSamPending = { el, w: w0, h: h0, promise }
+    try {
+        return await promise
+    } finally {
+        if (serverSamPending?.promise === promise) serverSamPending = null
+    }
+}
+
+/** `buildPrompts(scale)` gives prompts in model-input px. Re-encodes once on a 404. */
+const serverDecode = async (el, dims, buildPrompts, output = 'masks') => {
+    let img = await ensureServerSamImage(el, dims)
+    const send = (key) => postSelection('/api/ai/sam/decode', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key, prompts: buildPrompts(img.scale), output }),
+    })
+    try {
+        return { img, out: await send(img.key) }
+    } catch (err) {
+        if (err.status !== 404) throw err
+        // The server forgot the image (evicted, or restarted while idle).
+        img = await ensureServerSamImage(el, dims, { fresh: true })
+        return { img, out: await send(img.key) }
+    }
+}
+
+const decodePng = async (b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }),
+        { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+    const c = document.createElement('canvas')
+    c.width = bitmap.width
+    c.height = bitmap.height
+    const ctx = c.getContext('2d', { willReadFrequently: true })
+    ctx.drawImage(bitmap, 0, 0)
+    bitmap.close?.()
+    return ctx.getImageData(0, 0, c.width, c.height)
+}
+
+// R, G, B = candidates 0, 1, 2 → the [masks, h, w] shape samMaskToCanvas reads.
+// `only` keeps one candidate.
+const candidatesFromPng = async (b64, only = null) => {
+    const { data, width, height } = await decodePng(b64)
+    const plane = width * height
+    const channels = only == null ? [0, 1, 2] : [only]
+    const out = new Uint8Array(channels.length * plane)
+    channels.forEach((ch, k) => {
+        const o = k * plane
+        for (let p = 0; p < plane; p += 1) out[o + p] = data[p * 4 + ch] > 127 ? 1 : 0
+    })
+    return { dims: [channels.length, height, width], data: out }
+}
+
+const serverMaskCanvas = async (result, outW, outH, whole = false, object = false) =>
+    samMaskToCanvas(await candidatesFromPng(result.png), { data: result.scores }, outW, outH, whole, object)
+
+const toInput = (scale) => ([x, y]) => [Math.round(x * scale), Math.round(y * scale)]
+
+const samClickServer = async (el, points, labels, dims, object = false) => {
+    const { out } = await serverDecode(el, dims, (scale) => [{
+        points: points.map(toInput(scale)),
+        labels: labels.map((l) => (l ? 1 : 0)),
+    }])
+    return serverMaskCanvas(out.results[0], dims.width, dims.height, false, object)
+}
+
+/**
+ * One prompt per point set; one canvas each. The box is NOT sent: the browser's
+ * SlimSAM export has no `input_boxes` input, so transformers.js drops the box
+ * there and only the points prompt. Sending it here made Select Subject differ
+ * by side (0.43 of the self-test frame against the device's 0.137 disc).
+ */
+const samBoxServer = async (el, box, dims, pointSets, whole = false) => {
+    const { out } = await serverDecode(el, dims, (scale) => pointSets.map((pts) => ({
+        points: pts.map(toInput(scale)),
+        labels: pts.map(() => 1),
+    })))
+    return Promise.all(out.results.map((r) => serverMaskCanvas(r, dims.width, dims.height, whole)))
+}
+
+const withServerUse = async (capability, run) => {
+    const startedAt = Date.now()
+    try {
+        const out = await run()
+        recordDiag(capability, startedAt, true, null, 'server')
+        noteSelectionServer(true)
+        return out
+    } catch (err) {
+        recordDiag(capability, startedAt, false, err, 'server')
+        noteSelectionServer(false, err?.message || '')
+        throw err
+    }
+}
 
 /* ─── On-device subject instances (SlimSAM "everything" mode) ────────────── */
 
@@ -945,17 +1120,26 @@ const INSTANCE_MAX_BORDER = 0.4
 const INSTANCE_MAX = 8
 const INSTANCE_PNG_MAX_SIDE = 2048
 
-const instancesOnce = async (el, dims) => {
-    const { Tensor } = await loadTransformers()
-    const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
-    const W = dims.width
-    const H = dims.height
-    const prompts = []
+// The grid prompts in model-input px: one positive point per cell.
+const gridPoints = ({ width: W, height: H }, scale) => {
+    const points = []
     for (let gy = 0; gy < INSTANCE_GRID; gy += 1) {
         for (let gx = 0; gx < INSTANCE_GRID; gx += 1) {
-            prompts.push([Math.round(((gx + 0.5) / INSTANCE_GRID) * W * scale), Math.round(((gy + 0.5) / INSTANCE_GRID) * H * scale)])
+            points.push([Math.round(((gx + 0.5) / INSTANCE_GRID) * W * scale), Math.round(((gy + 0.5) / INSTANCE_GRID) * H * scale)])
         }
     }
+    return points
+}
+
+/*
+ * A decoded grid, whichever side decoded it: per prompt k candidates and their
+ * scores, the decoder-grid masks (`on`), and `render` for the kept ones at
+ * output size. Selection below reads only this, so both sides choose alike.
+ */
+const deviceGrid = async (el, dims) => {
+    const { Tensor } = await loadTransformers()
+    const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
+    const prompts = gridPoints(dims, scale)
     // [image][prompt][points-in-prompt][xy]: one point per prompt, N prompts.
     const inputs = await processor(rawImage, {
         input_points: [prompts.map((pt) => [pt])],
@@ -974,23 +1158,72 @@ const instancesOnce = async (el, dims) => {
     const [rh, rw] = Array.from(inputs.reshaped_input_sizes[0] ?? inputs.reshaped_input_sizes)
     const [oh, ow] = Array.from(inputs.original_sizes[0] ?? inputs.original_sizes)
     const longest = Math.max(rh, rw) || 1024
-    const vw = Math.max(1, Math.min(lowW, Math.round((lowW * rw) / longest)))
-    const vh = Math.max(1, Math.min(lowH, Math.round((lowH * rh) / longest)))
     const plane = lowW * lowH
+    return {
+        n, k, iou, lowW, lowH, oh, ow, scale, model: engine.id,
+        vw: Math.max(1, Math.min(lowW, Math.round((lowW * rw) / longest))),
+        vh: Math.max(1, Math.min(lowH, Math.round((lowH * rh) / longest))),
+        bestOf: (i) => {
+            let m = 0
+            for (let j = 1; j < k; j += 1) if (iou[i * k + j] > iou[i * k + m]) m = j
+            return m
+        },
+        on: (i, m, x, y) => pm.data[(i * k + m) * plane + y * lowW + x] > 0,
+        render: async (kept, outW, outH) => {
+            const canvases = []
+            for (const cand of kept) {
+                const off = (cand.i * k + cand.m) * plane
+                const one = new Tensor('float32', pm.data.slice(off, off + plane), [1, 1, 1, lowH, lowW])
+                const masks = await processor.post_process_masks(one, inputs.original_sizes, inputs.reshaped_input_sizes)
+                canvases.push(samMaskToCanvas(masks[0], null, outW, outH))
+            }
+            return canvases
+        },
+    }
+}
+
+const serverGrid = async (el, dims) => {
+    const prompt = (pt) => ({ points: [pt], labels: [1] })
+    const { img, out } = await serverDecode(el, dims, (scale) => gridPoints(dims, scale).map(prompt), 'low')
+    const { vw, vh, grid } = out.low
+    const atlas = (await decodePng(out.low.png)).data
+    const best = out.results.map((r) => r.best)
+    return {
+        n: out.results.length, k: 3, iou: out.results.flatMap((r) => r.scores),
+        lowW: grid, lowH: grid, vw, vh, oh: img.height, ow: img.width, scale: img.scale, model: img.model || 'server',
+        // The server picked each prompt's best on unrounded scores; only that
+        // candidate travels, so it is the one selection must use.
+        bestOf: (i) => best[i],
+        on: (i, m, x, y) => m === best[i] && atlas[((i * vh + y) * vw + x) * 4] > 127,
+        // One more round trip for the kept few, at full size.
+        render: async (kept, outW, outH) => {
+            const { out: full } = await serverDecode(el, dims, (scale) => {
+                const points = gridPoints(dims, scale)
+                return kept.map((cand) => prompt(points[cand.i]))
+            })
+            return Promise.all(full.results.map(async (r, j) =>
+                samMaskToCanvas(await candidatesFromPng(r.png, kept[j].m), null, outW, outH)))
+        },
+    }
+}
+
+const instancesOnce = async (el, dims, side) => {
+    const grid = side === 'server' ? await serverGrid(el, dims) : await deviceGrid(el, dims)
+    const W = dims.width
+    const H = dims.height
+    const { n, k, iou, lowW, lowH, vw, vh, oh, ow, scale } = grid
 
     const candidates = []
     for (let i = 0; i < n; i += 1) {
-        let m = 0
-        for (let j = 1; j < k; j += 1) if (iou[i * k + j] > iou[i * k + m]) m = j
+        const m = grid.bestOf(i)
         const score = iou[i * k + m]
         if (!(score >= INSTANCE_MIN_SCORE)) continue
-        const off = (i * k + m) * plane
         const bits = new Uint8Array(vw * vh)
         let area = 0
         let x0 = vw, y0 = vh, x1 = -1, y1 = -1, sx = 0, sy = 0
         for (let y = 0; y < vh; y += 1) {
             for (let x = 0; x < vw; x += 1) {
-                if (pm.data[off + y * lowW + x] > 0) {
+                if (grid.on(i, m, x, y)) {
                     bits[y * vw + x] = 1
                     area += 1
                     sx += x; sy += y
@@ -1007,7 +1240,7 @@ const instancesOnce = async (el, dims) => {
         for (let x = 0; x < vw; x += 1) edge += bits[x] + bits[(vh - 1) * vw + x]
         for (let y = 1; y < vh - 1; y += 1) edge += bits[y * vw] + bits[y * vw + vw - 1]
         if (edge / (2 * (vw + vh) - 4) > INSTANCE_MAX_BORDER) continue
-        candidates.push({ off, score, bits, area, frac, box: [x0, y0, x1, y1], c: [sx / area, sy / area] })
+        candidates.push({ i, m, score, bits, area, frac, box: [x0, y0, x1, y1], c: [sx / area, sy / area] })
     }
 
     // Whole objects first: a part (a face, a sleeve) arrives later and is
@@ -1040,11 +1273,10 @@ const instancesOnce = async (el, dims) => {
     uctx.fillRect(0, 0, outW, outH)
     uctx.globalCompositeOperation = 'lighten'
 
+    const canvases = kept.length ? await grid.render(kept, outW, outH) : []
     const instances = []
     for (const [index, cand] of kept.entries()) {
-        const one = new Tensor('float32', pm.data.slice(cand.off, cand.off + plane), [1, 1, 1, lowH, lowW])
-        const masks = await processor.post_process_masks(one, inputs.original_sizes, inputs.reshaped_input_sizes)
-        const canvas = samMaskToCanvas(masks[0], null, outW, outH)
+        const canvas = canvases[index]
         uctx.drawImage(canvas, 0, 0)
         const [bx0, by0] = toNatural(cand.box[0], cand.box[1])
         const [bx1, by1] = toNatural(cand.box[2] + 1, cand.box[3] + 1)
@@ -1066,20 +1298,22 @@ const instancesOnce = async (el, dims) => {
         unionPng: instances.length ? union.toDataURL('image/png').split(',')[1] : null,
         width: outW,
         height: outH,
-        mode: 'slimsam-grid',
-        model: engine.id,
+        mode: side === 'server' ? 'slimsam-grid-server' : 'slimsam-grid',
+        model: grid.model,
     }
 }
 
 /**
- * Every separate subject in the photo, on device, from the same SlimSAM that
- * does click select — the job SAM 3.1's concept detector used to do on the
- * service. Subjects come back unlabelled ('Subject'); bbox and centroid are in
- * NATURAL px, masks are PNGs capped at 2048px.
+ * Every separate subject in the photo, from the same SlimSAM that does click
+ * select, on the Selection engine's side. Subjects come back unlabelled
+ * ('Subject'); bbox and centroid are in NATURAL px, masks are PNGs capped at
+ * 2048px.
  */
 export const clientSubjectInstances = (el, dims) =>
-    runHeavy('subject detection', () =>
-        withModelUse('sam', () => withDeviceFallback('sam', () => instancesOnce(el, dims))))
+    onServer('subjects')
+        ? withServerUse('subjects', () => instancesOnce(el, dims, 'server'))
+        : runHeavy('subject detection', () =>
+            withModelUse('sam', () => withDeviceFallback('sam', () => instancesOnce(el, dims, 'client'))))
 
 /* ─── Self-test ──────────────────────────────────────────────────────────── */
 
@@ -1129,28 +1363,45 @@ const buildInstancesScene = () => {
  * this is what makes the in-browser path verifiable instead of
  * works-on-my-machine.
  *
- * @param {{ onProgress?: (msg: string) => void }} [opts]
+ * `side: 'server'` runs the SlimSAM checks on the server instead (the
+ * Selection engine card's test) and skips CLIPSeg, which never leaves the
+ * browser; the default tests this device, whatever the engine is set to.
+ *
+ * @param {{ onProgress?: (msg: string) => void, side?: 'client'|'server' }} [opts]
  * @returns {Promise<{ ok: boolean, device: string, totalMs: number,
  *                     checks: Array<{label: string, ok: boolean, detail: string}> }>}
  */
-export const runClientAISelfTest = async ({ onProgress } = {}) => {
+export const runClientAISelfTest = async ({ onProgress, side = 'client' } = {}) => {
+    sideOverride = side === 'server' ? 'server' : 'client'
+    try {
+        return await selfTestOnce({ onProgress, server: side === 'server' })
+    } finally {
+        sideOverride = null
+    }
+}
+
+const selfTestOnce = async ({ onProgress, server }) => {
     const startedAt = Date.now()
     const progress = (msg) => { try { onProgress?.(msg) } catch { /* ignore */ } }
     const { canvas, disc } = buildSelfTestScene()
+    const where = server ? 'on the server' : 'on this device'
 
-    progress('Loading CLIPSeg + grounding "the red circle"…')
-    let ground = { found: false, score: 0, bbox: null }
-    try {
-        const g = await clientGroundPhrase(canvas, 'the red circle', { width: disc.w, height: disc.h })
-        ground = { found: Boolean(g.canvas), score: g.score, bbox: g.bbox }
-    } catch (err) {
-        ground = { found: false, score: 0, bbox: null, error: String(err?.message || err) }
+    let ground
+    if (!server) {
+        progress('Loading CLIPSeg + grounding "the red circle"…')
+        ground = { found: false, score: 0, bbox: null }
+        try {
+            const g = await clientGroundPhrase(canvas, 'the red circle', { width: disc.w, height: disc.h })
+            ground = { found: Boolean(g.canvas), score: g.score, bbox: g.bbox }
+        } catch (err) {
+            ground = { found: false, score: 0, bbox: null, error: String(err?.message || err) }
+        }
     }
 
     // Depth is not a browser model any more (service only).
     const depth = undefined
 
-    progress('Cutting out the subject with SlimSAM…')
+    progress(`Cutting out the subject with SlimSAM ${where}…`)
     let segment = null
     try {
         const s = await clientSubjectMask(canvas, { width: disc.w, height: disc.h })
@@ -1165,7 +1416,7 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
         progress(`Background removal failed: ${err?.message}`)
     }
 
-    progress('Click-selecting the disc with SlimSAM…')
+    progress(`Click-selecting the disc with SlimSAM ${where}…`)
     let sam = null
     try {
         const m = await clientSamClick(canvas, [[disc.cx, disc.cy]], [1], { width: disc.w, height: disc.h })
@@ -1179,14 +1430,14 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
             height: m.height,
             coverage: stats.coverage,
             bbox: stats.bbox,
-            engine: SAM_ENGINE.id,
+            engine: server ? (serverSam?.model || 'server') : SAM_ENGINE.id,
         }
     } catch (err) {
         sam = null
         progress(`SAM click-select failed: ${err?.message}`)
     }
 
-    progress('Finding every subject with SlimSAM…')
+    progress(`Finding every subject with SlimSAM ${where}…`)
     const shapes = buildInstancesScene()
     let instances = null
     try {
@@ -1208,7 +1459,7 @@ export const runClientAISelfTest = async ({ onProgress } = {}) => {
     report.ok = report.checks.every((c) => c.ok)
     return {
         ...report,
-        device: state.device || 'unknown',
+        device: server ? 'server' : state.device || 'unknown',
         totalMs: Date.now() - startedAt,
         ground,
         depth,

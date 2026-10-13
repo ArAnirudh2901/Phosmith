@@ -16,6 +16,7 @@ import {
     ToolEmptyState,
 } from './_pixel-tool-ui'
 import { buildImageKitBackgroundRemovalUrls } from '@/lib/imagekit-ai'
+import SelectionEngineCard from './_selection-engine-card'
 import { getRoutingMode, setRoutingMode, subscribeRouting } from '@/lib/ai-routing'
 import { toUserMessage } from '@/lib/user-error'
 
@@ -326,9 +327,10 @@ const EraseControls = ({ project, dominantColor }) => {
                 )}
             </div>
 
-            {/* AI object eraser — SlimSAM on device: click an object, the model
-                segments the WHOLE object under the pointer, then the fill
-                service fills it. Click more objects to remove each. */}
+            {/* AI object eraser — SlimSAM (on device or the server, per the
+                Selection engine): click an object, the model segments the
+                WHOLE object under the pointer, then the fill service fills it.
+                Click more objects to remove each. */}
             <div className="space-y-2" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
                 <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
                     <label className="panel-label whitespace-nowrap" style={{ margin: 0 }}>AI Object Remover</label>
@@ -407,6 +409,7 @@ const EraseControls = ({ project, dominantColor }) => {
                         </div>
                     </div>
                 </motion.button>
+                <SelectionEngineCard compact />
             </div>
 
 

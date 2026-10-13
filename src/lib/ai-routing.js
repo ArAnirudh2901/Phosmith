@@ -14,9 +14,17 @@
  *   - 'client' / 'server': try the preferred side first; if it fails at
  *     runtime, the executor falls through to the other side (when supported)
  *     rather than failing the user's request. Masking should degrade, not die.
- *   - 'auto': server first (higher quality — SAM 3.1 refinement, instance
- *     separation, Gemini planning), client as the fallback. This is also what
- *     makes the editor work out-of-the-box without the Python service.
+ *   - 'auto': server first (Gemini planning), client as the fallback. This
+ *     is also what makes the editor work out-of-the-box without the Python
+ *     service.
+ *
+ * Selection is the exception (`selection: true` — click/box, Select Subject,
+ * every subject). It is one SlimSAM run on ONE side with no fall-through: a
+ * weak device dropping back to a 40 MB in-browser model is the failure the
+ * server side exists to prevent. 'auto' picks the side from the device
+ * (`device-profile.js`): the server for a low-memory / no-WebGPU / Data Saver
+ * device, the browser otherwise. The three move together through the Selection
+ * engine card (`selection-engine.js`).
  *
  * Persistence: localStorage `phosmith:ai-routing` (JSON map). The legacy
  * boolean `phosmith:client-ai` (the old all-or-nothing "On-device AI" toggle)
@@ -26,6 +34,8 @@
  * Headless-safe: without `window` everything works in memory with 'auto'
  * defaults, so the verify script can pin the resolver's semantics.
  */
+
+import { getDeviceProfile } from './device-profile'
 
 export const ROUTING_MODES = ['auto', 'client', 'server']
 
@@ -63,29 +73,33 @@ export const AI_CAPABILITIES = {
     subjects: {
         label: 'Subject detection',
         hint: 'Per-instance people/animals/objects',
-        // SlimSAM finds the separate subjects; CLIPSeg names them when a
-        // phrase asks for one ("the dog on the left").
+        // SlimSAM finds the separate subjects; CLIPSeg (always in the browser)
+        // names them when a phrase asks for one ("the dog on the left").
         client: true,
-        server: false,
-        clientImpl: 'SlimSAM point grid + CLIPSeg (browser)',
-        serverImpl: null,
+        server: true,
+        selection: true,
+        clientImpl: 'SlimSAM point grid (browser)',
+        serverImpl: 'SlimSAM point grid (server)',
     },
     segment: {
         label: 'Select subject',
         hint: 'One-click subject matte',
         client: true,
-        server: false,
+        server: true,
+        selection: true,
         clientImpl: 'SlimSAM + saliency box (browser)',
-        serverImpl: null,
+        serverImpl: 'SlimSAM + saliency box (server)',
     },
     sam: {
         label: 'Click / box select',
         hint: 'Point or drag to select an object',
-        // Selection uses one model: SlimSAM, in the browser.
+        // Selection uses one model, SlimSAM: in the browser, or on the server
+        // for devices that cannot run it well.
         client: true,
-        server: false,
+        server: true,
+        selection: true,
         clientImpl: 'SlimSAM in browser',
-        serverImpl: null,
+        serverImpl: 'SlimSAM on the server',
     },
     inpaint: {
         label: 'Object fill',
@@ -189,8 +203,12 @@ export const resetRoutingPolicy = () => {
 export const resolveOrder = (capability) => {
     const def = AI_CAPABILITIES[capability]
     if (!def) return ['server']
-    const sides = []
     const mode = getRoutingMode(capability)
+    if (def.selection) {
+        if (mode !== 'auto') return [mode]
+        return [getDeviceProfile().low ? 'server' : 'client']
+    }
+    const sides = []
     const preferClient = mode === 'client'
     const first = preferClient ? 'client' : 'server'
     const second = preferClient ? 'server' : 'client'

@@ -26,6 +26,8 @@ const LIMITERS = {
     "ai-collage-direct": { count: 12,  windowSec: 60 },  // 12 / minute — Composer art director (vision)
     "ai-crop-analyze":   { count: 20,  windowSec: 60 },  // 20 / minute — subject-aware crop vision pass
     "ai-stretch-plan":   { count: 10,  windowSec: 60 },  // 10 / minute — AI pixel stretch planner (one-shot per image)
+    "ai-sam-embed":      { count: 30,  windowSec: 60 },  // 30 / minute — SlimSAM image encode on the server (once per image)
+    "ai-sam-decode":     { count: 300, windowSec: 60 },  // 300/ minute — SlimSAM prompts (clicks, box drags, refine)
     "shape-mask":        { count: 120, windowSec: 60 },  // 120/minute — deterministic local shape rasterization
     "imagekit-resolve":  { count: 60,  windowSec: 60 },  // 60 / minute
     "imagekit-upload":   { count: 30,  windowSec: 60 },  // 30 / minute
