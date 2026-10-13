@@ -37,7 +37,7 @@ import {
 } from './client-ai-core'
 import { runHeavy } from '@/lib/heavy-job-queue'
 import { noteSelectionServer, selectionSide } from '@/lib/selection-engine'
-import { gradientMagnitude, scoreSubjectCandidate, subjectPrompts } from '@/lib/subject-pick'
+import { gradientMagnitude, growToWhole, scoreSubjectCandidate, subjectPrompts } from '@/lib/subject-pick'
 
 const ENABLED_KEY = 'phosmith:client-ai'
 const CHANGED_EVENT = 'phosmith:client-ai-changed'
@@ -589,7 +589,8 @@ export const clientGroundPhrase = (el, phrase, dims) =>
  * prior saliency box, the box with seed points, the seeds alone and a 6×6 grid,
  * three candidates each, scored on the 256-px decoder grid by subject-pick.js
  * (confident, off the frame's border, detailed, whole, central). Only the
- * winner is upsampled.
+ * winner is upsampled — after `growToWhole` swaps a part for the confident
+ * answer containing it (a frame-filling subject).
  */
 const SUBJECT_SALIENCY_SIDE = 96
 
@@ -627,14 +628,20 @@ const subjectOnce = async (el, dims, side) => {
     for (let p = 0; p < grad.length; p += 1) gradMean += grad[p]
     gradMean /= grad.length
     let best = null
+    const scored = []
     for (let i = 0; i < dec.n; i += 1) {
         for (let m = 0; m < dec.k; m += 1) {
-            const v = scoreSubjectCandidate({ bits: dec.bits(i, m), w: dec.vw, h: dec.vh, sam: dec.iou[i * dec.k + m] }, grad, gradMean)
-            if (v.score > 0 && (!best || v.score > best.score)) best = { i, m, ...v }
+            const sam = dec.iou[i * dec.k + m]
+            const v = scoreSubjectCandidate({ bits: dec.bits(i, m), w: dec.vw, h: dec.vh, sam }, grad, gradMean)
+            if (!(v.score > 0)) continue
+            // Bits re-derived on demand: only the winner and a few wholes are read again.
+            const c = { i, m, sam, boxed: i <= nseeds.length, ...v, get bits() { return dec.bits(i, m) } }
+            scored.push(c)
+            if (!best || v.score > best.score) best = c
         }
     }
     if (!best) throw new Error('No subject could be separated from the background')
-    const [canvas] = await dec.render([best], W, H)
+    const [canvas] = await dec.render([growToWhole(best, scored)], W, H)
     return canvas
 }
 

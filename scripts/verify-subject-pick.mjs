@@ -10,9 +10,11 @@
  *   - a flat region loses to a detailed one of the same size and place
  *   - a whole object beats a part of it
  *   - out-of-range areas, empty masks and hostile scores are refused, not NaN
+ *   - growToWhole: a part becomes the confident whole containing it (the
+ *     frame-filling cat), never a less confident, box-cut or background-shaped one
  */
 
-import { SUBJECT_PICK, gradientMagnitude, scoreSubjectCandidate, subjectPrompts } from '../src/lib/subject-pick.js'
+import { SUBJECT_PICK, gradientMagnitude, growToWhole, scoreSubjectCandidate, subjectPrompts } from '../src/lib/subject-pick.js'
 
 let checks = 0, failures = 0
 const check = (ok, label, detail = '') => {
@@ -86,6 +88,34 @@ check(score(disc, 0.5).score < score(disc, 0.95).score, 'SAM confidence counts')
 const tiny = new Uint8ClampedArray(16 * 16 * 4).fill(128)
 const t = subjectPrompts(tiny, 16, 16)
 check(t.box.every(Number.isFinite) && t.seeds.every((s) => s.every(Number.isFinite)), 'a flat 16×16 frame still gives a finite box and seeds')
+
+// growToWhole. A big subject running off the bottom edge (the cat), its face inside it.
+const bigFn = (x, y) => Math.hypot(x - 40, y - 44) < 38
+const faceFn = (x, y) => Math.hypot(x - 40, y - 38) < 20
+const cand = (fn, sam, extra = {}) => {
+  const bits = maskOf(fn)
+  let reads = 0
+  const c = { sam, ...scoreSubjectCandidate({ bits, w: W, h: H, sam }, grad, gm), ...extra }
+  Object.defineProperty(c, 'bits', { get: () => { reads += 1; return bits } })
+  c.reads = () => reads
+  return c
+}
+const face = cand(faceFn, 0.95)
+const whole = cand(bigFn, 0.97)
+check(whole.bc > 0 && whole.borderRatio < SUBJECT_PICK.wholeBorder, 'the subject runs off the frame, but holds far less of the border than of the frame', `bc ${whole.bc.toFixed(2)}, border/area ${whole.borderRatio.toFixed(2)}`)
+check(sky.borderRatio > 1 && subject.borderRatio === 0, 'border/area: background above 1, a contained subject 0', `${sky.borderRatio.toFixed(2)} vs ${subject.borderRatio}`)
+check(growToWhole(face, [face, whole]) === whole, 'a part grows into the confident whole that contains it')
+check(growToWhole(face, [face, cand(bigFn, 0.92)]) === face, 'not into a whole SAM is less sure of')
+check(growToWhole(face, [face, cand(bigFn, 0.97, { boxed: true })]) === face, 'not into a box answer (it may stop at our box)')
+const withSky = cand((x, y) => bigFn(x, y) && faceFn(x, y) || y < 30, 0.99)
+check(withSky.score > 0 && growToWhole(face, [face, withSky]) === face, 'not into the face plus the sky around it', `border/area ${withSky.borderRatio.toFixed(2)}`)
+check(growToWhole(face, [face, cand((x, y) => bigFn(x, y) && x > 40, 0.99)]) === face, 'not into a region holding only part of it')
+const surer = cand((x, y) => bigFn(x, y) || Math.hypot(x - 40, y - 8) < 6, 0.99)
+check(growToWhole(face, [face, whole, surer]) === surer, 'of several wholes, the one SAM is surest of')
+const lazy = [cand(bigFn, 0.5), cand(bigFn, 0.97, { boxed: true }), cand((x, y) => faceFn(x, y) && x < 40, 0.99)]
+const face2 = cand(faceFn, 0.95)
+growToWhole(face2, [face2, ...lazy])
+check(lazy.every((c) => c.reads() === 0) && face2.reads() === 0, 'masks are read only for candidates that pass the cheap tests', `${lazy.map((c) => c.reads())} ${face2.reads()}`)
 
 console.log(`\n[verify-subject-pick] ${checks - failures}/${checks} checks passed.`)
 if (failures) process.exit(1)

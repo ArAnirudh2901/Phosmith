@@ -17,6 +17,11 @@
  * change of any parameter still picks a good mask on all five, not at the
  * single best point.
  *
+ * Then `growToWhole`: the border prior prefers a part (a cat's face) over a
+ * subject that fills the frame and runs off it (the whole cat). SAM is surer
+ * of the whole, so a confident answer that contains the winner replaces it,
+ * unless our box cut it or it hugs the frame's border like background.
+ *
  * Pure: plain arrays in, numbers out. The prompts come from a border-prior
  * saliency (`subjectPrompts`): distance from the frame-border colour palette.
  */
@@ -29,6 +34,9 @@ export const SUBJECT_PICK = Object.freeze({
     centre: 0.35,    // centre prior width, in frame units
     minArea: 0.005,
     maxArea: 0.85,
+    wholeContain: 0.9,  // share of the winner the whole must cover
+    wholeSlack: 0.01,   // SAM may be this much less sure of the whole
+    wholeBorder: 0.5,   // max border share / area share; background runs > 1
 })
 
 const BORDER = 2     // px of each frame edge that samples the background palette
@@ -166,11 +174,40 @@ export const scoreSubjectCandidate = ({ bits, w, h, sam }, grad, gradMean, opts 
     const bc = edge / Math.sqrt(area)
     const richness = gradMean > 0 ? detail / area / gradMean : 1
     const dist = Math.hypot(sx / area / w - 0.5, sy / area / h - 0.5)
-    const conf = Number.isFinite(Number(sam)) ? Math.max(0, Number(sam)) : 0
-    const score = conf ** opts.samPow
+    const score = confidence(sam) ** opts.samPow
         * Math.exp(-(bc ** 2) / (2 * opts.sigma ** 2))
         * frac ** opts.areaPow
         * richness ** opts.detailPow
         * Math.exp(-(dist ** 2) / (2 * opts.centre ** 2))
-    return { score, area: frac, bc, detail: richness, dist }
+    // Share of the frame's border over share of its area: ~1 for a region spread evenly.
+    const borderRatio = edge / (2 * (w + h)) / frac
+    return { score, area: frac, bc, borderRatio, detail: richness, dist }
+}
+
+const confidence = (sam) => (Number.isFinite(Number(sam)) ? Math.max(0, Number(sam)) : 0)
+
+/**
+ * The whole the winner is part of, or the winner.
+ * @param {{ bits: Uint8Array, sam: number, area: number }} winner
+ * @param {Iterable<{ bits: Uint8Array, sam: number, area: number, score: number, borderRatio: number, boxed?: boolean }>} cands
+ *   scored candidates; `bits` is read only after the cheap tests (it may be a getter); `boxed` = from a box prompt
+ */
+export const growToWhole = (winner, cands, opts = SUBJECT_PICK) => {
+    const floor = confidence(winner.sam) - opts.wholeSlack
+    let wb = null, n = 0, best = winner
+    for (const c of cands) {
+        // A box answer may stop at our box, not at the object's edge.
+        if (c === winner || c.boxed || !(c.score > 0) || !(c.area > winner.area)) continue
+        if (!(c.borderRatio <= opts.wholeBorder) || !(confidence(c.sam) >= floor)) continue
+        if (best !== winner && !(confidence(c.sam) > confidence(best.sam))) continue
+        if (!wb) {
+            wb = winner.bits
+            for (let p = 0; p < wb.length; p += 1) n += wb[p]
+        }
+        const cb = c.bits
+        let inside = 0
+        for (let p = 0; p < wb.length; p += 1) if (wb[p] && cb[p]) inside += 1
+        if (n > 0 && inside >= opts.wholeContain * n) best = c
+    }
+    return best
 }
