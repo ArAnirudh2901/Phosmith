@@ -271,8 +271,10 @@ class SamDecodeRequest(BaseModel):
     key: str
     prompts: list[SamPrompt]
     # "masks": all three candidates per prompt at the embedded image's size.
-    # "low": only the best-scored candidate, on the decoder's 256 grid.
+    # "low": only the best-scored candidate, on the decoder's 256 grid;
+    # with `all`, every candidate (Select Subject scores all of them).
     output: str = "masks"
+    all: bool = False
 
 
 def _validate_prompts(prompts: list[SamPrompt], width: int, height: int) -> None:
@@ -300,7 +302,7 @@ def _png_b64(arr: np.ndarray, mode: str) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _sam_decode(app: FastAPI, entry: dict, prompts: list[SamPrompt], output: str) -> dict:
+def _sam_decode(app: FastAPI, entry: dict, prompts: list[SamPrompt], output: str, every: bool = False) -> dict:
     import torch  # type: ignore
 
     oh, ow = entry["original"]
@@ -338,7 +340,8 @@ def _sam_decode(app: FastAPI, entry: dict, prompts: list[SamPrompt], output: str
             vh = max(1, min(grid, round(grid * rh / max(rh, rw))))
             for j, i in enumerate(idx):
                 best = int(np.argmax(iou[j]))
-                low[i] = (best, (pm[j, best, :vh, :vw].numpy() > 0))
+                ks = range(pm.shape[1]) if every else (best,)
+                low[i] = (best, np.concatenate([pm[j, k, :vh, :vw].numpy() > 0 for k in ks], axis=0))
         else:
             masks = app.state.sam_processor.image_processor.post_process_masks(
                 pm.unsqueeze(0), torch.tensor([[oh, ow]]), torch.tensor([[rh, rw]]))[0].numpy()  # (P, 3, oh, ow) bool
@@ -347,11 +350,14 @@ def _sam_decode(app: FastAPI, entry: dict, prompts: list[SamPrompt], output: str
 
     if output == "low":
         vh, vw = low[0][1].shape
+        if every:
+            vh //= 3
+        # Rows: prompt by prompt, and within a prompt candidate by candidate when `all`.
         atlas = np.concatenate([m for _, m in low], axis=0).astype(np.uint8) * 255
         return {
             "width": ow, "height": oh,
             "results": [{"scores": scores[i], "best": low[i][0]} for i in range(len(prompts))],
-            "low": {"png": _png_b64(atlas, "L"), "vw": vw, "vh": vh, "grid": 256},
+            "low": {"png": _png_b64(atlas, "L"), "vw": vw, "vh": vh, "grid": 256, "candidates": 3 if every else 1},
         }
     # One RGB PNG per prompt: channel k is candidate k.
     return {
@@ -573,7 +579,7 @@ async def sam_decode(req: SamDecodeRequest) -> dict:
     SAM_CACHE.move_to_end(req.key)
     t0 = time.perf_counter()
     try:
-        out = await run_in_threadpool(_sam_decode, app, entry, req.prompts, req.output)
+        out = await run_in_threadpool(_sam_decode, app, entry, req.prompts, req.output, req.all)
     except Exception as e:
         log.exception("SlimSAM decode failed")
         raise HTTPException(500, f"SlimSAM decode failed: {e}")

@@ -49,6 +49,7 @@
     "verify:agent": "bun scripts/verify-agent-loop.mjs",
     "verify:inpaint": "bun scripts/verify-inpaint.mjs",
     "verify:sam-server": "bun scripts/verify-sam-server.mjs",
+    "verify:subject-pick": "bun scripts/verify-subject-pick.mjs",
     "verify:history": "node scripts/verify-history-journal.mjs",
     "mask:install": "pip install -r services/segment/requirements.txt",
     "mask:dev": "bun scripts/run-service.mjs segment",

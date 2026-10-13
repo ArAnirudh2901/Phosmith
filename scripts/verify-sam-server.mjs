@@ -144,6 +144,16 @@ check('the grid point on the disc selects the disc', onCell(cellOf(DISC.cx, DISC
 check('the grid point on the square selects the square', onCell(cellOf(600, 250), 600, 250) && !onCell(cellOf(600, 250), DISC.cx, DISC.cy))
 check('every result names a best candidate', low.body.results.every((r) => [0, 1, 2].includes(r.best) && r.scores.length === 3))
 
+// Select Subject scores every candidate: `all` sends all three per prompt.
+const every = await decode({ key, prompts: grid.slice(0, 4), output: 'low', all: true })
+const atlas3 = await sharp(Buffer.from(every.body.low.png, 'base64')).raw().toBuffer({ resolveWithObject: true })
+check('`all` sends three candidates per prompt, prompt by prompt', every.status === 200 && every.body.low.candidates === 3 && atlas3.info.height === 192 * 4 * 3,
+  `${atlas3.info.width}x${atlas3.info.height}`)
+const one = await decode({ key, prompts: grid.slice(0, 4), output: 'low' })
+const atlas1 = await sharp(Buffer.from(one.body.low.png, 'base64')).raw().toBuffer({ resolveWithObject: true })
+const rowOf = (img, r) => img.data.subarray(r * 192 * 256 * img.info.channels, (r + 1) * 192 * 256 * img.info.channels)
+check('and the best candidate in it is the one `low` sends', [0, 1, 2, 3].every((i) => Buffer.compare(rowOf(atlas3, i * 3 + one.body.results[i].best), rowOf(atlas1, i)) === 0))
+
 // Failure modes.
 check('an unknown key is a 404 (the client embeds again)', (await decode({ key: 'nope', prompts: grid.slice(0, 1) })).status === 404)
 const hostile = [

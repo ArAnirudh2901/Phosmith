@@ -37,6 +37,7 @@ import {
 } from './client-ai-core'
 import { runHeavy } from '@/lib/heavy-job-queue'
 import { noteSelectionServer, selectionSide } from '@/lib/selection-engine'
+import { gradientMagnitude, scoreSubjectCandidate, subjectPrompts } from '@/lib/subject-pick'
 
 const ENABLED_KEY = 'phosmith:client-ai'
 const CHANGED_EVENT = 'phosmith:client-ai-changed'
@@ -45,7 +46,10 @@ const GROUND_MODEL = 'Xenova/clipseg-rd64-refined'
 // Click/box select runs on SlimSAM (~40 MB, distilled SAM) — the one
 // segmentation model this project ships for prompted selection. The slow image
 // encode is cached per image so multi-click refine stays fast.
-const SAM_ENGINE = { id: 'Xenova/slimsam-77-uniform', label: 'SlimSAM' }
+// Xenova/slimsam-77-uniform's encoder with a decoder that takes BOXES (its own
+// declares no input_boxes, so transformers.js silently dropped every box):
+// scripts/slimsam-onnx/export_decoder.py.
+const SAM_ENGINE = { id: 'ArAnirudh/slimsam-77-uniform-boxes', label: 'SlimSAM' }
 // Mirror the server's peak-relative thresholding (services/segment/main.py):
 // CLIPSeg sigmoids are range-compressed, so absolute cuts drop real targets.
 const GROUND_THRESHOLD_REL = 0.55
@@ -580,183 +584,93 @@ const groundOnce = async (el, phrase, { width, height }) => {
 export const clientGroundPhrase = (el, phrase, dims) =>
     withModelUse('ground', () => withDeviceFallback('ground', () => groundOnce(el, phrase, dims)))
 
-/* ─── Subject cutout (saliency box → SlimSAM) ────────────────────────────────
- * The browser ships ONE model, so the subject matte is a SlimSAM box prompt
- * seeded by a saliency box instead of a second segmentation network. Saliency
- * is frequency-tuned colour distance from the frame's mean with a centre prior
- * — the same idea the collage Composer uses.
+/* ─── Subject cutout (Select Subject) ────────────────────────────────────────
+ * One model, so the subject is chosen from SlimSAM's own answers: a border-
+ * prior saliency box, the box with seed points, the seeds alone and a 6×6 grid,
+ * three candidates each, scored on the 256-px decoder grid by subject-pick.js
+ * (confident, off the frame's border, detailed, whole, central). Only the
+ * winner is upsampled.
  */
-const SALIENCY_SIDE = 160
-const SUBJECT_MASS = 0.86   // share of saliency mass the seed box must contain
+const SUBJECT_SALIENCY_SIDE = 96
 
-const saliencySeed = (el, width, height) => {
-    const k = SALIENCY_SIDE / Math.max(width, height)
-    const w = Math.max(16, Math.round(width * k))
-    const h = Math.max(16, Math.round(height * k))
+const pixelsAt = (el, w, h) => {
     const c = document.createElement('canvas')
     c.width = w
     c.height = h
     const ctx = c.getContext('2d', { willReadFrequently: true })
     if (!ctx) throw new Error('Could not allocate a canvas for subject detection')
     ctx.drawImage(el, 0, 0, w, h)
-    const px = ctx.getImageData(0, 0, w, h).data
-    const n = w * h
-    let mr = 0, mg = 0, mb = 0
-    for (let i = 0; i < px.length; i += 4) { mr += px[i]; mg += px[i + 1]; mb += px[i + 2] }
-    mr /= n; mg /= n; mb /= n
-    const sal = new Float32Array(n)
-    let total = 0
-    for (let p = 0, i = 0; p < n; p += 1, i += 4) {
-        const d = Math.abs(px[i] - mr) + Math.abs(px[i + 1] - mg) + Math.abs(px[i + 2] - mb)
-        const x = (p % w) / w - 0.5
-        const y = Math.floor(p / w) / h - 0.5
-        // Centre prior: photographers put the subject near the middle.
-        const v = d * (1 - 0.6 * Math.min(1, Math.hypot(x, y) * 1.6))
-        sal[p] = v
-        total += v
-    }
-    if (total <= 0) return { box: [0, 0, width, height], seeds: [[width / 2, height / 2]] }
-    // Smallest interval per axis holding SUBJECT_MASS of the saliency mass.
-    const interval = (marginal, size) => {
-        const target = SUBJECT_MASS * marginal.reduce((a, b) => a + b, 0)
-        let best = [0, size - 1], bestLen = size + 1, lo = 0, acc = 0
-        for (let hi = 0; hi < size; hi += 1) {
-            acc += marginal[hi]
-            while (acc - marginal[lo] >= target) { acc -= marginal[lo]; lo += 1 }
-            if (acc >= target && hi - lo < bestLen) { bestLen = hi - lo; best = [lo, hi] }
-        }
-        return best
-    }
-    const cols = new Float32Array(w)
-    const rows = new Float32Array(h)
-    for (let p = 0; p < n; p += 1) { cols[p % w] += sal[p]; rows[Math.floor(p / w)] += sal[p] }
-    const [x0, x1] = interval(Array.from(cols), w)
-    const [y0, y1] = interval(Array.from(rows), h)
-    const pad = 0.02
-    const sx = width / w, sy = height / h
-    // Peak saliency INSIDE the box: a box centre can land on foreground clutter
-    // (a wall, a railing) while the peak sits on the subject itself.
-    let peak = -1, px_ = (x0 + x1) / 2, py_ = (y0 + y1) / 2
-    for (let y = y0; y <= y1; y += 1) {
-        for (let x = x0; x <= x1; x += 1) {
-            // 3×3 mean keeps a single bright speckle from winning.
-            let acc = 0, cnt = 0
-            for (let dy = -1; dy <= 1; dy += 1) {
-                for (let dx = -1; dx <= 1; dx += 1) {
-                    const qx = x + dx, qy = y + dy
-                    if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue
-                    acc += sal[qy * w + qx]
-                    cnt += 1
-                }
-            }
-            const v = cnt ? acc / cnt : 0
-            if (v > peak) { peak = v; px_ = x; py_ = y }
-        }
-    }
-    // Saliency-weighted centroid inside the box: usually the subject's body.
-    let mx = 0, my = 0, mass = 0
-    for (let y = y0; y <= y1; y += 1) {
-        for (let x = x0; x <= x1; x += 1) {
-            const v = sal[y * w + x]
-            mx += x * v; my += y * v; mass += v
-        }
-    }
-    const box = [
-        Math.max(0, (x0 - pad * w) * sx),
-        Math.max(0, (y0 - pad * h) * sy),
-        Math.min(width, (x1 + 1 + pad * w) * sx),
-        Math.min(height, (y1 + 1 + pad * h) * sy),
-    ]
-    const seeds = [
-        [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2],
-    ]
-    if (mass > 0) seeds.push([(mx / mass + 0.5) * sx, (my / mass + 0.5) * sy])
-    seeds.push([(px_ + 0.5) * sx, (py_ + 0.5) * sy])
-    return { box, seeds }
+    return ctx.getImageData(0, 0, w, h).data
 }
 
-/** How well a mask fills the saliency box without leaking outside it. */
-const scoreSubjectMask = (canvas, box, width, height) => {
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
-    const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data
-    const kx = canvas.width / width, ky = canvas.height / height
-    const bx0 = Math.max(0, Math.floor(box[0] * kx)), bx1 = Math.min(canvas.width, Math.ceil(box[2] * kx))
-    const by0 = Math.max(0, Math.floor(box[1] * ky)), by1 = Math.min(canvas.height, Math.ceil(box[3] * ky))
-    const boxArea = Math.max(1, (bx1 - bx0) * (by1 - by0))
-    let inside = 0, outside = 0
-    for (let y = 0; y < canvas.height; y += 1) {
-        for (let x = 0; x < canvas.width; x += 1) {
-            if (px[(y * canvas.width + x) * 4] <= 127) continue
-            if (x >= bx0 && x < bx1 && y >= by0 && y < by1) inside += 1
-            else outside += 1
+const subjectOnce = async (el, dims, side) => {
+    const W = dims.width
+    const H = dims.height
+    const k = SUBJECT_SALIENCY_SIDE / Math.max(W, H)
+    const w = Math.max(16, Math.round(W * k))
+    const h = Math.max(16, Math.round(H * k))
+    const { box, seeds } = subjectPrompts(pixelsAt(el, w, h), w, h)
+    const sx = W / w
+    const sy = H / h
+    const nbox = [box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy]
+    const nseeds = seeds.map(([x, y]) => [x * sx, y * sy])
+    const prompts = [
+        { box: nbox },
+        ...nseeds.map((seed) => ({ box: nbox, points: [seed] })),
+        ...nseeds.map((seed) => ({ points: [seed] })),
+        ...naturalGrid(dims).map((pt) => ({ points: [pt] })),
+    ]
+    const dec = await decodeLow(el, dims, side, prompts, { all: true })
+    // The decoder grid's valid region is the whole frame at vw×vh.
+    const grad = gradientMagnitude(pixelsAt(el, dec.vw, dec.vh), dec.vw, dec.vh)
+    let gradMean = 0
+    for (let p = 0; p < grad.length; p += 1) gradMean += grad[p]
+    gradMean /= grad.length
+    let best = null
+    for (let i = 0; i < dec.n; i += 1) {
+        for (let m = 0; m < dec.k; m += 1) {
+            const v = scoreSubjectCandidate({ bits: dec.bits(i, m), w: dec.vw, h: dec.vh, sam: dec.iou[i * dec.k + m] }, grad, gradMean)
+            if (v.score > 0 && (!best || v.score > best.score)) best = { i, m, ...v }
         }
     }
-    const frame = canvas.width * canvas.height || 1
-    const coverage = (inside + outside) / frame
-    // A part of the subject (a knee) fills little of the box; the whole scene leaks out of it.
-    let score = inside / boxArea - 1.5 * (outside / boxArea)
-    if (coverage < 0.01 || coverage > 0.9) score -= 1
-    return { score, coverage }
+    if (!best) throw new Error('No subject could be separated from the background')
+    const [canvas] = await dec.render([best], W, H)
+    return canvas
 }
 
 /**
- * In-browser subject cutout: a coverage canvas (white = subject) at the image's
- * natural size, produced by prompting SlimSAM with a saliency box. One model,
- * so nothing else has to load. Throws when the result is empty or fills the
- * frame (no separable subject).
+ * Subject cutout: a coverage canvas (white = subject) at the image's natural
+ * size, on the Selection engine's side. Throws when nothing reads as a subject.
  *
  * @param {HTMLImageElement|HTMLCanvasElement} el
  * @param {{ width: number, height: number }} naturalDims
  * @returns {Promise<HTMLCanvasElement>}
  */
-export const clientSubjectMask = async (el, dims) =>
-    // Loading SlimSAM and running a mask per seed candidate is the other big
-    // allocator in the app. Queued so it cannot land on top of a bake or export.
-    // No supersede key: two callers wanting mattes for DIFFERENT images are two
+export const clientSubjectMask = async (el, dims) => {
+    const server = onServer('segment')
+    const run = async () => {
+        const startedAt = Date.now()
+        try {
+            const width = Number(dims?.width) || el?.naturalWidth || el?.width || 0
+            const height = Number(dims?.height) || el?.naturalHeight || el?.height || 0
+            if (width < 1 || height < 1) throw new Error('Image is not ready for subject detection')
+            const size = { width, height }
+            const out = server
+                ? await withServerUse('sam', () => subjectOnce(el, size, 'server'))
+                : await withModelUse('sam', () => withDeviceFallback('sam', () => subjectOnce(el, size, 'client')))
+            recordDiag('segment', startedAt, true)
+            return out
+        } catch (err) {
+            recordDiag('segment', startedAt, false, err)
+            throw err
+        }
+    }
+    // Loading SlimSAM and decoding ~40 prompts is the other big allocator in
+    // the app. Queued so it cannot land on top of a bake or export. No
+    // supersede key: two callers wanting mattes for DIFFERENT images are two
     // intents, and dropping the queued one would silently lose a result.
     // On the server it allocates nothing here, so it does not hold the slot.
-    onServer('segment')
-        ? clientSubjectMaskInner(el, dims, true)
-        : runHeavy('subject detection', () => clientSubjectMaskInner(el, dims, false))
-
-const clientSubjectMaskInner = async (el, dims, server) => {
-    const startedAt = Date.now()
-    try {
-        const width = Number(dims?.width) || el?.naturalWidth || el?.width || 0
-        const height = Number(dims?.height) || el?.naturalHeight || el?.height || 0
-        if (width < 1 || height < 1) throw new Error('Image is not ready for subject detection')
-        const { box, seeds } = saliencySeed(el, width, height)
-        // Each seed is one cheap decoder pass (the image embedding is cached),
-        // so try them all and keep the mask that reads as the whole subject.
-        let best = null
-        let lastErr = null
-        const keep = (candidate) => {
-            const verdict = scoreSubjectMask(candidate, box, width, height)
-            if (!best || verdict.score > best.verdict.score) best = { canvas: candidate, verdict }
-        }
-        if (server) {
-            // Every seed in one round trip.
-            const candidates = await withServerUse('sam', () => samBoxServer(el, box, { width, height }, seeds.map((seed) => [seed])))
-            candidates.forEach(keep)
-        } else {
-            for (const seed of seeds) {
-                try {
-                    keep(await withModelUse('sam', () =>
-                        withDeviceFallback('sam', () => samBoxOnce(el, box, { width, height }, seed))))
-                } catch (err) {
-                    lastErr = err
-                }
-            }
-        }
-        if (!best) throw lastErr || new Error('Subject detection failed')
-        if (best.verdict.coverage < 0.004) throw new Error('No subject could be separated from the background')
-        if (best.verdict.coverage > 0.985) throw new Error('Subject selection covered the whole frame')
-        recordDiag('segment', startedAt, true)
-        return best.canvas
-    } catch (err) {
-        recordDiag('segment', startedAt, false, err)
-        throw err
-    }
+    return server ? run() : runHeavy('subject detection', run)
 }
 
 /* ─── On-device SAM (click / box select) ─────────────────────────────────── */
@@ -801,8 +715,13 @@ const ensureSamImage = async (el, { width, height }) => {
     const scale = input.width / w0          // natural → input coords
     const rawImage = await canvasToRawImage(input)
     let embeddings = null
-    try { embeddings = await model.get_image_embeddings(await processor(rawImage)) } catch { embeddings = null }
-    samImage = { el, w: w0, h: h0, rawImage, embeddings, scale, engineId: engine.id }
+    let sizes = null
+    try {
+        const pre = await processor(rawImage)
+        sizes = { original_sizes: pre.original_sizes, reshaped_input_sizes: pre.reshaped_input_sizes }
+        embeddings = await model.get_image_embeddings(pre)
+    } catch { embeddings = null }
+    samImage = { el, w: w0, h: h0, rawImage, embeddings, sizes, scale, engineId: engine.id }
     return { model, processor, engine, ...samImage }
 }
 
@@ -871,11 +790,37 @@ const samMaskToCanvas = (maskTensor, iou, outW, outH, whole = false, object = fa
     return out
 }
 
-const samClickOnce = async (el, points, labels, dims, object = false) => {
-    const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
-    const input_points = [[points.map(([x, y]) => [Math.round(x * scale), Math.round(y * scale)])]]
-    const input_labels = [[labels.map((l) => (l ? 1 : 0))]]
-    const inputs = await processor(rawImage, { input_points, input_labels })
+// The decoder takes a box as two more points labelled 2 (top-left) and 3
+// (bottom-right), Meta's SAM ONNX convention; a prompt without a box carries
+// the "not a point" pad (0, 0, label -1) that HF's encoder would add itself.
+const devicePrompt = ({ points = [], labels = null, box = null }, scale) => {
+    const at = ([x, y]) => [Math.round(x * scale), Math.round(y * scale)]
+    const pts = points.map(at)
+    const lab = points.map((_, i) => (labels ? (labels[i] ? 1 : 0) : 1))
+    if (box) {
+        pts.push(at([box[0], box[1]]), at([box[2], box[3]]))
+        lab.push(2, 3)
+    } else {
+        pts.push([0, 0])
+        lab.push(-1)
+    }
+    return { pts, lab }
+}
+
+// Prompt tensors from the sizes cached at encode time. Running the processor
+// per prompt re-preprocessed the whole image only to scale a few coordinates.
+const promptInputs = async ({ processor, rawImage, embeddings, sizes }, input_points, input_labels) => {
+    if (!embeddings || !sizes) return processor(rawImage, { input_points, input_labels })
+    const points = processor.reshape_input_points(input_points, sizes.original_sizes, sizes.reshaped_input_sizes)
+    return { ...sizes, input_points: points, input_labels: processor.image_processor.add_input_labels(input_labels, points) }
+}
+
+/** One prompt — points, a box, or both — on device. */
+const samPromptOnce = async (el, dims, prompt, { whole = false, object = false } = {}) => {
+    const sam = await ensureSamImage(el, dims)
+    const { model, processor, engine, rawImage, embeddings, scale } = sam
+    const { pts, lab } = devicePrompt(prompt, scale)
+    let inputs = await promptInputs(sam, [[pts]], [[lab]])
     let outputs
     if (embeddings) {
         // The cached-embeddings call can RESOLVE with unusable outputs (no
@@ -886,45 +831,14 @@ const samClickOnce = async (el, points, labels, dims, object = false) => {
         } catch { outputs = null }
         if (!outputs?.pred_masks) outputs = null
     }
-    if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
-    const masks = await processor.post_process_masks(outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
-    if (!masks?.[0]?.dims) throw new Error(`${engine.label} returned no mask for the point prompt`)
-    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height, false, object)
-}
-
-const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points = null) => {
-    const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
-    const input_boxes = [[[
-        Math.round(box[0] * scale), Math.round(box[1] * scale),
-        Math.round(box[2] * scale), Math.round(box[3] * scale),
-    ]]]
-    // SlimSAM's prompt encoder always reads point tensors: a box-only prompt
-    // throws (`dims` of undefined), so the box centre rides along as a positive
-    // point. The box itself does NOT reach the model: this ONNX export declares
-    // no `input_boxes`, and transformers.js drops inputs a session does not
-    // declare (with a console warning). The points are the whole prompt.
-    // Several positive points (a vision model pointing at the subject's parts)
-    // hold SAM to the whole object far better than one centre point can.
-    const seeds = Array.isArray(points) && points.length ? points : [seedPoint || [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]]
-    const input_points = [[[seeds.map(([x, y]) => [Math.round(x * scale), Math.round(y * scale)])]]]
-    const input_labels = [[seeds.map(() => 1)]]
-    const inputs = await processor(rawImage, { input_boxes, input_points: input_points[0], input_labels })
-    let outputs
-    if (embeddings) {
-        try {
-            outputs = await model({
-                ...embeddings,
-                input_boxes: inputs.input_boxes,
-                input_points: inputs.input_points,
-                input_labels: inputs.input_labels,
-            })
-        } catch { outputs = null }
-        if (!outputs?.pred_masks) outputs = null // resolved-but-unusable (see samClickOnce)
+    if (!outputs) {
+        // The full pass needs pixel values, which the cached path skipped.
+        if (!inputs.pixel_values) inputs = await processor(rawImage, { input_points: [[pts]], input_labels: [[lab]] })
+        outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
     }
-    if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
     const masks = await processor.post_process_masks(outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
-    if (!masks?.[0]?.dims) throw new Error(`${engine.label} returned no mask for the box prompt`)
-    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height, whole)
+    if (!masks?.[0]?.dims) throw new Error(`${engine.label} returned no mask for the prompt`)
+    return samMaskToCanvas(masks[0], outputs.iou_scores, dims.width, dims.height, whole, object)
 }
 
 /**
@@ -934,22 +848,23 @@ const samBoxOnce = async (el, box, dims, seedPoint = null, whole = false, points
  * `{ object: true }` returns the whole object under the click rather than the
  * part SAM scores best (see samMaskToCanvas).
  */
-export const clientSamClick = (el, points, labels, dims, { object = false } = {}) =>
+export const clientSamClick = (el, points, labels, dims, { object = false, whole = false } = {}) =>
     onServer('sam')
-        ? withServerUse('sam', () => samClickServer(el, points, labels, dims, object))
-        : withModelUse('sam', () => withDeviceFallback('sam', () => samClickOnce(el, points, labels, dims, object)))
+        ? withServerUse('sam', () => samClickServer(el, points, labels, dims, object, whole))
+        : withModelUse('sam', () => withDeviceFallback('sam', () => samPromptOnce(el, dims, { points, labels }, { object, whole })))
 
 /**
- * In-browser SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px;
- * `{ whole: true }` returns the whole object in the box rather than the part
- * under its centre; `points` ([[x, y], …] natural px) are positive prompts
- * used instead of the box centre.
+ * SlimSAM box-select. `box` is [x0, y0, x1, y1] natural px; `points`
+ * ([[x, y], …] natural px) and `labels` (1 keep / 0 exclude, default all 1)
+ * prompt with it. `{ whole: true }` returns the largest confident answer
+ * rather than the best-scored part.
  */
-export const clientSamBox = (el, box, dims, { whole = false, points = null } = {}) =>
-    onServer('sam')
-        ? withServerUse('sam', async () => (await samBoxServer(el, box, dims,
-            [Array.isArray(points) && points.length ? points : [[(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]]], whole))[0])
-        : withModelUse('sam', () => withDeviceFallback('sam', () => samBoxOnce(el, box, dims, null, whole, points)))
+export const clientSamBox = (el, box, dims, { whole = false, points = null, labels = null } = {}) => {
+    const pts = Array.isArray(points) ? points : []
+    return onServer('sam')
+        ? withServerUse('sam', async () => (await samBoxServer(el, box, dims, [pts], { whole, labels }))[0])
+        : withModelUse('sam', () => withDeviceFallback('sam', () => samPromptOnce(el, dims, { points: pts, labels, box }, { whole })))
+}
 
 /** Is SlimSAM already on this device (loaded, or in transformers.js's cache)? */
 export const isSelectionModelCached = async () => {
@@ -1018,12 +933,12 @@ const ensureServerSamImage = async (el, { width, height }, { fresh = false } = {
 }
 
 /** `buildPrompts(scale)` gives prompts in model-input px. Re-encodes once on a 404. */
-const serverDecode = async (el, dims, buildPrompts, output = 'masks') => {
+const serverDecode = async (el, dims, buildPrompts, output = 'masks', extra = {}) => {
     let img = await ensureServerSamImage(el, dims)
     const send = (key) => postSelection('/api/ai/sam/decode', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ key, prompts: buildPrompts(img.scale), output }),
+        body: JSON.stringify({ key, prompts: buildPrompts(img.scale), output, ...extra }),
     })
     try {
         return { img, out: await send(img.key) }
@@ -1067,24 +982,20 @@ const serverMaskCanvas = async (result, outW, outH, whole = false, object = fals
 
 const toInput = (scale) => ([x, y]) => [Math.round(x * scale), Math.round(y * scale)]
 
-const samClickServer = async (el, points, labels, dims, object = false) => {
+const samClickServer = async (el, points, labels, dims, object = false, whole = false) => {
     const { out } = await serverDecode(el, dims, (scale) => [{
         points: points.map(toInput(scale)),
         labels: labels.map((l) => (l ? 1 : 0)),
     }])
-    return serverMaskCanvas(out.results[0], dims.width, dims.height, false, object)
+    return serverMaskCanvas(out.results[0], dims.width, dims.height, whole, object)
 }
 
-/**
- * One prompt per point set; one canvas each. The box is NOT sent: the browser's
- * SlimSAM export has no `input_boxes` input, so transformers.js drops the box
- * there and only the points prompt. Sending it here made Select Subject differ
- * by side (0.43 of the self-test frame against the device's 0.137 disc).
- */
-const samBoxServer = async (el, box, dims, pointSets, whole = false) => {
+/** One prompt per point set, each with `box`; one canvas each. */
+const samBoxServer = async (el, box, dims, pointSets, { whole = false, labels = null } = {}) => {
     const { out } = await serverDecode(el, dims, (scale) => pointSets.map((pts) => ({
+        box: box.map((v) => Math.round(v * scale)),
         points: pts.map(toInput(scale)),
-        labels: pts.map(() => 1),
+        labels: pts.map((_, i) => (labels ? (labels[i] ? 1 : 0) : 1)),
     })))
     return Promise.all(out.results.map((r) => serverMaskCanvas(r, dims.width, dims.height, whole)))
 }
@@ -1120,61 +1031,86 @@ const INSTANCE_MAX_BORDER = 0.4
 const INSTANCE_MAX = 8
 const INSTANCE_PNG_MAX_SIDE = 2048
 
-// The grid prompts in model-input px: one positive point per cell.
-const gridPoints = ({ width: W, height: H }, scale) => {
+// The grid prompts, natural px: one positive point per cell.
+const naturalGrid = ({ width: W, height: H }) => {
     const points = []
     for (let gy = 0; gy < INSTANCE_GRID; gy += 1) {
-        for (let gx = 0; gx < INSTANCE_GRID; gx += 1) {
-            points.push([Math.round(((gx + 0.5) / INSTANCE_GRID) * W * scale), Math.round(((gy + 0.5) / INSTANCE_GRID) * H * scale)])
-        }
+        for (let gx = 0; gx < INSTANCE_GRID; gx += 1) points.push([((gx + 0.5) / INSTANCE_GRID) * W, ((gy + 0.5) / INSTANCE_GRID) * H])
     }
     return points
 }
 
 /*
- * A decoded grid, whichever side decoded it: per prompt k candidates and their
- * scores, the decoder-grid masks (`on`), and `render` for the kept ones at
- * output size. Selection below reads only this, so both sides choose alike.
+ * Prompts ({ points, labels, box }, natural px) decoded on the 256-px decoder
+ * grid, whichever side decodes them: k candidates per prompt with scores, each
+ * candidate's mask on the grid (`bits`), and `render` for the chosen ones at
+ * output size. Detect All Subjects and Select Subject choose from this alone,
+ * so both sides choose alike. `all: false` lets the server send only each
+ * prompt's best candidate.
  */
-const deviceGrid = async (el, dims) => {
-    const { Tensor } = await loadTransformers()
-    const { model, processor, engine, rawImage, embeddings, scale } = await ensureSamImage(el, dims)
-    const prompts = gridPoints(dims, scale)
-    // [image][prompt][points-in-prompt][xy]: one point per prompt, N prompts.
-    const inputs = await processor(rawImage, {
-        input_points: [prompts.map((pt) => [pt])],
-        input_labels: [prompts.map(() => [1])],
-    })
-    let outputs = null
-    if (embeddings) {
-        try { outputs = await model({ ...embeddings, input_points: inputs.input_points, input_labels: inputs.input_labels }) } catch { outputs = null }
-        if (!outputs?.pred_masks) outputs = null
-    }
-    if (!outputs) outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
+const decodeLow = (el, dims, side, prompts, { all = true } = {}) =>
+    side === 'server' ? serverDecodeLow(el, dims, prompts, all) : deviceDecodeLow(el, dims, prompts)
 
-    const pm = outputs.pred_masks
-    const [, n, k, lowH, lowW] = pm.dims
-    const iou = Array.from(outputs.iou_scores.data)
-    const [rh, rw] = Array.from(inputs.reshaped_input_sizes[0] ?? inputs.reshaped_input_sizes)
-    const [oh, ow] = Array.from(inputs.original_sizes[0] ?? inputs.original_sizes)
+const deviceDecodeLow = async (el, dims, prompts) => {
+    const { Tensor } = await loadTransformers()
+    const sam = await ensureSamImage(el, dims)
+    const { model, processor, engine, rawImage, embeddings, scale } = sam
+    const conv = prompts.map((p) => devicePrompt(p, scale))
+    // A batch needs one point count, so prompts decode in groups by length.
+    const groups = new Map()
+    conv.forEach((c, i) => groups.set(c.pts.length, [...(groups.get(c.pts.length) || []), i]))
+    const where = new Array(prompts.length)
+    const iou = []
+    let k = 3, lowW = 256, lowH = 256, sizes = null
+    for (const idx of groups.values()) {
+        const points = [idx.map((i) => conv[i].pts)]
+        const labels = [idx.map((i) => conv[i].lab)]
+        let inputs = await promptInputs(sam, points, labels)
+        let outputs = null
+        if (embeddings) {
+            try { outputs = await model({ ...embeddings, input_points: inputs.input_points, input_labels: inputs.input_labels }) } catch { outputs = null }
+            if (!outputs?.pred_masks) outputs = null
+        }
+        if (!outputs) {
+            if (!inputs.pixel_values) inputs = await processor(rawImage, { input_points: points, input_labels: labels })
+            outputs = await withTimeout(model(inputs), INFER_TIMEOUT_MS, `${engine.label} inference`)
+        }
+        const pm = outputs.pred_masks
+        ;[, , k, lowH, lowW] = pm.dims
+        sizes ??= inputs
+        const sc = outputs.iou_scores.data
+        idx.forEach((i, j) => {
+            where[i] = { data: pm.data, off: j * k * lowW * lowH }
+            for (let m = 0; m < k; m += 1) iou[i * k + m] = sc[j * k + m]
+        })
+    }
+    const [rh, rw] = Array.from(sizes.reshaped_input_sizes[0] ?? sizes.reshaped_input_sizes)
+    const [oh, ow] = Array.from(sizes.original_sizes[0] ?? sizes.original_sizes)
     const longest = Math.max(rh, rw) || 1024
+    const vw = Math.max(1, Math.min(lowW, Math.round((lowW * rw) / longest)))
+    const vh = Math.max(1, Math.min(lowH, Math.round((lowH * rh) / longest)))
     const plane = lowW * lowH
     return {
-        n, k, iou, lowW, lowH, oh, ow, scale, model: engine.id,
-        vw: Math.max(1, Math.min(lowW, Math.round((lowW * rw) / longest))),
-        vh: Math.max(1, Math.min(lowH, Math.round((lowH * rh) / longest))),
+        n: prompts.length, k, iou, lowW, lowH, vw, vh, oh, ow, scale, model: engine.id,
         bestOf: (i) => {
             let m = 0
             for (let j = 1; j < k; j += 1) if (iou[i * k + j] > iou[i * k + m]) m = j
             return m
         },
-        on: (i, m, x, y) => pm.data[(i * k + m) * plane + y * lowW + x] > 0,
-        render: async (kept, outW, outH) => {
+        bits: (i, m) => {
+            const { data, off } = where[i]
+            const o = off + m * plane
+            const b = new Uint8Array(vw * vh)
+            for (let y = 0; y < vh; y += 1) for (let x = 0; x < vw; x += 1) b[y * vw + x] = data[o + y * lowW + x] > 0 ? 1 : 0
+            return b
+        },
+        render: async (chosen, outW, outH) => {
             const canvases = []
-            for (const cand of kept) {
-                const off = (cand.i * k + cand.m) * plane
-                const one = new Tensor('float32', pm.data.slice(off, off + plane), [1, 1, 1, lowH, lowW])
-                const masks = await processor.post_process_masks(one, inputs.original_sizes, inputs.reshaped_input_sizes)
+            for (const c of chosen) {
+                const { data, off } = where[c.i]
+                const o = off + c.m * plane
+                const one = new Tensor('float32', data.slice(o, o + plane), [1, 1, 1, lowH, lowW])
+                const masks = await processor.post_process_masks(one, sizes.original_sizes, sizes.reshaped_input_sizes)
                 canvases.push(samMaskToCanvas(masks[0], null, outW, outH))
             }
             return canvases
@@ -1182,33 +1118,44 @@ const deviceGrid = async (el, dims) => {
     }
 }
 
-const serverGrid = async (el, dims) => {
-    const prompt = (pt) => ({ points: [pt], labels: [1] })
-    const { img, out } = await serverDecode(el, dims, (scale) => gridPoints(dims, scale).map(prompt), 'low')
-    const { vw, vh, grid } = out.low
+const serverDecodeLow = async (el, dims, prompts, all) => {
+    const toServer = (scale) => prompts.map((p) => ({
+        points: (p.points || []).map(toInput(scale)),
+        labels: (p.points || []).map((_, j) => (p.labels ? (p.labels[j] ? 1 : 0) : 1)),
+        ...(p.box ? { box: p.box.map((v) => Math.round(v * scale)) } : {}),
+    }))
+    const { img, out } = await serverDecode(el, dims, toServer, 'low', { all })
+    const { vw, vh, grid, candidates } = out.low
     const atlas = (await decodePng(out.low.png)).data
     const best = out.results.map((r) => r.best)
     return {
         n: out.results.length, k: 3, iou: out.results.flatMap((r) => r.scores),
         lowW: grid, lowH: grid, vw, vh, oh: img.height, ow: img.width, scale: img.scale, model: img.model || 'server',
-        // The server picked each prompt's best on unrounded scores; only that
-        // candidate travels, so it is the one selection must use.
+        // The server picked each prompt's best on unrounded scores.
         bestOf: (i) => best[i],
-        on: (i, m, x, y) => m === best[i] && atlas[((i * vh + y) * vw + x) * 4] > 127,
-        // One more round trip for the kept few, at full size.
-        render: async (kept, outW, outH) => {
+        bits: (i, m) => {
+            const b = new Uint8Array(vw * vh)
+            // Rows: prompt by prompt, and candidate by candidate when all were sent.
+            const row = candidates === 3 ? i * 3 + m : m === best[i] ? i : -1
+            if (row < 0) return b
+            const o = row * vw * vh
+            for (let p = 0; p < vw * vh; p += 1) b[p] = atlas[(o + p) * 4] > 127 ? 1 : 0
+            return b
+        },
+        // One more round trip for the chosen few, at full size.
+        render: async (chosen, outW, outH) => {
             const { out: full } = await serverDecode(el, dims, (scale) => {
-                const points = gridPoints(dims, scale)
-                return kept.map((cand) => prompt(points[cand.i]))
+                const every = toServer(scale)
+                return chosen.map((c) => every[c.i])
             })
             return Promise.all(full.results.map(async (r, j) =>
-                samMaskToCanvas(await candidatesFromPng(r.png, kept[j].m), null, outW, outH)))
+                samMaskToCanvas(await candidatesFromPng(r.png, chosen[j].m), null, outW, outH)))
         },
     }
 }
 
 const instancesOnce = async (el, dims, side) => {
-    const grid = side === 'server' ? await serverGrid(el, dims) : await deviceGrid(el, dims)
+    const grid = await decodeLow(el, dims, side, naturalGrid(dims).map((pt) => ({ points: [pt] })), { all: false })
     const W = dims.width
     const H = dims.height
     const { n, k, iou, lowW, lowH, vw, vh, oh, ow, scale } = grid
@@ -1218,13 +1165,12 @@ const instancesOnce = async (el, dims, side) => {
         const m = grid.bestOf(i)
         const score = iou[i * k + m]
         if (!(score >= INSTANCE_MIN_SCORE)) continue
-        const bits = new Uint8Array(vw * vh)
+        const bits = grid.bits(i, m)
         let area = 0
         let x0 = vw, y0 = vh, x1 = -1, y1 = -1, sx = 0, sy = 0
         for (let y = 0; y < vh; y += 1) {
             for (let x = 0; x < vw; x += 1) {
-                if (grid.on(i, m, x, y)) {
-                    bits[y * vw + x] = 1
+                if (bits[y * vw + x]) {
                     area += 1
                     sx += x; sy += y
                     if (x < x0) x0 = x

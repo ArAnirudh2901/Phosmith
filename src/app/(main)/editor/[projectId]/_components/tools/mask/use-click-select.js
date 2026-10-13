@@ -351,8 +351,9 @@ export function useClickSelect({
         let canvas = null
         let lastErr = null
         try {
+            // A box with clicks refines inside it (SAM takes both together).
             canvas = box
-                ? await clientSamBox(sourceEl, box, dims)
+                ? await clientSamBox(sourceEl, box, dims, points.length ? { points, labels } : {})
                 : await clientSamClick(sourceEl, points, labels, dims)
         } catch (err) {
             if (err?.name === 'AbortError') return

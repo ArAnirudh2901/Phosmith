@@ -59,7 +59,7 @@ export function matteStats(matte) {
  * orientation, ≤1024px). SlimSAM's one-click subject comes first, prompted with
  * the vision box when there is one. On a cluttered frame the saliency seed can
  * land on a PART (the moto's engine: 1% of the frame), so a matte that small is
- * retried with box prompts around it and across the frame, and the most
+ * retried with clicks at the centres of boxes around it and across the frame, and the most
  * subject-like answer wins: big, not running along the frame like background.
  */
 export async function findSubjectMatte(small, { hint = null } = {}) {
@@ -90,7 +90,9 @@ export async function findSubjectMatte(small, { hint = null } = {}) {
         const w = clamp(found.w * 4, 0.3, 0.9), h = clamp(found.h * 4, 0.3, 0.9)
         boxes.unshift({ x: clamp(cx - w / 2, 0, 1 - w), y: clamp(cy - h / 2, 0, 1 - h), w, h })
       }
-      for (const b of boxes) await attempt(() => ai.clientSamBox(small, px(b), dims, { whole: true }))
+      // A click at each box's centre, not the box: a box this wide asks SAM for
+      // whatever fills it, which on an open frame is the sky.
+      for (const b of boxes) await attempt(() => ai.clientSamClick(small, [[(b.x + b.w / 2) * W, (b.y + b.h / 2) * H]], [1], dims, { whole: true }))
     }
     const win = best()
     // SlimSAM's outline is a 256px blob; put its edge on the photo's edges.
